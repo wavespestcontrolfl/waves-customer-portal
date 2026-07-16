@@ -2567,7 +2567,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           const nextRow = await knex('scheduled_services')
             .where('customer_id', service.customer_id)
             .andWhere('scheduled_date', '>', afterIso)
-            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site', 'rescheduled'])
+            // NO 'rescheduled': phantom placeholders hold the OLD date until the
+            // office rebooks — publishing one shows a stale time as still real
+            // (same rule as the tree-shrub and nextAppointment queries below).
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
             // "turf": commercial lawn persists as "Commercial Turf Treatment Program".
             // Grouped OR so it stays ANDed with the customer/date/status predicates.
             .andWhere((qb) => qb
@@ -2910,7 +2913,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     photoChain,
     pdfUrl: `/api/reports/${token}`,
     legacy: {
-      notes: service.technician_notes || '',
+      // No raw technician_notes here (owner ruling 2026-07-16): the field is
+      // internal — access codes, billing notes — and the only sanctioned path
+      // to customer copy is technicianReportCustomerCopy's reviewed parse,
+      // which already feeds the summary slot. The client never read this key.
       measurements: {
         soilTemp: service.soil_temp,
         thatch: service.thatch_measurement,

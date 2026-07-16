@@ -116,7 +116,7 @@ const {
   putReportPdf,
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
   mosquitoReportV2PdfSignature,
   buildMosquitoReportV2,
@@ -1288,7 +1288,9 @@ router.get('/:token/data', async (req, res, next) => {
       technicianName: service.technician_name,
       customerName: `${service.first_name} ${service.last_name}`,
       cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
-      notes: service.technician_notes,
+      // technician_notes is internal (owner ruling 2026-07-16): only the
+      // reviewed WHAT WE DID / WHAT WE FOUND parse may reach the customer.
+      notes: technicianReportCustomerCopy(service.technician_notes)?.body || '',
       products: products.map(p => ({
         name: p.product_name, category: p.product_category,
         activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
@@ -1354,11 +1356,13 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
     doc.moveDown(1);
   }
 
-  // Tech notes
-  if (service.technician_notes) {
+  // Tech notes — raw technician_notes is internal (owner ruling 2026-07-16);
+  // print only the reviewed WHAT WE DID / WHAT WE FOUND parse, or nothing.
+  const reviewedNotes = technicianReportCustomerCopy(service.technician_notes)?.body;
+  if (reviewedNotes) {
     doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
     doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(service.technician_notes, { width: 512, lineGap: 3 });
+    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(reviewedNotes, { width: 512, lineGap: 3 });
     doc.moveDown(1);
   }
 

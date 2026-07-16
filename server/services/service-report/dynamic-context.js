@@ -327,6 +327,11 @@ async function buildServiceReportDynamicContext({
     : safeBuild('pressure_trend', () => buildPressureTrendContext({
       record,
       currentPressureIndexOverride,
+      // Report tokens are permanent and this context is computed at render
+      // time: without the bound, visits completed AFTER this report become
+      // the trend's "current" point, so an old link describes a later visit
+      // (and contradicts sinceLastVisit, which is bounded).
+      beforeDate: record.service_date || undefined,
       knex,
     }));
   const sinceLastVisitPromise = omitDecision
