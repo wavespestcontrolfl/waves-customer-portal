@@ -203,14 +203,19 @@ finding and warns on P1. Reviewers must return JSON matching
 - **Twilio `From`/`MessagingServiceSid` hardcoded.** Numbers per GBP
   location come from config; hardcoded `+1…` literals in route code drift
   when numbers move.
-- **Permission-allowlist entries must account for npm lifecycle hooks.**
-  `.claude/settings.json` `permissions.allow` entries auto-approve everything
-  the allowlisted script's `pre`/`post` hooks run — the root `predev` runs
-  `npm run db:migrate`, so allowlisting `npm run dev` silently auto-approves
-  a DB write. Flag any allowlist addition of an npm wrapper script whose
-  lifecycle hooks (check `package.json`) write to the DB, call external
-  APIs, or spend money; allowlist the narrow underlying script instead
-  (e.g. `dev:client` / `dev:server`, not `dev`).
+- **Permission-allowlist entries must account for npm lifecycle hooks and
+  wildcard sweep.** `.claude/settings.json` `permissions.allow` entries
+  auto-approve everything the allowlisted script's `pre`/`post` hooks run —
+  the root `predev` runs `npm run db:migrate`, so allowlisting
+  `npm run dev` silently auto-approves a DB write. Wildcard entries sweep
+  in every current AND future matching script — `npm run check:*` covered
+  `check:lawn-models`, which POSTs live prompts to three LLM providers.
+  Flag any allowlist addition of (a) an npm wrapper script whose lifecycle
+  hooks (check `package.json`) write to the DB, call external APIs, or
+  spend money, or (b) a wildcard over a script family that mixes safe and
+  spending commands. Allowlist the narrow script explicitly instead
+  (e.g. `dev:client` / `dev:server`, not `dev`; `check:portal-brand`,
+  not `check:*`).
 - **`ops/agents/` convention violations.** Scripts in that folder must
   declare READ-ONLY or MUTATES in their header, default to dry-run when
   they mutate (write only under `--execute`), and contain no secrets,
