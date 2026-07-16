@@ -72,6 +72,54 @@ function makeKnex({ existing = null, insertError = null, isTransaction = false }
   return knex;
 }
 
+function makePromotionKnex({ staged = [], existingHash = null } = {}) {
+  const inserts = [];
+  let deleted = false;
+  const columns = {
+    service_record_id: {}, photo_type: {}, s3_key: {}, storage_key: {},
+    caption: {}, sort_order: {}, gps_lat: {}, gps_lng: {}, captured_at: {},
+    image_sha256: {}, hash_sha256: {}, prev_hash_sha256: {}, created_at: {},
+  };
+  const knex = jest.fn((table) => {
+    let insertPayload = null;
+    const chain = {
+      where: jest.fn(() => chain),
+      whereNotNull: jest.fn(() => chain),
+      orderBy: jest.fn(() => chain),
+      orderByRaw: jest.fn(() => chain),
+      columnInfo: jest.fn(async () => columns),
+      first: jest.fn(async (column) => {
+        if (table === 'service_records') return { id: 'record-1' };
+        if (table === 'service_photos' && column === 'hash_sha256' && existingHash) {
+          return { hash_sha256: existingHash };
+        }
+        return null;
+      }),
+      forUpdate: jest.fn(async () => staged),
+      insert: jest.fn((payload) => {
+        insertPayload = payload;
+        inserts.push(payload);
+        return chain;
+      }),
+      returning: jest.fn(async () => [{
+        id: `promoted-${inserts.length}`,
+        ...insertPayload,
+        created_at: new Date(),
+      }]),
+      update: jest.fn(async () => 1),
+      del: jest.fn(async () => {
+        deleted = true;
+        return staged.length;
+      }),
+    };
+    return chain;
+  });
+  knex.isTransaction = true;
+  knex.getInserts = () => inserts;
+  knex.wasDeleted = () => deleted;
+  return knex;
+}
+
 describe('service photo uploads', () => {
   beforeEach(() => {
     mockS3Send.mockReset();
@@ -192,6 +240,56 @@ describe('service photo uploads', () => {
       photo_type: 'before',
       image_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+  });
+
+  test('rejects banned customer-facing wording in field photo captions', () => {
+    const { sanitizeCustomerFacingPhotoCaption } = require('../services/service-photos');
+
+    expect(sanitizeCustomerFacingPhotoCaption('  Entry-point evidence  ')).toBe('Entry-point evidence');
+    let error;
+    try {
+      sanitizeCustomerFacingPhotoCaption('Pests eliminated from the home');
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toMatchObject({
+      statusCode: 422,
+      code: 'photo_caption_banned_copy',
+      isOperational: true,
+    });
+  });
+
+  test('recovers staged rows after completion and appends them to an existing chain', async () => {
+    const { promoteStagedPhotosForCompletedVisit } = require('../services/service-photos');
+    const originalCapture = new Date('2026-07-15T12:00:00.000Z');
+    const existingHash = 'a'.repeat(64);
+    const knex = makePromotionKnex({
+      existingHash,
+      staged: [{
+        id: 'staged-1',
+        photo_type: 'before',
+        s3_key: 'service-photo-staging/visit-1/before.jpg',
+        caption: 'Entry-point evidence',
+        sort_order: 0,
+        captured_at: originalCapture,
+        image_sha256: 'b'.repeat(64),
+      }],
+    });
+
+    const result = await promoteStagedPhotosForCompletedVisit({
+      scheduledServiceId: 'visit-1',
+      knex,
+    });
+
+    expect(result.serviceRecordId).toBe('record-1');
+    expect(result.photos).toHaveLength(1);
+    expect(knex.getInserts()[0]).toMatchObject({
+      service_record_id: 'record-1',
+      prev_hash_sha256: existingHash,
+      caption: 'Entry-point evidence',
+    });
+    expect(knex.getInserts()[0].captured_at.getTime()).toBeGreaterThan(originalCapture.getTime());
+    expect(knex.wasDeleted()).toBe(true);
   });
 
   test('uses the caller transaction when provided', async () => {

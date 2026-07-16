@@ -8,6 +8,7 @@ const {
   hashPhotoChainPayload,
   latestPhotoHash,
 } = require('./service-report/photo-chain');
+const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
 
 const SERVICE_PHOTO_PREFIX = 'service-photos/';
 const STAGED_SERVICE_PHOTO_PREFIX = 'service-photo-staging/';
@@ -26,6 +27,22 @@ function nullIfEmpty(value) {
   if (value == null) return null;
   const text = String(value).trim();
   return text ? text : null;
+}
+
+function sanitizeCustomerFacingPhotoCaption(value) {
+  const caption = nullIfEmpty(value)?.slice(0, 200) || null;
+  const violations = [...new Set(findBannedCustomerCopy(caption))];
+  if (violations.length) {
+    const err = new Error(
+      `Photo caption contains wording we can't put on a customer report (${violations.join(', ')}).`
+    );
+    err.statusCode = 422;
+    err.code = 'photo_caption_banned_copy';
+    err.isOperational = true;
+    err.violations = violations;
+    throw err;
+  }
+  return caption;
 }
 
 function numberOrNull(value) {
@@ -352,20 +369,31 @@ async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId,
     let prevHash = cols.hash_sha256 && cols.prev_hash_sha256
       ? await latestPhotoHash(trx, serviceRecordId)
       : null;
+    const appendingToExistingChain = !!prevHash;
+    const promotedAt = Date.now();
     const promoted = [];
 
-    for (const photo of staged) {
+    for (let index = 0; index < staged.length; index += 1) {
+      const photo = staged[index];
       const insert = {
         service_record_id: serviceRecordId,
         photo_type: photo.photo_type,
         s3_key: photo.s3_key,
-        caption: photo.caption,
+        caption: sanitizeCustomerFacingPhotoCaption(photo.caption),
         sort_order: photo.sort_order || 0,
       };
       if (cols.storage_key) insert.storage_key = photo.s3_key;
       if (cols.gps_lat) insert.gps_lat = photo.gps_lat;
       if (cols.gps_lng) insert.gps_lng = photo.gps_lng;
-      if (cols.captured_at) insert.captured_at = photo.captured_at;
+      if (cols.captured_at) {
+        // A completion/upload race can promote a true before photo after the
+        // completion photos have already formed a chain. Keep late recovery
+        // append-only so chronological validation uses the same order as the
+        // hashes.
+        insert.captured_at = appendingToExistingChain
+          ? new Date(promotedAt + index)
+          : photo.captured_at;
+      }
       if (cols.image_sha256) insert.image_sha256 = photo.image_sha256;
       if (cols.prev_hash_sha256) insert.prev_hash_sha256 = prevHash;
 
@@ -384,6 +412,21 @@ async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId,
       .del();
     return promoted;
   });
+}
+
+async function promoteStagedPhotosForCompletedVisit({ scheduledServiceId, knex = db }) {
+  if (!scheduledServiceId) return null;
+  const serviceRecord = await knex('service_records')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'desc')
+    .first('id');
+  if (!serviceRecord) return null;
+  const photos = await promoteStagedServicePhotos({
+    scheduledServiceId,
+    serviceRecordId: serviceRecord.id,
+    knex,
+  });
+  return { serviceRecordId: serviceRecord.id, photos };
 }
 
 async function uploadServicePhotoDataUrls({
@@ -445,10 +488,12 @@ module.exports = {
   VALID_PHOTO_TYPES,
   cleanupUploadedServicePhotoObjects,
   decodeDataUrlPhoto,
+  sanitizeCustomerFacingPhotoCaption,
   safePhotoName,
   uniqueServicePhotoCount,
   uploadServicePhotoBuffer,
   uploadServicePhotoDataUrls,
   uploadStagedServicePhotoBuffer,
   promoteStagedServicePhotos,
+  promoteStagedPhotosForCompletedVisit,
 };

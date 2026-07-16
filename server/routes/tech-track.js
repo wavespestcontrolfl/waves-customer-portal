@@ -45,6 +45,8 @@ const {
   buildOnSiteLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const {
+  promoteStagedPhotosForCompletedVisit,
+  sanitizeCustomerFacingPhotoCaption,
   uploadServicePhotoBuffer,
   uploadStagedServicePhotoBuffer,
   VALID_PHOTO_TYPES,
@@ -363,12 +365,8 @@ router.post('/:id/rain-out', async (req, res, next) => {
 
 // POST /api/tech/services/:id/photos — tech-portal field photo upload.
 //
-// Multipart upload. Tech attaches a photo to a completed service
-// they're assigned to. service_photos.service_record_id is NOT NULL
-// in the schema, so the service must already have a service_record
-// (i.e., the completion route POST /api/admin/dispatch/:serviceId/complete
-// from PR #330 must have run). 409 with a clear message if not — UI
-// surfaces "Complete the service first."
+// Multipart upload. Photos captured before completion are staged against the
+// scheduled visit; completed visits write directly to service_photos.
 //
 // Why service_record_id and not scheduled_service_id directly:
 //   service_records is the canonical "completion happened" audit
@@ -390,7 +388,6 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
         error: `Invalid photoType — must be one of: ${[...VALID_PHOTO_TYPES].join(', ')}`,
       });
     }
-
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
       .first('id', 'customer_id', 'technician_id', 'scheduled_date');
@@ -402,6 +399,7 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
     if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
+    const caption = sanitizeCustomerFacingPhotoCaption(req.body.caption);
 
     // Find the service_record for this scheduled_service via the
     // direct FK (migration 20260427000007). The completion route
@@ -423,7 +421,7 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
         mimeType: req.file.mimetype,
         photoType,
         sortOrder: req.body.sortOrder,
-        caption: req.body.caption,
+        caption,
         gpsLat: req.body.gpsLat,
         gpsLng: req.body.gpsLng,
         capturedAt: req.body.capturedAt,
@@ -432,6 +430,19 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
         `[tech-track] photo staged service=${svc.id} tech=${req.technicianId} ` +
         `type=${photoType} size=${req.file.size}`
       );
+      // Completion may have committed after the record lookup above. Recover
+      // immediately when visible; GET /photos repeats this recovery so an
+      // upload that raced an uncommitted completion cannot remain stranded.
+      const recovery = await promoteStagedPhotosForCompletedVisit({
+        scheduledServiceId: svc.id,
+      });
+      if (recovery) {
+        const promoted = recovery.photos.find((photo) => photo.s3_key === row.s3_key)
+          || await db('service_photos')
+            .where({ service_record_id: recovery.serviceRecordId, s3_key: row.s3_key })
+            .first();
+        return res.json({ photo: promoted || { ...row, staged: true } });
+      }
       return res.json({ photo: { ...row, staged: true } });
     }
 
@@ -442,14 +453,16 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       mimeType: req.file.mimetype,
       photoType,
       sortOrder: req.body.sortOrder,
-      caption: req.body.caption,
+      caption,
       thumbnailKey: req.body.thumbnailKey,
       stateBadge: req.body.stateBadge,
       zoneId: req.body.zoneId,
       findingId: req.body.findingId,
       gpsLat: req.body.gpsLat,
       gpsLng: req.body.gpsLng,
-      capturedAt: req.body.capturedAt,
+      // Old camera-roll metadata would sort ahead of the existing hash-chain
+      // tail. Post-completion attachments use upload time instead.
+      capturedAt: undefined,
       device: req.body.device,
       appVersion: req.body.appVersion,
       aiTags: req.body.aiTags,
@@ -502,6 +515,10 @@ router.get('/:id/photos', async (req, res, next) => {
       })));
       return res.json({ photos, staged: true });
     }
+
+    // Recovery for the narrow race where completion inserted its record after
+    // POST /photos staged the file but had already passed its promotion step.
+    await promoteStagedPhotosForCompletedVisit({ scheduledServiceId: svc.id });
 
     const photos = await db('service_photos')
       .where({ service_record_id: serviceRecord.id })
