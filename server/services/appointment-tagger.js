@@ -38,12 +38,15 @@ const PREP_TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'rescheduled',
 
 class AppointmentTagger {
 
-  // opts.rerun marks a replay of an existing appointment (the admin
-  // regenerate-brief endpoint) rather than a fresh booking. Prep flows
-  // carry their own dedupe and may replay; the welcome must not — its
-  // history checks are scoped to rows created before the triggering
-  // booking, which is only meaningful at booking time.
-  async onServiceScheduled(scheduledServiceId, { rerun = false } = {}) {
+  // opts.suppressWelcome skips the new-recurring welcome branch. Callers
+  // pass it when the triggering row is not a fresh booking they own the
+  // welcome decision for: the admin regenerate-brief endpoint replays old
+  // appointments, and the estimate-accept route can reuse an existing
+  // appointment row AND already fires the converter's pre-conversion-gated
+  // welcome post-commit. The welcome's history checks are scoped to rows
+  // created before the triggering booking, which is only meaningful for a
+  // just-inserted row. Prep flows carry their own dedupe and always run.
+  async onServiceScheduled(scheduledServiceId, { suppressWelcome = false } = {}) {
     const service = await db('scheduled_services')
       .where('scheduled_services.id', scheduledServiceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -83,7 +86,7 @@ class AppointmentTagger {
     // count is blind to imported customers whose visit history lives only
     // in scheduled_services (2026-07-16 misfire). Idempotent via
     // sendNewRecurringWelcome.
-    if (!rerun && service.waveguard_tier && service.is_recurring) {
+    if (!suppressWelcome && service.waveguard_tier && service.is_recurring) {
       const isNewSignup = await isNewRecurringSignupCandidate(service.customer_id, {
         excludeServiceId: service.id,
       });

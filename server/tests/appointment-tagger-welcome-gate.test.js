@@ -113,11 +113,11 @@ describe('appointment tagger welcome gate', () => {
     );
   });
 
-  test('rerun (regenerate-brief replay) never consults the gate or sends the welcome', async () => {
+  test('suppressWelcome (regenerate-brief replay / estimate-accept reuse) never consults the gate or sends', async () => {
     serviceRow = serviceFixture();
     isNewRecurringSignupCandidate.mockResolvedValue(true);
 
-    await AppointmentTagger.onServiceScheduled('svc-anchor', { rerun: true });
+    await AppointmentTagger.onServiceScheduled('svc-anchor', { suppressWelcome: true });
 
     expect(isNewRecurringSignupCandidate).not.toHaveBeenCalled();
     expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
