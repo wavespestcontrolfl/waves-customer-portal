@@ -11,7 +11,8 @@ import { useEffect, useRef } from 'react';
 //   <div ref={dialogRef} role="dialog" aria-modal="true" ...>
 //
 // For modals that only mount while open, call it with no argument.
-// Escape handling stays with each modal — this hook only handles focus.
+// Pass an onEscape callback to give every modal the same keyboard-close
+// contract without duplicating document listeners at each call site.
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -23,8 +24,10 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-export default function useModalFocus(active = true) {
+export default function useModalFocus(active = true, onEscape = null) {
   const dialogRef = useRef(null);
+  const onEscapeRef = useRef(onEscape);
+  onEscapeRef.current = onEscape;
 
   // Capture the opener during render on the closed→open transition. With an
   // autoFocus child (e.g. the chat input in PortalPage), React moves focus
@@ -63,6 +66,12 @@ export default function useModalFocus(active = true) {
     if (!dialog.contains(document.activeElement)) dialog.focus();
 
     const onKeyDown = (e) => {
+      if (e.key === 'Escape' && onEscapeRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        onEscapeRef.current();
+        return;
+      }
       if (e.key !== 'Tab') return;
       const focusable = getFocusable();
       if (focusable.length === 0) {

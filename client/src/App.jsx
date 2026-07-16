@@ -4,8 +4,75 @@ import { GrowthBookProvider } from '@growthbook/growthbook-react';
 import { growthbook } from './lib/growthbook';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
+import { CUSTOMER_SURFACE } from './theme-customer';
 import { useGlassSurface } from './glass/glass-engine';
 import Icon from './components/Icon';
+import CustomerDialogHost from './components/brand/CustomerDialogHost';
+
+function CustomerFailureScreen({ title, message, onRetry }) {
+  useGlassSurface(true, 'full');
+  return (
+    <main style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 24,
+      fontFamily: FONTS.body,
+      boxSizing: 'border-box',
+    }}>
+      <section data-glass="modal" style={{
+        width: 'min(420px, 100%)',
+        position: 'relative',
+        background: 'rgba(255,255,255,0.90)',
+        border: `1px solid ${CUSTOMER_SURFACE.border}`,
+        borderRadius: 16,
+        padding: 26,
+        textAlign: 'center',
+        boxShadow: '0 24px 70px rgba(4,57,94,0.20)',
+      }}>
+        <div style={{
+          width: 48,
+          height: 48,
+          borderRadius: 14,
+          margin: '0 auto 15px',
+          background: CUSTOMER_SURFACE.soft,
+          color: COLORS.glassNavy,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}>
+          <Icon name="warning" size={22} strokeWidth={2} />
+        </div>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 850, color: CUSTOMER_SURFACE.text, fontFamily: FONTS.heading }}>
+          {title}
+        </h1>
+        <p style={{ margin: '9px 0 21px', fontSize: 14, color: CUSTOMER_SURFACE.body, lineHeight: 1.55 }}>
+          {message}
+        </p>
+        <button
+          type="button"
+          data-glass-accent=""
+          onClick={onRetry}
+          style={{
+            minHeight: 42,
+            padding: '0 19px',
+            background: COLORS.glassNavy,
+            color: '#fff',
+            border: '1px solid rgba(4,57,94,0.16)',
+            borderRadius: 10,
+            fontSize: 14,
+            fontWeight: 850,
+            fontFamily: FONTS.heading,
+            cursor: 'pointer',
+          }}
+        >
+          Try Again
+        </button>
+      </section>
+    </main>
+  );
+}
 
 class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -13,6 +80,15 @@ class PageErrorBoundary extends Component {
   componentDidCatch(error, info) { console.error('[Page crash]', error, info.componentStack); }
   render() {
     if (this.state.error) {
+      if (this.props.customerGlass) {
+        return (
+          <CustomerFailureScreen
+            title="Something went wrong"
+            message={this.state.error.message || 'This page could not be displayed. Please try again.'}
+            onRetry={() => { this.setState({ error: null }); window.location.reload(); }}
+          />
+        );
+      }
       return (
         <div style={{
           minHeight: '100vh',
@@ -166,6 +242,16 @@ function showReloadToast() {
 // Rendered when a lazy chunk still fails after the one automatic reload —
 // a friendly retry beats the blank screen the rethrow used to produce.
 function ChunkLoadFallback() {
+  const operatorPath = /^\/(admin|tech)(\/|$)/.test(window.location.pathname);
+  if (!operatorPath) {
+    return (
+      <CustomerFailureScreen
+        title="Couldn’t load this page"
+        message="Check your connection and try again."
+        onRetry={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
+      />
+    );
+  }
   return (
     <div style={{
       minHeight: '100vh', background: '#FAF8F3', display: 'flex', alignItems: 'center',
@@ -316,7 +402,8 @@ function EstimatePublicGateway() {
 // had NO boundary — any render crash blanked the whole app.
 function RoutesErrorBoundary({ children }) {
   const location = useLocation();
-  return <PageErrorBoundary key={location.pathname}>{children}</PageErrorBoundary>;
+  const customerGlass = !/^\/(admin|tech)(\/|$)/.test(location.pathname);
+  return <PageErrorBoundary key={location.pathname} customerGlass={customerGlass}>{children}</PageErrorBoundary>;
 }
 
 function ProtectedRoute({ children }) {
@@ -530,6 +617,7 @@ export default function App() {
         </Routes>
         </RoutesErrorBoundary>
         </BiometricGate>
+        <CustomerDialogHost />
       </BrowserRouter>
     </AuthProvider>
   );
