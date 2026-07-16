@@ -1,7 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const path = require('path');
-const fs = require('fs');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const PDFDocument = require('pdfkit');
@@ -116,7 +114,7 @@ const {
   putReportPdf,
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
   mosquitoReportV2PdfSignature,
   buildMosquitoReportV2,
@@ -1133,16 +1131,11 @@ router.get('/:token', async (req, res, next) => {
       return res.send(pdf);
     }
 
-    // Check if pre-generated PDF exists
-    if (service.report_pdf_path) {
-      const fullPath = path.join(__dirname, '..', '..', service.report_pdf_path);
-      if (fs.existsSync(fullPath)) {
-        await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
-        return fs.createReadStream(fullPath).pipe(res);
-      }
-    }
+    // Legacy pre-generated PDF files (report_pdf_path) are deliberately NOT
+    // served anymore: they were written with raw technician_notes (gate
+    // codes, billing notes) before the 2026-07-16 owner ruling and a stored
+    // file can't be sanitized in place — regenerate on the fly instead, which
+    // routes notes through technicianReportCustomerCopy (codex P1 #2797).
 
     // Generate PDF on-the-fly
     const products = await db('service_products').where({ service_record_id: service.id });
@@ -1288,7 +1281,9 @@ router.get('/:token/data', async (req, res, next) => {
       technicianName: service.technician_name,
       customerName: `${service.first_name} ${service.last_name}`,
       cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
-      notes: service.technician_notes,
+      // technician_notes is internal (owner ruling 2026-07-16): only the
+      // reviewed WHAT WE DID / WHAT WE FOUND parse may reach the customer.
+      notes: technicianReportCustomerCopy(service.technician_notes)?.body || '',
       products: products.map(p => ({
         name: p.product_name, category: p.product_category,
         activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
@@ -1354,11 +1349,13 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
     doc.moveDown(1);
   }
 
-  // Tech notes
-  if (service.technician_notes) {
+  // Tech notes — raw technician_notes is internal (owner ruling 2026-07-16);
+  // print only the reviewed WHAT WE DID / WHAT WE FOUND parse, or nothing.
+  const reviewedNotes = technicianReportCustomerCopy(service.technician_notes)?.body;
+  if (reviewedNotes) {
     doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
     doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(service.technician_notes, { width: 512, lineGap: 3 });
+    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(reviewedNotes, { width: 512, lineGap: 3 });
     doc.moveDown(1);
   }
 
