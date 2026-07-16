@@ -94,6 +94,16 @@ describe('addressMatchKey / snapshotMatchesLine1', () => {
     expect(snapshotMatchesContact('123 Main St, Bradenton, FL 34205', contact)).toBe(true);
   });
 
+  test('unit-bearing snapshots only match the same canonical unit', () => {
+    const contact = {
+      address_line1: '123 Main St', address_line2: 'Unit 4', city: 'Bradenton', zip: '34205',
+    };
+    expect(snapshotMatchesContact('123 Main St, Apt 4, Bradenton, FL 34205', contact)).toBe(true);
+    expect(snapshotMatchesContact('123 Main St Apt 4, Bradenton, FL 34205', contact)).toBe(true);
+    expect(snapshotMatchesContact('123 Main St, Unit 5, Bradenton, FL 34205', contact)).toBe(false);
+    expect(snapshotMatchesContact('123 Main St, Bradenton, FL 34205', contact)).toBe(false);
+  });
+
   test('suffix spelling differences compare equal (Street vs St)', () => {
     expect(snapshotMatchesLine1('123 Main Street', '123 Main St')).toBe(true);
     expect(snapshotMatchesContact('123 Main Street, Bradenton, FL 34205', {
@@ -149,6 +159,22 @@ describe('propagateCustomerAddressChange', () => {
     const estUpdate = conn.__updates.find((u) => u.table === 'estimates');
     expect(estUpdate.ids).toEqual(['est-match']);
     expect(estUpdate.patch).toMatchObject({ address: '4857 Tobermory Way, Bradenton, FL 34211' });
+  });
+
+  test('propagates a newly added unit into open lead and estimate snapshots', async () => {
+    const afterWithUnit = { ...BEFORE, address_line2: 'Unit 4' };
+    const conn = makeConn({
+      leads: [{ id: 'lead-match', address: BEFORE.address_line1, city: BEFORE.city, zip: BEFORE.zip }],
+      estimates: [{ id: 'est-match', address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211' }],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: afterWithUnit }, conn);
+
+    expect(counts).toEqual({ leads: 1, estimates: 1 });
+    expect(conn.__updates.find((update) => update.table === 'leads').patch.address)
+      .toBe('4867 Tobermorey Way, Unit 4');
+    expect(conn.__updates.find((update) => update.table === 'estimates').patch.address)
+      .toBe('4867 Tobermorey Way, Unit 4, Lakewood Ranch, FL 34211');
   });
 
   test('an authored proposal snapshot (estimate_data.proposal.propertyAddress) is patched under the same guard', async () => {

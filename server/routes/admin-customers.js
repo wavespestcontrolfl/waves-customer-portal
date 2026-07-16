@@ -6,7 +6,7 @@ const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
-const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
+const { formatAddress, normalizeLeadAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const PhotoService = require('../services/photos');
@@ -965,6 +965,24 @@ function cleanOptionalState(value) {
   return cleaned ? cleaned.slice(0, 2) : null;
 }
 
+function normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip } = {}) {
+  const normalized = normalizeLeadAddress({
+    line1: cleanText(addressLine1 || address),
+    line2: cleanText(addressLine2),
+    city: cleanText(city),
+    state: cleanText(state),
+    zip: cleanText(zip),
+  });
+  return {
+    addressLine1: normalizeContactStreet(normalized.line1),
+    addressLine2: normalized.line2 || null,
+    city: normalizeContactCity(normalized.city),
+    state: cleanState(normalized.state),
+    zip: normalizeContactZip(normalized.zip),
+    unitConflict: normalized.unitConflict,
+  };
+}
+
 async function createDefaultCustomerRows(trx, customerId) {
   await trx('property_preferences')
     .insert({ customer_id: customerId })
@@ -1174,16 +1192,20 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
     if (!firstName || !phone) {
       return res.status(400).json({ error: 'firstName and phone required' });
     }
+    const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
+    }
     const normalized = {
       firstName: normalizeContactName(cleanText(firstName)),
       lastName: normalizeContactName(cleanText(lastName)),
       phone: normalizeContactPhone(cleanText(phone)),
       email: cleanEmail(email),
-      address: normalizeContactStreet(cleanText(addressLine1 || address)),
-      addressLine2: normalizeUnitLine(cleanText(addressLine2)),
-      city: normalizeContactCity(cleanText(city)),
-      state: cleanState(state),
-      zip: normalizeContactZip(cleanText(zip)),
+      address: normalizedAddress.addressLine1,
+      addressLine2: normalizedAddress.addressLine2,
+      city: normalizedAddress.city,
+      state: normalizedAddress.state,
+      zip: normalizedAddress.zip,
       profileLabel: cleanOptionalText(profileLabel),
       leadSource: cleanOptionalText(leadSource) || 'admin_manual',
       pipelineStage: cleanText(pipelineStage) || 'new_lead',
@@ -2203,16 +2225,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
+    const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
+    if (normalizedAddress.unitConflict) {
+      return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
+    }
     const normalized = {
       firstName: normalizeContactName(cleanText(firstName)),
       lastName: normalizeContactName(cleanText(lastName)),
       phone: normalizeContactPhone(cleanText(phone)),
       email: cleanEmail(email),
-      addressLine1: normalizeContactStreet(cleanText(addressLine1 || address)),
-      addressLine2: normalizeUnitLine(cleanText(addressLine2)),
-      city: normalizeContactCity(cleanText(city)),
-      state: cleanState(state),
-      zip: normalizeContactZip(cleanText(zip)),
+      addressLine1: normalizedAddress.addressLine1,
+      addressLine2: normalizedAddress.addressLine2,
+      city: normalizedAddress.city,
+      state: normalizedAddress.state,
+      zip: normalizedAddress.zip,
       tier: cleanOptionalText(tier),
       monthlyRate: monthlyRate === '' || monthlyRate === undefined || monthlyRate === null ? 0 : parseFloat(monthlyRate) || 0,
       leadSource: cleanOptionalText(leadSource),
@@ -2328,6 +2354,22 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // and applied before the cross-account conflict check so dedup compares the
     // stored format.
     Object.assign(updates, normalizeContactRecord(updates));
+    if (req.body.addressLine1 !== undefined || req.body.addressLine2 !== undefined) {
+      const normalizedAddress = normalizeAdminAddressInput({
+        addressLine1: req.body.addressLine1 !== undefined ? req.body.addressLine1 : before.address_line1,
+        addressLine2: req.body.addressLine2 !== undefined ? req.body.addressLine2 : before.address_line2,
+        city: req.body.city !== undefined ? req.body.city : before.city,
+        state: req.body.state !== undefined ? req.body.state : before.state,
+        zip: req.body.zip !== undefined ? req.body.zip : before.zip,
+      });
+      if (normalizedAddress.unitConflict) {
+        return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
+      }
+      // Rewrite both street fields together so agreeing inline/dedicated units
+      // collapse to one canonical representation and can never drift apart.
+      updates.address_line1 = normalizedAddress.addressLine1 || null;
+      updates.address_line2 = normalizedAddress.addressLine2;
+    }
     // Stamp when the review flag flips so admins can see who/when later.
     if (updates.has_left_google_review !== undefined) {
       updates.review_marked_at = updates.has_left_google_review ? new Date() : null;
@@ -3459,6 +3501,7 @@ router._private = {
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
+  normalizeAdminAddressInput,
   parseAnnualPrepayAmount,
   parseAnnualPrepayVisitCount,
   scheduleLinesFromEstimate,

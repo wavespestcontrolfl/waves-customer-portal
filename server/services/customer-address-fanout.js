@@ -26,7 +26,14 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { formatAddress, normalizeStreetLine, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+const {
+  formatAddress,
+  normalizeStreetLine,
+  normalizeUnitLine,
+  splitStreetLineUnit,
+  unitLineValueKey,
+  UNIT_DESIGNATORS,
+} = require('../utils/address-normalizer');
 
 // Deliverable estimate states — mirrors SENDABLE_ESTIMATE_STATUSES in
 // routes/admin-estimates.js (scheduled/sending/send_failed rows still produce
@@ -56,7 +63,21 @@ function addressMatchKey(value) {
 // ", FL 34211" segment ("floor" spelled out still counts). trlr/rm are USPS
 // designators the shared list doesn't carry.
 const UNIT_SEGMENT_DESIGNATORS = [...UNIT_DESIGNATORS].filter((d) => d !== 'fl').concat(['trlr', 'rm']);
-const UNIT_SEGMENT_RE = new RegExp(`^\\s*(?:${UNIT_SEGMENT_DESIGNATORS.join('|')}|#)\\.?\\s*#?\\s*[\\w-]+\\s*$`, 'i');
+const UNIT_SEGMENT_PREFIX_RE = new RegExp(`^\\s*(?:${UNIT_SEGMENT_DESIGNATORS.join('|')}|#)\\.?\\s*#?\\s*\\S+`, 'i');
+
+function unitKey(value) {
+  return unitLineValueKey(normalizeUnitLine(value));
+}
+
+function snapshotStreetAndUnit(snapshot) {
+  const segments = String(snapshot ?? '').split(',').map((segment) => segment.trim());
+  const inline = splitStreetLineUnit(segments[0]);
+  const unitSegment = segments.slice(1).find((segment) => UNIT_SEGMENT_PREFIX_RE.test(segment));
+  return {
+    street: inline.unit ? inline.street : segments[0],
+    unit: unitSegment || inline.unit || '',
+  };
+}
 
 // A tail segment carrying no city information (state, zip, country) — used
 // to find the city segment of a full single-line snapshot.
@@ -80,11 +101,17 @@ const NON_CITY_TAIL_RE = /^\s*(?:fl|florida)?\s*(?:\d{5}(?:-\d{4})?)?\s*(?:usa|u
 // only when the data actually says they differ.
 function snapshotMatchesContact(snapshot, contact) {
   if (!contact) return false;
-  const lineKey = addressMatchKey(normalizeStreetLine(contact.address_line1));
+  const contactParts = splitStreetLineUnit(contact.address_line1);
+  const contactStreet = contactParts.unit ? contactParts.street : contact.address_line1;
+  const contactUnit = contact.address_line2 || contactParts.unit || '';
+  const lineKey = addressMatchKey(normalizeStreetLine(contactStreet));
   if (!lineKey) return false;
   const segments = String(snapshot ?? '').split(',');
-  if (segments.slice(1).some((seg) => UNIT_SEGMENT_RE.test(seg))) return false;
-  const segKey = addressMatchKey(normalizeStreetLine(segments[0]));
+  const snapshotParts = snapshotStreetAndUnit(snapshot);
+  const snapshotUnitKey = unitKey(snapshotParts.unit);
+  const contactUnitKey = unitKey(contactUnit);
+  if (snapshotUnitKey !== contactUnitKey) return false;
+  const segKey = addressMatchKey(normalizeStreetLine(snapshotParts.street));
   if (!segKey || segKey !== lineKey) return false;
   if (segments.length === 1) return true; // bare street line — nothing more to check
 
@@ -100,7 +127,9 @@ function snapshotTailPlace(snapshot) {
   if (segments.length === 1) return null;
   const tail = segments.slice(1).join(' ');
   const zip = (tail.match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || null;
-  const citySeg = segments.slice(1).find((seg) => seg.trim() && !NON_CITY_TAIL_RE.test(seg)) || '';
+  const citySeg = segments.slice(1).find((seg) => (
+    seg.trim() && !NON_CITY_TAIL_RE.test(seg) && !UNIT_SEGMENT_PREFIX_RE.test(seg)
+  )) || '';
   const city = citySeg.replace(/\b(?:fl|florida)\b/gi, '').replace(/\b\d{5}(?:-\d{4})?\b/g, '');
   return { zip, city };
 }
@@ -143,8 +172,11 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
 
   const now = new Date();
   const fullAddress = formatAddress({
-    line1: after.address_line1, city: after.city, state: after.state, zip: after.zip,
+    line1: after.address_line1, line2: after.address_line2, city: after.city, state: after.state, zip: after.zip,
   }).slice(0, 300);
+  const streetAddress = formatAddress({
+    line1: after.address_line1, line2: after.address_line2,
+  });
 
   // The updates re-assert the open/terminal predicates from the selects: a
   // concurrent accept/archive/close landing between select and update must
@@ -176,7 +208,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // the street line.
   const matched = leadRows.filter((r) => leadMatchesContact(r, before) || leadMatchesContact(r, after));
   const leadGroups = [
-    { rows: matched.filter((r) => !String(r.address || '').includes(',')), address: after.address_line1 },
+    { rows: matched.filter((r) => !String(r.address || '').includes(',')), address: streetAddress },
     // leads.address is varchar(255) (default knex string) — an oversized full
     // string would throw INSIDE the caller's transaction and roll back the
     // whole customer edit.

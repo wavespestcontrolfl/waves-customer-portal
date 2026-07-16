@@ -16,6 +16,7 @@ const {
   mapCustomerListRow,
   mapPipelineCustomer,
   membershipDetailsChanged,
+  normalizeAdminAddressInput,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,
 } = adminCustomersRoute._private;
@@ -84,6 +85,19 @@ describe('stageLifecycleStamps', () => {
 });
 
 describe('admin customers route helpers', () => {
+  test('dedupes matching inline/dedicated units and flags contradictions', () => {
+    expect(normalizeAdminAddressInput({
+      addressLine1: '123 Main St Apt 4', addressLine2: 'Unit 4', city: 'Sarasota', zip: '34236',
+    })).toMatchObject({
+      addressLine1: '123 Main St',
+      addressLine2: 'Unit 4',
+      unitConflict: false,
+    });
+    expect(normalizeAdminAddressInput({
+      addressLine1: '123 Main St Apt 4', addressLine2: 'Unit 5', city: 'Sarasota', zip: '34236',
+    }).unitConflict).toBe(true);
+  });
+
   test('validates known customer pipeline stages', () => {
     expect(isValidStage('new_lead')).toBe(true);
     expect(isValidStage('active_customer')).toBe(true);
