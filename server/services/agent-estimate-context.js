@@ -242,10 +242,16 @@ async function buildAgentEstimateContext(leadId) {
     existingServiceKeys: [], currentServices: [], currentSpendPerVisitTotal: 0,
     currentTier: null, currentTierLabel: null, currentDiscountPct: 0,
   };
+  // A recognized customer whose service lookup FAILED must not silently price
+  // as if they had no services — that would drop the membership tier and let
+  // an active service be quoted again. The flag makes the pricing paths
+  // refuse instead of guessing.
+  let serviceContextUnavailable = false;
   if (customer?.id) {
     try {
       customerSpend = await loadCurrentServiceSpendContext(db, customer.id);
     } catch (err) {
+      serviceContextUnavailable = true;
       logger.warn(`[agent-estimate] current-service spend load failed: ${err.message}`);
     }
   }
@@ -259,6 +265,7 @@ async function buildAgentEstimateContext(leadId) {
     existing_service_keys: customerSpend.existingServiceKeys,
     current_services: customerSpend.currentServices,
     current_spend_per_visit_total: customerSpend.currentSpendPerVisitTotal,
+    service_context_unavailable: serviceContextUnavailable,
   } : {
     recognized: false,
     customer_id: null,

@@ -90,7 +90,6 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
             boraCare: { type: 'object' },
             preSlabTermiticide: { type: 'object' },
             preSlabTermidor: { type: 'object' },
-            rodent: { type: 'object' },
             rodentBait: { type: 'object' },
             oneTimePest: { type: 'object' },
             oneTimeLawn: { type: 'object' },
@@ -400,11 +399,12 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
 
 // The engine's per-service options are open objects, so an exact-key list can
 // never stay complete against its price levers (customPricePerPalm,
-// customContainerCost, customFloorBeforeVolumeDiscount, ...). Deny the whole
-// custom* and *override* families by pattern — no legitimate agent-suppliable
-// input uses either shape, and a false positive just tells the model to drop
-// the key and let DB-authoritative pricing rule.
-const AGENT_FORBIDDEN_PRICING_INPUT_PATTERN = /^custom|override/;
+// customContainerCost, volumeDiscount, subcontractCost, ...). Deny the whole
+// custom*, *override*, *discount*, and *subcontract* families by pattern —
+// no legitimate agent-suppliable input uses any of these shapes, and a false
+// positive just tells the model to drop the key and let DB-authoritative
+// pricing rule.
+const AGENT_FORBIDDEN_PRICING_INPUT_PATTERN = /^custom|override|discount|subcontract/;
 
 function findForbiddenAgentPricingInputs(value, path = [], found = []) {
   if (!value || typeof value !== 'object') return found;
@@ -536,10 +536,20 @@ function accountPricingFromContext(context = {}) {
   return {
     customerId: account.recognized ? account.customer_id : null,
     recognized: account.recognized === true,
+    serviceContextUnavailable: account.service_context_unavailable === true,
     priorQualifyingServices,
     activeServiceKeys: [...new Set([...priorQualifyingServices, ...currentServiceKeys])],
     customerAccount: account,
   };
+}
+
+// A recognized customer whose existing-service lookup failed has NO reliable
+// tier or duplicate-service basis — pricing must refuse, not silently treat
+// the account as service-free (which drops the membership discount and can
+// quote an active service a second time).
+function serviceContextUnavailableError(accountPricing) {
+  if (!accountPricing.recognized || !accountPricing.serviceContextUnavailable) return null;
+  return 'This recognized customer\'s existing-service context could not be loaded. Retry shortly — pricing without their current services could misapply the membership tier or re-quote an active service.';
 }
 
 function duplicateCurrentServices(services = {}, activeServiceKeys = []) {
@@ -574,6 +584,24 @@ function buildAgentPricingInput(engineInput, accountPricing) {
   return pricingInput;
 }
 
+// Every service key generateEstimate actually consumes. The engine silently
+// ignores unrecognized keys, so a requested-but-unpriced service (e.g. a bare
+// "rodent") would pass the zero-total check, appear in service_interest and
+// the confirmation card, and never show up or charge on the customer estimate.
+const AGENT_ALLOWED_SERVICE_KEYS = new Set([
+  'pest', 'lawn', 'mosquito', 'treeShrub', 'termite', 'termiteBait', 'trenching',
+  'boraCare', 'preSlabTermiticide', 'preSlabTermidor', 'rodentBait', 'oneTimePest',
+  'oneTimeLawn', 'lawnPestControl', 'oneTimeMosquito', 'germanRoach',
+  'germanRoachInitial', 'pestInitialRoach', 'flea', 'bedBug', 'stinging',
+  'rodentTrapping', 'palm',
+]);
+
+function unknownServiceKeysError(services = {}) {
+  const unknown = Object.keys(services).filter((key) => !AGENT_ALLOWED_SERVICE_KEYS.has(key));
+  if (!unknown.length) return null;
+  return `Unknown service key(s): ${unknown.join(', ')}. The pricing engine ignores unrecognized services, which would list a service the customer is never charged for. Use the documented service keys only (rodent control is rodentBait or rodentTrapping).`;
+}
+
 function optionalBoundedNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (value === undefined || value === null || value === '') return undefined;
   const number = Number(value);
@@ -587,6 +615,8 @@ function validateAgentEngineInput(input) {
     || !Object.keys(input.services).length) {
     return 'engineInputs.services must contain at least one service';
   }
+  const unknownServices = unknownServiceKeysError(input.services);
+  if (unknownServices) return unknownServices;
   const home = optionalBoundedNumber(input.homeSqFt, { min: 500, max: 10000000 });
   const building = optionalBoundedNumber(input.buildingSqFt, { min: 500, max: 10000000 });
   if (home === null || building === null || (home === undefined && building === undefined)) {
@@ -654,6 +684,8 @@ async function computeEstimate(input) {
   if (Object.keys(services).length === 0) {
     return { error: 'At least one service is required in services object' };
   }
+  const unknownServices = unknownServiceKeysError(services);
+  if (unknownServices) return { error: unknownServices };
 
   const measuredTurfSf = optionalBoundedNumber(input.measuredTurfSf ?? input.lawnSqFt, { min: 0, max: 10000000 });
   if (measuredTurfSf === null) return { error: 'measuredTurfSf must be 0-10000000 when provided' };
@@ -694,6 +726,8 @@ async function computeEstimate(input) {
     if (context?.error) return { error: 'Selected lead could not be loaded for customer recognition' };
     accountPricing = accountPricingFromContext(context);
   }
+  const spendUnavailableError = serviceContextUnavailableError(accountPricing);
+  if (spendUnavailableError) return { error: spendUnavailableError };
   const duplicateServices = duplicateCurrentServices(services, accountPricing.activeServiceKeys);
   if (duplicateServices.length) {
     return {
@@ -1107,6 +1141,8 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     return { error: 'engineInputs.services must contain at least one service' };
   }
 
+  const spendUnavailableError = serviceContextUnavailableError(accountPricing);
+  if (spendUnavailableError) return { error: spendUnavailableError };
   const duplicateServices = duplicateCurrentServices(
     input.engineInputs.services,
     accountPricing.activeServiceKeys,
@@ -1214,13 +1250,18 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   }
   for (const text of input.assumptions || []) laneReasons.push(`assumption: ${text}`);
   for (const text of input.uncertainty || []) laneReasons.push(`open question: ${text}`);
+  // Pricing/margin failures are collected separately and placed FIRST in the
+  // stored/displayed list — a draft with 30+ evidence/protocol reasons must
+  // not truncate "collected margin is below 35%" out of the operator-visible
+  // approval summary.
+  const pricingLaneReasons = [];
   for (const line of lines) {
-    if (line.margin_floor_ok === false) laneReasons.push(`${line.service} collected margin is below 35%`);
-    if (line.margin_floor_ok == null) laneReasons.push(`${line.service} collected margin could not be independently verified`);
+    if (line.margin_floor_ok === false) pricingLaneReasons.push(`${line.service} collected margin is below 35%`);
+    if (line.margin_floor_ok == null) pricingLaneReasons.push(`${line.service} collected margin could not be independently verified`);
     if (line.pricing_confidence && String(line.pricing_confidence).toLowerCase() !== 'high') {
-      laneReasons.push(`${line.service} pricing confidence is ${line.pricing_confidence}`);
+      pricingLaneReasons.push(`${line.service} pricing confidence is ${line.pricing_confidence}`);
     }
-    for (const reason of line.review_reasons || []) laneReasons.push(`${line.service}: ${reason}`);
+    for (const reason of line.review_reasons || []) pricingLaneReasons.push(`${line.service}: ${reason}`);
   }
   for (const row of inventoryReview) {
     if (!row?.status) {
@@ -1233,13 +1274,14 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     if (row?.warning) laneReasons.push(`protocol: ${row.warning}`);
   }
 
+  const allLaneReasons = [...new Set([...pricingLaneReasons, ...laneReasons])];
   return {
     preview: true,
     action: input.estimateId ? 'revise_agent_draft' : 'create_or_update_lead_agent_draft',
     totals,
     lines,
-    lane: laneReasons.length ? 'yellow' : 'green',
-    lane_reasons: [...new Set(laneReasons)].slice(0, 30),
+    lane: allLaneReasons.length ? 'yellow' : 'green',
+    lane_reasons: allLaneReasons.slice(0, 30),
     engineResult,
     customer_account: accountPricing.customerAccount,
     presentation: presentationForServices(input.engineInputs.services, engineResult),
@@ -1379,13 +1421,58 @@ function anchorAgentEstimateContact(input, lead) {
     input: {
       ...input,
       customerName: leadName || input.customerName,
-      customerPhone: leadPhone || input.customerPhone,
-      customerEmail: leadEmail || input.customerEmail,
+      // The LEAD is the only recipient authority. When a lead field is blank
+      // a model-supplied phone/email must NOT become the stored recipient —
+      // the send path delivers the bearer estimate link to these columns, and
+      // the confirmation card does not display them, so a hallucinated
+      // contact would be undetectable until it was already sent.
+      customerPhone: leadPhone || null,
+      customerEmail: leadEmail || null,
       contactVerification: {
         addressMismatch,
         selectedLeadHasAddress: !!leadAddress,
       },
     },
+  };
+}
+
+// Shared duplicate guard for BOTH Agent Estimate write paths. The phone
+// helper alone returns only the newest open estimate, so this checks EVERY
+// open estimate on the phone: a same-street open estimate blocks (pointing
+// at that row), the different-property bypass applies only when every open
+// estimate has a known, street-different address, and any unknown address
+// keeps the conservative block.
+async function agentEstimateDuplicateBlock(trx, phone, address, { excludeEstimateId = null } = {}) {
+  let duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx, excludeEstimateId });
+  if (duplicateBlock?.existingEstimateId && address) {
+    try {
+      const phoneLast10 = String(phone || '').replace(/\D/g, '').slice(-10);
+      let query = trx('estimates')
+        .select('id', 'address')
+        .whereRaw("right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10])
+        .whereIn('status', OPEN_ESTIMATE_STATUSES)
+        .whereNull('archived_at');
+      if (excludeEstimateId) query = query.whereNot('id', excludeEstimateId);
+      const openRows = await query;
+      const sameProperty = openRows.find((row) => row.address && sameStreetAddress(row.address, address));
+      if (sameProperty) {
+        duplicateBlock = { ...duplicateBlock, existingEstimateId: sameProperty.id };
+      } else if (openRows.length && openRows.every((row) => row.address)) {
+        logger.info('[intelligence-bar:agent-estimate] duplicate guard bypassed — every open estimate on this phone is a different property');
+        duplicateBlock = null;
+      }
+    } catch (dupErr) {
+      logger.warn(`[intelligence-bar:agent-estimate] duplicate address compare failed (keeping block): ${dupErr.message}`);
+    }
+  }
+  return duplicateBlock;
+}
+
+function duplicateBlockResult(duplicateBlock) {
+  return {
+    error: duplicateBlock.message || 'An automated estimate is already open for this phone number',
+    blocked: true,
+    existing_estimate_id: duplicateBlock.existingEstimateId,
   };
 }
 
@@ -1410,12 +1497,28 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     if (currentData.lead_id && String(currentData.lead_id) !== String(input.leadId)) {
       return { error: 'This Agent Estimate draft belongs to a different lead and will not be overwritten' };
     }
+    // A revision rewrites the stored address and recipient — recheck the
+    // phone/property duplicate guard (excluding this row) so a correction to
+    // another property can't leave two open estimates on the same
+    // phone/street.
+    const duplicateBlock = await agentEstimateDuplicateBlock(
+      trx,
+      input.customerPhone || null,
+      input.address,
+      { excludeEstimateId: estimate.id },
+    );
+    if (duplicateBlock) return duplicateBlockResult(duplicateBlock);
     const payload = agentEstimatePayload(input, preview, currentData, accountPricing);
     const [updated] = await trx('estimates').where({ id: estimate.id, status: 'draft', source: 'estimator_engine' })
       .update({
         estimate_data: JSON.stringify(payload.data),
         ...payload.fields,
-        customer_id: accountPricing.customerId || estimate.customer_id || null,
+        // Recognition is reloaded for every confirmation — use ONLY the
+        // current result. Falling back to the row's old customer_id would
+        // keep a stale link after the lead was unlinked or its phone became
+        // ambiguous, and acceptance would apply the quote to the wrong
+        // account.
+        customer_id: accountPricing.customerId || null,
         notes: null,
         updated_at: trx.fn.now(),
       })
@@ -1454,41 +1557,8 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
       }
     }
 
-    let duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx });
-    // The duplicate guard is phone-only: a shared-line / property-manager
-    // caller with several properties on one number would have the SECOND
-    // property's draft suppressed by the first property's open estimate.
-    // The helper returns only the NEWEST open estimate, so check EVERY open
-    // estimate on the phone: an older open estimate for THIS address must
-    // still block, and the bypass applies only when all open estimates have
-    // known, street-different addresses. Unknown addresses keep the
-    // conservative block.
-    if (duplicateBlock?.existingEstimateId && input.address) {
-      try {
-        const phoneLast10 = String(phone || '').replace(/\D/g, '').slice(-10);
-        const openRows = await trx('estimates')
-          .select('id', 'address')
-          .whereRaw("right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10])
-          .whereIn('status', OPEN_ESTIMATE_STATUSES)
-          .whereNull('archived_at');
-        const sameProperty = openRows.find((row) => row.address && sameStreetAddress(row.address, input.address));
-        if (sameProperty) {
-          duplicateBlock = { ...duplicateBlock, existingEstimateId: sameProperty.id };
-        } else if (openRows.length && openRows.every((row) => row.address)) {
-          logger.info('[intelligence-bar:agent-estimate] duplicate guard bypassed — every open estimate on this phone is a different property');
-          duplicateBlock = null;
-        }
-      } catch (dupErr) {
-        logger.warn(`[intelligence-bar:agent-estimate] duplicate address compare failed (keeping block): ${dupErr.message}`);
-      }
-    }
-    if (duplicateBlock) {
-      return {
-        error: duplicateBlock.message || 'An automated estimate is already open for this phone number',
-        blocked: true,
-        existing_estimate_id: duplicateBlock.existingEstimateId,
-      };
-    }
+    const duplicateBlock = await agentEstimateDuplicateBlock(trx, phone, input.address);
+    if (duplicateBlock) return duplicateBlockResult(duplicateBlock);
 
     const payload = agentEstimatePayload(input, preview, {}, accountPricing);
     const token = crypto.randomBytes(16).toString('hex');

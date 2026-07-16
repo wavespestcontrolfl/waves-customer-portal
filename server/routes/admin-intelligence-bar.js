@@ -969,7 +969,12 @@ function getToolsForContext(context, isAdmin = false) {
     return [...base, ...BANKING_QUERY_TOOLS];
   }
   if (context === 'estimates') {
-    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
+    // create_agent_estimate_draft's trust boundary (feature gate + forced UI
+    // confirmation) is only active in the agent_estimate context. Offered
+    // from the ordinary estimates bar it would either never surface its
+    // Confirm card (UI-confirm gate off) or surface one that /confirm-action
+    // rejects (user flag off) — so it is not offered here at all.
+    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS.filter((tool) => tool.name !== AGENT_ESTIMATE_WRITE_TOOL)];
   }
   if (context === 'tech') {
     return TECH_TOOLS;
