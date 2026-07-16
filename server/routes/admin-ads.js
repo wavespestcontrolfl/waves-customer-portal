@@ -576,14 +576,29 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (!(amount > 0)) {
         return res.status(422).json({ applied: false, error: 'This recommendation has no concrete target budget — set the budget manually.' });
       }
+      // A throttled campaign ('spent'/'stop') deliberately runs a mode-derived
+      // budget (frozen current / 1% of base), so setBudget would record the
+      // new BASE but push the throttled amount — not the target this rec
+      // claims. Applying it would report "$X/day set" while Google keeps the
+      // cap. Mode changes go through change_mode recs; budget edits on a
+      // throttled campaign are a manual, eyes-open action.
+      if (campaign.budget_mode && campaign.budget_mode !== 'base') {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is throttled in "${campaign.budget_mode}" mode, so a new daily budget wouldn't take effect. Apply a change_mode recommendation (or set the mode to base) first, or edit the budget manually.` });
+      }
       // Safety bound on AI-supplied budgets: apply_value is unvalidated model
       // output, and the card's prose can say "$30" while the value is 3000.
       // One click moves a budget at most 3× in either direction from the
-      // known base; anything larger goes through the manual budget editor,
-      // where the number is typed by a human.
+      // campaign's known base (falling back to the current daily budget);
+      // with NO recorded budget there is nothing trustworthy to bound an AI
+      // number against, so the change is manual-only. Anything larger goes
+      // through the manual budget editor, where the number is typed by hand.
       const baseBudget = toFiniteNumber(campaign.daily_budget_base);
-      if (baseBudget > 0 && (amount > baseBudget * 3 || amount < baseBudget / 3)) {
-        return res.status(422).json({ applied: false, error: `Refusing to one-click a budget change from $${baseBudget}/day to $${amount}/day (more than a 3× move) — if that's really intended, set it in the campaign's budget editor.` });
+      const boundRef = baseBudget > 0 ? baseBudget : toFiniteNumber(campaign.daily_budget_current);
+      if (!(boundRef > 0)) {
+        return res.status(422).json({ applied: false, error: 'This campaign has no recorded daily budget to sanity-check an AI-suggested amount against — set the budget manually in the campaign editor.' });
+      }
+      if (amount > boundRef * 3 || amount < boundRef / 3) {
+        return res.status(422).json({ applied: false, error: `Refusing to one-click a budget change from $${boundRef}/day to $${amount}/day (more than a 3× move) — if that's really intended, set it in the campaign's budget editor.` });
       }
       result = await getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`);
     } else {

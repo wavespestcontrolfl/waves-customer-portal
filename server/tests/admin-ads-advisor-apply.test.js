@@ -85,7 +85,7 @@ beforeEach(() => {
 });
 
 test('increase_budget resolves the campaign by name and applies', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20, budget_mode: 'base' }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: true, livePushAttempted: true });
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
@@ -97,9 +97,9 @@ test('increase_budget resolves the campaign by name and applies', async () => {
 });
 
 test('campaignId is preferred over the name lookup', async () => {
-  mockCampaignById = { id: 'c-7', campaign_name: 'Pest Bradenton', platform: 'google_ads' };
+  mockCampaignById = { id: 'c-7', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 };
   // A conflicting name match must not win when an id is present.
-  mockNameMatches = [{ id: 'c-other', campaign_name: 'Pest Bradenton', platform: 'google_ads' }];
+  mockNameMatches = [{ id: 'c-other', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 25, googleAdsUpdated: true, livePushAttempted: true });
 
   const res = await apply({ action: 'increase_budget', campaignId: 'c-7', campaignName: 'Pest Bradenton', value: 25 });
@@ -131,7 +131,7 @@ test('unlinked campaign (no live push attempted) still counts as applied', async
 });
 
 test('a refused live Google push is NOT applied and not counted', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', platform_campaign_id: 'g-1' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', platform_campaign_id: 'g-1', daily_budget_base: 20 }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: false, livePushAttempted: true });
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
@@ -187,8 +187,39 @@ test('a sane budget within 3× of the base still applies', async () => {
   expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String));
 });
 
+test('budget bound falls back to the current daily budget when no base exists', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: null, daily_budget_current: 10 }];
+
+  const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 3000 });
+
+  expect(res.status).toBe(422);
+  expect(res.body.error).toMatch(/3× move/);
+  expect(mockSetBudget).not.toHaveBeenCalled();
+});
+
+test('no recorded budget at all → manual-only, nothing to bound against', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: null, daily_budget_current: null }];
+
+  const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
+
+  expect(res.status).toBe(422);
+  expect(res.body.error).toMatch(/no recorded daily budget/);
+  expect(mockSetBudget).not.toHaveBeenCalled();
+});
+
+test('budget apply on a throttled (spent/stop) campaign is refused — the target would not go live', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20, budget_mode: 'spent' }];
+
+  const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
+
+  expect(res.status).toBe(422);
+  expect(res.body.error).toMatch(/throttled in "spent" mode/);
+  expect(mockSetBudget).not.toHaveBeenCalled();
+  expect(mockIncrement).not.toHaveBeenCalled();
+});
+
 test('applied_count increment failure does not flip a completed apply to an error', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: true, livePushAttempted: true });
   mockIncrement.mockRejectedValueOnce(new Error('db hiccup'));
 
