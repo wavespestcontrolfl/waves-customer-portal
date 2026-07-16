@@ -531,6 +531,33 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Lawn Care Service');
   });
 
+  test('except-after-negation rescues the positive (codex r9)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'nothing except lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'no pest add-ons, except lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+    // ...while a plain except still declines
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control except lawn care',
+    })).toBe('Quarterly Pest Control Service');
+  });
+
+  test('modified termite bait-station wording stays termite (codex r9)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control plus termite monitoring bait stations',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'bait stations for subterranean termites',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',

@@ -63,7 +63,7 @@ const SERVICE_FAMILIES = [
   { key: 'termite', label: 'Termite Service', re: /\btermites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i },
   // bait station is rodent wording ONLY when not termite-qualified —
   // "termite bait stations" is a termite deliverable in this repo.
-  { key: 'rodent', label: 'Rodent Control Service', re: /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|(?<!termite\s)\bbait\s+stations?\b(?!\s+for\s+(?:the\s+)?termites?\b)/i },
+  { key: 'rodent', label: 'Rodent Control Service', re: /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|(?<!\btermites?\s(?:\w+\s){0,2})\bbait\s+stations?\b(?!\s+for\s+(?:the\s+)?(?:\w+\s+){0,2}termites?\b)/i },
   { key: 'wildlife', label: 'Wildlife Control Service', re: /\bwildlife\b|\braccoons?\b|\bsquirrels?\b|\bo?possums?\b|\barmadillos?\b/i },
   { key: 'wdo', label: 'WDO Inspection Service', re: /\bwdo\b|\bwood[\s-]?destroying\b/i },
 ];
@@ -74,7 +74,7 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?termites?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?(?:\w+\s+){0,2}termites?\b|\btermites?\s+\w+\s+bait\s+stations?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
 // ("termite service" — incl. the canonical "+ Termite Service" tail the V2
 // backfill carries forward — counts as work: it only ever got composed
 // because treatment wording passed this gate on the original scan, and a
@@ -150,7 +150,19 @@ const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never
 // "pest control instead of lawn care, mosquito service too" keeps the
 // mosquito request (codex r6). Stripped BEFORE segment-based negation.
 const COMPARED_AWAY_RE = /\b(?:instead\s+of|rather\s+than|in\s+lieu\s+of|except(?:\s+for)?)\b[^,.;!?]*/gi;
-const stripComparedAway = (s) => s.replace(COMPARED_AWAY_RE, ' ');
+// "except" flips meaning with a preceding negation: "pest control except
+// lawn care" DECLINES lawn, but "nothing except lawn care" / "no pest,
+// except lawn care" REQUESTS it (codex r9). With a negator earlier in the
+// sentence, rewrite except→but so the contrast split rescues the positive.
+const NEGATION_BEFORE_EXCEPT_RE = /\b(?:no|not|nothing|none|never|don['’]?t|doesn['’]?t)\b[^.;!?]*$/i;
+function stripComparedAway(s) {
+  return s.replace(COMPARED_AWAY_RE, (match, offset, whole) => {
+    if (/^except/i.test(match) && NEGATION_BEFORE_EXCEPT_RE.test(whole.slice(0, offset))) {
+      return match.replace(/^except(?:\s+for)?/i, ' but ');
+    }
+    return ' ';
+  });
+}
 // `except` is NOT here: it EXCLUDES what follows (handled by
 // COMPARED_AWAY_RE), unlike but/however which rescue a positive (codex r8).
 const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)|,\s*(?=[^,.;!?]{0,60}\b(?:too|as\s+well)\b)/gi;

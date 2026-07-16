@@ -5824,7 +5824,18 @@ const CallRecordingProcessor = {
           // Multi-service calls: matched_service is single-slot, so append the
           // requested families it doesn't cover ("pest and lawn" must not
           // price as pest-only). Fill-if-empty semantics unchanged.
-          const serviceInterestLabel = composeServiceInterest(extracted);
+          // When the V2 gate approved this call, compose the extras from the
+          // V2-APPROVED requested_service: the appended families come from
+          // that field, and a V1-hallucinated family V2 rejected must not
+          // leak onto the lead label (codex r9). matched_service stays V1
+          // here — the recurring-default backfill below re-asserts it
+          // against the merged fields.
+          const v2FlatForCompose = v2ApprovedExtraction ? flatView(v2ApprovedExtraction) : null;
+          const serviceInterestLabel = composeServiceInterest(
+            v2FlatForCompose?.requested_service
+              ? { ...extracted, requested_service: v2FlatForCompose.requested_service }
+              : extracted,
+          );
           if (serviceInterestLabel && isEmpty(current?.service_interest)) {
             leadUpdates.service_interest = serviceInterestLabel;
             persistedServiceInterestLabel = serviceInterestLabel;
