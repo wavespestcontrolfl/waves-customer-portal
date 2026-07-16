@@ -24,6 +24,19 @@ const {
 
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 
+// Privacy headers on EVERY outcome — including 404s, errors, AND the rate
+// limiter's own 429s, which is why this mounts BEFORE the limiter (Codex
+// #2771 r6): the token is a bearer credential on a payment-adjacent
+// surface, so responses must never be cached, the token must never leak
+// via Referer from any rendered content, and the URLs must never be
+// indexed.
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Robots-Tag', 'noindex');
+  next();
+});
+
 // Per-route limit on top of the global /api limiter — same bar as the
 // sibling public token routes (card, prep, lawn-diagnostic).
 router.use(rateLimit({
@@ -33,17 +46,6 @@ router.use(rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
-
-// Privacy headers on EVERY outcome (including 404s/errors): the token is a
-// bearer credential on a payment-adjacent surface, so responses must never
-// be cached, the token must never leak via Referer from any rendered
-// content, and the URLs must never be indexed (Codex follow-up on #2771).
-router.use((req, res, next) => {
-  res.set('Cache-Control', 'private, no-store');
-  res.set('Referrer-Policy', 'no-referrer');
-  res.set('X-Robots-Tag', 'noindex');
-  next();
-});
 
 router.get('/:token', async (req, res) => {
   const token = String(req.params.token || '');
