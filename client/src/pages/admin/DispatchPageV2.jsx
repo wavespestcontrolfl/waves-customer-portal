@@ -2445,6 +2445,7 @@ export default function DispatchPageV2({
               ? completionDetourPhotos.photos
               : []
           }
+          onDiscardBillingDetour={() => setCompletionDetourPhotos(null)}
           onClose={(completed) => {
             setCompletingService(null);
             if (completed) setCompletionDetourPhotos(null);

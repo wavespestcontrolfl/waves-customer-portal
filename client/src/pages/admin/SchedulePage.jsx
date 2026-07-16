@@ -7588,6 +7588,7 @@ export function CompletionPanel({
   onBillingRequired,
   onScheduleFollowup,
   billingDetourPhotos = [],
+  onDiscardBillingDetour,
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -9232,6 +9233,11 @@ export function CompletionPanel({
 
   function discardDraft() {
     localStorage.removeItem(completionDraftKey(service.id));
+    // Photos survive checkout in parent memory rather than localStorage. A
+    // deliberate Discard must clear both stores or old evidence remains
+    // attached to the otherwise-reset completion.
+    setServicePhotos([]);
+    onDiscardBillingDetour?.();
     setSavedDraft(null);
     setShowDraftPrompt(false);
   }
