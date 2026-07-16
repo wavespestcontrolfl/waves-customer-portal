@@ -10,7 +10,13 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  loadTemplateByKey: jest.fn(),
   redactEmailAddresses: (s) => String(s || ''),
+}));
+jest.mock('../services/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
@@ -20,9 +26,11 @@ jest.mock('../services/short-url', () => ({
 }));
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: jest.fn(async () => 'SMS body'),
+  isTemplateActive: jest.fn(),
 }));
 
 const EmailTemplates = require('../services/email-template-library');
+const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { _private } = require('../services/estimate-follow-up');
 const smsTemplates = require('../routes/admin-sms-templates');
@@ -39,9 +47,59 @@ const baseEst = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  smsTemplates.isTemplateActive.mockResolvedValue(true);
+  EmailTemplates.loadTemplateByKey.mockResolvedValue({
+    template: { template_key: 'estimate.viewed_followup', status: 'active' },
+  });
 });
 
 describe('estimate follow-up emails via template library', () => {
+  test('an inactive SMS template plus archived email disables the stage cleanly', async () => {
+    smsTemplates.isTemplateActive.mockResolvedValueOnce(false);
+    EmailTemplates.loadTemplateByKey.mockResolvedValueOnce({
+      template: { template_key: 'estimate.viewed_followup', status: 'archived' },
+    });
+
+    await expect(_private.legacyStageDeliveryAvailability('viewed', {
+      sms: 'estimate_followup_viewed',
+      email: 'estimate.viewed_followup',
+    })).resolves.toEqual({ smsEnabled: false, emailEnabled: false, anyEnabled: false });
+  });
+
+  test('an archived email leg does not disable an active SMS leg', async () => {
+    smsTemplates.isTemplateActive.mockResolvedValueOnce(true);
+    EmailTemplates.loadTemplateByKey.mockResolvedValueOnce({
+      template: { template_key: 'estimate.expiring_notice', status: 'archived' },
+    });
+
+    await expect(_private.legacyStageDeliveryAvailability('expiring', {
+      sms: 'estimate_followup_expiring',
+      email: 'estimate.expiring_notice',
+    })).resolves.toEqual({ smsEnabled: true, emailEnabled: false, anyEnabled: true });
+  });
+
+  test('an active email leg runs independently while estimate follow-up SMS stays disabled', async () => {
+    smsTemplates.isTemplateActive.mockResolvedValueOnce(false);
+    EmailTemplates.loadTemplateByKey.mockResolvedValueOnce({
+      template: { template_key: 'estimate.viewed_followup', status: 'active' },
+    });
+
+    await expect(_private.legacyStageDeliveryAvailability('viewed', {
+      sms: 'estimate_followup_viewed',
+      email: 'estimate.viewed_followup',
+    })).resolves.toEqual({ smsEnabled: false, emailEnabled: true, anyEnabled: true });
+  });
+
+  test('missing email template fails open so the existing send audit still records the defect', async () => {
+    smsTemplates.isTemplateActive.mockResolvedValueOnce(false);
+    EmailTemplates.loadTemplateByKey.mockResolvedValueOnce(null);
+
+    await expect(_private.legacyStageDeliveryAvailability('final', {
+      sms: 'estimate_followup_final',
+      email: 'estimate.followup_final',
+    })).resolves.toEqual({ smsEnabled: false, emailEnabled: true, anyEnabled: true });
+  });
+
   test('SMS renderer forwards workflow/entity context to template issues', async () => {
     await _private.renderTemplate(
       'estimate_followup_unviewed',
@@ -174,6 +232,28 @@ describe('estimate follow-up emails via template library', () => {
     });
 
     expect(attempted).toBe(false);
+  });
+
+  test('template kill-switch races are informational rather than send errors', async () => {
+    const err = new Error('email template estimate.viewed_followup is archived');
+    err.code = 'EMAIL_TEMPLATE_DISABLED';
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(err);
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true });
+
+    const attempted = await _private.sendDualChannel(baseEst, {
+      sms: 'SMS body',
+      email: {
+        templateKey: 'estimate.viewed_followup',
+        stage: 'viewed',
+        payload: { first_name: 'Taylor', estimate_url: 'https://portal/x' },
+      },
+    });
+
+    expect(attempted).toBe(false);
+    expect(logger.info).toHaveBeenCalledWith(
+      '[est-followup] Email skipped for estimate est-1 (viewed): email template estimate.viewed_followup is archived',
+    );
+    expect(logger.error).not.toHaveBeenCalled();
   });
 
   test('skips email when customer_email is null but still attempts SMS', async () => {
