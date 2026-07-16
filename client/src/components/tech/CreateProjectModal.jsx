@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
+import WdoSignaturePad from './WdoSignaturePad';
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/wdoProfileToFindings';
 import { computePretreatChemistry } from '../../lib/termitePretreatRates';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
@@ -367,6 +368,17 @@ export default function CreateProjectModal({
   const [aiUseComms, setAiUseComms] = useState(true);
   const [error, setError] = useState(null);
   const [createdProject, setCreatedProject] = useState(null);
+  // One-page create-and-sign (WDO): after a successful save, the sheet stays
+  // open on a licensee-signature step instead of closing — the signature
+  // needs a saved project id and saved content to certify, which now exist.
+  // Shape: { project, applicator: {name, idCardNo}, signature: meta|null }.
+  // onCreated/onClose are DEFERRED to finishSignStep so parents (which
+  // unmount the modal from onCreated) don't tear the step down.
+  const [signStep, setSignStep] = useState(null);
+  // True while the pad's signature POST/DELETE is in flight — every sign-step
+  // exit holds until it settles, or the modal could unmount mid-mutation and
+  // hand the parent stale signed/unsigned state (Codex P2).
+  const [signBusy, setSignBusy] = useState(false);
 
   // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
   // company's treatment sticker/notice (or visible evidence) into the
@@ -1276,6 +1288,24 @@ export default function CreateProjectModal({
       }
 
       try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+      if (projectType === 'wdo_inspection' && !signStep) {
+        // Fetch the detail payload for the same signer prefill the report
+        // page uses (findings applicator → creating tech's name + FDACS
+        // license) plus the stripped signature metadata. Prefill-only: if
+        // the fetch fails, the pad still works with blank fields.
+        let detail = null;
+        try {
+          const dr = await adminFetch(`/admin/projects/${data.project.id}`);
+          const dd = await dr.json().catch(() => null);
+          if (dr.ok) detail = dd?.project || null;
+        } catch { /* prefill only */ }
+        setSignStep({
+          project: data.project,
+          applicator: detail?.wdo_applicator || { name: '', idCardNo: '' },
+          signature: detail?.wdo_signature || null,
+        });
+        return;
+      }
       if (onCreated) onCreated(data.project);
       onClose?.();
     } catch (e) {
@@ -1283,6 +1313,27 @@ export default function CreateProjectModal({
     } finally {
       setSaving(false);
     }
+  }
+
+  // The pad reports the authoritative outcome of its own mutation (signed
+  // metadata from the POST response, or null after a clear) — applied
+  // directly, no refetch: a slow or failed detail GET must never leave the
+  // step claiming unsigned after a successful save (Codex P2). The pad
+  // AWAITS this inside its busy window, so exits can't race it either.
+  function applySignatureOutcome(meta) {
+    setSignStep(prev => (prev ? { ...prev, signature: meta } : prev));
+  }
+
+  // The only exit from the sign step — signed or not, the draft is already
+  // saved, so leaving always reports the created project to the parent
+  // (which refreshes its lists and may open the report) and closes. Held
+  // while the pad's mutation is in flight.
+  function finishSignStep() {
+    if (signBusy) return;
+    const project = signStep?.project;
+    setSignStep(null);
+    if (onCreated && project) onCreated(project);
+    onClose?.();
   }
 
   // Portaled to <body>: rendered inline the overlay is trapped in the page's
@@ -1310,7 +1361,14 @@ export default function CreateProjectModal({
         paddingTop: `calc(${isEstimateStyle ? 24 : 12}px + env(safe-area-inset-top, 0px))`,
         paddingBottom: `calc(${isEstimateStyle ? 24 : 12}px + env(safe-area-inset-bottom, 0px))`,
       }}
-      onClick={(e) => { if (e.target === e.currentTarget && !saving) onClose?.(); }}
+      onClick={(e) => {
+        if (e.target !== e.currentTarget || saving) return;
+        // On the sign step the scrim is an exit like any other: it must go
+        // through finishSignStep so the parent still learns about the saved
+        // project (onCreated drives list refreshes / opening the report).
+        if (signStep) { finishSignStep(); return; }
+        onClose?.();
+      }}
     >
       <div style={isSheet ? {
         width: '100%', maxWidth: 640, margin: 0,
@@ -1356,13 +1414,15 @@ export default function CreateProjectModal({
               fontWeight: 500,
               lineHeight: 1.35,
             }}>
-              {projectType === 'wdo_inspection'
-                ? 'Wood Destroying Organism (WDO) Inspection Report'
-                : 'Inspection or documentation-heavy job'}
+              {signStep
+                ? 'Draft saved — licensee signature'
+                : projectType === 'wdo_inspection'
+                  ? 'Wood Destroying Organism (WDO) Inspection Report'
+                  : 'Inspection or documentation-heavy job'}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-            {isSheet && onViewDetails && (
+            {isSheet && onViewDetails && !signStep && (
               <button
                 type="button"
                 onClick={() => {
@@ -1387,7 +1447,7 @@ export default function CreateProjectModal({
             )}
             <button
               type="button"
-              onClick={() => !saving && onClose?.()}
+              onClick={() => !saving && (signStep ? finishSignStep() : onClose?.())}
               aria-label="Close"
               style={{
                 background: 'transparent', border: 'none', color: P.muted,
@@ -1397,6 +1457,67 @@ export default function CreateProjectModal({
           </div>
         </div>
 
+        {/* Sign step (WDO): the draft is saved server-side; the licensee signs
+            against that saved content in the same sheet — no detour to the
+            report page. The pad is the same component the report page mounts,
+            posting to /:id/wdo-signature itself. */}
+        {signStep ? (
+          <>
+          <div style={{
+            padding: isEstimateStyle ? 22 : 16,
+            display: 'flex', flexDirection: 'column', gap: 12,
+            ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
+          }}>
+            <div style={{ fontSize: 14, fontWeight: wStrong, color: P.heading, fontFamily: P.bodyFont }}>
+              ✓ Report draft saved
+            </div>
+            <div style={{ fontSize: 13, color: P.muted, lineHeight: 1.45, fontFamily: P.bodyFont }}>
+              {signStep.signature?.signed
+                ? 'Signed — the report is ready for review and sending.'
+                : 'Sign now to finish in one step — the FDACS-13645 report can’t be sent until the licensee signs. You can also sign later from the saved report.'}
+            </div>
+            <WdoSignaturePad
+              projectId={signStep.project.id}
+              signature={signStep.signature}
+              defaultSignerName={signStep.applicator?.name || ''}
+              defaultSignerIdCard={signStep.applicator?.idCardNo || ''}
+              onChanged={applySignatureOutcome}
+              onBusyChange={setSignBusy}
+            />
+          </div>
+          <div style={{
+            padding: isEstimateStyle ? '16px 24px 20px' : '12px 16px',
+            borderTop: `1px solid ${P.border}`,
+            background: P.card,
+            display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center',
+            ...(isSheet ? { paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
+          }}>
+            {!signStep.signature?.signed && (
+              <span style={{ fontSize: 12, color: P.muted, marginRight: 'auto', fontFamily: P.bodyFont }}>
+                Unsigned reports can’t be sent yet.
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={finishSignStep}
+              disabled={signBusy}
+              style={{
+                minHeight: isEstimateStyle || isSheet ? 48 : undefined,
+                padding: isEstimateStyle ? '0 18px' : '10px 18px',
+                borderRadius: isEstimateStyle ? 10 : 8,
+                fontSize: isEstimateStyle ? 14 : 13,
+                fontWeight: wStrong,
+                background: signStep.signature?.signed ? P.accent : 'transparent',
+                color: signStep.signature?.signed ? P.accentText : P.text,
+                border: signStep.signature?.signed ? 'none' : `1px solid ${P.border}`,
+                cursor: signBusy ? 'default' : 'pointer',
+                opacity: signBusy ? 0.5 : 1,
+              }}
+            >{signBusy ? 'Saving…' : signStep.signature?.signed ? 'Done' : 'Sign later'}</button>
+          </div>
+          </>
+        ) : (
+        <>
         {/* Body — in sheet mode this is the scroll region (header/footer pinned).
             onInput marks the draft user-dirty: every keystroke in any field
             bubbles here, while autofill EFFECTS don't fire input events —
@@ -1927,6 +2048,8 @@ export default function CreateProjectModal({
             }}
           >{saving ? 'Saving…' : treatmentExtract.status === 'working' ? 'Reading photo…' : isSheet ? 'Save Report' : 'Save Draft'}</button>
         </div>
+        </>
+        )}
       </div>
     </div>,
     document.body,

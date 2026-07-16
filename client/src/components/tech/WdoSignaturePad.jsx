@@ -9,13 +9,18 @@ import { adminFetch } from "../../lib/adminFetch";
  */
 const CANVAS_CSS_HEIGHT = 160;
 
-export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", defaultSignerIdCard = "", onChanged }) {
+// onBusyChange (optional): reports the in-flight save/clear mutation so a host
+// that can unmount this pad (the create sheet's sign step) can hold its exits
+// until the POST/DELETE settles — leaving mid-mutation strands the caller with
+// stale signed/unsigned state.
+export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", defaultSignerIdCard = "", onChanged, onBusyChange }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const hasDrawn = useRef(false);
   const [signerName, setSignerName] = useState(defaultSignerName);
   const [signerIdCard, setSignerIdCard] = useState(defaultSignerIdCard);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSavingState] = useState(false);
+  const setSaving = (v) => { setSavingState(v); onBusyChange?.(v); };
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(!signature?.signed);
 
@@ -108,12 +113,20 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         method: "POST",
         body: { signature: dataUrl, signer_name: signerName.trim(), signer_id_card: signerIdCard.trim() },
       });
+      const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
         throw new Error(d.error || "Could not save signature");
       }
       setEditing(false);
-      onChanged?.();
+      // Pass the authoritative outcome (the POST response's metadata) and
+      // AWAIT the host's handler inside the busy window — a host that only
+      // refreshes on onChanged must not see busy end before it has the new
+      // signed state (it could exit with stale unsigned metadata).
+      await onChanged?.({
+        signed: true,
+        signer_name: d.signer_name || signerName.trim(),
+        signed_at: d.signed_at || new Date().toISOString(),
+      });
     } catch (e) {
       setError(e.message || "Could not save signature");
     } finally {
@@ -132,7 +145,8 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         throw new Error(d.error || "Could not clear signature");
       }
       setEditing(true);
-      onChanged?.();
+      // null = cleared; awaited for the same reason as save().
+      await onChanged?.(null);
     } catch (e) {
       setError(e.message || "Could not clear signature");
     } finally {
