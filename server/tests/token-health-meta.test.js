@@ -322,4 +322,19 @@ describe('token health meta checks', () => {
     });
     expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/content_publishing_limit'));
   });
+
+  test('meta_ads token is not_configured when its env var is unset', async () => {
+    delete process.env.META_ADS_ACCESS_TOKEN;
+    const tokenHealth = require('../services/token-health');
+    const result = await tokenHealth.checkSingle('meta_ads');
+    expect(result).toMatchObject({ platform: 'meta_ads', status: 'not_configured' });
+  });
+
+  test('meta_capi token resolves healthy via debug_token', async () => {
+    process.env.META_CAPI_ACCESS_TOKEN = 'capi-token';
+    const tokenHealth = require('../services/token-health');
+    const result = await tokenHealth.checkSingle('meta_capi');
+    expect(result).toMatchObject({ platform: 'meta_capi', status: 'healthy', lastError: null });
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/debug_token'));
+  });
 });

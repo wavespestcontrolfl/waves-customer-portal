@@ -19,6 +19,7 @@ const logger = require('../logger');
 const { runExclusive } = require('../../utils/cron-lock');
 const { sha256Hex, normalizeEmail, normalizePhone } = require('./data-manager')._private;
 const { whereLiveCustomer } = require('../customer-stages');
+const { filterMarketingSuppressed } = require('./ad-audience-consent');
 
 const GRAPH = 'https://graph.facebook.com';
 const STATE_TABLE = 'ad_audience_syncs';
@@ -80,7 +81,8 @@ async function collectCustomerMembers() {
   const rows = await whereLiveCustomer(db('customers'))
     .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
     .select('id', 'email', 'phone');
-  return rows.map((r) => ({ key: `customer:${r.id}`, email: r.email, phone: r.phone }));
+  const members = rows.map((r) => ({ key: `customer:${r.id}`, email: r.email, phone: r.phone }));
+  return filterMarketingSuppressed(members, { audienceKey: 'customers' });
 }
 
 async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAYS } = {}) {
@@ -99,7 +101,8 @@ async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAY
       whereLiveCustomer(this.select(db.raw('1')).from('customers as c').whereRaw('c.id = leads.customer_id'));
     })
     .select('id', 'email', 'phone');
-  return rows.map((r) => ({ key: `lead:${r.id}`, email: r.email, phone: r.phone }));
+  const members = rows.map((r) => ({ key: `lead:${r.id}`, email: r.email, phone: r.phone }));
+  return filterMarketingSuppressed(members, { audienceKey: 'unbooked_leads' });
 }
 
 // ── PII hashing → a data row aligned to SCHEMA, or null if no match keys ──

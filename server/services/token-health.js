@@ -382,6 +382,44 @@ async function checkGBP(locationKey) {
   }
 }
 
+// The Meta ADS lanes use their own long-lived tokens (separate from the social
+// FACEBOOK_ACCESS_TOKEN checked above): campaign/insight ingestion, CAPI
+// conversion uploads, and Custom Audience uploads. When one expires the affected
+// lane silently returns no data / stops uploading, so surface it here too.
+async function checkMetaAdToken(platform, envVarName) {
+  const token = String(process.env[envVarName] || '').trim();
+  if (!token) {
+    const result = { platform, status: 'not_configured', lastError: `Missing: ${envVarName}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+    return result;
+  }
+  try {
+    const { res, data } = await fetchGraph(`/debug_token?input_token=${encodeURIComponent(token)}`, token);
+    const info = data?.data;
+    if (res.ok && info && info.is_valid) {
+      // expires_at is unix seconds; 0 = never (system-user tokens).
+      const expiresAt = info.expires_at ? new Date(info.expires_at * 1000) : null;
+      const result = { platform, status: 'healthy', lastError: null, expiresAt };
+      await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+      return result;
+    }
+    const errCode = data?.error?.code ?? info?.error?.code;
+    const status = (errCode === 190 || errCode === 463 || info?.is_valid === false) ? 'expired' : 'error';
+    const lastError = data?.error?.message || info?.error?.message || 'Token reported not valid';
+    const result = { platform, status, lastError, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+    return result;
+  }
+}
+
+const checkMetaAds = () => checkMetaAdToken('meta_ads', 'META_ADS_ACCESS_TOKEN');
+const checkMetaCapi = () => checkMetaAdToken('meta_capi', 'META_CAPI_ACCESS_TOKEN');
+const checkMetaAudiences = () => checkMetaAdToken('meta_audiences', 'META_AUDIENCES_ACCESS_TOKEN');
+
 async function checkBouncie() {
   const platform = 'bouncie';
   const envVarName = 'BOUNCIE_REFRESH_TOKEN';
@@ -789,6 +827,9 @@ const TokenHealthService = {
       case 'facebook': return checkFacebook();
       case 'instagram': return checkInstagram();
       case 'linkedin': return checkLinkedIn();
+      case 'meta_ads': return checkMetaAds();
+      case 'meta_capi': return checkMetaCapi();
+      case 'meta_audiences': return checkMetaAudiences();
       case 'gbp_lwr': return checkGBP('LWR');
       case 'gbp_parrish': return checkGBP('PARRISH');
       case 'gbp_sarasota': return checkGBP('SARASOTA');
@@ -820,6 +861,9 @@ const TokenHealthService = {
     results.push(await checkFacebook());
     results.push(await checkInstagram());
     results.push(await checkLinkedIn());
+    results.push(await checkMetaAds());
+    results.push(await checkMetaCapi());
+    results.push(await checkMetaAudiences());
 
     for (const key of GBP_LOCATION_KEYS) {
       results.push(await checkGBP(key));
