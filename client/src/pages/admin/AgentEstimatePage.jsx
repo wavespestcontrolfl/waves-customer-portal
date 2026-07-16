@@ -272,11 +272,23 @@ export function CustomerAccountPanel({ account, profile }) {
   );
 }
 
-function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sendMessage }) {
+function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sendMessage, failedChannels = [] }) {
   if (!draft) {
     return <div className="p-4 text-[14px] leading-6 text-zinc-500">No Agent Estimate draft yet. Build one, review the AI basis, then confirm the draft card.</div>;
   }
   const canSend = draft.status === "draft" && draft.editable_here === true;
+  const retryChannels = draft.status === "sent" ? failedChannels : [];
+  // The send endpoint delivers to the contact snapshot stored ON the
+  // estimate, not the lead's current contact — display and gate on the
+  // draft recipient so a post-draft lead correction can't silently send
+  // the link to a stale phone/email.
+  const recipientPhone = draft.customer_phone || null;
+  const recipientEmail = draft.customer_email || null;
+  const phoneDigits = (value) => String(value || "").replace(/\D/g, "").slice(-10);
+  const recipientMismatch = !!(
+    (recipientPhone && contact?.phone && phoneDigits(recipientPhone) !== phoneDigits(contact.phone))
+    || (recipientEmail && contact?.email && String(recipientEmail).toLowerCase() !== String(contact.email).toLowerCase())
+  );
   return (
     <div className="space-y-4 p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -320,11 +332,22 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
       >
         <ExternalLink size={18} aria-hidden="true" /> Preview customer estimate
       </button>
+      {(canSend || retryChannels.length > 0) && (
+        <div className="rounded-sm bg-zinc-50 p-3 text-[14px] leading-5 text-zinc-700">
+          <div className="font-medium text-zinc-900">Delivers to the contact saved on this draft</div>
+          <div>{recipientPhone || "No phone on draft"} · {recipientEmail || "No email on draft"}</div>
+          {recipientMismatch && (
+            <div className="mt-1">
+              The lead's contact info changed after this draft was created — revise the draft to re-anchor it before sending.
+            </div>
+          )}
+        </div>
+      )}
       {canSend && (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
           <button
             type="button"
-            disabled={!contact?.phone || sending}
+            disabled={!recipientPhone || sending}
             onClick={() => onSend("sms")}
             className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -332,7 +355,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           </button>
           <button
             type="button"
-            disabled={!contact?.email || sending}
+            disabled={!recipientEmail || sending}
             onClick={() => onSend("email")}
             className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -340,12 +363,36 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           </button>
           <button
             type="button"
-            disabled={!contact?.phone || !contact?.email || sending}
+            disabled={!recipientPhone || !recipientEmail || sending}
             onClick={() => onSend("both")}
             className="flex h-12 items-center justify-center gap-2 rounded-sm border border-zinc-300 bg-white px-3 text-[14px] font-medium text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Send both
           </button>
+        </div>
+      )}
+      {retryChannels.length > 0 && (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {retryChannels.includes("sms") && (
+            <button
+              type="button"
+              disabled={!recipientPhone || sending}
+              onClick={() => onSend("sms")}
+              className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <MessageSquare size={18} aria-hidden="true" /> Retry SMS
+            </button>
+          )}
+          {retryChannels.includes("email") && (
+            <button
+              type="button"
+              disabled={!recipientEmail || sending}
+              onClick={() => onSend("email")}
+              className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Send size={18} aria-hidden="true" /> Retry email
+            </button>
+          )}
         </div>
       )}
       {sending && <div className="text-[14px] text-zinc-600">Sending estimate…</div>}
@@ -458,6 +505,10 @@ export default function AgentEstimatePage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendMessage, setSendMessage] = useState("");
+  // Channels that failed on the last (possibly partial) send. The server
+  // marks the estimate sent when ANY requested channel succeeds, so these
+  // drive the retry buttons that remain after status leaves "draft".
+  const [failedChannels, setFailedChannels] = useState([]);
   const [memories, setMemories] = useState([]);
   const fileInputRef = useRef(null);
   const primedLeadRef = useRef(null);
@@ -507,6 +558,7 @@ export default function AgentEstimatePage() {
     if (!data?.confirmedAction || data?.toolCalls?.[0]?.name !== "create_agent_estimate_draft") return;
     const result = data.result;
     if (!result?.success) return;
+    setFailedChannels([]);
     setDraft((current) => ({
       ...current,
       id: result.estimate_id,
@@ -529,7 +581,9 @@ export default function AgentEstimatePage() {
     context: "agent_estimate",
     buildPageData: () => ({ agent_estimate_context: context, current_estimate: draft }),
     fallbackActions: NO_FALLBACK_ACTIONS,
-    getRequestKey: () => selectedLeadId,
+    // Versioned by the evidence load: a response computed against pre-refresh
+    // evidence is stale, not just a response for a different lead.
+    getRequestKey: () => `${selectedLeadId}:${contextRequestRef.current}`,
   });
 
   useEffect(() => {
@@ -541,6 +595,7 @@ export default function AgentEstimatePage() {
     setDraft(null);
     setContextError("");
     setSendMessage("");
+    setFailedChannels([]);
     setPreviewOpen(false);
     intelligence.clear();
   }, [selectedLeadId, intelligence.clear]);
@@ -583,21 +638,28 @@ export default function AgentEstimatePage() {
   const quickActions = intelligence.quickActions || [];
   const buildDisabled = !context || contextLoading || intelligence.loading;
   const openLead = ["new", "contacted", "estimate_sent", "estimate_viewed"].includes(String(contact?.status || "new"));
-  // Closed (won/lost/unresponsive/duplicate) leads must not reach the draft
-  // tool through ANY entry — Build, quick actions, or a typed Ask AI prompt.
-  const askDisabled = buildDisabled || !openLead;
   // A lead linked to a non-Agent estimate (legacy draft, or one already sent/
   // scheduled) can never be drafted or revised here — the server rejects both
   // paths deterministically — so don't send the operator through a paid AI
   // run and confirmation that is guaranteed to fail.
   const buildBlocked = !!draft && draft.editable_here !== true;
+  // Closed (won/lost/unresponsive/duplicate) leads and blocked drafts must
+  // not reach the draft tool through ANY estimator entry — Build, quick
+  // actions, or a typed Ask AI prompt — since every Agent Estimate prompt is
+  // instructed to propose create_agent_estimate_draft.
+  const askDisabled = buildDisabled || !openLead || buildBlocked;
 
   const chooseLead = (leadId) => {
     setSearchParams(leadId ? { leadId } : {});
   };
 
   const sendDraft = async (sendMethod) => {
-    if (!draft?.id || draft.status !== "draft" || draft.editable_here !== true || sending) return;
+    if (!draft?.id || sending) return;
+    // A partial "both" send marks the estimate sent server-side while one
+    // channel failed — the backend permits resending, so keep a retry path
+    // for exactly the channels that failed.
+    const isRetry = draft.status === "sent" && failedChannels.includes(sendMethod);
+    if (!(draft.status === "draft" && draft.editable_here === true) && !isRetry) return;
     // Capture the lead this send belongs to — if the operator switches leads
     // before the request resolves, the completion must not mark the newly
     // selected draft as sent or reload the old lead under the new URL.
@@ -617,7 +679,12 @@ export default function AgentEstimatePage() {
       const channelIssues = Object.entries(data.channels || {})
         .filter(([, value]) => value && !value.ok)
         .map(([channel, value]) => `${channel}: ${value.error || "failed"}`);
-      setSendMessage(channelIssues.length ? `Estimate sent with an issue — ${channelIssues.join("; ")}` : `Estimate sent by ${label}.`);
+      setFailedChannels(channelIssues.length
+        ? Object.entries(data.channels || {}).filter(([, value]) => value && !value.ok).map(([channel]) => channel)
+        : []);
+      setSendMessage(channelIssues.length
+        ? `Estimate sent with an issue — ${channelIssues.join("; ")}. Retry the failed channel below.`
+        : `Estimate sent by ${label}.`);
       setDraft((current) => ({ ...current, status: "sent" }));
       await loadContext();
     } catch (error) {
@@ -658,7 +725,17 @@ export default function AgentEstimatePage() {
           </p>
         </div>
         {selectedLeadId && (
-          <button type="button" onClick={loadContext} disabled={contextLoading} className="flex h-11 items-center gap-2 rounded-sm border border-zinc-300 bg-white px-4 text-[14px] font-medium text-zinc-800 disabled:opacity-50">
+          <button
+            type="button"
+            onClick={() => {
+              // A refresh means the operator wants decisions made on CURRENT
+              // evidence — drop any response/pending card computed before it.
+              intelligence.clear();
+              loadContext();
+            }}
+            disabled={contextLoading}
+            className="flex h-11 items-center gap-2 rounded-sm border border-zinc-300 bg-white px-4 text-[14px] font-medium text-zinc-800 disabled:opacity-50"
+          >
             <RefreshCw size={17} className={contextLoading ? "animate-spin" : ""} aria-hidden="true" /> Refresh evidence
           </button>
         )}
@@ -708,7 +785,7 @@ export default function AgentEstimatePage() {
                   )}
                   <button
                     type="button"
-                    disabled={askDisabled || buildBlocked}
+                    disabled={askDisabled}
                     onClick={() => intelligence.submit(context.suggested_prompt || BUILD_PROMPT)}
                     className="flex min-h-14 w-full items-center justify-center gap-2 rounded-sm bg-zinc-900 px-5 text-[16px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -840,6 +917,7 @@ export default function AgentEstimatePage() {
               onSend={sendDraft}
               sending={sending}
               sendMessage={sendMessage}
+              failedChannels={failedChannels}
             />
             {previewUrl && (
               <div className="hidden border-t border-zinc-200 p-3 lg:block">
