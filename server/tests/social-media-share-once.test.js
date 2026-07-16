@@ -51,8 +51,9 @@ describe('shareUrlOnce', () => {
     const res = await social.shareUrlOnce({ title: 'T', description: 'D', link: URL, source: 'autonomous_blog' });
 
     expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), expect.any(Array));
-    // Dedup must NOT block on prior 'failed' rows (kept retryable).
-    expect(builder.whereNotIn).toHaveBeenCalledWith('status', ['dry_run', 'failed']);
+    // Dedup must NOT block on prior 'failed' rows (kept retryable) nor on
+    // REJECTED studio drafts (admin killed the copy, not the URL).
+    expect(builder.whereNotIn).toHaveBeenCalledWith('status', ['dry_run', 'failed', 'rejected']);
     expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({ source: 'autonomous_blog', noAiImage: true }));
     // The autonomous blog lane opts into EVERY platform explicitly — the
     // omitted-channels default excludes twitter (admin preview flow).
