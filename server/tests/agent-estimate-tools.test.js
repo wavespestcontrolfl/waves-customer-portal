@@ -322,14 +322,20 @@ describe('Agent Estimate draft tool', () => {
         recognized: true,
         customer_id: 'customer-1',
         active_plan: true,
+        current_tier: 'Bronze',
+        current_discount_pct: 0,
         existing_service_keys: ['pest_control'],
         current_services: [{
           key: 'pest_control', label: 'Pest Control', currentPerVisit: 117, spendSource: 'last_paid_invoice',
         }],
         current_spend_per_visit_total: 117,
       },
-      quote_form: { message_fields: [{ field: 'message', text: 'add lawn and tree shrub' }] },
-      calls: [], sms_thread: [], activities: [],
+      quote_form: { message_fields: [{ field: 'message', text: 'add lawn and tree shrub; Oasis currently charges $65/month for lawn' }] },
+      calls: [{
+        id: 'david-call',
+        transcript: 'I want a monthly 12-month lawn program and tree and shrub treatment for the hibiscus, front beds, and palms. Please bundle the services.',
+      }],
+      sms_thread: [], activities: [],
     });
     mockComputeMembershipContext.mockResolvedValueOnce({
       isExistingCustomer: true,
@@ -350,7 +356,7 @@ describe('Agent Estimate draft tool', () => {
           treeShrub: { tier: 'standard' },
         },
       },
-      evidence: [{ source: 'quote_form', quote: 'add lawn and tree shrub', decision: 'new services' }],
+      evidence: [{ source: 'call_transcript', quote: 'monthly 12-month lawn program and tree and shrub treatment', decision: 'new services' }],
     }, { confirmed: true });
 
     expect(result).toEqual(expect.objectContaining({
