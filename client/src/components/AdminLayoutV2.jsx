@@ -313,9 +313,10 @@ export default function AdminLayoutV2() {
             alignItems: "center",
             gap: 8,
             margin: "10px 12px",
-            padding: isMobile ? "12px 12px" : "8px 10px",
-            minHeight: isMobile ? 44 : undefined,
-            borderRadius: 8,
+            padding: isMobile ? "0 12px" : "0 10px",
+            minHeight: isMobile ? 44 : 36,
+            boxSizing: "border-box",
+            borderRadius: 4,
             border: "1px solid var(--border-default)",
             background: "var(--surface-hover)",
             color: "var(--text-tertiary)",
@@ -325,11 +326,11 @@ export default function AdminLayoutV2() {
           }}
           aria-label="Open search"
         >
-          <Search size={isMobile ? 16 : 14} strokeWidth={2} />
+          <Search size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden />
           <span style={{ flex: 1 }}>Search…</span>
           <kbd
             style={{
-              fontFamily: "'Roboto', Arial, sans-serif",
+              fontFamily: "inherit",
               fontSize: 11,
               padding: "2px 6px",
               borderRadius: 4,
@@ -361,16 +362,13 @@ export default function AdminLayoutV2() {
               <h2
                 id={headingId}
                 style={{
-                  // Title-case section headers, weight 600 — heavier and
-                  // closer to body copy than the prior all-caps tracked
-                  // label, so the groupings read as section names rather
-                  // than utility labels.
-                  fontSize: 15,
-                  fontWeight: 600,
-                  color: "var(--text-primary)",
-                  textTransform: "none",
-                  letterSpacing: 0,
-                  padding: "14px 12px 6px",
+                  fontSize: 12,
+                  lineHeight: 1.4,
+                  fontWeight: 500,
+                  color: "var(--text-secondary)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  padding: "12px 12px 4px",
                   margin: 0,
                   userSelect: "none",
                 }}
@@ -400,8 +398,9 @@ export default function AdminLayoutV2() {
                       display: "flex",
                       alignItems: "center",
                       gap: 12,
-                      padding: isMobile ? "10px 12px" : "8px 12px",
-                      minHeight: isMobile ? 44 : undefined,
+                      padding: "0 12px",
+                      minHeight: isMobile ? 44 : 36,
+                      boxSizing: "border-box",
                       borderRadius: 6,
                       marginBottom: 1,
                       background: isActive
@@ -507,7 +506,7 @@ export default function AdminLayoutV2() {
               e.currentTarget.style.color = "var(--text-tertiary)";
             }}
           >
-            <LogOut size={15} strokeWidth={1.75} />
+            <LogOut size={15} strokeWidth={1.75} aria-hidden />
           </button>
         </div>
       </aside>

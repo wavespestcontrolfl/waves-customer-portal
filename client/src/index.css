@@ -138,6 +138,15 @@ html {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
 
+/* Tailwind preflight is intentionally disabled, so native form controls keep
+   the browser's content-box default. Inside the admin that can make a
+   width:100% field overflow once its padding and border are added. Keep the
+   existing page-local dimensions and styling, but make those dimensions
+   include the field chrome. */
+.admin-shell-v2 :where(input, select, textarea) {
+  box-sizing: border-box;
+}
+
 /* /admin/* scroll feel — scoped to .admin-shell-v2. The admin window never
    scrolls; .admin-main (AdminLayoutV2) is the real scroll container, with
    nested overflow panes inside pages (thread lists, dropdowns, detail
