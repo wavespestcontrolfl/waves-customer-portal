@@ -2013,6 +2013,22 @@ async function findAttachableCallAppointment({ customerId, scheduledDate, servic
 // the customer's primary property). One-sided evidence can't confirm the
 // match — the caller falls through to the normal hold/insert path, since
 // a different property's visit is not a duplicate.
+// Slot evidence for the attach guard (Codex #2771 r9): property + service
+// + ±1 day alone can't distinguish "re-confirming the visit the office
+// just booked" from "adding a SECOND visit near an existing one" — and
+// attaching in the second case silently loses the requested booking.
+// Attach only when the candidate sits on the SAME date as the call's
+// extracted date AND the window agrees (or the call carried no usable
+// time); neighbor-day and different-time matches hold for human review.
+function attachCandidateSlotAgrees(candidate, { scheduledDate, windowStart } = {}) {
+  const candDate = callBookingDateOnly(candidate?.scheduled_date);
+  if (!candDate || !scheduledDate || candDate !== scheduledDate) return false;
+  const candStart = String(candidate?.window_start || '').slice(0, 5);
+  const reqStart = String(windowStart || '').slice(0, 5);
+  if (!candStart || !reqStart) return true;
+  return candStart === reqStart;
+}
+
 function attachCandidateMatchesProperty(candidate, linkage) {
   const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const candProp = candidate?.property_id || null;
@@ -6784,12 +6800,18 @@ const CallRecordingProcessor = {
                 const attachMatch = attachable.row && attachCandidateMatchesProperty(attachable.row, propertyLinkage)
                   ? attachable.row
                   : null;
-                if (attachMatch && attachMatch.status !== 'confirmed') {
-                  // A matching PENDING row is an office hold/tentative slot
-                  // (Codex #2771 r3): attaching would mark the call handled
-                  // while the visit stays unconfirmed and unarmed (the reuse
-                  // path skips confirmation + reminder side effects), and
-                  // inserting would double-book it. A human decides.
+                if (attachMatch
+                  && (attachMatch.status !== 'confirmed'
+                    || !attachCandidateSlotAgrees(attachMatch, { scheduledDate, windowStart }))) {
+                  // Hold for human review instead of attaching when the
+                  // match is a PENDING office hold (Codex #2771 r3 —
+                  // attaching would mark the call handled while the visit
+                  // stays unconfirmed and unarmed) or when the requested
+                  // SLOT disagrees (r9 — a neighbor-day or different-time
+                  // row may be a separate visit the customer is adding, and
+                  // silently attaching would lose the new booking; a same
+                  // date+window match is a re-confirmation, anything else
+                  // is a human's call).
                   return {
                     __held: {
                       reason: 'ambiguous_existing_appointment',
@@ -8085,6 +8107,7 @@ CallRecordingProcessor._test = {
   findExistingCallAppointment,
   findAttachableCallAppointment,
   attachCandidateMatchesProperty,
+  attachCandidateSlotAgrees,
   classifyCallerAccount,
   summarizeKnownCaller,
   summarizePriorCall,

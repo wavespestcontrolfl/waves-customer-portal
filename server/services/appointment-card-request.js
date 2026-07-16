@@ -753,11 +753,17 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       details: { via: 'appointment_card_request', scheduled_service_id: request.scheduled_service_id, setup_intent_id: setupIntentId },
     });
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
-      // The card IS saved and consented — the visit is secured — but the
-      // enrollment refusal means completion auto-charge may fall back to a
-      // pay link. Surface it; don't fail the customer's capture.
-      logger.warn(`[appt-card-request] enrollment refused (${enrollment.reason}) for customer ${request.customer_id}`);
+      // A refused enrollment must NOT complete the request (Codex #2771
+      // r9): completion billing auto-charges only an active Auto Pay
+      // method, so a 'completed' row here would show the visit as secured
+      // while it completes unpaid, and every later funnel trigger would
+      // skip it. Alert the office, put the row back, and stay retryable —
+      // the page re-POST / webhook redelivery re-runs the idempotent
+      // sequence (save + consent short-circuit; enrollment re-attempts).
+      logger.warn(`[appt-card-request] enrollment refused (${enrollment.reason}) for customer ${request.customer_id} — completion stays retryable`);
       await alertCaptureNeedsReview({ customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, reason: enrollment.reason });
+      await revertClaim();
+      return { ok: false, code: 'completion_failed' };
     }
 
     await db('appointment_card_requests')

@@ -82,6 +82,12 @@ router.post('/:token/complete', async (req, res) => {
         // client maps this to its "nothing needed" state.
         return res.status(409).json({ error: 'This appointment no longer needs a card on file.', code: 'no_longer_needed' });
       }
+      if (result.code === 'completion_in_progress') {
+        // The webhook (or another tab) holds the completion claim and is
+        // actively saving this card — not a failure. The client shows the
+        // secured state; the durable webhook path finishes the save.
+        return res.status(409).json({ error: 'Your card is being saved.', code: 'completion_in_progress' });
+      }
       // intent_mismatch / verification_failed / pm_ownership_mismatch /
       // completion_failed — the customer retries from the page; details
       // stay in the logs, not the response.

@@ -1433,6 +1433,19 @@ describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
     expect(attachCandidateMatchesProperty({}, { propertyId: null, address: null })).toBe(true);
   });
 
+  test('slot evidence: attach only on same date + agreeing (or absent) window', () => {
+    const { attachCandidateSlotAgrees } = CallRecordingProcessor._test;
+    const req = { scheduledDate: '2026-07-20', windowStart: '09:00' };
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-20', window_start: '09:00:00' }, req)).toBe(true);
+    // Different time on the same date may be a SECOND visit — human decides.
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-20', window_start: '14:00:00' }, req)).toBe(false);
+    // Neighbor-day matches never auto-attach.
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-21', window_start: '09:00:00' }, req)).toBe(false);
+    // No usable time on either side → the same-date match stands.
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-20', window_start: null }, req)).toBe(true);
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-20', window_start: '09:00:00' }, { scheduledDate: '2026-07-20', windowStart: null })).toBe(true);
+  });
+
   test('one-sided evidence cannot confirm the match — never attach on it', () => {
     // Call resolved the rental; candidate is a bare primary-property booking.
     expect(attachCandidateMatchesProperty({}, { propertyId: 'prop-9', address: { line1: '9 Rental Rd' } })).toBe(false);

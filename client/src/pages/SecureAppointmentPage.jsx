@@ -178,6 +178,13 @@ export default function SecureAppointmentPage() {
         setState('closed');
         return;
       }
+      // The Stripe webhook (or another tab) won the completion claim and
+      // is saving this card right now — the SetupIntent already succeeded,
+      // so the durable webhook path finishes it. Not a failure.
+      if (err?.code === 'completion_in_progress') {
+        setState('secured');
+        return;
+      }
       setError('We could not finish saving your card. Please try again, or text us and we’ll help.');
     } finally {
       setBusy(false);

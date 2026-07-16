@@ -691,15 +691,17 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(mockEnrollConsentedMethod).toHaveBeenCalled();
   });
 
-  test('enrollment refusal still completes the capture but alerts the office', async () => {
-    mockEnrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'ach_blocked' });
+  test('enrollment refusal stays retryable — never a completed-but-unprotected row', async () => {
+    mockEnrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'method_not_found' });
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
-    expect(res).toEqual({ ok: true });
+    expect(res).toEqual({ ok: false, code: 'completion_failed' });
     expect(mockNotifyAdmin).toHaveBeenCalled();
     const updates = touches('appointment_card_requests')
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
       .map(([, patch]) => patch);
-    expect(updates.some((p) => p.status === 'completed')).toBe(true);
+    expect(updates.some((p) => p.status === 'completed')).toBe(false);
+    // The claim reverts so the page re-POST / webhook redelivery can retry.
+    expect(updates.some((p) => p.status === 'pending')).toBe(true);
   });
 
   test('unverifiable intent never writes anything', async () => {
