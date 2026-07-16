@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
+import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
@@ -1879,7 +1880,7 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
                 if (canSaveNative()) {
                   e.preventDefault();
                   saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
-                    .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                    .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
                 }
               }}
               style={actionButtonStyle('primary')}
@@ -4940,7 +4941,7 @@ function LegacyReport({ data, token, glass = false }) {
               if (canSaveNative()) {
                 e.preventDefault();
                 saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
-                  .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                  .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
               }
             }}
             style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
