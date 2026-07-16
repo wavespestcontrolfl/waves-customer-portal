@@ -34,7 +34,7 @@ const POST_ID = '3f2a9c34-1111-2222-3333-444455556666';
 let tableState;
 
 const ACTIVE_STATES = ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending'];
-const isActive = (p) => Boolean(p && (ACTIVE_STATES.includes(p.astro_status) || p.astro_pr_number));
+const isActive = (p) => Boolean(p && (ACTIVE_STATES.includes(p.astro_status) || p.astro_pr_number || p.astro_branch_name));
 
 function setupDb() {
   const calls = { updates: [], deletes: 0 };
@@ -116,8 +116,13 @@ describe('POST /blog/:id/generate guard', () => {
     tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: 88 };
     expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
 
-    // publish_failed with NO PR marker is a plain retryable row
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null };
+    // branch-only failure marker (branch created, PR creation failed):
+    // astro_branch_name is the row's ONLY reference to the surviving branch
+    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null, astro_branch_name: 'content/blog-x' };
+    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
+
+    // publish_failed with NO external markers is a plain retryable row
+    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null, astro_branch_name: null };
     expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(200);
   });
 
@@ -167,6 +172,12 @@ describe('DELETE /blog/:id guard', () => {
     const r = await invoke('delete', '/blog/:id', { params: { id: POST_ID } });
     expect(r.statusCode).toBe(409);
     expect(r.payload.error).toContain('PR #88');
+    expect(calls.deletes).toBe(0);
+
+    // branch-only marker (no PR): deleting would lose the only DB reference
+    // to the surviving branch the scheduler reclaims (codex r1)
+    tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null, astro_branch_name: 'content/blog-x' };
+    expect((await invoke('delete', '/blog/:id', { params: { id: POST_ID } })).statusCode).toBe(409);
     expect(calls.deletes).toBe(0);
   });
 });

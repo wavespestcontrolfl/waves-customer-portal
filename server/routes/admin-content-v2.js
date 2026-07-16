@@ -59,12 +59,17 @@ const BLOG_STATUS_VALUES = new Set(['idea', 'queued', 'draft', 'published']);
 // (an open PR, a merged commit, or a live page hangs off it) — destructive
 // row operations must go through the astro lifecycle endpoints instead.
 // build_failed keeps its open PR/branch; publish_failed can too when the
-// failure landed after PR creation, so astroActivePost() also checks the
-// PR marker itself.
+// failure landed after PR creation — and publishAstro can fail AFTER
+// creating a branch but BEFORE the PR exists, leaving astro_branch_name as
+// the row's ONLY reference to the surviving branch (the scheduler reclaims
+// it rather than retrying blind). So both external markers count as active,
+// not just the PR number.
 const ASTRO_PIPELINE_ACTIVE = new Set(['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending']);
 
 function astroActivePost(post) {
-  return Boolean(post && (ASTRO_PIPELINE_ACTIVE.has(post.astro_status) || post.astro_pr_number));
+  return Boolean(post && (
+    ASTRO_PIPELINE_ACTIVE.has(post.astro_status) || post.astro_pr_number || post.astro_branch_name
+  ));
 }
 
 // Atomic variant of the same predicate for WHERE clauses — the read-side
@@ -74,6 +79,7 @@ function astroActivePost(post) {
 function whereNotAstroActive(query) {
   return query
     .whereNull('astro_pr_number')
+    .whereNull('astro_branch_name')
     .where((q) => q.whereNull('astro_status').orWhereNotIn('astro_status', Array.from(ASTRO_PIPELINE_ACTIVE)));
 }
 

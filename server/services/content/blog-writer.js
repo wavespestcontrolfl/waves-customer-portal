@@ -267,6 +267,7 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
       .where('id', blogPostId)
       .whereNot('status', 'published')
       .whereNull('astro_pr_number')
+      .whereNull('astro_branch_name')
       .where((q) => q.whereNull('astro_status')
         .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending']))
       .update({
