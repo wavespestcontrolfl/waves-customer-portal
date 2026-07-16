@@ -76,7 +76,7 @@ function redactResult(result) {
   // Lane reasons and composer free text can quote names/addresses verbatim.
   if (Array.isArray(clone.reasons)) clone.reasons = clone.reasons.map((r) => mask(r, 0));
   if (clone.intent) {
-    for (const field of ['customer_name', 'customer_phone', 'customer_email', 'address', 'skip_reason']) {
+    for (const field of ['customer_name', 'customer_phone', 'customer_email', 'address', 'skip_reason', 'service_interest_label']) {
       if (clone.intent[field]) clone.intent[field] = mask(clone.intent[field], 2);
     }
     for (const e of clone.intent.evidence || []) {

@@ -28,6 +28,7 @@ const {
   withAutomatedEstimatePhoneLock,
 } = require('../estimate-automation-duplicates');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
+const { sameStreetAddress } = require('./address-compare');
 
 const LANES = { GREEN: 'green', YELLOW: 'yellow', RED: 'red' };
 
@@ -111,6 +112,11 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
       ? { buildingSizeMeasured: !!homeSqFt && !FALLBACK_SQFT_SOURCES.has(homeSource) }
       : {}),
     stories: positive(propertyFacts?.stories) || 1,
+    // Provenance the story-sensitive pricers key their review reasons off —
+    // a defaulted count on a 2-story home must carry storiesSource so
+    // termite bait (linear-feet math) flags itself instead of silently
+    // underquoting.
+    storiesSource: positive(propertyFacts?.stories) ? 'lookup' : 'default',
     address: intent.address || null,
     leadSource: 'call_pipeline',
   };
@@ -414,7 +420,26 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   const { priorQualifyingServices: _nestedPrior, ...storedEngineInputs } = engineInput || {};
 
   const creationResult = await withAutomatedEstimatePhoneLock(customerPhone, async (trx) => {
-    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customerPhone, { database: trx });
+    let duplicateBlock = await blockIfAutomatedEstimateDuplicate(customerPhone, { database: trx });
+    // The duplicate guard is phone-only: a caller with several properties on
+    // one number would have their SECOND property's draft suppressed by the
+    // first property's open estimate. When both addresses are known and
+    // street-differ, this is a different quote — let it through. Unknown
+    // addresses keep the conservative block.
+    if (duplicateBlock?.existingEstimateId && intent.address) {
+      try {
+        const existingRow = await trx('estimates')
+          .select('address')
+          .where({ id: duplicateBlock.existingEstimateId })
+          .first();
+        if (existingRow?.address && !sameStreetAddress(existingRow.address, intent.address)) {
+          logger.info('[estimator-engine] duplicate guard bypassed — open estimate is for a different property');
+          duplicateBlock = null;
+        }
+      } catch (dupErr) {
+        logger.warn(`[estimator-engine] duplicate address compare failed (keeping block): ${dupErr.message}`);
+      }
+    }
     if (duplicateBlock) return { duplicateBlock };
 
     const [estimate] = await trx('estimates').insert({

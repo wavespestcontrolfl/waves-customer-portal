@@ -136,12 +136,12 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
     }
     const digits = last10(phone);
     if (!digits) return { lead: null, forThisCall: false };
-    // On an AMBIGUOUS shared line a random phone-matched lead is as
-    // untrusted as the ambiguous profiles — but a REUSED open lead (the
-    // processor updates it without restamping twilio_call_sid) is this
-    // call's lead: it was touched at/after the call started.
-    if (!phoneFallback) {
-      if (!call?.created_at) return { lead: null, forThisCall: false };
+    // A REUSED open lead (the processor updates it without restamping
+    // twilio_call_sid) is THIS call's lead: it was touched at/after the call
+    // started. It outranks any newer-by-created_at stale/foreign lead on the
+    // same last-10 — and on an AMBIGUOUS shared line it is the ONLY
+    // phone-matched lead trusted at all.
+    if (call?.created_at) {
       const reused = await db('leads')
         .select(LEAD_COLS)
         .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
@@ -149,8 +149,9 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .where('updated_at', '>=', call.created_at)
         .orderBy('updated_at', 'desc')
         .first();
-      return { lead: reused || null, forThisCall: !!reused };
+      if (reused) return { lead: reused, forThisCall: true };
     }
+    if (!phoneFallback) return { lead: null, forThisCall: false };
     let q = db('leads')
       .select(LEAD_COLS)
       .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
@@ -161,11 +162,9 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
       q = q.where('created_at', '<=', cutoff);
     }
     const byPhone = await q.first();
-    // A phone-fallback lead touched at/after the call started was created or
-    // reused by THIS call's processing; older ones are prior history.
-    const forThisCall = !!(byPhone && call?.created_at
-      && byPhone.updated_at && new Date(byPhone.updated_at) >= new Date(call.created_at));
-    return { lead: byPhone || null, forThisCall };
+    // Touched-since-call leads were already claimed above — anything left is
+    // prior phone history.
+    return { lead: byPhone || null, forThisCall: false };
   } catch (err) {
     logger.warn(`[estimator-engine] lead load failed: ${err.message}`);
     return { lead: null, forThisCall: false };

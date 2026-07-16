@@ -43,18 +43,22 @@ function estimatorEngineEnabled() {
 function addressFromContext(context) {
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {
-    // Street-only extractions (city/ZIP nullable in the schema) borrow the
-    // TRUSTED profile's city/ZIP — a bare street would geocode ambiguously.
-    // But when the extraction supplies its OWN city (possibly a different
-    // property than the profile), never graft the profile's ZIP onto it —
-    // a mixed "Sarasota, FL 34209" locates the wrong parcel.
+    // Street-only extractions (city/ZIP nullable in the schema) borrow
+    // locality — a bare street would geocode ambiguously. But when the
+    // extraction supplies its OWN city (possibly a different property than
+    // the profile), never graft another record's ZIP onto it — a mixed
+    // "Sarasota, FL 34209" locates the wrong parcel. Borrow order: THIS
+    // call's lead first (a second-property quote carries its locality on the
+    // current lead, not the home on file), then the trusted profile.
     const trusted = (!context.customerPhoneAmbiguous && context.customer) || null;
     if (sa.city || sa.postal_code) {
       return [sa.street_line_1, sa.city, [sa.state || 'FL', sa.postal_code].filter(Boolean).join(' ')]
         .filter(Boolean).join(', ');
     }
-    const city = trusted?.city || context.lead?.city || null;
-    const stateZip = [city ? 'FL' : null, trusted?.zip || context.lead?.zip].filter(Boolean).join(' ');
+    const currentLead = context.leadIsForThisCall ? context.lead : null;
+    const city = currentLead?.city || trusted?.city || context.lead?.city || null;
+    const zip = currentLead?.zip || trusted?.zip || context.lead?.zip || null;
+    const stateZip = [city ? 'FL' : null, zip].filter(Boolean).join(' ');
     return [sa.street_line_1, city, stateZip].filter(Boolean).join(', ');
   }
   const leadAddress = context.lead?.address
@@ -81,55 +85,7 @@ function commercialHint(context) {
   return propType === 'commercial' || context.lead?.is_commercial === true;
 }
 
-// Compare the full first address segment (house number + entire street
-// line), normalizing the common suffix/directional abbreviations, so a
-// spelled-out correction like "123 Palm St" → "123 Palm Ave" is treated as a
-// DIFFERENT property. False negatives here are cheap (an extra re-lookup);
-// a false positive prices the wrong parcel.
-const STREET_TOKEN_ALIASES = {
-  street: 'st', avenue: 'ave', road: 'rd', drive: 'dr', lane: 'ln', court: 'ct',
-  boulevard: 'blvd', place: 'pl', circle: 'cir', terrace: 'ter', parkway: 'pkwy',
-  highway: 'hwy', north: 'n', south: 's', east: 'e', west: 'w',
-  northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
-};
-// The composer ADDING locality to a bare street is re-gather-worthy even
-// when the street segment matches — the bare-street lookup can have resolved
-// the wrong parcel on SWFL's repeated street names.
-function addressAddsLocality(candidate, baseline) {
-  const hasLocality = (s) => {
-    const tail = String(s || '').split(',').slice(1).join(' ');
-    return /\d{5}/.test(tail) || /[a-z]/i.test(tail.replace(/\bfl(orida)?\b/gi, ''));
-  };
-  return hasLocality(candidate) && !hasLocality(baseline);
-}
-
-function sameStreetAddress(a, b) {
-  const normSegment = (s) => String(s || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((t) => STREET_TOKEN_ALIASES[t] || t)
-    .join(' ');
-  const first = (s) => normSegment(String(s || '').split(',')[0]);
-  const [na, nb] = [first(a), first(b)];
-  if (!na || !nb || na !== nb) return false;
-  // Same house number + street is NOT enough — SWFL street names repeat
-  // across cities, so a city/ZIP correction alone means a different parcel.
-  const zip = (s) => (String(s || '').match(/\b(\d{5})\b(?!.*\b\d{5}\b)/) || [])[1] || null;
-  const [za, zb] = [zip(a), zip(b)];
-  if (za && zb && za !== zb) return false;
-  // Full-city equality, not token overlap — North Port vs Port Charlotte
-  // share a token but are different parcels. A spurious mismatch only costs
-  // a re-lookup.
-  const cityString = (s) => normSegment(String(s || '').split(',').slice(1).join(' '))
-    .split(' ')
-    .filter((t) => t && t !== 'fl' && t !== 'florida' && !/^\d+$/.test(t))
-    .join(' ');
-  const [ca, cb] = [cityString(a), cityString(b)];
-  if (ca && cb && ca !== cb) return false;
-  return true;
-}
+const { sameStreetAddress, addressAddsLocality } = require('./address-compare');
 
 // Property lookup + (when the county roll is unassessed) the
 // subdivision-median dig. Both fail-open.
