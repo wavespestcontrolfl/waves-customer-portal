@@ -806,7 +806,13 @@ async function loadSecureCardPageData(token) {
     windowDisplay: visit?.window_display || null,
   };
 
-  if (request.status === 'completed' || request.status === 'satisfied') {
+  // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
+  // already succeeded and the page POST or webhook holds the completion
+  // claim — showing the card form again mid-save (e.g. on a 3DS redirect
+  // return that lost the /complete race) would invite a second card entry.
+  // If the in-flight attempt fails and reverts, the durable webhook retry
+  // converges the row to completed.
+  if (request.status === 'completed' || request.status === 'satisfied' || request.status === 'completing') {
     return { state: 'secured', ...base };
   }
   const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;

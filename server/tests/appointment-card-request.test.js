@@ -806,6 +806,13 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
   });
 
+  test('a mid-completion row renders secured, never the card form again', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completing', updated_at: new Date() });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+  });
+
   test('cancelled or past visit → closed (no intent minted)', async () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
     const res = await loadSecureCardPageData(REQUEST.token);

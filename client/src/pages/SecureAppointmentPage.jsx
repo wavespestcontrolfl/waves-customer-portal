@@ -135,6 +135,10 @@ export default function SecureAppointmentPage() {
         // capture first so the page-data fetch below renders "secured".
         const redirectIntent = searchParams.get('setup_intent');
         if (redirectIntent && searchParams.get('redirect_status') === 'succeeded') {
+          // Errors (including completion_in_progress when the webhook beat
+          // us to the claim) fall through to the page-data fetch below —
+          // the GET renders completing/completed rows as secured, so the
+          // redirect race can never re-show the card form mid-save.
           try { await complete(redirectIntent); } catch { /* fall through to page state */ }
           if (!cancelled) {
             const cleaned = new URLSearchParams(searchParams);
