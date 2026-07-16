@@ -355,5 +355,15 @@ export function isAdminNavItemActive(item, pathname, search = "") {
   if (item.id === "schedule" && pathname === "/admin/dispatch") {
     return true;
   }
+  if (item.id === "more") {
+    return ADMIN_MOBILE_MORE_SECTIONS.some(({ items }) =>
+      items.some((moreItem) => {
+        const morePathname = pathnameFor(moreItem.path);
+        return (
+          pathname === morePathname || pathname.startsWith(`${morePathname}/`)
+        );
+      }),
+    );
+  }
   return pathname.startsWith(`${itemPathname}/`);
 }

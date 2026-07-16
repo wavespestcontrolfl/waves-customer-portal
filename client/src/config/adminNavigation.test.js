@@ -194,4 +194,24 @@ describe("isAdminNavItemActive", () => {
     expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.customers, "/admin/customer"))
       .toBe(false);
   });
+
+  it("keeps More active while viewing a secondary mobile destination", () => {
+    for (const pathname of [
+      "/admin/projects",
+      "/admin/pipeline",
+      "/admin/lawn-assessments",
+      "/admin/tool-health",
+    ]) {
+      expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.more, pathname)).toBe(true);
+    }
+
+    for (const pathname of [
+      "/admin/dashboard",
+      "/admin/dispatch",
+      "/admin/customers",
+      "/admin/communications",
+    ]) {
+      expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.more, pathname)).toBe(false);
+    }
+  });
 });
