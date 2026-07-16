@@ -21,8 +21,8 @@
  *     time is further out.
  *   - 24h flag: re-armed for any future time — a silent reshuffle must
  *     not strand the customer with no day-before reminder at all.
- *   - Terminal status (cancelled/skipped/no_show) cancels the reminder;
- *     moving back to an active status re-activates it.
+ *   - Terminal status (cancelled/skipped/no_show/completed) cancels the
+ *     reminder; moving back to an active status re-activates it.
  * The trigger only writes appointment_reminders rows; it never sends
  * anything itself. Application updates that run after it (handleReschedule)
  * simply overwrite with the same or more specific values — verified
@@ -38,9 +38,9 @@ DECLARE
   became_active boolean;
   time_changed boolean;
 BEGIN
-  became_terminal := NEW.status IN ('cancelled','skipped','no_show')
-                     AND OLD.status NOT IN ('cancelled','skipped','no_show');
-  became_active   := OLD.status IN ('cancelled','skipped','no_show')
+  became_terminal := NEW.status IN ('cancelled','skipped','no_show','completed')
+                     AND OLD.status NOT IN ('cancelled','skipped','no_show','completed');
+  became_active   := OLD.status IN ('cancelled','skipped','no_show','completed')
                      AND NEW.status IN ('pending','confirmed','rescheduled');
   time_changed    := (NEW.scheduled_date IS DISTINCT FROM OLD.scheduled_date)
                      OR (NEW.window_start IS DISTINCT FROM OLD.window_start);
@@ -112,7 +112,7 @@ exports.up = async function up(knex) {
                 AT TIME ZONE 'America/New_York') AS correct_time
           FROM scheduled_services ss
          WHERE ss.status IN ('pending','confirmed','rescheduled')
-           AND ss.scheduled_date >= CURRENT_DATE
+           AND ss.scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date
       ) sync
      WHERE sync.service_id = ar.scheduled_service_id
        AND ar.cancelled = false

@@ -1694,6 +1694,15 @@ const AppointmentReminders = {
         if (sent) {
           await this.markRescheduleNoticeSent(scheduledServiceId);
           logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+        } else {
+          // Notice failed (or was blocked) on a notifying reschedule — re-arm
+          // the 72h window so the cron's fallback reminder still delivers the
+          // new time. Without this, the DB sync trigger's pre-covered flag
+          // survives (startMoved sees the already-synced appointment_time)
+          // and the customer would get only the 24h day-before text.
+          await db('appointment_reminders')
+            .where({ id: record.id })
+            .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() });
         }
       }
 
