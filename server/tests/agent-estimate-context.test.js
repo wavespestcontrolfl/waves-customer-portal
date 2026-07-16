@@ -3,6 +3,7 @@ const mockLoadSmsThread = jest.fn(async () => [{ body: 'phone-scoped text' }]);
 const mockLoadPriorEstimates = jest.fn(async () => [{ id: 'phone-scoped-estimate' }]);
 let mockContextLead = null;
 let mockContextCallRows = [];
+let mockContextOtherLeads = [];
 
 jest.mock('../models/db', () => {
   const db = (table) => {
@@ -21,7 +22,11 @@ jest.mock('../models/db', () => {
         return null;
       },
       catch() { return this; },
-      then(resolve) { resolve(table === 'call_log' ? mockContextCallRows : []); },
+      then(resolve) {
+        if (table === 'call_log') return resolve(mockContextCallRows);
+        if (table === 'leads') return resolve(mockContextOtherLeads);
+        return resolve([]);
+      },
     };
     return builder;
   };
@@ -127,6 +132,7 @@ describe('ambiguous customer phone suppression', () => {
       id: 'call-9', twilio_call_sid: 'CA-other-lead', direction: 'inbound',
       duration_seconds: 60, transcription: 'someone else calling', created_at: '2026-07-01',
     }];
+    mockContextOtherLeads = [];
   });
 
   test('suppresses SMS, prior estimates, and phone-matched calls when the phone matches multiple customers', async () => {
@@ -188,5 +194,47 @@ describe('suppressed-caller sentinel phones', () => {
     expect(mockLoadCustomerByPhone).not.toHaveBeenCalled();
     expect(mockLoadSmsThread).not.toHaveBeenCalled();
     expect(mockLoadPriorEstimates).not.toHaveBeenCalled();
+  });
+});
+
+describe('repeat leads vs shared phones', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockContextLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      first_name: 'Pat', last_name: 'Repeat', phone: '9415550100',
+      email: null, address: '1 St', city: 'Bradenton', zip: '34208',
+      twilio_call_sid: null, transcript_summary: null, extracted_data: null,
+      status: 'new',
+    };
+    mockContextCallRows = [];
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
+  });
+
+  test('an older lead with the SAME full name is a repeat lead, not a shared line', async () => {
+    mockContextOtherLeads = [{ first_name: 'Pat', last_name: 'Repeat' }];
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.shared_phone_history_suppressed).toBe(false);
+    expect(mockLoadSmsThread).toHaveBeenCalled();
+    expect(mockLoadCustomerByPhone).toHaveBeenCalled();
+  });
+
+  test('a different name on the same number stays a shared line', async () => {
+    mockContextOtherLeads = [{ first_name: 'Sam', last_name: 'Other' }];
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.shared_phone_history_suppressed).toBe(true);
+    expect(mockLoadSmsThread).not.toHaveBeenCalled();
+  });
+
+  test('a nameless row on the same number stays conservatively shared', async () => {
+    mockContextOtherLeads = [{ first_name: null, last_name: null }];
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.shared_phone_history_suppressed).toBe(true);
   });
 });

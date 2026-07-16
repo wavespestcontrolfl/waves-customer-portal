@@ -396,6 +396,9 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'targetlawngrossmargin',
   'targetmargin',
   'uselawncostfloor',
+  // services.pest.version selects the pricing VERSION (frequency multipliers)
+  // — server-derived only.
+  'version',
 ]);
 
 // The engine's per-service options are open objects, so an exact-key list can
@@ -536,7 +539,12 @@ function accountPricingFromContext(context = {}) {
   const activeServices = (Array.isArray(account.current_services) ? account.current_services : [])
     .flatMap((row) => {
       if (!row?.key) return [];
-      const addresses = Array.isArray(row.serviceAddresses) ? row.serviceAddresses.filter(Boolean) : [];
+      // Addresses are trusted for property scoping only when EVERY active row
+      // of this service carries one — a mixed known/unknown set could hide a
+      // row that covers the quoted street, so it stays account-wide.
+      const addresses = row.serviceAddressesComplete === true && Array.isArray(row.serviceAddresses)
+        ? row.serviceAddresses.filter(Boolean)
+        : [];
       const entries = [{ key: row.key, addresses }];
       if (row.key.startsWith('commercial_')) {
         entries.push({ key: row.key.slice('commercial_'.length), addresses });
@@ -1524,6 +1532,12 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     await trx('leads').where({ id: input.leadId }).forUpdate().select('id');
     const leadCheck = await loadAgentEstimateLead(input.leadId, trx);
     if (leadCheck.error) return leadCheck;
+    // Re-anchor recipients from the LOCKED lead row: a contact correction
+    // that landed between the pre-transaction anchor and this lock must win,
+    // or the draft persists (and later sends to) the stale phone/email.
+    const reanchored = anchorAgentEstimateContact(input, leadCheck.lead);
+    if (reanchored.error) return reanchored;
+    const lockedInput = reanchored.input;
     const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
     if (!estimate) return { error: 'Agent Estimate draft not found' };
     if (estimate.status !== 'draft' || estimate.source !== 'estimator_engine') {
@@ -1542,12 +1556,12 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     // phone/street.
     const duplicateBlock = await agentEstimateDuplicateBlock(
       trx,
-      input.customerPhone || null,
-      input.address,
+      lockedInput.customerPhone || null,
+      lockedInput.address,
       { excludeEstimateId: estimate.id },
     );
     if (duplicateBlock) return duplicateBlockResult(duplicateBlock);
-    const payload = agentEstimatePayload(input, preview, currentData, accountPricing);
+    const payload = agentEstimatePayload(lockedInput, preview, currentData, accountPricing);
     // Merge over the existing JSON instead of replacing it: an operator can
     // author a commercial proposal on a draft (estimate_data.proposal), and a
     // full overwrite would silently delete it. Agent-owned OPTIONAL keys are
@@ -1587,6 +1601,12 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     const leadResult = await loadAgentEstimateLead(input.leadId, trx);
     if (leadResult.error) return leadResult;
     const lead = leadResult.lead;
+    // Re-anchor recipients from the LOCKED lead row: a contact correction
+    // that landed between the pre-transaction anchor and this lock must win,
+    // or the draft persists (and later sends to) the stale phone/email.
+    const reanchored = anchorAgentEstimateContact(input, lead);
+    if (reanchored.error) return reanchored;
+    const lockedInput = reanchored.input;
 
     if (lead.estimate_id) {
       const existing = await trx('estimates').where({ id: lead.estimate_id }).first();
@@ -1604,10 +1624,10 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
       }
     }
 
-    const duplicateBlock = await agentEstimateDuplicateBlock(trx, phone, input.address);
+    const duplicateBlock = await agentEstimateDuplicateBlock(trx, lockedInput.customerPhone || null, lockedInput.address);
     if (duplicateBlock) return duplicateBlockResult(duplicateBlock);
 
-    const payload = agentEstimatePayload(input, preview, {}, accountPricing);
+    const payload = agentEstimatePayload(lockedInput, preview, {}, accountPricing);
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const [estimate] = await trx('estimates').insert({

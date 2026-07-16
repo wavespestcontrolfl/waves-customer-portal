@@ -164,6 +164,21 @@ describe('computeMembershipContext', () => {
     expect(snapshot.currentServices.map((service) => service.key).sort()).toEqual(['pest_control', 'rodent_bait']);
   });
 
+  test('commercial display names canonicalize to commercial_ + the residential template key', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'c1', service_type: 'Commercial Turf Treatment Program', scheduled_date: '2099-01-05', estimated_price: 300 },
+        { id: 'c2', service_type: 'Commercial Rodent Bait Stations', scheduled_date: '2099-02-05', estimated_price: 60 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.existingServiceKeys).toEqual([]);
+    expect(spend.currentServices.map((service) => service.key).sort())
+      .toEqual(['commercial_lawn_care', 'commercial_rodent_bait']);
+  });
+
   test('a customer row with NO existing services is NOT flagged existing (keeps prepay eligible)', async () => {
     // Regression: a brand-new pest/lawn signup whose customer row already
     // exists (created at intake/onsite) carries zero qualifying recurring

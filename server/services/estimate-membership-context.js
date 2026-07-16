@@ -53,11 +53,21 @@ function accountServiceKey(raw) {
   if (qualifying) return qualifying;
   // Canonical keys for the non-tier recurring programs. The estimate
   // converter stores DISPLAY names on scheduled_services ("Rodent Bait
-  // Stations", "Palm Injection"); a generic snake-case of those labels
-  // ("rodent_bait_stations") never matches the requested-service template
-  // keys, so duplicate checks would miss the active service.
+  // Stations", "Commercial Turf Treatment Program"); a generic snake-case of
+  // those labels never matches the requested-service template keys, so
+  // duplicate checks would miss the active service. Commercial programs
+  // canonicalize to commercial_ + the residential TEMPLATE key, so stripping
+  // the prefix in the duplicate check yields exactly the requested key
+  // (turf → lawn_care, monitoring → termite_bait, stations → rodent_bait).
   const s = String(raw || '').toLowerCase();
-  if (!s.includes('commercial')) {
+  if (s.includes('commercial')) {
+    if (s.includes('pest')) return 'commercial_pest_control';
+    if (s.includes('lawn') || s.includes('turf')) return 'commercial_lawn_care';
+    if (s.includes('tree') || s.includes('shrub')) return 'commercial_tree_shrub';
+    if (s.includes('mosquito')) return 'commercial_mosquito';
+    if (s.includes('termite')) return 'commercial_termite_bait';
+    if (s.includes('rodent')) return 'commercial_rodent_bait';
+  } else {
     if (s.includes('rodent') && s.includes('bait')) return 'rodent_bait';
     if (s.includes('palm')) return 'palm_injection';
   }
@@ -326,6 +336,11 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // Every property this service is active at — lets duplicate checks
       // scope to the quoted property instead of blocking account-wide.
       serviceAddresses: [...new Set(serviceRows.map((row) => row.effective_service_address).filter(Boolean))],
+      // False when ANY active row's property is unknown: the unknown row
+      // could cover the quoted street, so the duplicate check must fall back
+      // to the account-wide block rather than trust the known-address subset.
+      serviceAddressesComplete: serviceRows.length > 0
+        && serviceRows.every((row) => !!row.effective_service_address),
       currentPerVisit: currentPerVisit ?? null,
       spendSource: lastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
       lastPaidAt: lastPaid?.paidAt || null,

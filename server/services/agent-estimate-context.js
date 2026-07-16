@@ -72,12 +72,27 @@ async function phoneIsShared(lead) {
   const digits = last10(lead?.phone);
   if (!digits) return false;
   try {
-    const row = await db('leads')
+    const rows = await db('leads')
       .whereNull('deleted_at')
       .whereNot('id', lead.id)
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
-      .first('id');
-    return !!row;
+      .limit(10)
+      .select('first_name', 'last_name');
+    if (!rows.length) return false;
+    // A REPEAT lead for the same person is not a shared line — suppressing
+    // it would price a returning customer as a new account and hide their
+    // own SMS/estimate history. Same full name (matching last name; matching
+    // first name when both sides carry one) reads as the same person; a
+    // different or missing name stays conservatively shared.
+    const norm = (value) => String(value || '').trim().toLowerCase();
+    const leadFirst = norm(lead.first_name);
+    const leadLast = norm(lead.last_name);
+    return rows.some((row) => {
+      const first = norm(row.first_name);
+      const last = norm(row.last_name);
+      if (!leadLast || !last || last !== leadLast) return true;
+      return !!(leadFirst && first && first !== leadFirst);
+    });
   } catch (err) {
     logger.warn(`[agent-estimate] shared-phone check failed: ${err.message}`);
     return true;

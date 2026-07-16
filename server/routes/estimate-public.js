@@ -12861,7 +12861,15 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         perTreatment: rawPerTreatment,
         visits,
         manualDiscount: rawManualDiscountForTier,
-        marginFloorAnnual: finiteNumberOrNull(row.marginFloorAnnual),
+        // Engine-invocation rows carry marginFloorAnnual directly; v1-backed
+        // stored rows persist the same cadence floor under prov.costFloorAnnual
+        // (v1-legacy-mapper) — both paths must clamp at it.
+        marginFloorAnnual: finiteNumberOrNull(
+          row.marginFloorAnnual
+          ?? row.prov?.minimumCollectedAnnualPrice
+          ?? row.prov?.costFloorAnnual
+          ?? row.costFloorAnnual,
+        ),
       });
       // The engine itself may have already lifted the tier to the program
       // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that

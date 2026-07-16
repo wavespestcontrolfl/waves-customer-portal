@@ -1347,6 +1347,7 @@ describe('Agent Estimate round-6 hardening', () => {
         key: 'pest_control',
         currentPerVisit: 117,
         serviceAddresses: ['1 Test St, Bradenton FL 34208'],
+        serviceAddressesComplete: true,
       }],
     };
     mockBuildAgentEstimateContext.mockResolvedValueOnce({ customer_account: account });
@@ -1451,5 +1452,69 @@ describe('Agent Estimate round-6 hardening', () => {
     const stored = JSON.parse(update.estimate_data);
     expect(stored.proposal).toEqual({ enabled: true, buildings: [{ name: 'Main office' }] });
     expect(stored.estimatorEngine.origin).toBe('manual_agent');
+  });
+});
+
+describe('Agent Estimate round-7 hardening', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGenerateEstimate.mockReturnValue(ENGINE_RESULT);
+    mockDuplicateBlock.mockResolvedValue(null);
+  });
+
+  test('rejects a model-selected pricing version', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'bimonthly', version: 'v2' } },
+    });
+
+    expect(result.error).toMatch(/version/);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a mixed known/unknown address set keeps the account-wide duplicate block', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: ['pest_control'],
+        current_services: [{
+          key: 'pest_control',
+          currentPerVisit: 117,
+          serviceAddresses: ['1 Test St, Bradenton FL 34208'],
+          serviceAddressesComplete: false,
+        }],
+      },
+    });
+
+    const result = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      address: '500 Other Rd, Venice FL 34285',
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+
+    expect(result.error).toMatch(/already has active pest_control/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a canonical commercial turf program blocks a requested lawn service', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: [],
+        current_services: [{ key: 'commercial_lawn_care', currentPerVisit: 300 }],
+      },
+    });
+
+    const result = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      homeSqFt: 2000,
+      services: { lawn: { frequency: 'monthly' } },
+    });
+
+    expect(result.error).toMatch(/already has active lawn_care/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 });

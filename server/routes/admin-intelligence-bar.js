@@ -165,6 +165,9 @@ const PII_TOOL_NAMES = new Set([
   'find_similar_estimates',
   'match_existing_customer',
   'create_pending_estimate',
+  // compute_estimate carries the full service address + selected lead id —
+  // same PII class as lookup_property and the draft writer.
+  'compute_estimate',
   AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
