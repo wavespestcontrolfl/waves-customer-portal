@@ -862,7 +862,6 @@ const ContentScheduler = {
 };
 
 module.exports = ContentScheduler;
-module.exports.sharePublishedBlog = sharePublishedBlog;
 module.exports.normalizeCalendarRange = normalizeCalendarRange;
 module.exports.sharePublishedNewsletter = sharePublishedNewsletter;
 module.exports.gbpFallbackByLocation = gbpFallbackByLocation;

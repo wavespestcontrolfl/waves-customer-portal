@@ -311,18 +311,38 @@ async function pollLivePost(post) {
     await runPostPublishVisibility({ ...post, ...updates, astro_live_url: url });
     // Auto-share at the moment a MANUAL-lane post is verified live (owner
     // directive 2026-07-16, explicitly confirmed: every hub post shares
-    // without a click). The scheduler lane is excluded — it invokes
-    // sharePublishedBlog itself after observing live (publish_status=
-    // 'publishing' marks its claim) — and sharePublishedBlog carries every
-    // gate this needs: the per-post auto_share_social flag (default true),
-    // the shared_to_social dedupe, SOCIAL automation flag + admin pause,
-    // live-URL link, hero handling. Fail-soft: a share failure never blocks
-    // the live flip (already written above); the 4-hourly RSS backstop
-    // dedupes on source_url and recovers a transiently failed share.
+    // without a click). The scheduler lane is excluded — it shares itself
+    // after observing live (publish_status='publishing' marks its claim).
+    // The share goes through shareUrlOnce — the same advisory-lock +
+    // source_url dedupe the autonomous poller and the RSS backstop share,
+    // so a cron tick racing an admin refresh can never double-post. The
+    // row is RE-FETCHED first: pollPending's projection carries only the
+    // astro lifecycle fields, and the per-post auto_share_social opt-out
+    // (schedule checkbox) plus title/meta live on the full row. Fail-soft:
+    // a share failure never blocks the live flip (already written above);
+    // the RSS backstop recovers transient failures.
     if (post.publish_status !== 'publishing' && liveShareOnFlipEnabled()) {
       try {
-        const { sharePublishedBlog } = require('../content-scheduler');
-        await sharePublishedBlog({ ...post, ...updates, astro_live_url: url });
+        const fresh = await db('blog_posts').where({ id: post.id }).first();
+        if (fresh && fresh.auto_share_social && !fresh.shared_to_social) {
+          const social = require('../social-media');
+          if (social.SOCIAL_FLAGS?.automationEnabled && !(await social.isPausedByAdmin())) {
+            const r = await social.shareUrlOnce({
+              title: fresh.title,
+              description: fresh.meta_description || '',
+              link: url,
+              source: 'blog',
+              noAiImage: true,
+            });
+            const status = r?.skipped ? `skipped (${r.skipped})`
+              : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');
+            logger.info(`[pages-poll] live-flip social share for ${url}: ${status}`);
+            if (r?.shared && r?.success && !r?.dryRun) {
+              await db('blog_posts').where({ id: post.id })
+                .update({ shared_to_social: true, updated_at: new Date() });
+            }
+          }
+        }
       } catch (err) {
         logger.warn(`[pages-poll] live-flip social share failed for ${post.slug || post.id}: ${err.message} (RSS backstop will retry)`);
       }
