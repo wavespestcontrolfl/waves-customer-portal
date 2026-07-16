@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm ci)",
+      "Bash(npm run build)",
+      "Bash(npm run dev)",
+      "Bash(npm run dev:client)",
+      "Bash(npm run dev:server)",
+      "Bash(npm test)",
+      "Bash(npm run test:*)",
+      "Bash(npm run check:*)",
+      "Bash(npm run lint:staged)",
+      "Bash(npm run models:check)",
+      "Bash(npm run verify:blog-schema)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git ls-remote:*)",
+      "Bash(git fetch:*)"
+    ]
+  }
+}
