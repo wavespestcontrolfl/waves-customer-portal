@@ -563,7 +563,14 @@ describe('appointment reminder reschedule windows', () => {
       '2026-05-08T10:00', // same start the trigger already synced
     );
 
-    expect(rearmUpdate.where).toHaveBeenCalledWith({ id: 'reminder-reschedule' });
+    // Guarded by the appointment time this invocation handled, so a stale
+    // failure can't clobber a newer overlapping reschedule's state.
+    expect(rearmUpdate.where).toHaveBeenCalledWith({
+      id: 'reminder-reschedule',
+      appointment_time: expect.any(Date),
+    });
+    const [{ appointment_time: rearmTime }] = rearmUpdate.where.mock.calls[0];
+    expect(rearmTime.toISOString()).toBe('2026-05-08T14:00:00.000Z');
     expect(rearmUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       reminder_72h_sent: false,
       reminder_72h_sent_at: null,

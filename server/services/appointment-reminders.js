@@ -1705,8 +1705,13 @@ const AppointmentReminders = {
         }
       } finally {
         if (!noticeSent) {
+          // Guard on appointment_time so a stale failure can't clobber a
+          // newer overlapping reschedule: if another invocation has since
+          // moved the row to a different time (and possibly marked its own
+          // notice sent), this re-arm no-ops instead of re-opening the 72h
+          // window for a slot this attempt no longer owns.
           await db('appointment_reminders')
-            .where({ id: record.id })
+            .where({ id: record.id, appointment_time: newApptTime })
             .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() })
             .catch((rearmErr) => logger.error(`[appt-remind] 72h re-arm after failed notice failed: ${rearmErr.message}`));
         }
