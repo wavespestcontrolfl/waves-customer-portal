@@ -42,6 +42,10 @@ const { buildRescheduleLink } = require('./reschedule-link');
 const SELF_HEAL_TERMINAL_STATUSES = new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
 const REMINDER_BLOCKING_STATUSES = new Set([...SELF_HEAL_TERMINAL_STATUSES, 'rescheduled']);
 
+// Per-run cap for the registration self-heal sweep (selfHealMissingReminderRows).
+// Bounds each 15-min cron run; a large backlog drains within a few hours.
+const SELF_HEAL_REGISTRATION_LIMIT = 25;
+
 // ── SMS → email fallback ──
 // Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
 // carrier-undeliverable / no mobile / blocked) we send the same information by
@@ -868,13 +872,17 @@ const AppointmentReminders = {
    * roll back the visit/payment it rides with. Unlike registerAppointment() this
    * takes the caller's conn rather than opening its own transaction.
    */
-  async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source }) {
+  async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source, createdAt }) {
     if (!conn || !scheduledServiceId || !customerId) return null;
     const apptTime = parseETDateTime(appointmentTime);
     if (isNaN(apptTime.getTime())) return null;
     const now = new Date();
     const serviceLabel = smsServiceLabelStored(serviceType) || serviceType || null;
     const reminderSource = source || 'system_seed';
+    // Optional booking-time override (self-heal passes the visit's real
+    // created_at): the 72h pass reads created_at as the booking time, so a
+    // late-registered row must not look freshly booked. Default DB now().
+    const createdAtOverride = createdAt ? { created_at: createdAt } : {};
 
     // Serialize against concurrent registrations for the same customer+time
     // (mirrors registerAppointment) so the same-time check below can't race.
@@ -923,6 +931,7 @@ const AppointmentReminders = {
           reminder_24h_sent: true,
           reminder_24h_sent_at: now,
           cancelled: false,
+          ...createdAtOverride,
         })
         .returning('*');
       return suppressed;
@@ -950,6 +959,7 @@ const AppointmentReminders = {
         reminder_24h_sent: twentyFourMissed,
         reminder_24h_sent_at: twentyFourMissed ? now : null,
         cancelled: false,
+        ...createdAtOverride,
       })
       .returning('*');
     return record;
@@ -1133,12 +1143,101 @@ const AppointmentReminders = {
   },
 
   /**
+   * Registration self-heal. Every cron / reschedule / cancel path in this
+   * service drives off appointment_reminders — but a visit inserted outside
+   * the booking paths (manual DB backfill, one-off script) never got a row
+   * registered, so that customer silently gets no confirmation and no
+   * 72h/24h reminders (2026-07-15: a customer's re-anchored quarterly series
+   * had no rows — no reminder would ever have fired). Register any future,
+   * non-terminal visit that lacks a row. registerVisitReminderInTx semantics
+   * apply: no confirmation SMS goes out (confirmation_sent=true),
+   * already-unreachable windows are pre-marked, and same-customer/same-time
+   * visits merge into one reminder. Capped per run; the 15-min cadence
+   * drains a backlog within hours. Never throws.
+   */
+  async selfHealMissingReminderRows() {
+    let healed = 0;
+    try {
+      const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+      const missing = await db('scheduled_services as ss')
+        .leftJoin('appointment_reminders as ar', 'ar.scheduled_service_id', 'ss.id')
+        .whereNull('ar.id')
+        .whereNotNull('ss.customer_id')
+        .whereNotIn('ss.status', [...SELF_HEAL_TERMINAL_STATUSES])
+        // scheduled_date is a DATE column — compare against the ET calendar
+        // day as a plain date string (a timestamptz bound would shift the
+        // boundary by the session offset).
+        .where('ss.scheduled_date', '>=', etDateString(new Date()))
+        // Dispatch-owned pending bookings (call follow-ups, outbound-review
+        // bookings) are left unarmed ON PURPOSE until the office confirms —
+        // arming them here would text the customer first. admin-schedule
+        // registers them at the office-confirm transition. NULL-safe on
+        // purpose: NOT (pending AND source_action IN (...)) is NULL — not
+        // true — for NULL source_action, which would silently drop ordinary
+        // pending visits with no source marker from the sweep.
+        .where(function () {
+          this.whereNot('ss.status', 'pending')
+            .orWhereNull('ss.source_action')
+            .orWhereNotIn('ss.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
+        })
+        .whereNotExists(function () {
+          this.select(1)
+            .from('customers')
+            .whereRaw('customers.id = ss.customer_id')
+            .whereNotNull('customers.deleted_at');
+        })
+        .orderBy('ss.scheduled_date', 'asc')
+        .limit(SELF_HEAL_REGISTRATION_LIMIT)
+        .select('ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.created_at');
+
+      for (const svc of missing) {
+        try {
+          // DATE columns hydrate as a JS Date at UTC midnight (TZ=UTC in
+          // prod) — take the UTC calendar day, same as scheduledServiceApptTime.
+          // Formatting that instant in ET would move the day back by one.
+          const datePart = svc.scheduled_date instanceof Date
+            ? svc.scheduled_date.toISOString().slice(0, 10)
+            : String(svc.scheduled_date || '').slice(0, 10);
+          const windowStart = String(svc.window_start || '').slice(0, 5) || '08:00';
+          const record = await db.transaction((trx) => AppointmentReminders.registerVisitReminderInTx(trx, {
+            scheduledServiceId: svc.id,
+            customerId: svc.customer_id,
+            appointmentTime: `${datePart}T${windowStart}`,
+            serviceType: svc.service_type,
+            source: 'cron_selfheal',
+            // Preserve the visit's real booking time: the 72h pass skips
+            // "booked < 72h before appointment" off created_at, and a healed
+            // row stamped with the cron time would wrongly skip that reminder.
+            createdAt: svc.created_at,
+          }));
+          if (record) healed += 1;
+        } catch (err) {
+          logger.error(`[appt-remind] Self-heal registration failed for ${svc.id}: ${err.message}`);
+        }
+      }
+      if (healed) {
+        logger.info(
+          `[appt-remind] Self-healed ${healed} missing reminder row(s)` +
+          (missing.length === SELF_HEAL_REGISTRATION_LIMIT ? ' (cap hit — more next run)' : '')
+        );
+      }
+    } catch (err) {
+      logger.error(`[appt-remind] Self-heal registration sweep failed: ${err.message}`);
+    }
+    return healed;
+  },
+
+  /**
    * Check and send 72h and 24h reminders.
    * Called by cron every 15 minutes.
    */
   async checkAndSendReminders() {
     const results = { sent72h: 0, sent24h: 0, skipped: 0, errors: 0 };
     const now = new Date();
+
+    // Registration self-heal first, so a visit missing its reminder row joins
+    // this same run's confirmation-recovery and reminder passes below.
+    await AppointmentReminders.selfHealMissingReminderRows();
 
     // Durability backstop for deferred confirmations. Admin saves insert the
     // reminder row with confirmation_sent=false and fire the Twilio send off the
