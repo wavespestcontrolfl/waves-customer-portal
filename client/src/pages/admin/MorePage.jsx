@@ -1,118 +1,11 @@
 import { Link, useNavigate } from "react-router-dom";
 import {
-  FileText,
-  Clock,
-  BookOpen,
-  Star,
-  Gift,
-  Mail,
-  Megaphone,
-  Search as SearchIcon,
-  Share2,
-  Wrench,
-  Package,
-  Tags,
-  ClipboardCheck,
-  Library,
-  Brain,
-  Receipt,
-  Banknote,
-  Landmark,
-  Calculator,
-  Ruler,
-  Activity,
-  Settings as SettingsIcon,
   LogOut,
   ExternalLink,
   ChevronRight,
-  Bot,
-  Sprout,
-  Camera,
-  Newspaper,
-  Send,
 } from "lucide-react";
 import { refetchFlags } from "../../hooks/useFeatureFlag";
-
-const SECTIONS = [
-  {
-    section: "Operations",
-    items: [
-      {
-        path: "/admin/pipeline",
-        icon: FileText,
-        label: "Pipeline",
-      },
-      { path: "/admin/timetracking", icon: Clock, label: "Staff" },
-      { path: "/admin/service-library", icon: BookOpen, label: "Services" },
-    ],
-  },
-  {
-    section: "Communications",
-    items: [
-      { path: "/admin/reviews", icon: Star, label: "Reviews" },
-      { path: "/admin/referrals", icon: Gift, label: "Referrals" },
-      { path: "/admin/email", icon: Mail, label: "Email" },
-    ],
-  },
-  {
-    section: "Marketing",
-    items: [
-      { path: "/admin/ppc", icon: Megaphone, label: "PPC" },
-      { path: "/admin/seo", icon: SearchIcon, label: "SEO" },
-      { path: "/admin/social-media", icon: Share2, label: "Social Media" },
-      { path: "/admin/blog", icon: Newspaper, label: "Blog" },
-      { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
-      // Consolidated assessments hub — Lead Magnets tab + Field Assessment
-      // tab (the old standalone /admin/lawn-assessment flow). Mobile lands
-      // on the Field tab: it matches the entry this replaced, and tech-role
-      // users are allowed on the lawn-assessment API (requireTechOrAdmin)
-      // but not on the admin-only photo-assessments API backing the
-      // default Lead Magnets tab.
-      { path: "/admin/lawn-assessments?tab=field", icon: Camera, label: "Assessments" },
-    ],
-  },
-  {
-    section: "Field & Equipment",
-    items: [
-      { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
-      { path: "/admin/turf-height", icon: Sprout, label: "Turf Height Review" },
-      { path: "/admin/inventory", icon: Package, label: "Inventory" },
-      { path: "/admin/price-match", icon: Tags, label: "Price Match" },
-      { path: "/admin/compliance", icon: ClipboardCheck, label: "Compliance" },
-    ],
-  },
-  {
-    section: "Intelligence",
-    items: [
-      { path: "/admin/knowledge", icon: Library, label: "Knowledge Base" },
-      { path: "/admin/kb", icon: Brain, label: "Claudeopedia" },
-    ],
-  },
-  {
-    section: "Agents",
-    items: [
-      { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
-    ],
-  },
-  {
-    section: "Finance",
-    items: [
-      { path: "/admin/invoices", icon: Receipt, label: "Invoices" },
-      { path: "/admin/billing-recovery", icon: Banknote, label: "Recovery" },
-      { path: "/admin/banking", icon: Landmark, label: "Banking" },
-      { path: "/admin/tax", icon: Calculator, label: "Taxes" },
-      { path: "/admin/pricing-logic", icon: Ruler, label: "Pricing" },
-      { path: "/admin/price-change", icon: Megaphone, label: "Price Notices" },
-    ],
-  },
-  {
-    section: "System",
-    items: [
-      { path: "/admin/tool-health", icon: Activity, label: "Tool Health" },
-      { path: "/admin/settings", icon: SettingsIcon, label: "Settings" },
-    ],
-  },
-];
+import { ADMIN_MOBILE_MORE_SECTIONS } from "../../config/adminNavigation";
 
 export default function MorePage() {
   const navigate = useNavigate();
@@ -136,7 +29,7 @@ export default function MorePage() {
           Everything beyond the five tabs.
         </p>{" "}
       </div>
-      {SECTIONS.map(({ section, items }) => (
+      {ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => (
         <section key={section} className="mt-2">
           {" "}
           <div className="px-4 py-2 text-[10px] font-medium uppercase tracking-label text-zinc-500">

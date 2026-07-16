@@ -145,6 +145,7 @@ import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
+import AdminTabRedirect from './components/admin/AdminTabRedirect';
 import { isNativeApp } from './native/platform';
 import WavesShell from './components/brand/WavesShell';
 import { lazy, Suspense } from 'react';
@@ -235,7 +236,6 @@ const AdminCommunicationsPage = lazyWithRetry(() => import('./pages/admin/Commun
 const AdminCustomersPage = lazyWithRetry(() => import('./pages/admin/CustomersPageV2'));
 const AdminReferralsPage = lazyWithRetry(() => import('./pages/admin/ReferralsPageV2'));
 const AdminDashboardPage = lazyWithRetry(() => import('./pages/admin/DashboardPageV2'));
-const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const AdminCommercialProposalPage = lazyWithRetry(() => import('./pages/admin/CommercialProposalPage'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
@@ -262,7 +262,6 @@ const AdminAutoDispatchPage = lazyWithRetry(() => import('./pages/admin/AutoDisp
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
 const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
-const AdminEquipmentCalibrationPage = lazyWithRetry(() => import('./pages/admin/EquipmentCalibrationPanel'));
 const AdminLawnProtocolPage = lazyWithRetry(() => import('./pages/admin/LawnProtocolCommandCenterPage'));
 const AdminTurfHeightReviewPage = lazyWithRetry(() => import('./pages/admin/TurfHeightReviewPage'));
 const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/KnowledgeBasePage'));
@@ -280,12 +279,9 @@ const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
 const PriceChangeNoticePage = lazyWithRetry(() => import('./pages/PriceChangeNoticePage'));
 const AdminPriceChangePage = lazyWithRetry(() => import('./pages/admin/AdminPriceChangePage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
-const CustomerHealthPage = lazyWithRetry(() => import('./pages/admin/CustomerHealthPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
-const LeadsPage = lazyWithRetry(() => import('./pages/admin/LeadsPage'));
 const ServiceLibraryPage = lazyWithRetry(() => import('./pages/admin/ServiceLibraryPage'));
 const ProjectsPage = lazyWithRetry(() => import('./pages/admin/ProjectsPage'));
-const CredentialsPage = lazyWithRetry(() => import('./pages/admin/CredentialsPage'));
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
 const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
 const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
@@ -435,7 +431,7 @@ export default function App() {
             {/* Field estimates use the canonical server-priced builder. The retired
                 tech-only calculator duplicated prices client-side and its SMS call
                 posted the wrong request shape, so it could show “sent” after a 400. */}
-            <Route path="estimate" element={<Navigate to="/admin/estimates?tab=new" replace />} />
+            <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading protocols...</div>}><TechProtocolsPage /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn diagnostic...</div>}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social post...</div>}><TechSocialPostPage /></Suspense>} />
@@ -446,7 +442,9 @@ export default function App() {
             <Route path="customers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customers...</div>}><AdminCustomersPage /></Suspense>} />
             <Route path="customers/duplicates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading duplicates...</div>}><AdminDuplicateCustomersPage /></Suspense>} />
             <Route path="pipeline" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><AdminPipelinePage /></Suspense>} />
-            <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
+            {/* Legacy Pipeline entry routes preserve notifications/bookmarks but
+                no longer mount duplicate copies of EstimatesPageV2. */}
+            <Route path="estimates" element={<AdminTabRedirect to="/admin/pipeline" tab="estimates" preserveTabs={['leads', 'estimates', 'new', 'pricing']} />} />
             <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading proposal...</div>}><AdminCommercialProposalPage /></Suspense>} />
             {/* /admin/dispatch is now the canonical dispatcher surface
                 — Board tab (phase 2 v1) + Schedule tab (existing
@@ -481,7 +479,7 @@ export default function App() {
             <Route path="lawn-assessments" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading assessments...</div>}><AdminAssessmentsHubPage /></Suspense>} />
             <Route path="lawn-protocol" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn protocol...</div>}><AdminLawnProtocolPage /></Suspense>} />
             <Route path="turf-height" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading turf height review...</div>}><AdminTurfHeightReviewPage /></Suspense>} />
-            <Route path="equipment-calibration" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment calibration...</div>}><AdminEquipmentCalibrationPage /></Suspense>} />
+            <Route path="equipment-calibration" element={<AdminTabRedirect to="/admin/equipment" tab="calibrations" />} />
             <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
             <Route path="kb" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgeBasePage /></Suspense>} />
             <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
@@ -492,7 +490,7 @@ export default function App() {
             <Route path="settings/pest-pressure" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading Pest Pressure settings...</div>}><PestPressureSettingsPage /></Suspense>} />
             <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
             <Route path="timetracking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading time tracking...</div>}><TimeTrackingPage /></Suspense>} />
-            <Route path="leads" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><LeadsPage /></Suspense>} />
+            <Route path="leads" element={<AdminTabRedirect to="/admin/pipeline" tab="leads" />} />
             <Route path="fleet" element={<FleetRedirect />} />
             <Route path="service-library" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading service library...</div>}><ServiceLibraryPage /></Suspense>} />
             <Route path="projects" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading projects...</div>}><ProjectsPage /></Suspense>} />
@@ -501,7 +499,7 @@ export default function App() {
             <Route path="document-requests" element={<Navigate to="/admin/contracts?tab=requests" replace />} />
             <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
             <Route path="compliance" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading compliance...</div>}><CompliancePage /></Suspense>} />
-            <Route path="credentials" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading credentials...</div>}><CredentialsPage /></Suspense>} />
+            <Route path="credentials" element={<AdminTabRedirect to="/admin/compliance" tab="credentials" />} />
             <Route path="newsletter" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading newsletter...</div>}><NewsletterPage /></Suspense>} />
             <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />
