@@ -12621,8 +12621,11 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
   // (minimumCollectedAnnualPrice). The program minimum alone would let a
   // discounted alternate cadence render/bill below the margin its own cost
   // basis requires.
+  // CEIL to cents: nearest-cent rounding of floor/12 can reconstruct an
+  // annual a cent BELOW the floor (630.85 → 52.57/mo → 630.84/yr), quietly
+  // defeating the 35% post-discount guard.
   const marginFloorMonthly = Number.isFinite(Number(marginFloorAnnual)) && Number(marginFloorAnnual) > 0
-    ? roundMonthly(Number(marginFloorAnnual) / 12)
+    ? Math.ceil((Number(marginFloorAnnual) / 12) * 100) / 100
     : 0;
   const minMonthly = Math.max(programMinMonthly > 0 ? programMinMonthly : 0, marginFloorMonthly);
   if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };

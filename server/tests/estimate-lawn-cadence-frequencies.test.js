@@ -429,8 +429,10 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     };
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [line] });
     const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
-    // Standard: 10% off 660 = 594 breaches its own 640 margin floor -> clamped there.
-    expect(byKey.standard.monthly).toBeCloseTo(53.33, 2);
+    // Standard: 10% off 660 = 594 breaches its own 640 margin floor -> clamped
+    // there (monthly CEILs to cents so the reconstructed annual never lands
+    // below the floor).
+    expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
     // Premium has headroom: the full requested 10% survives instead of the
     // selected line's capped after/before ratio.
     expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);

@@ -60,7 +60,10 @@ function normalizeLawnTrack(value) {
 
 function normalizeProtocolKey(value) {
   const requested = String(value || '').trim().toLowerCase();
-  if (requested === 'lawn' || requested === 'lawn_care') return 'lawn';
+  // one_time_lawn / lawn_pest_knockdown are Agent Estimate service keys that
+  // still follow the lawn protocol family — without the alias, get_protocol
+  // reports "no program exists" and the required protocol review is skipped.
+  if (['lawn', 'lawn_care', 'one_time_lawn', 'lawn_pest_control', 'lawn_pest_knockdown'].includes(requested)) return 'lawn';
   return PROTOCOL_KEY_ALIASES[requested] || requested || null;
 }
 

@@ -81,17 +81,19 @@ async function phoneIsShared(lead) {
     if (!rows.length) return false;
     // A REPEAT lead for the same person is not a shared line — suppressing
     // it would price a returning customer as a new account and hide their
-    // own SMS/estimate history. Same full name (matching last name; matching
-    // first name when both sides carry one) reads as the same person; a
-    // different or missing name stays conservatively shared.
+    // own SMS/estimate history. Fail closed: only a FULL name match (both
+    // last names AND both first names present and equal) reads as the same
+    // person — a missing first name on a family line could be a different
+    // household member, so it stays shared.
     const norm = (value) => String(value || '').trim().toLowerCase();
     const leadFirst = norm(lead.first_name);
     const leadLast = norm(lead.last_name);
     return rows.some((row) => {
       const first = norm(row.first_name);
       const last = norm(row.last_name);
-      if (!leadLast || !last || last !== leadLast) return true;
-      return !!(leadFirst && first && first !== leadFirst);
+      const samePerson = !!(leadLast && last && last === leadLast
+        && leadFirst && first && first === leadFirst);
+      return !samePerson;
     });
   } catch (err) {
     logger.warn(`[agent-estimate] shared-phone check failed: ${err.message}`);

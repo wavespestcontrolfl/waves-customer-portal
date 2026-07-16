@@ -1227,16 +1227,33 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   if (input.evidenceVerification?.unverified > 0) {
     laneReasons.push(`${input.evidenceVerification.unverified} evidence quote(s) could not be verified against the selected lead`);
   }
+  // A fact counts as VERIFIED only when it carries a usable value, a source,
+  // and an affirmative confidence — an empty `{ address: {} }` placeholder
+  // must not satisfy the key-presence checks below and green a draft whose
+  // price-driving measurements were never verified.
+  const isVerifiedFact = (fact) => {
+    if (!fact || typeof fact !== 'object') return false;
+    const hasValue = fact.value !== undefined && fact.value !== null && String(fact.value).trim() !== '';
+    const confidence = String(fact.confidence || '').trim().toLowerCase();
+    return hasValue && !!fact.source && !!confidence
+      && !['low', 'weak', 'unknown', 'unverified'].includes(confidence);
+  };
+  const verifiedFactKeys = propertyFactEntries
+    .filter(([, fact]) => isVerifiedFact(fact))
+    .map(([key]) => key);
   if (!propertyFactEntries.length) {
     laneReasons.push('property facts were not verified');
   }
-  if (!propertyFactEntries.some(([key]) => /address/i.test(key))) {
+  if (!verifiedFactKeys.some((key) => /address/i.test(key))) {
     laneReasons.push('service address was not recorded as a verified property fact');
   }
   if (input.contactVerification?.addressMismatch) {
     laneReasons.push('draft service address differs from the selected lead address');
   }
   for (const [key, fact] of propertyFactEntries) {
+    if (!isVerifiedFact(fact)) {
+      laneReasons.push(`${key} lacks a verified value, source, or confidence`);
+    }
     const confidence = String(fact?.confidence || '').toLowerCase();
     if (['low', 'weak', 'unknown', 'unverified'].includes(confidence)) {
       laneReasons.push(`${key} has ${confidence} confidence`);
@@ -1246,28 +1263,28 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     }
   }
   const hasLawnService = serviceKeys.some((key) => /lawn|turf/i.test(key));
-  if (hasLawnService && !propertyFactEntries.some(([key]) => /lawn|turf|treatable/i.test(key))) {
+  if (hasLawnService && !verifiedFactKeys.some((key) => /lawn|turf|treatable/i.test(key))) {
     laneReasons.push('treatable lawn area was not recorded as a verified property fact');
   }
   const isCommercial = input.engineInputs.isCommercial === true
     || String(input.engineInputs.propertyType || '').toLowerCase().includes('commercial');
-  if (isCommercial && !propertyFactEntries.some(([key]) => /commercial|building|unit/i.test(key))) {
+  if (isCommercial && !verifiedFactKeys.some((key) => /commercial|building|unit/i.test(key))) {
     laneReasons.push('commercial treated building or unit area was not verified');
   }
   if (serviceKeys.some((key) => /mosquito/i.test(key))
-    && !propertyFactEntries.some(([key]) => /lot|outdoor|treatable|lawn|turf/i.test(key))) {
+    && !verifiedFactKeys.some((key) => /lot|outdoor|treatable|lawn|turf/i.test(key))) {
     laneReasons.push('mosquito treatable outdoor area was not verified');
   }
   if (serviceKeys.some((key) => /trench/i.test(key))
-    && !propertyFactEntries.some(([key]) => /perimeter|concrete|dirt|linear/i.test(key))) {
+    && !verifiedFactKeys.some((key) => /perimeter|concrete|dirt|linear/i.test(key))) {
     laneReasons.push('trenching perimeter and concrete/dirt measurements were not verified');
   }
   if (serviceKeys.some((key) => /termite|bait/i.test(key))
-    && !propertyFactEntries.some(([key]) => /perimeter|footprint|building/i.test(key))) {
+    && !verifiedFactKeys.some((key) => /perimeter|footprint|building/i.test(key))) {
     laneReasons.push('termite footprint or perimeter measurement was not verified');
   }
   if (serviceKeys.some((key) => /palm/i.test(key))
-    && !propertyFactEntries.some(([key]) => /palm.*count|treated.*palm/i.test(key))) {
+    && !verifiedFactKeys.some((key) => /palm.*count|treated.*palm/i.test(key))) {
     laneReasons.push('treated palm count was not operator-confirmed');
   }
   if (!protocolReview.length) {

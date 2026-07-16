@@ -103,17 +103,18 @@ async function loadActiveRecurringServiceRows(database, customerId) {
     if (cols.service_address_zip) selectCols.push('service_address_zip');
   }
   const rows = await query.select(selectCols);
-  // Stamp each row's EFFECTIVE service address (stamped columns, falling back
-  // to the customer's primary address) so duplicate checks can scope an
+  // Carry each row's STAMPED service address so duplicate checks can scope an
   // active service to its property — a multi-property customer's pest plan at
-  // one address must not block a quote for another address.
-  const customerAddress = [customer.address_line1, customer.city, customer.zip]
-    .filter(Boolean).join(', ') || null;
+  // one address must not block a quote for another address. An unstamped row
+  // stays null (UNKNOWN): substituting the customer's current primary address
+  // would let a legacy row that actually covers a secondary property look
+  // street-different and slip past the duplicate guard, so unknown rows keep
+  // the conservative account-wide block downstream.
   return rows.map((row) => ({
     ...row,
     effective_service_address: (hasStampedAddress && row.service_address_line1)
       ? [row.service_address_line1, row.service_address_city, row.service_address_zip].filter(Boolean).join(', ')
-      : customerAddress,
+      : null,
   }));
 }
 

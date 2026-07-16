@@ -52,16 +52,24 @@ router.post('/memory', async (req, res, next) => {
       return res.status(400).json({ error: 'rule_text must be 12-2000 characters' });
     }
     if (rationale.length > 4000) return res.status(400).json({ error: 'rationale is too long' });
-    const latest = await db('agent_estimate_memory').max('version as max_version').first();
-    const version = Math.max(0, Number(latest?.max_version) || 0) + 1;
-    const [memory] = await db('agent_estimate_memory').insert({
-      rule_text: ruleText,
-      rationale: rationale || null,
-      source_lead_id: sourceLeadId,
-      created_by: req.technicianId,
-      status: 'pending',
-      version,
-    }).returning('*');
+    // Version allocation must be atomic: two concurrent submissions reading
+    // the same max would both insert the same version, duplicating labels in
+    // the approved-learning prompt and breaking audit ordering. An advisory
+    // xact lock serializes the read+insert without needing a schema change.
+    const memory = await db.transaction(async (trx) => {
+      await trx.raw("select pg_advisory_xact_lock(hashtext('agent_estimate_memory_version'))");
+      const latest = await trx('agent_estimate_memory').max('version as max_version').first();
+      const version = Math.max(0, Number(latest?.max_version) || 0) + 1;
+      const [inserted] = await trx('agent_estimate_memory').insert({
+        rule_text: ruleText,
+        rationale: rationale || null,
+        source_lead_id: sourceLeadId,
+        created_by: req.technicianId,
+        status: 'pending',
+        version,
+      }).returning('*');
+      return inserted;
+    });
     res.status(201).json({ memory });
   } catch (err) {
     next(err);
