@@ -118,6 +118,7 @@ function makeDatabase({
   lead = { id: 'lead-1', customer_id: null, estimate_id: null },
   customer = null,
   estimate = null,
+  estimateRows = null,
   turfRows = [],
 } = {}) {
   const writes = [];
@@ -126,6 +127,7 @@ function makeDatabase({
       where: () => builder,
       whereNull: () => builder,
       whereNot: () => builder,
+      whereIn: () => builder,
       whereNotIn: () => builder,
       whereRaw: () => builder,
       leftJoin: () => builder,
@@ -148,7 +150,11 @@ function makeDatabase({
         if (table === 'estimates') return thenable([{ id: estimate?.id || 'estimate-1', token: estimate?.token || 'token-1' }]);
         return thenable(1);
       },
-      then: (resolve) => resolve(table === 'customers as c' ? turfRows : []),
+      then: (resolve) => resolve(
+        table === 'customers as c' ? turfRows
+          : table === 'estimates' ? (estimateRows ?? (estimate ? [estimate] : []))
+            : [],
+      ),
     };
     return builder;
   };
@@ -1015,5 +1021,117 @@ describe('Agent Estimate open-lead enforcement', () => {
 
     expect(result.success).toBe(true);
     expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeTruthy();
+  });
+});
+
+describe('Agent Estimate round-4 hardening', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGenerateEstimate.mockReturnValue(ENGINE_RESULT);
+    mockDuplicateBlock.mockResolvedValue(null);
+  });
+
+  test('rejects any custom* or *override* engine control by pattern', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { palm: { customPricePerPalm: 12, palmCount: 8 } },
+    });
+
+    expect(result.error).toMatch(/customPricePerPalm/);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+
+    const containerCost = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { preSlabTermiticide: { customContainerCost: 90 } },
+    });
+    expect(containerCost.error).toMatch(/customContainerCost/);
+  });
+
+  test('derives recurring collected margin from the canonical costs.total', () => {
+    expect(_private.compactAgentLine({
+      service: 'lawn_care',
+      annualAfterDiscount: 800,
+      monthlyAfterDiscount: 66.67,
+      costs: { total: 600 },
+      margin: 0.45,
+    })).toEqual(expect.objectContaining({
+      annual: 800,
+      estimated_annual_cost: 600,
+      collected_margin: 0.25,
+      margin_floor_ok: false,
+    }));
+  });
+
+  test('an older open estimate for the same address still blocks on a shared phone', async () => {
+    const { database, writes } = makeDatabase({
+      estimateRows: [
+        { id: 'est-old', address: '1 Test St, Bradenton FL 34208' },
+        { id: 'est-new', address: '500 Other Rd, Venice FL 34285' },
+      ],
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    mockDuplicateBlock.mockResolvedValue({
+      blocked: true,
+      existingEstimateId: 'est-new',
+      message: 'An automated estimate is already open for this phone number',
+    });
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.error).toMatch(/already open for this phone number/i);
+    expect(result.existing_estimate_id).toBe('est-old');
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
+  });
+
+  test('an unknown address among open estimates keeps the conservative block', async () => {
+    const { database, writes } = makeDatabase({
+      estimateRows: [
+        { id: 'est-new', address: '500 Other Rd, Venice FL 34285' },
+        { id: 'est-blank', address: null },
+      ],
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    mockDuplicateBlock.mockResolvedValue({
+      blocked: true,
+      existingEstimateId: 'est-new',
+      message: 'An automated estimate is already open for this phone number',
+    });
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.error).toMatch(/already open for this phone number/i);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
+  });
+
+  test('a revision fails closed when the lead was closed mid-flight', async () => {
+    const existing = {
+      id: 'estimate-old',
+      token: 'old-token',
+      status: 'draft',
+      source: 'estimator_engine',
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-1',
+        engineInputs: INPUT.engineInputs,
+        engineResult: ENGINE_RESULT,
+        estimatorEngine: { origin: 'manual_agent' },
+      }),
+    };
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: null, estimate_id: existing.id, status: 'lost' },
+      estimate: existing,
+    });
+    mockDb.mockImplementation(database);
+    mockDb.transaction.mockImplementation(async (callback) => callback(database));
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      estimateId: existing.id,
+    }, { confirmed: true });
+
+    expect(result.error).toMatch(/lost/i);
+    expect(writes.filter((write) => write.op === 'update' && write.table === 'estimates')).toEqual([]);
   });
 });

@@ -200,8 +200,15 @@ async function buildAgentEstimateContext(leadId) {
   const sharedPhone = externalPhone ? await phoneIsShared(lead) : false;
   const phoneKey = externalPhone && !sharedPhone ? externalPhone : null;
   const rawCalls = await loadCalls(lead, phoneKey);
-  const latestExtraction = rawCalls[0]?.extraction || null;
-  const { customer, ambiguous: customerAmbiguous } = await resolveCustomer(lead, latestExtraction, phoneKey);
+  // Disambiguate the customer match ONLY with the extraction from THIS lead's
+  // own call (SID match) — the newest phone-matched call can belong to a
+  // different person on a shared/family line, and its caller name would
+  // confidently select the wrong customer profile. With no SID-matched call,
+  // a multi-customer phone stays ambiguous and history stays suppressed.
+  const leadCall = lead.twilio_call_sid
+    ? rawCalls.find((call) => call.call_sid === lead.twilio_call_sid)
+    : null;
+  const { customer, ambiguous: customerAmbiguous } = await resolveCustomer(lead, leadCall?.extraction || null, phoneKey);
   // Phone-scoped history fails closed on BOTH suppression signals: another
   // lead on the number (sharedPhone) or multiple customer rows on the number
   // (customerAmbiguous). Either way the thread/estimates may belong to a
@@ -223,7 +230,8 @@ async function buildAgentEstimateContext(leadId) {
       .select('activity_type', 'description', 'metadata', 'created_at').catch(() => []),
     lead.estimate_id
       ? db('estimates').where({ id: lead.estimate_id }).first('id', 'token', 'status', 'source',
-        'monthly_total', 'annual_total', 'onetime_total', 'service_interest', 'estimate_data', 'updated_at').catch(() => null)
+        'monthly_total', 'annual_total', 'onetime_total', 'service_interest', 'estimate_data',
+        'customer_phone', 'customer_email', 'updated_at').catch(() => null)
       : Promise.resolve(null),
     db('agent_estimate_memory').where({ status: 'approved' }).orderBy('reviewed_at', 'desc')
       .limit(20).select('id', 'rule_text', 'rationale', 'version', 'reviewed_at').catch(() => []),
@@ -326,6 +334,12 @@ async function buildAgentEstimateContext(leadId) {
       annual_total: Number(currentEstimate.annual_total || 0),
       onetime_total: Number(currentEstimate.onetime_total || 0),
       service_interest: currentEstimate.service_interest || null,
+      // The send endpoint delivers to the contact snapshot stored ON the
+      // estimate, not the lead's current contact — the UI must display and
+      // gate on these values so a post-draft lead correction can't silently
+      // send the link to a stale phone/email.
+      customer_phone: currentEstimate.customer_phone || null,
+      customer_email: currentEstimate.customer_email || null,
       agent_origin: currentEngine.origin || null,
       lane: currentEngine.lane || null,
       lane_reasons: currentEngine.laneReasons || [],

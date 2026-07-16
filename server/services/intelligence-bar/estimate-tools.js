@@ -25,6 +25,7 @@ const { validateEstimateDeliveryOptions } = require('../estimate-delivery-option
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
+  OPEN_ESTIMATE_STATUSES,
 } = require('../estimate-automation-duplicates');
 const { performPropertyLookup } = require('../../routes/property-lookup-v2');
 const { buildAgentEstimateContext } = require('../agent-estimate-context');
@@ -397,6 +398,14 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'uselawncostfloor',
 ]);
 
+// The engine's per-service options are open objects, so an exact-key list can
+// never stay complete against its price levers (customPricePerPalm,
+// customContainerCost, customFloorBeforeVolumeDiscount, ...). Deny the whole
+// custom* and *override* families by pattern — no legitimate agent-suppliable
+// input uses either shape, and a false positive just tells the model to drop
+// the key and let DB-authoritative pricing rule.
+const AGENT_FORBIDDEN_PRICING_INPUT_PATTERN = /^custom|override/;
+
 function findForbiddenAgentPricingInputs(value, path = [], found = []) {
   if (!value || typeof value !== 'object') return found;
   if (Array.isArray(value)) {
@@ -405,7 +414,8 @@ function findForbiddenAgentPricingInputs(value, path = [], found = []) {
   }
   for (const [key, nested] of Object.entries(value)) {
     const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (AGENT_FORBIDDEN_PRICING_INPUT_KEYS.has(normalized)) {
+    if (AGENT_FORBIDDEN_PRICING_INPUT_KEYS.has(normalized)
+      || AGENT_FORBIDDEN_PRICING_INPUT_PATTERN.test(normalized)) {
       found.push([...path, key].join('.'));
     } else {
       findForbiddenAgentPricingInputs(nested, [...path, key], found);
@@ -1054,8 +1064,12 @@ function compactAgentLine(line) {
   const annual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual ?? 0);
   const oneTime = Number(line.priceAfterDiscount ?? line.price ?? line.total ?? 0);
   const priceBasis = annual > 0 ? annual : oneTime;
+  // Recurring lawn lines expose their annual cost as costs.total; without it
+  // the margin falls back to line.margin, which was computed from the PRE-
+  // discount price and overstates the collected margin whenever the WaveGuard
+  // margin-floor guard caps annualAfterDiscount.
   const rawCost = annual > 0
-    ? (line.costs?.annualCost ?? line.annualCost)
+    ? (line.costs?.annualCost ?? line.annualCost ?? line.costs?.total)
     : (line.costs?.oneTimeCost ?? line.costs?.total ?? line.oneTimeCost ?? line.estimatedCost);
   const cost = Number(rawCost);
   const hasCostBasis = Number.isFinite(cost) && cost >= 0;
@@ -1377,6 +1391,13 @@ function anchorAgentEstimateContact(input, lead) {
 
 async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing = accountPricingFromContext()) {
   return db.transaction(async (trx) => {
+    // Lock the lead row and revalidate its open status INSIDE the revision
+    // transaction — the pre-transaction check goes stale while context
+    // loading, repricing, and membership queries run, and another operator
+    // can close the lead in that window (mirrors persistNewAgentDraft).
+    await trx('leads').where({ id: input.leadId }).forUpdate().select('id');
+    const leadCheck = await loadAgentEstimateLead(input.leadId, trx);
+    if (leadCheck.error) return leadCheck;
     const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
     if (!estimate) return { error: 'Agent Estimate draft not found' };
     if (estimate.status !== 'draft' || estimate.source !== 'estimator_engine') {
@@ -1437,17 +1458,24 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     // The duplicate guard is phone-only: a shared-line / property-manager
     // caller with several properties on one number would have the SECOND
     // property's draft suppressed by the first property's open estimate.
-    // When both addresses are known and street-differ this is a different
-    // quote — let it through (mirrors the estimator-engine draft path).
-    // Unknown addresses keep the conservative block.
+    // The helper returns only the NEWEST open estimate, so check EVERY open
+    // estimate on the phone: an older open estimate for THIS address must
+    // still block, and the bypass applies only when all open estimates have
+    // known, street-different addresses. Unknown addresses keep the
+    // conservative block.
     if (duplicateBlock?.existingEstimateId && input.address) {
       try {
-        const existingRow = await trx('estimates')
-          .select('address')
-          .where({ id: duplicateBlock.existingEstimateId })
-          .first();
-        if (existingRow?.address && !sameStreetAddress(existingRow.address, input.address)) {
-          logger.info('[intelligence-bar:agent-estimate] duplicate guard bypassed — open estimate is for a different property');
+        const phoneLast10 = String(phone || '').replace(/\D/g, '').slice(-10);
+        const openRows = await trx('estimates')
+          .select('id', 'address')
+          .whereRaw("right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10])
+          .whereIn('status', OPEN_ESTIMATE_STATUSES)
+          .whereNull('archived_at');
+        const sameProperty = openRows.find((row) => row.address && sameStreetAddress(row.address, input.address));
+        if (sameProperty) {
+          duplicateBlock = { ...duplicateBlock, existingEstimateId: sameProperty.id };
+        } else if (openRows.length && openRows.every((row) => row.address)) {
+          logger.info('[intelligence-bar:agent-estimate] duplicate guard bypassed — every open estimate on this phone is a different property');
           duplicateBlock = null;
         }
       } catch (dupErr) {
