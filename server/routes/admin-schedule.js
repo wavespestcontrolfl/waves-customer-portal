@@ -574,6 +574,8 @@ function copyLineDiscountFields(target, source, cols) {
   if (cols.line_discount_type && source.line_discount_type) target.line_discount_type = source.line_discount_type;
   if (cols.line_discount_amount && source.line_discount_amount != null) target.line_discount_amount = source.line_discount_amount;
   if (cols.line_discount_dollars && source.line_discount_dollars != null) target.line_discount_dollars = source.line_discount_dollars;
+  if (cols.service_key_snapshot) target.service_key_snapshot = source.service_key_snapshot || null;
+  if (cols.service_category_snapshot) target.service_category_snapshot = source.service_category_snapshot || null;
 }
 
 function copyAppointmentDiscountFields(target, source, cols) {
@@ -616,6 +618,8 @@ function copyAddonDiscountFields(target, source, cols) {
   if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
   if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
+  if (cols.service_key_snapshot) target.service_key_snapshot = source.service_key_snapshot || null;
+  if (cols.service_category_snapshot) target.service_category_snapshot = source.service_category_snapshot || null;
 }
 
 function httpError(status, message) {
@@ -1007,6 +1011,8 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
       estimated_price: addon.price != null ? addon.price : null,
     };
     if (addonCols.base_price && addon.base != null) addonData.base_price = addon.base;
+    if (addonCols.service_key_snapshot) addonData.service_key_snapshot = addon.serviceKey || addon.service_key_snapshot || null;
+    if (addonCols.service_category_snapshot) addonData.service_category_snapshot = addon.serviceCategory || addon.service_category_snapshot || null;
     if (addonCols.estimated_duration_minutes && addon.estimatedDuration != null && addon.estimatedDuration !== '' && !isNaN(parseInt(addon.estimatedDuration, 10))) {
       addonData.estimated_duration_minutes = parseInt(addon.estimatedDuration, 10);
     }
@@ -1157,29 +1163,30 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   if (cols.is_callback && parent?.is_callback) target.is_callback = true;
 }
 
-async function loadStoredDiscountScope(database, parent, addonRows = []) {
+async function loadStoredDiscountScope(_database, parent, addonRows = []) {
   const serviceKeyFilter = parent?.discount_service_key_filter || null;
   const serviceCategoryFilter = parent?.discount_service_category_filter || null;
   if (!serviceKeyFilter && !serviceCategoryFilter) return null;
 
-  const serviceIds = Array.from(new Set([
-    parent.service_id,
-    ...(Array.isArray(addonRows) ? addonRows.map((addon) => addon.service_id) : []),
-  ].filter(Boolean)));
-  if (serviceIds.length === 0) {
-    throw new Error('Cannot replay a scoped recurring discount without catalog service IDs');
-  }
-  const services = await database('services')
-    .whereIn('id', serviceIds)
-    .select('id', 'service_key', 'category');
-  if (services.length !== serviceIds.length) {
-    throw new Error('Cannot replay a scoped recurring discount because a catalog service is missing');
+  const lines = [parent, ...(Array.isArray(addonRows) ? addonRows : [])];
+  const servicesById = new Map();
+  for (const line of lines) {
+    if (!line?.service_id) continue;
+    if ((serviceKeyFilter && !line.service_key_snapshot)
+      || (serviceCategoryFilter && !line.service_category_snapshot)) {
+      throw new Error('Cannot replay a scoped recurring discount because a service identity snapshot is missing');
+    }
+    servicesById.set(line.service_id, {
+      id: line.service_id,
+      service_key: line.service_key_snapshot || null,
+      category: line.service_category_snapshot || null,
+    });
   }
   return {
     isScoped: true,
     serviceKeyFilter,
     serviceCategoryFilter,
-    servicesById: new Map(services.map((service) => [service.id, service])),
+    servicesById,
   };
 }
 
@@ -2395,6 +2402,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
+      if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
+      if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
       if (cols.estimated_price && finalPrice != null) insertData.estimated_price = finalPrice;
       if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
@@ -2473,6 +2482,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
+        if (cols.service_id && serviceId) childData.service_id = serviceId;
+        if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || null;
+        if (cols.service_category_snapshot) childData.service_category_snapshot = pricing.primaryServiceCategory || null;
         if (cols.recurring_nth && rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) childData.recurring_nth = parseInt(rOpts.nth);
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
@@ -2541,6 +2553,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
             notes: combinedNotes,
           };
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
+          if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
+          if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
@@ -3393,26 +3407,34 @@ router.put('/:id/update-details', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         let incomingIsReService = null; // null = unknown → leave flag as-is
         let resolvedServiceId; // undefined = don't touch service_id
+        let resolvedServiceKey;
+        let resolvedServiceCategory;
 
         if (serviceId !== undefined) {
           const svcRow = serviceId
-            ? await db('services').where({ id: serviceId }).first('service_key', 'name').catch(() => null)
+            ? await db('services').where({ id: serviceId }).first('service_key', 'category', 'name').catch(() => null)
             : null;
           incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
           resolvedServiceId = serviceId || null;
+          resolvedServiceKey = svcRow?.service_key || null;
+          resolvedServiceCategory = svcRow?.category || null;
         } else if (isReService({ serviceType })) {
           // Label-only switch INTO a re-service (dispatch card). Resolve the
           // catalog row so completion-profile resolution (keyed off service_id)
           // is correct; lawn vs pest is inferred from the label.
           incomingIsReService = true;
           const reKey = /lawn|turf/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
-          const reSvc = await db('services').where({ service_key: reKey }).first('id').catch(() => null);
+          const reSvc = await db('services').where({ service_key: reKey }).first('id', 'service_key', 'category').catch(() => null);
           resolvedServiceId = reSvc?.id || null;
+          resolvedServiceKey = reSvc?.service_key || null;
+          resolvedServiceCategory = reSvc?.category || null;
         }
 
         if (incomingIsReService !== null) {
           if (cols.is_callback) updates.is_callback = incomingIsReService;
           if (cols.service_id && resolvedServiceId !== undefined) updates.service_id = resolvedServiceId;
+          if (cols.service_key_snapshot && resolvedServiceId !== undefined) updates.service_key_snapshot = resolvedServiceKey || null;
+          if (cols.service_category_snapshot && resolvedServiceId !== undefined) updates.service_category_snapshot = resolvedServiceCategory || null;
         }
 
         if (incomingIsReService === true) {
@@ -3564,6 +3586,16 @@ router.put('/:id/update-details', async (req, res, next) => {
     // primary line + add-on lines, then replace add-on rows in the transaction.
     if (Array.isArray(addons)) {
       const cols = await db('scheduled_services').columnInfo();
+      const addonServiceIds = Array.from(new Set(addons
+        .map((addon) => addon?.serviceId)
+        .filter(Boolean)));
+      const addonServices = addonServiceIds.length > 0
+        ? await db('services').whereIn('id', addonServiceIds).select('id', 'service_key', 'category')
+        : [];
+      const addonServiceById = new Map(addonServices.map((service) => [service.id, service]));
+      if (addonServices.length !== addonServiceIds.length) {
+        return res.status(400).json({ error: 'One or more add-on services no longer exist' });
+      }
       const toMoney = (v) => {
         if (v == null || v === '') return null;
         const n = Number(v);
@@ -3573,6 +3605,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       for (const a of addons) {
         const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
         if (!serviceName) continue;
+        const catalogService = a.serviceId ? addonServiceById.get(a.serviceId) : null;
         const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
@@ -3591,6 +3624,8 @@ router.put('/:id/update-details', async (req, res, next) => {
         }
         normalizedAddons.push({
           serviceId: a.serviceId || null,
+          serviceKey: catalogService?.service_key || null,
+          serviceCategory: catalogService?.category || null,
           serviceName: serviceName.slice(0, 200),
           base: gross,
           price: net,
@@ -3614,16 +3649,25 @@ router.put('/:id/update-details', async (req, res, next) => {
           primaryGross = Math.max(0, Math.round((total - addonGross) * 100) / 100);
         }
       }
-      const addonNetTotal = normalizedAddons.reduce((s, l) => s + (l.price || 0), 0);
       const hasAnyPrice = primaryGross != null || normalizedAddons.some((l) => l.price != null);
       if (hasAnyPrice) {
         // This editor neither displays nor edits the appointment-level discount
         // or the primary line discount, and it runs on every save once an
         // appointment has add-ons. Preserve both so an unrelated edit can't
         // silently drop a discount and overcharge at invoicing.
+        const existingFields = [
+          'service_id',
+          'discount_type',
+          'discount_amount',
+          'line_discount_dollars',
+        ];
+        if (cols.service_key_snapshot) existingFields.push('service_key_snapshot');
+        if (cols.service_category_snapshot) existingFields.push('service_category_snapshot');
+        if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
+        if (cols.discount_service_category_filter) existingFields.push('discount_service_category_filter');
         const existing = await db('scheduled_services')
           .where({ id: req.params.id })
-          .first('discount_type', 'discount_amount', 'line_discount_dollars')
+          .first(...existingFields)
           .catch(() => null);
 
         // Appointment-level discount: the editor only sends discountType/
@@ -3649,10 +3693,22 @@ router.put('/:id/update-details', async (req, res, next) => {
           ? Math.max(0, Math.round((primaryGross - primaryLineDiscountDollars) * 100) / 100)
           : 0;
 
-        const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
-        const finalPrice = applyDiscount(subtotal, effDiscountType, effDiscountAmount);
-        const discountDollars = Math.max(0, Math.round((subtotal - finalPrice) * 100) / 100);
-        if (cols.estimated_price) updates.estimated_price = finalPrice;
+        const financials = calculateVisitFinancialsForAddons({
+          primaryNet,
+          primaryServiceKey: updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
+          primaryServiceCategory: updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
+          appointmentDiscount: effDiscountType ? {
+            discountType: effDiscountType,
+            discountAmount: effDiscountAmount,
+            serviceKeyFilter: appointmentDiscountChanged
+              ? null
+              : (existing?.discount_service_key_filter || null),
+            serviceCategoryFilter: appointmentDiscountChanged
+              ? null
+              : (existing?.discount_service_category_filter || null),
+          } : null,
+        }, normalizedAddons);
+        if (cols.estimated_price) updates.estimated_price = financials.price;
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
         // Only rewrite the appointment-level discount columns when the request
         // explicitly carried a discount value; otherwise leave them as-is.
@@ -3661,7 +3717,7 @@ router.put('/:id/update-details', async (req, res, next) => {
           if (cols.discount_type) updates.discount_type = effDiscountType;
           if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
         }
-        if (cols.discount_dollars) updates.discount_dollars = discountDollars > 0 ? discountDollars : null;
+        if (cols.discount_dollars) updates.discount_dollars = financials.appointmentDiscountDollars;
         // Leave the primary line_discount_* columns untouched — invoicing reads
         // them and this editor can't resend them.
       }
