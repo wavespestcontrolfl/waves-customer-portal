@@ -46,7 +46,22 @@ function makeDb(initial = {}) {
         rows.forEach((r) => Object.assign(r, patch));
         return rows.length;
       },
-      async insert(row) { tables[table].push({ ...row }); return [1]; },
+      insert(row) {
+        const exec = (ignoreConflict) => {
+          const dup = row.pr_number !== undefined
+            && tables[table].some((x) => x.pr_number === row.pr_number);
+          if (dup) {
+            if (ignoreConflict) return [0];
+            throw new Error('duplicate key value violates unique constraint');
+          }
+          tables[table].push({ ...row });
+          return [1];
+        };
+        return {
+          onConflict: () => ({ ignore: async () => exec(true) }),
+          then: (res, rej) => Promise.resolve().then(() => exec(false)).then(res, rej),
+        };
+      },
     };
   }
   db._tables = tables;
@@ -1395,11 +1410,15 @@ describe('markPrTerminal', () => {
     expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 375).status).toBe('closed');
   });
 
-  test('never creates a row for a PR that never entered remediation', async () => {
+  test('tombstones a missing row so an in-flight round cannot recreate live telemetry', async () => {
     const db = makeDb({ codex_remediation_state: [] });
-    const r = await rem.markPrTerminal(999, 'merged', db);
-    expect(r.updated).toBe(0);
-    expect(db._tables.codex_remediation_state).toHaveLength(0);
+    await rem.markPrTerminal(999, 'merged', db);
+    expect(db._tables.codex_remediation_state).toHaveLength(1);
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ pr_number: 999, status: 'merged' });
+    // …and the racing round's first saveState now loses to the tombstone.
+    const { saveState } = rem._internals;
+    expect(await saveState(db, 999, { status: 'remediating', branch: 'b' })).toBe(false);
+    expect(db._tables.codex_remediation_state[0].status).toBe('merged');
   });
 
   test('rejects junk input and never throws (fail-soft)', async () => {
@@ -1430,5 +1449,17 @@ describe('saveState vs terminal rows', () => {
     expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
     expect(await saveState(db, 44, { status: 'active', rounds: 0 })).toBe(true);
     expect(db._tables.codex_remediation_state).toHaveLength(2);
+  });
+
+  test('a round whose PR went terminal aborts BEFORE gh.putFile', async () => {
+    // The PR merged after this round's getPr but before its state write —
+    // the terminal row must stop the round with nothing pushed.
+    const db = makeDb({ codex_remediation_state: [{ pr_number: CTX.prNumber, status: 'merged', rounds: 1 }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toContain('terminal');
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].status).toBe('merged');
   });
 });
