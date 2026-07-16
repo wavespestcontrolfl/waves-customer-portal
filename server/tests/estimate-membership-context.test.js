@@ -89,6 +89,11 @@ describe('computeMembershipContext', () => {
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
 
     expect(spend.existingServiceKeys).toEqual(['pest_control']);
+    expect(spend).toEqual(expect.objectContaining({
+      currentTier: 'bronze',
+      currentTierLabel: 'Bronze',
+      currentDiscountPct: 0,
+    }));
     expect(spend.currentServices).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'pest_control', currentPerVisit: 117, qualifiesForWaveGuard: true }),
       expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 42, qualifiesForWaveGuard: false }),
@@ -96,7 +101,7 @@ describe('computeMembershipContext', () => {
     expect(spend.currentSpendPerVisitTotal).toBe(159);
   });
 
-  test('existing-service per-visit savings use the last PAID invoice amount', async () => {
+  test('existing-service spend is preserved as context while discounts apply only to additions', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),
       paidInvoices: [
@@ -115,14 +120,8 @@ describe('computeMembershipContext', () => {
       tierLabel: 'Silver',
       existingServiceKeys: ['pest_control'],
     });
-    expect(ctx.existingServices).toEqual([
-      expect.objectContaining({
-        key: 'pest_control',
-        extraDiscountPct: 10,
-        perVisitSavings: 11.70, // 10% of the $117 they last paid — not the $120 estimated_price
-        remainingVisits: 3,
-      }),
-    ]);
+    expect(ctx.existingServices).toEqual([]);
+    expect(ctx.discountAppliesTo).toBe('new_services_only');
     expect(ctx.currentServices).toEqual([
       expect.objectContaining({
         key: 'pest_control',
@@ -194,7 +193,7 @@ describe('computeMembershipContext', () => {
       estData: lawnEstimateData(),
     });
 
-    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 12.00 });
+    expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 120, spendSource: 'scheduled_estimate' });
   });
 
   test('invoice lookup failure degrades to the estimated_price fallback, not an error', async () => {
@@ -206,7 +205,7 @@ describe('computeMembershipContext', () => {
     });
 
     expect(ctx).not.toBeNull();
-    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 12.00 });
+    expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 120, spendSource: 'scheduled_estimate' });
   });
 
   test('new-service savings include a per-application dollar figure', async () => {
@@ -252,14 +251,14 @@ describe('computeMembershipContext', () => {
       estData: lawnEstimateData(),
     });
 
-    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 11.70 });
+    expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 117 });
   });
 
   test('discount line items reduce the last-paid per-visit basis', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),
       // $120 visit with a -$12 member discount row — the customer actually
-      // paid $108, so savings must be based on $108, not $120.
+      // paid $108, so current spend must show $108, not $120.
       paidInvoices: [{
         service_type: 'pest_control',
         total: '108.00',
@@ -276,7 +275,7 @@ describe('computeMembershipContext', () => {
       estData: lawnEstimateData(),
     });
 
-    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 10.80 });
+    expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 108 });
   });
 
   test('an all-setup invoice is skipped in favor of an older service invoice', async () => {
@@ -300,7 +299,7 @@ describe('computeMembershipContext', () => {
       estData: lawnEstimateData(),
     });
 
-    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 11.70 });
+    expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 117 });
   });
 
   test('setup/prepay invoices without service_type never feed the per-visit basis', async () => {
@@ -319,6 +318,6 @@ describe('computeMembershipContext', () => {
       estData: lawnEstimateData(),
     });
 
-    expect(ctx.existingServices[0]).toMatchObject({ perVisitSavings: 11.70 });
+    expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 117 });
   });
 });

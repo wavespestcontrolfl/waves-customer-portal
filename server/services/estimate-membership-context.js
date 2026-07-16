@@ -14,24 +14,22 @@
 //
 // The NEW-service member discount it shows is honored at the charged total
 // because the same combined tier (from the same shared waveguard-existing-
-// services loader) reprices the estimate at save. The existing-service
-// per-application figures remain informational (crediting them against existing
-// prepaid visits is a separate billing action).
+// services loader) reprices the estimate at save. Existing service prices are
+// context only and stay untouched; adding a service never reprices a customer's
+// current plan lines.
 //
 // The snapshot captures:
 //   1. The combined WaveGuard tier — existing qualifying services PLUS the
 //      new service(s) in this estimate.
 //   2. The tier-upgrade callout (e.g. Silver -> Gold).
-//   3. The per-application savings on EXISTING recurring services from a tier
-//      upgrade — per remaining visit, prepaid-aware.
-//   4. The member discount on the NEW service in this estimate.
+//   3. The customer's current service/spend snapshot for staff transparency.
+//   4. The member discount on the NEW service in this estimate only.
 //
 // Returns null for leads (no customer_id), inactive customers, or on ANY error
 // so neither save nor the public estimate endpoints ever break (CLAUDE.md r6).
 // ============================================================
 
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
 const {
   toQualifyingKey,
@@ -281,6 +279,9 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     existingServiceKeys: [],
     currentServices: [],
     currentSpendPerVisitTotal: 0,
+    currentTier: null,
+    currentTierLabel: null,
+    currentDiscountPct: 0,
   };
 
   const rows = Array.isArray(existingRows)
@@ -290,6 +291,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     ? existingRows
     : await loadExistingRecurringQualifyingRows(database, customerId);
   const existingServiceKeys = [...new Set(qualifyingRows.map((row) => toQualifyingKey(row.service_type)).filter(Boolean))];
+  const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
   const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
   const byKey = new Map();
   for (const row of rows) {
@@ -325,6 +327,9 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       (sum, service) => sum + (Number(service.currentPerVisit) || 0),
       0,
     )),
+    currentTier: currentTier?.tier || null,
+    currentTierLabel: currentTier ? (TIER_LABEL[currentTier.tier] || currentTier.tier) : null,
+    currentDiscountPct: currentTier ? Math.round(currentTier.discount * 100) : 0,
   };
 }
 
@@ -385,60 +390,11 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     const delta = combinedTier.discount - oldTier.discount;
     const deltaPct = Math.round(delta * 100);
 
-    // ── Active prepaid term (drives prepaid-aware copy) ────────
-    // Only a genuinely active term counts as prepaid. 'payment_pending' means
-    // the customer selected annual prepay but hasn't paid yet, so it must not
-    // render "remaining prepaid" savings (mirrors ACTIVE_STATUSES in
-    // annual-prepay-renewals.js).
-    let prepaidTerm = null;
-    try {
-      prepaidTerm = await database('annual_prepay_terms')
-        .where({ customer_id: customerId })
-        .whereIn('status', ['active', 'renewal_pending'])
-        .andWhere('term_end', '>=', database.fn.now())
-        .orderBy('term_end', 'desc')
-        .first();
-    } catch { prepaidTerm = null; }
-
-    // Compare against today's date in the business timezone (ET). Using a UTC
-    // ISO date would roll over after ~8pm ET and treat a visit still scheduled
-    // for today as past, undercounting remaining per-visit savings.
-    const today = etDateString();
-    const isFuture = (d) => {
-      if (!d) return false;
-      const iso = typeof d === 'string'
-        ? d.slice(0, 10)
-        : (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10);
-      return iso >= today;
-    };
-
-    // ── Existing-service per-application savings from the tier delta ──
-    // Only meaningful when the new service upgrades the tier. The per-visit
-    // basis is what the customer actually LAST PAID for that service (most
-    // recent paid visit invoice), falling back to the scheduled
-    // estimated_price when there's no paid history yet.
+    // Existing service prices remain exactly as contracted. Their current
+    // spend is retained for staff context, but the new combined tier applies
+    // only to services priced in this estimate.
     const currentSpend = await loadCurrentServiceSpendContext(database, customerId, { existingRows });
-    const currentSpendByKey = new Map(currentSpend.currentServices.map((service) => [service.key, service]));
     const existingServices = [];
-    if (upgraded) {
-      for (const key of existingKeys) {
-        const rows = existingByKey.get(key) || [];
-        const perVisitPrice = currentSpendByKey.get(key)?.currentPerVisit ?? null;
-        const perVisitSavings = perVisitPrice ? round2(perVisitPrice * delta) : null;
-        const remainingVisits = rows.filter((r) => isFuture(r.scheduled_date)).length;
-        existingServices.push({
-          key,
-          label: SERVICE_LABEL[key] || key,
-          extraDiscountPct: deltaPct,
-          perVisitSavings,
-          remainingVisits,
-          totalRemainingSavings: (perVisitSavings && remainingVisits)
-            ? round2(perVisitSavings * remainingVisits)
-            : null,
-          prepaid: !!prepaidTerm,
-        });
-      }
-    }
 
     // ── New-service member discount ────────────────────────────
     // Use the rate actually applied to the recurring total (margin-guard caps
@@ -482,6 +438,7 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
       // pick a cross-sell the customer doesn't already have (existingServices
       // above is only populated on a tier upgrade).
       existingServiceKeys: existingKeys,
+      discountAppliesTo: 'new_services_only',
       currentServices: currentSpend.currentServices,
       currentSpendPerVisitTotal: currentSpend.currentSpendPerVisitTotal,
       existingServices,

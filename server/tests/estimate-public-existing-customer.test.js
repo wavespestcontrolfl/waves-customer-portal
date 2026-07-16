@@ -57,15 +57,8 @@ function donMembership(overrides = {}) {
       addedServiceLabels: ['Lawn Care'],
     },
     existingServiceKeys: ['pest_control'],
-    existingServices: [{
-      key: 'pest_control',
-      label: 'Pest Control',
-      extraDiscountPct: 10,
-      perVisitSavings: 11.70,
-      remainingVisits: 3,
-      totalRemainingSavings: 35.10,
-      prepaid: false,
-    }],
+    discountAppliesTo: 'new_services_only',
+    existingServices: [],
     newServices: [{
       key: 'lawn_care',
       label: 'Lawn Care',
@@ -101,15 +94,17 @@ describe('existing-customer public estimate page', () => {
     expect(html).not.toContain('save $6.98/mo');
   });
 
-  test('member card reads as savings copy — upgrade callout + remaining-visit savings', () => {
+  test('member card says the combined tier discounts additions without repricing current service', () => {
     const html = renderPage('existing-token-copy', lawnEstimate(), lawnEstimateData(), donMembership());
 
     expect(html).toContain('Welcome back, Don');
     expect(html).toContain('what your WaveGuard membership saves you on this estimate');
     expect(html).toContain('bumps your membership from <strong>Bronze</strong>');
     expect(html).toContain('up to <strong>Silver</strong>');
-    expect(html).toContain('including the ones you already have');
-    expect(html).toContain('save $11.70/visit on your 3 remaining visits');
+    expect(html).toContain('discounts the new services by up to 10%');
+    expect(html).toContain('your current service prices stay unchanged');
+    expect(html).not.toContain('including the ones you already have');
+    expect(html).not.toContain('Your existing services');
   });
 
   test('no-benefit membership (combined Bronze, 0% discount) renders no member card', () => {
@@ -178,8 +173,14 @@ describe('existing-customer public estimate page', () => {
   });
 
   test('legacy snapshot without tierDiscountPct keeps its card when rows carry benefit', () => {
-    const membership = donMembership();
+    const membership = donMembership({
+      existingServices: [{
+        key: 'pest_control', label: 'Pest Control', extraDiscountPct: 10,
+        perVisitSavings: 11.70, remainingVisits: 3, totalRemainingSavings: 35.10, prepaid: false,
+      }],
+    });
     delete membership.tierDiscountPct;
+    delete membership.discountAppliesTo;
     const html = renderPage('legacy-snapshot-token', lawnEstimate(), lawnEstimateData(), membership);
 
     expect(html).toContain('<section class="card wg-member-card">');

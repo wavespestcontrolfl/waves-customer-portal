@@ -172,7 +172,7 @@ function suggestedPrompt(lead, currentEstimate, customerAccount = null) {
     ? 'Review and revise the existing Agent Estimate draft'
     : 'Build a new Agent Estimate draft';
   const accountInstruction = customerAccount?.recognized
-    ? ' This is a recognized customer expansion: preserve every active current service, use its server-loaded spend only as account context, and quote only services the customer wants to add. Pass this selected lead ID to compute_estimate so the engine applies the combined membership tier. Select the customer presentation from the newly quoted service mix.'
+    ? ' This is a recognized customer expansion: preserve every active current service and its existing paid price, use the current service keys only to establish the starting membership tier, and quote only services the customer wants to add. Pass this selected lead ID to compute_estimate so the engine applies the combined tier only to those additions. Select the customer presentation from the newly quoted service mix.'
     : '';
   return `${action} for ${name}. Read every supplied quote-form field, call transcript, and SMS before selecting services.${accountInstruction} Verify the home/building sqft and lot sqft; for commercial properties verify the treated unit/building sqft, and for lawn verify treatable turf rather than assuming the whole lot. Check the selected service protocols, product availability (say untracked when no count exists), and collected margin using the $35 loaded labor rate. Use only compute_estimate for dollars. Show assumptions and conflicting facts, then propose create_agent_estimate_draft for my confirmation. Never send automatically.`;
 }
@@ -205,7 +205,10 @@ async function buildAgentEstimateContext(leadId) {
   ]);
 
   const profileIsExisting = !!lead.customer_id || !!customer;
-  let customerSpend = { existingServiceKeys: [], currentServices: [], currentSpendPerVisitTotal: 0 };
+  let customerSpend = {
+    existingServiceKeys: [], currentServices: [], currentSpendPerVisitTotal: 0,
+    currentTier: null, currentTierLabel: null, currentDiscountPct: 0,
+  };
   if (customer?.id) {
     try {
       customerSpend = await loadCurrentServiceSpendContext(db, customer.id);
@@ -218,6 +221,8 @@ async function buildAgentEstimateContext(leadId) {
     customer_id: customer.id,
     match_method: lead.customer_id ? 'linked_customer_id' : 'unambiguous_phone',
     active_plan: customerSpend.existingServiceKeys.length > 0,
+    current_tier: customerSpend.currentTierLabel || customer.waveguard_tier || null,
+    current_discount_pct: customerSpend.currentDiscountPct,
     existing_service_keys: customerSpend.existingServiceKeys,
     current_services: customerSpend.currentServices,
     current_spend_per_visit_total: customerSpend.currentSpendPerVisitTotal,
@@ -226,6 +231,8 @@ async function buildAgentEstimateContext(leadId) {
     customer_id: null,
     match_method: sharedPhone ? 'shared_phone_suppressed' : null,
     active_plan: false,
+    current_tier: null,
+    current_discount_pct: 0,
     existing_service_keys: [],
     current_services: [],
     current_spend_per_visit_total: 0,
