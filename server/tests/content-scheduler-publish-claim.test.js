@@ -34,12 +34,15 @@ jest.mock('../models/db', () => {
       _table: table,
       _filters: [],
       where: jest.fn(function (...args) {
-        if (typeof args[0] === 'function') args[0].call(q);
+        // knex passes the builder as BOTH `this` and the first argument —
+        // arrow-style grouped wheres ((q) => q.whereNull(...)) need the arg.
+        if (typeof args[0] === 'function') args[0].call(q, q);
         else q._filters.push(args);
         return q;
       }),
       orWhere: jest.fn(function (...args) {
-        if (typeof args[0] === 'function') args[0].call(q);
+        if (typeof args[0] === 'function') args[0].call(q, q);
+        else q._filters.push(['orWhere', ...args]);
         return q;
       }),
       whereNull: jest.fn(function (col) {
