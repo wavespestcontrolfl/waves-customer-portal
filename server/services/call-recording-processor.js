@@ -30,6 +30,7 @@ const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
+const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -5585,6 +5586,16 @@ const CallRecordingProcessor = {
     // because Step 3 already created the customer — attribution would find the customer
     // and skip lead creation (race condition).
     let leadId = null;
+    // The composed service_interest the enrichment pass actually wrote (null
+    // when it wrote nothing) — the V2 recurring-default backfill's ownership
+    // predicate must match THIS persisted value, not a label recomputed after
+    // the V2 merge has overwritten matched/requested (codex P1 07-15).
+    let persistedServiceInterestLabel = null;
+    // Just the "+ Family" tail of that label (never its primary): the backfill
+    // recompose may only carry SECONDARY families forward — reinjecting the
+    // whole label would resurrect a stale V1 primary the validated V2 merge
+    // corrected (codex P1 07-15).
+    let persistedServiceInterestExtras = null;
     let voicemailSmsResult = null;
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
@@ -5783,7 +5794,13 @@ const CallRecordingProcessor = {
             isPaid: callAttr.isPaid,
             leadSourceDetail: leadSourceRow.name || 'inbound call',
             // service_interest isn't on the lead row yet (enrichment writes it
-            // later) — pass the extracted service so service-line ROI is right.
+            // later) — pass the PRIMARY matched service, NOT the composed
+            // multi-service label: attribution derives a single service_line
+            // via inferServiceLine, whose keyword order (lawn before pest)
+            // would bucket a pest-primary "… + Lawn Care Service" composite
+            // as lawn and skew paid/organic ROI (codex r3). The secondary
+            // families live on the lead's service_interest; the single-line
+            // funnel field carries the primary by design.
             serviceInterest: extracted.matched_service || extracted.requested_service || null,
             leadDate: call.created_at || null, // date by the actual call
           }).catch(() => {});
@@ -5804,7 +5821,105 @@ const CallRecordingProcessor = {
           if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
           if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
           if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
-          if (extracted.matched_service && isEmpty(current?.service_interest)) leadUpdates.service_interest = extracted.matched_service;
+          // Multi-service calls: matched_service is single-slot, so append the
+          // requested families it doesn't cover ("pest and lawn" must not
+          // price as pest-only). Fill-if-empty semantics unchanged.
+          // When the V2 gate approved this call, compose the extras from the
+          // V2-APPROVED service categories (primary + secondary_categories),
+          // mapped to scannable legacy service words: a V1-hallucinated
+          // family V2 rejected must not leak onto the lead label (codex r9),
+          // and flatView's requested_service is the raw primary category
+          // token ("pest_general"), which drops V2's secondaries and scans
+          // as nothing (codex r10). matched_service stays V1 here — the
+          // recurring-default backfill below re-asserts it post-merge.
+          const v2ServiceRequest = v2ApprovedExtraction?.service_request || null;
+          const v2RequestedForCompose = (() => {
+            if (!v2ServiceRequest) return null;
+            // composeWordsForV2Category, NOT mapServiceCategoryToLegacy: the
+            // legacy map collapses palm_injection into Tree & Shrub and
+            // hard-labels termite as inspection (codex r11).
+            let cats = [v2ServiceRequest.primary_service_category,
+              ...(Array.isArray(v2ServiceRequest.secondary_categories) ? v2ServiceRequest.secondary_categories : [])];
+            // A specialty catalog pick (flea/stinging/bed-bug) rides the
+            // coarse pest_general category in the V2 enum — the generic
+            // category word is the SAME job, not an extra pest request
+            // (codex r20).
+            const v2SpecificPick = flatView(v2ApprovedExtraction).specific_service_name;
+            if (v2SpecificPick && labelIsSpecialtyPestFamily(v2SpecificPick)) {
+              // Only the coarse category BACKING the specialty pick (the
+              // PRIMARY slot) is redundant — a separate pest_general
+              // SECONDARY is a real second request (codex r22).
+              cats = cats.filter((c, i) => !(i === 0 && (c === 'pest_general' || c === 'bundled_waveguard')));
+            }
+            // Null-mapped categories (other/inspection_only/future enums)
+            // yield an EMPTY category-authoritative request — never fall
+            // back to V1 caller text under V2 approval (codex r12)…
+            const words = cats.map((c) => composeWordsForV2Category(c)).filter(Boolean);
+            // …EXCEPT for families the V2 enum cannot express at all
+            // (tree/shrub, wildlife): those exist only in the caller text,
+            // so scan it for JUST them (codex r14 — closes the enum gap
+            // without reopening the V1-hallucination door).
+            const inexpressible = v2InexpressibleFamilyWords(extracted.requested_service);
+            return [words.join(' and '), inexpressible].filter(Boolean).join(' and ');
+          })();
+          // Prefix with the primary the V2 merge will adopt (same adoption
+          // rule as the merge below: V2 anchored a specific service, V1 had
+          // no label, or the category maps one-to-one) — a V1 primary V2
+          // rejected must not lead the label (codex r12).
+          const matchedForCompose = (() => {
+            if (v2ServiceRequest === null) return extracted.matched_service;
+            const v2Flat = flatView(v2ApprovedExtraction);
+            // A V2-anchored catalog pick IS the primary: "Palm Injection"
+            // must lead the label, not the coarse category mapping
+            // ("Tree & Shrub Care") that would then re-append the specific
+            // as a fake second service (codex r13).
+            if (v2Flat.specific_service_name) return v2Flat.specific_service_name;
+            const v2Cat = v2ServiceRequest.primary_service_category || null;
+            // Categories whose legacy mapping is null/coarse (stinging,
+            // exclusion) lead with their own family label — else a
+            // wasp-only call renders as two services (codex r15).
+            const catPrimary = v2PrimaryLabelForCategory(v2Cat);
+            if (catPrimary) return catPrimary;
+            // Termite category with no specific pick: flatView's coarse
+            // "Termite Inspection" would pair with the composed
+            // "+ Termite Service" as a phantom double — pick the single
+            // right primary from the caller's work cue (codex r22).
+            if (v2Cat === 'termite') {
+              return hasTermiteWorkCue(extracted.requested_service) ? 'Termite Service' : 'Termite Inspection';
+            }
+            const preciseV2Category = v2Cat === 'bed_bug' || v2Cat === 'wdo';
+            return v2Flat.matched_service
+              && (!extracted.matched_service || preciseV2Category)
+              ? v2Flat.matched_service
+              : extracted.matched_service;
+          })();
+          const serviceInterestLabel = composeServiceInterest(
+            v2ServiceRequest !== null
+              ? {
+                ...extracted,
+                matched_service: matchedForCompose,
+                requested_service: v2RequestedForCompose,
+                // Only the V2-ADOPTED specific may mark coverage — a stale
+                // V1 specific belonging to a secondary family (e.g. V1
+                // "Monthly Lawn Care Service" under V2 pest+lawn) would
+                // swallow that secondary's tail (codex r21).
+                specific_service_name: flatView(v2ApprovedExtraction).specific_service_name || null,
+              }
+              : extracted,
+            // Caller wording still decides termite work-vs-inspection —
+            // families stay category-authoritative under V2 approval.
+            v2ServiceRequest !== null ? { cueText: extracted.requested_service } : {},
+          );
+          if (serviceInterestLabel && isEmpty(current?.service_interest)) {
+            leadUpdates.service_interest = serviceInterestLabel;
+            persistedServiceInterestLabel = serviceInterestLabel;
+            // composeServiceInterest always prefixes the label with the
+            // matched service it composed with (matchedForCompose under V2
+            // approval), so the slice is exactly the extras.
+            persistedServiceInterestExtras = serviceInterestLabel === matchedForCompose
+              ? null
+              : serviceInterestLabel.slice(String(matchedForCompose || '').length);
+          }
           // Urgency is a triage signal, not a hand-edited field — and the
           // leads schema defaults it to 'normal' at insert (migration
           // 20260401000095_lead_attribution.js:43), so an empty-only guard
@@ -6134,8 +6249,27 @@ const CallRecordingProcessor = {
               .where((qb) => {
                 qb.whereNull('service_interest').orWhere({ service_interest: '' });
                 if (preReassertMatched) qb.orWhere({ service_interest: preReassertMatched });
+                // Enrichment may have persisted a COMPOSED label (matched +
+                // uncovered requested families) from the pre-V2-merge
+                // extraction — match the exact value it wrote, not a label
+                // recomputed from the since-mutated fields.
+                if (persistedServiceInterestLabel && persistedServiceInterestLabel !== preReassertMatched) {
+                  qb.orWhere({ service_interest: persistedServiceInterestLabel });
+                }
               })
-              .update({ service_interest: extracted.matched_service });
+              .update({
+                // Recompose over BOTH the post-merge request and the SECONDARY
+                // families enrichment already persisted: the V2 merge can
+                // narrow requested_service to the primary category only, and a
+                // primary-only recompose here would erase those tails. Only
+                // the extras carry forward — never the pre-merge primary,
+                // which the validated V2 merge may have corrected.
+                service_interest: composeServiceInterest({
+                  ...extracted,
+                  requested_service: [persistedServiceInterestExtras, extracted.requested_service]
+                    .filter(Boolean).join(' '),
+                }) || extracted.matched_service,
+              });
           }
         } catch (bfErr) {
           logger.warn(`[call-proc] recurring-default backfill failed open: ${bfErr.message}`);
