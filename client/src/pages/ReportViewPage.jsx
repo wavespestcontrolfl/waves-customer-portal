@@ -2310,8 +2310,17 @@ const CHIP_SEPARATOR_STYLE = {
 };
 
 function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
-  const items = typedReport?.findings;
-  if (!Array.isArray(items) || !items.length) return null;
+  const rawItems = typedReport?.findings;
+  const hasTileText = (item) => {
+    const text = item?.customerValueLabel != null && item.customerValueLabel !== ''
+      ? String(item.customerValueLabel)
+      : (item?.value != null ? String(item.value) : '');
+    return !!text.trim();
+  };
+  // all-valueless snapshots hide the whole card, not a header over zero
+  // tiles (codex P3)
+  const items = Array.isArray(rawItems) ? rawItems.filter(hasTileText) : [];
+  if (!items.length) return null;
   return (
     <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-findings">
       <h2>What we found &amp; did</h2>
@@ -2330,9 +2339,6 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
           const text = item.customerValueLabel != null && item.customerValueLabel !== ''
             ? String(item.customerValueLabel)
             : (item.value != null ? String(item.value) : '');
-          // a valueless item used to render the literal string "undefined" as
-          // its tile value (audit 2026-07-16) — skip it instead
-          if (!text.trim()) return null;
           // Chips render ONLY from the snapshot's authoritative mapped
           // parts (multi-select fields persist them at completion) — never
           // from splitting the display text, which would shred customer

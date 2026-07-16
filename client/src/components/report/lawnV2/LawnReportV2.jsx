@@ -885,9 +885,10 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
 
   const before = pics[0];
   const after = pics[pics.length - 1];
-  // rounded like ScoreBadge in the same card — float scores otherwise render
-  // "+7.300000000000004 points"
-  const delta = Math.round(toScore(after.score) - toScore(before.score));
+  // difference of the ROUNDED scores, so the delta always agrees with the
+  // ScoreBadge numbers shown beside it (codex P2: rounding the raw delta can
+  // disagree with round(after) - round(before) near .5 boundaries)
+  const delta = Math.round(toScore(after.score)) - Math.round(toScore(before.score));
   const H = 260;
 
   const setFromX = (clientX) => {
@@ -1072,7 +1073,9 @@ export function LawnTrends({ trends = {} }) {
       points: mowing,
       unit: '"',
       band: mowingBand || undefined,
-      accent: mowingBand ? bandAccent(lastVal(mowing), mowingBand[0], mowingBand[1]) : COLORS.blue,
+      // COLORS.blue does not exist in theme-brand (codex P2) — unknown band
+      // takes the neutral slate used for 'tracking' states
+      accent: mowingBand ? bandAccent(lastVal(mowing), mowingBand[0], mowingBand[1]) : COLORS.grayMid,
     },
     weed && { key: 'weed', title: 'Weed Cleanliness', sub: 'higher is better', points: weed, domain: [0, 100], accent: scoreAccent(lastVal(weed)) },
     coverage && { key: 'cov', title: 'Turf Coverage', sub: 'higher is better', points: coverage, domain: [0, 100], accent: scoreAccent(lastVal(coverage)) },
