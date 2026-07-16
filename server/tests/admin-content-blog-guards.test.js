@@ -126,6 +126,11 @@ describe('POST /blog/:id/generate guard', () => {
     // publish_failed with NO external markers is a plain retryable row
     tableState.post = { id: POST_ID, status: 'draft', astro_status: 'publish_failed', astro_pr_number: null, astro_branch_name: null };
     expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(200);
+
+    // mid-publish scheduler claim: markers don't exist yet but the publisher
+    // already captured the row's content (codex r3)
+    tableState.post = { id: POST_ID, status: 'queued', astro_status: 'draft', publish_status: 'publishing' };
+    expect((await invoke('post', '/blog/:id/generate', { params: { id: POST_ID } })).statusCode).toBe(409);
   });
 
   test('allows a plain draft and 404s junk / missing ids', async () => {

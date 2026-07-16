@@ -688,9 +688,12 @@ router.post('/blog/:id/generate', aiContentLimiter, async (req, res, next) => {
     // article's source text (no versioning exists). This read-side check
     // gives the friendly 409; generatePost's own CAS'd final write closes
     // the race where the state changes during the long AI call.
-    if (post.status === 'published' || astroActivePost(post)) {
+    if (post.status === 'published' || post.publish_status === 'publishing' || astroActivePost(post)) {
+      const why = post.status === 'published' ? 'published'
+        : post.publish_status === 'publishing' ? 'being published right now (scheduler claim)'
+          : `in Astro state '${post.astro_status || 'pending'}'`;
       return res.status(409).json({
-        error: `Post is ${post.status === 'published' ? 'published' : `in Astro state '${post.astro_status || 'pending'}'`} — generating would overwrite its content. Unpublish it first.`,
+        error: `Post is ${why} — generating would overwrite its content. Unpublish it first.`,
       });
     }
     const result = await BlogWriter.generatePost(req.params.id);

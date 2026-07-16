@@ -266,6 +266,11 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     const updated = await db('blog_posts')
       .where('id', blogPostId)
       .whereNot('status', 'published')
+      // publish_status='publishing' is the scheduler's transient claim while
+      // publishAstro runs — the branch/PR markers don't exist yet, but the
+      // publisher already captured the row's content; overwriting now would
+      // ship a PR whose source differs from the database.
+      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
       .whereNull('astro_pr_number')
       .whereNull('astro_branch_name')
       .where((q) => q.whereNull('astro_status')
