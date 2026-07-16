@@ -4209,7 +4209,16 @@ function CancelSignupModal({ customer, onClose, onDone }) {
           )}
           {preview && preview.eligible && !result && (
             <div>
-              <div className="mb-3">This will, in order:</div>
+              {/* First-run lesson (2026-07-15): the preview reads "done"
+                  enough that the owner closed it here thinking the run had
+                  fired. State the not-yet-ness explicitly. */}
+              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-13 text-zinc-900">
+                <span className="font-medium">Preview only — nothing has happened yet.</span>{" "}
+                <span className="text-ink-secondary">
+                  No refund is issued and nothing is cancelled until you press the red button below.
+                </span>
+              </div>
+              <div className="mb-3">Pressing it will, in order:</div>
               <ul className="list-disc pl-5 mb-3">
                 {preview.invoices.length > 0 && (
                   <li>
@@ -4279,11 +4288,11 @@ function CancelSignupModal({ customer, onClose, onDone }) {
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
           <Button variant="secondary" onClick={onClose} disabled={running}>
-            {result ? "Close" : "Keep customer"}
+            {result ? "Close" : "Close without cancelling"}
           </Button>
           {preview?.eligible && !result && (
             <Button variant="danger" onClick={confirm} disabled={running}>
-              {running ? "Working…" : `Cancel & refund ${fmtCurrency(preview.refundTotal)}`}
+              {running ? "Working…" : `Cancel & refund ${fmtCurrency(preview.refundTotal)} now`}
             </Button>
           )}
         </div>
