@@ -1,7 +1,7 @@
 ---
 description: Commit, push, and open/refresh the PR for the current work via the waves-ship flow
 argument-hint: optional context (e.g. "no PR yet, just push" or extra notes for the PR body)
-allowed-tools: Bash(git status:*), Bash(git diff:*), Bash(git branch:*), Bash(git log:*)
+allowed-tools: Bash(git status:*), Bash(git diff:*), Bash(git branch:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git push:*), Bash(git ls-remote:*), Bash(npm run check:portal-brand), Bash(npm run verify:blog-schema)
 ---
 
 ## Current state (precomputed)

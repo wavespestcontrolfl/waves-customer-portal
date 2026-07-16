@@ -3,7 +3,6 @@
     "allow": [
       "Bash(npm ci)",
       "Bash(npm run build)",
-      "Bash(npm run dev)",
       "Bash(npm run dev:client)",
       "Bash(npm run dev:server)",
       "Bash(npm test)",
