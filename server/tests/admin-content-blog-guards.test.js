@@ -38,7 +38,8 @@ const ACTIVE_STATES = ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_p
 const isActive = (p) => Boolean(p && (ACTIVE_STATES.includes(p.astro_status) || p.astro_pr_number || p.astro_branch_name));
 // Fake delete mirrors the route's full predicate (astro-active, published,
 // or mid-publish claim)
-const isDeletable = (p) => Boolean(p && !isActive(p) && p.status !== 'published' && p.publish_status !== 'publishing');
+const claimLive = (p) => Boolean(p && p.publish_claimed_at && (Date.now() - new Date(p.publish_claimed_at).getTime()) < 30 * 60 * 1000);
+const isDeletable = (p) => Boolean(p && !isActive(p) && p.status !== 'published' && p.publish_status !== 'publishing' && !claimLive(p));
 
 function setupDb() {
   const calls = { updates: [], deletes: 0 };
@@ -249,44 +250,67 @@ describe('GET /blog sort/limit hardening', () => {
 // codex r4 (P0): the manual publish lane must own the row while publishAstro
 // runs its long external workflow — DELETE/generate reject the claim, and
 // the route restores the prior publish_status afterwards.
-describe('publish-astro atomic claim', () => {
+describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invisible to pages-poll)', () => {
   const AstroPublisher = require('../services/content-astro/astro-publisher');
 
-  test('claims publishing before publishAstro and restores the prior value after', async () => {
+  test('claims before publishAstro and releases after — publish_status untouched', async () => {
     const calls = setupDb();
-    tableState.post = { id: POST_ID, status: 'draft', astro_status: null, publish_status: 'pending_review' };
+    tableState.post = { id: POST_ID, status: 'draft', astro_status: null, publish_status: 'pending_review', publish_claimed_at: null };
     AstroPublisher.publishAstro.mockResolvedValue({ pr_number: 9 });
 
     const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
     expect(r.statusCode).toBe(200);
-    const statusWrites = calls.updates.filter((u) => 'publish_status' in u.updates).map((u) => u.updates.publish_status);
-    expect(statusWrites).toEqual(['publishing', 'pending_review']);
+    const claimWrites = calls.updates.filter((u) => 'publish_claimed_at' in u.updates).map((u) => u.updates.publish_claimed_at);
+    expect(claimWrites).toHaveLength(2);
+    expect(claimWrites[0]).toBeInstanceOf(Date);
+    expect(claimWrites[1]).toBeNull();
+    // pages-poll's auto-merge marker is never written by the manual lane
+    expect(calls.updates.some((u) => 'publish_status' in u.updates)).toBe(false);
   });
 
-  test('a row already claimed by a publisher 409s instead of double-publishing', async () => {
-    setupDb();
-    tableState.post = { id: POST_ID, status: 'queued', publish_status: 'publishing' };
+  test('a row already claimed 409s instead of double-publishing (fresh claim blocks, stale claim does not)', async () => {
+    const calls = setupDb();
+    // updateResult-style: the claim UPDATE reports 0 rows for a live claim
+    tableState.post = { id: POST_ID, status: 'queued', publish_claimed_at: new Date() };
+    calls.claimBlocked = true;
+    db.mockImplementation((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        first: jest.fn(() => Promise.resolve(tableState.post ?? null)),
+        update: jest.fn(() => Promise.resolve(0)),
+      };
+      return q;
+    });
     const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
     expect(r.statusCode).toBe(409);
     expect(AstroPublisher.publishAstro).not.toHaveBeenCalled();
   });
 
-  test('the claim is restored even when publishAstro throws', async () => {
+  test('the claim is released even when publishAstro throws', async () => {
     const calls = setupDb();
-    tableState.post = { id: POST_ID, status: 'draft', publish_status: null };
+    tableState.post = { id: POST_ID, status: 'draft', publish_claimed_at: null };
     AstroPublisher.publishAstro.mockRejectedValue(Object.assign(new Error('gates failed'), { code: 'BLOG_GUARDRAILS_FAILED' }));
     const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
     expect(r.statusCode).toBe(400);
-    const statusWrites = calls.updates.filter((u) => 'publish_status' in u.updates).map((u) => u.updates.publish_status);
-    expect(statusWrites).toEqual(['publishing', null]);
+    const claimWrites = calls.updates.filter((u) => 'publish_claimed_at' in u.updates).map((u) => u.updates.publish_claimed_at);
+    expect(claimWrites[claimWrites.length - 1]).toBeNull();
   });
 
-  test('DELETE refuses a mid-publish claimed row', async () => {
+  test('DELETE refuses a mid-publish claimed row (scheduler marker or manual claim)', async () => {
     const calls = setupDb();
     tableState.post = { id: POST_ID, status: 'queued', astro_status: null, publish_status: 'publishing' };
+    expect((await invoke('delete', '/blog/:id', { params: { id: POST_ID } })).statusCode).toBe(409);
+
+    tableState.post = { id: POST_ID, status: 'queued', astro_status: null, publish_status: null, publish_claimed_at: new Date() };
     const r = await invoke('delete', '/blog/:id', { params: { id: POST_ID } });
     expect(r.statusCode).toBe(409);
     expect(r.payload.error).toContain('being published');
     expect(calls.deletes).toBe(0);
+  });
+
+  test('PUT refuses a mid-publish row and CAS-guards against a concurrent status flip', async () => {
+    setupDb();
+    tableState.post = { id: POST_ID, status: 'queued', publish_claimed_at: new Date() };
+    expect((await invoke('put', '/blog/:id', { params: { id: POST_ID }, body: { title: 'T' } })).statusCode).toBe(409);
   });
 });

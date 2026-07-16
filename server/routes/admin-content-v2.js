@@ -79,13 +79,33 @@ function astroActivePost(post) {
 // check alone is a check-then-act race (a publisher can open a PR between
 // the read and the destructive write). NULL semantics: whereNotIn excludes
 // NULL astro_status rows, hence the orWhereNull.
+// Manual-publish claim window: a publish_claimed_at younger than this owns
+// the row (the manual /publish-astro lane sets it; pages-poll never reads
+// it, so it can't be mistaken for scheduler auto-merge authorization).
+// Older claims are crashed publishes — staleness is inherent, no sweep.
+const PUBLISH_CLAIM_STALE_MS = 30 * 60 * 1000;
+
+function publishClaimActive(post) {
+  if (!post || !post.publish_claimed_at) return false;
+  const at = new Date(post.publish_claimed_at).getTime();
+  return Number.isFinite(at) && (Date.now() - at) < PUBLISH_CLAIM_STALE_MS;
+}
+
+function whereNoLivePublishClaim(query) {
+  return query.where((q) => q.whereNull('publish_claimed_at')
+    .orWhere('publish_claimed_at', '<', new Date(Date.now() - PUBLISH_CLAIM_STALE_MS)));
+}
+
 function whereNotAstroActive(query) {
-  return query
-    .whereNull('astro_pr_number')
-    .whereNull('astro_branch_name')
-    // Mid-publish claim: markers don't exist yet but a publisher owns the row.
-    .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
-    .where((q) => q.whereNull('astro_status').orWhereNotIn('astro_status', Array.from(ASTRO_PIPELINE_ACTIVE)));
+  return whereNoLivePublishClaim(
+    query
+      .whereNull('astro_pr_number')
+      .whereNull('astro_branch_name')
+      // Mid-publish scheduler claim: markers don't exist yet but a publisher
+      // owns the row.
+      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+      .where((q) => q.whereNull('astro_status').orWhereNotIn('astro_status', Array.from(ASTRO_PIPELINE_ACTIVE))),
+  );
 }
 
 const BLOG_SORT_COLUMNS = new Set([
@@ -625,6 +645,11 @@ router.put('/blog/:id', async (req, res, next) => {
     assertBlogPostId(req.params.id);
     const existing = await db('blog_posts').where('id', req.params.id).first();
     if (!existing) return res.status(404).json({ error: 'Post not found' });
+    // A publisher owns the row mid-publish (scheduler claim or manual claim):
+    // editing now would leave the opened PR and the database source divergent.
+    if (existing.publish_status === 'publishing' || publishClaimActive(existing)) {
+      return res.status(409).json({ error: 'Post is being published right now — retry after it finishes.' });
+    }
 
     const updates = { ...normalizeBlogUpdates(req.body), updated_at: new Date() };
     if (updates.status !== undefined) {
@@ -641,7 +666,14 @@ router.put('/blog/:id', async (req, res, next) => {
     if (updates.content) {
       updates.word_count = updates.content.split(/\s+/).filter(Boolean).length;
     }
-    const [post] = await db('blog_posts').where('id', req.params.id).update(updates).returning('*');
+    // CAS on the status the no-jump rule was validated against — a concurrent
+    // unpublish (published→draft) must not let this write re-publish the row.
+    const [post] = await db('blog_posts')
+      .where('id', req.params.id)
+      .where('status', existing.status)
+      .update(updates)
+      .returning('*');
+    if (!post) return res.status(409).json({ error: 'Post state changed underneath this request — reload and retry.' });
     res.json({ post });
   } catch (err) { next(err); }
 });
@@ -666,7 +698,7 @@ router.delete('/blog/:id', async (req, res, next) => {
     if (!deleted) {
       const post = await db('blog_posts').where('id', req.params.id).first();
       if (!post) return res.status(404).json({ error: 'Post not found' });
-      const why = post.publish_status === 'publishing'
+      const why = (post.publish_status === 'publishing' || publishClaimActive(post))
         ? 'Post is being published right now (publisher claim) — retry after it finishes.'
         : post.status === 'published' && !astroActivePost(post)
           ? "Post is published — un-publish it first (set status to draft, or unpublish-astro if it has a live page), then delete."
@@ -692,9 +724,9 @@ router.post('/blog/:id/generate', aiContentLimiter, async (req, res, next) => {
     // article's source text (no versioning exists). This read-side check
     // gives the friendly 409; generatePost's own CAS'd final write closes
     // the race where the state changes during the long AI call.
-    if (post.status === 'published' || post.publish_status === 'publishing' || astroActivePost(post)) {
+    if (post.status === 'published' || post.publish_status === 'publishing' || publishClaimActive(post) || astroActivePost(post)) {
       const why = post.status === 'published' ? 'published'
-        : post.publish_status === 'publishing' ? 'being published right now (scheduler claim)'
+        : (post.publish_status === 'publishing' || publishClaimActive(post)) ? 'being published right now (publisher claim)'
           : `in Astro state '${post.astro_status || 'pending'}'`;
       return res.status(409).json({
         error: `Post is ${why} — generating would overwrite its content. Unpublish it first.`,
@@ -798,29 +830,24 @@ router.post('/blog/:id/publish', async (req, res, next) => {
 
 // POST /api/admin/content/blog/:id/publish-astro — create branch + PR
 router.post('/blog/:id/publish-astro', async (req, res, next) => {
-  // Atomic 'publishing' claim (the scheduler's own transient marker) for the
-  // manual lane: publishAstro runs a long external branch/commit/PR workflow
-  // and only persists astro markers at the END — without a claim, DELETE
-  // could remove the row (orphaning the PR publishAstro was about to open)
-  // and generate could overwrite the content it had already captured. The
-  // claim is restored afterwards so admin PRs never enter pages-poll's
-  // publishing+pr_open auto-merge branch; a crash mid-publish is bounded by
-  // the scheduler's resetStalePublishingBlogs sweep (~30 min).
+  // Atomic manual-lane claim: publishAstro runs a long external
+  // branch/commit/PR workflow and only persists astro markers at the END —
+  // without a claim, DELETE could remove the row (orphaning the PR about to
+  // open) and generate/PUT could change the content the publisher had
+  // already captured. publish_claimed_at is lane-neutral: pages-poll never
+  // reads it, so an admin PR can NEVER be mistaken for the scheduler's
+  // publishing+pr_open auto-merge authorization (that marker stays the
+  // scheduler's alone). A crashed publish self-expires via the claim window.
   let claimed = false;
-  let prior = null;
   try {
     assertBlogPostId(req.params.id);
-    const post = await db('blog_posts').where('id', req.params.id).first();
-    if (!post) return res.status(404).json({ error: 'Post not found' });
-    prior = post.publish_status ?? null;
-    if (prior === 'publishing') {
+    const got = await whereNoLivePublishClaim(db('blog_posts').where('id', req.params.id))
+      .update({ publish_claimed_at: new Date(), updated_at: new Date() });
+    if (!got) {
+      const post = await db('blog_posts').where('id', req.params.id).first();
+      if (!post) return res.status(404).json({ error: 'Post not found' });
       return res.status(409).json({ error: 'Post is already being published.' });
     }
-    const got = await db('blog_posts')
-      .where('id', req.params.id)
-      .where((q) => (prior === null ? q.whereNull('publish_status') : q.where('publish_status', prior)))
-      .update({ publish_status: 'publishing', updated_at: new Date() });
-    if (!got) return res.status(409).json({ error: 'Post state changed underneath this request — reload and retry.' });
     claimed = true;
 
     const AstroPublisher = require('../services/content-astro/astro-publisher');
@@ -838,10 +865,10 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     if (claimed) {
       try {
         await db('blog_posts')
-          .where({ id: req.params.id, publish_status: 'publishing' })
-          .update({ publish_status: prior, updated_at: new Date() });
+          .where('id', req.params.id)
+          .update({ publish_claimed_at: null, updated_at: new Date() });
       } catch (e) {
-        logger.warn(`[content] publish-astro claim restore failed for ${req.params.id}: ${e.message} (stale-publishing sweep will reset it)`);
+        logger.warn(`[content] publish-astro claim release failed for ${req.params.id}: ${e.message} (claim self-expires in 30m)`);
       }
     }
   }
