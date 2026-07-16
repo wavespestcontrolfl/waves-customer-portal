@@ -48,8 +48,9 @@ const { surchargeAllowed } = require('./surcharge-jurisdiction');
 const {
   assertInvoicePaymentIntentTenderMatches,
   invoicePaymentStatusForIntent,
+  nextInvoiceStatusAfterFailedPayment,
 } = require('./stripe-invoice-state');
-const { assertInvoiceCollectible, invoiceAmountDue } = require('./invoice-helpers');
+const { assertInvoiceCollectible, isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -60,6 +61,568 @@ function isIncompatibleAttachedMethodError(err) {
   const message = String(err?.message || err?.raw?.message || '').toLowerCase();
   return message.includes('incompatible with the attached paymentmethod')
     || message.includes('replace the paymentmethod first');
+}
+
+// A Stripe create/confirm call that fails without returning a PaymentIntent is
+// only unsafe to retry when the failure came from the connection/API layer.
+// Validation and card-decline errors are deterministic; a timeout or 5xx may
+// have happened after Stripe accepted the request.
+function isAmbiguousStripeChargeError(err) {
+  const paymentIntentId = err?.payment_intent?.id || err?.raw?.payment_intent?.id || null;
+  const type = err?.type || err?.raw?.type || null;
+  return !paymentIntentId && ['StripeConnectionError', 'StripeAPIError'].includes(type);
+}
+
+const SAVED_CARD_RECONCILIATION_ERROR_CODES = new Set([
+  'STRIPE_CHARGED_DB_FAILED',
+  'STRIPE_AMBIGUOUS_OUTCOME',
+]);
+const SAVED_CARD_CLAIM_STALE_MS = 5 * 60 * 1000;
+
+function savedCardClaimIsStale(attempt, now = Date.now()) {
+  const claimedAt = new Date(attempt?.created_at || '').getTime();
+  return Number.isFinite(claimedAt) && now - claimedAt >= SAVED_CARD_CLAIM_STALE_MS;
+}
+
+function savedCardClaimWasSubmitted(attempt) {
+  return Boolean(attempt?.submitted_at || attempt?.stripe_payment_intent_id);
+}
+
+function savedCardChargeNeedsReconciliation(err) {
+  return SAVED_CARD_RECONCILIATION_ERROR_CODES.has(err?.code);
+}
+
+function savedCardChargeSuppressesAlternateCollection(err) {
+  return savedCardChargeNeedsReconciliation(err) || err?.code === 'STRIPE_CHARGE_IN_PROGRESS';
+}
+
+function shouldTreatSavedCardFailureAsAmbiguous({ chargeSubmitted, error }) {
+  return chargeSubmitted === true && isAmbiguousStripeChargeError(error);
+}
+
+async function promoteStaleSavedCardClaim(attempt, database = db) {
+  if (attempt?.status !== 'claimed' || !savedCardClaimIsStale(attempt)) return false;
+  return database('stripe_invoice_charge_attempts')
+    .where({ id: attempt.id, status: 'claimed' })
+    .whereNull('resolved_at')
+    .update({
+      status: 'ambiguous',
+      error_message: 'Saved-card charge claim exceeded the active window; outcome requires reconciliation',
+      updated_at: new Date(),
+    });
+}
+
+async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
+  if (
+    attempt?.status !== 'claimed'
+    || !savedCardClaimIsStale(attempt)
+    || savedCardClaimWasSubmitted(attempt)
+  ) return false;
+
+  return database('stripe_invoice_charge_attempts')
+    .where({ id: attempt.id, status: 'claimed' })
+    .whereNull('resolved_at')
+    .whereNull('submitted_at')
+    .whereNull('stripe_payment_intent_id')
+    .update({
+      status: 'failed',
+      error_message: 'Saved-card charge claim expired before submission to Stripe',
+      resolved_at: new Date(),
+      updated_at: new Date(),
+    });
+}
+
+async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db) {
+  let chargeAttempt = await database('stripe_invoice_charge_attempts')
+    .where({ invoice_id: invoiceId })
+    .whereIn('status', ['claimed', 'ambiguous'])
+    .whereNull('resolved_at')
+    .first('id', 'status', 'stripe_payment_intent_id', 'idempotency_key', 'submitted_at', 'created_at');
+  if (chargeAttempt) {
+    let ambiguous = chargeAttempt.status === 'ambiguous';
+    if (!ambiguous && savedCardClaimIsStale(chargeAttempt)) {
+      if (!savedCardClaimWasSubmitted(chargeAttempt)) {
+        const released = await releaseStalePreSubmitSavedCardClaim(chargeAttempt, database).catch((releaseErr) => {
+          logger.error(`[stripe] could not release stale pre-submit saved-card claim ${chargeAttempt.id}: ${releaseErr.message}`);
+          return 0;
+        });
+        if (released > 0) chargeAttempt = null;
+      } else {
+        const promoted = await promoteStaleSavedCardClaim(chargeAttempt, database).catch((promoteErr) => {
+          logger.error(`[stripe] could not promote stale saved-card claim ${chargeAttempt.id}: ${promoteErr.message}`);
+          return 0;
+        });
+        ambiguous = promoted > 0;
+        if (ambiguous) chargeAttempt.status = 'ambiguous';
+      }
+    }
+  }
+  if (chargeAttempt) {
+    const ambiguous = chargeAttempt.status === 'ambiguous';
+    const err = new Error(ambiguous
+      ? 'Invoice has an unresolved charge attempt with an ambiguous Stripe outcome'
+      : 'Invoice already has a saved-card charge in progress or awaiting reconciliation');
+    err.code = ambiguous ? 'STRIPE_AMBIGUOUS_OUTCOME' : 'STRIPE_CHARGE_IN_PROGRESS';
+    err.chargeAttemptId = chargeAttempt.id;
+    err.stripePaymentIntentId = chargeAttempt.stripe_payment_intent_id || null;
+    err.idempotencyKey = chargeAttempt.idempotency_key;
+    err.reconciliationRequired = ambiguous;
+    throw err;
+  }
+
+  const orphan = await database('stripe_orphan_charges')
+    .where({ invoice_id: invoiceId, resolved: false })
+    .first('stripe_payment_intent_id');
+  if (orphan) {
+    const err = new Error(`Invoice has an unresolved Stripe charge ${orphan.stripe_payment_intent_id}`);
+    err.code = 'STRIPE_CHARGED_DB_FAILED';
+    err.stripePaymentIntentId = orphan.stripe_payment_intent_id;
+    err.reconciliationRequired = true;
+    throw err;
+  }
+
+  // An API/connection failure without a returned PI may still have collected
+  // money. Keep the invoice fenced across page reloads. A reconciler can clear
+  // the fence by linking the attempt to a different superseding payment or by
+  // correcting its ambiguous_outcome metadata after verifying Stripe.
+  const ambiguousAttempt = await database('payments')
+    .where({ status: 'failed' })
+    .whereNull('stripe_payment_intent_id')
+    .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+    .whereRaw("COALESCE((metadata->>'ambiguous_outcome')::boolean, false) = true")
+    .where(function unresolvedAmbiguousAttempt() {
+      this.whereNull('superseded_by_payment_id')
+        .orWhereColumn('superseded_by_payment_id', 'payments.id');
+    })
+    .first('id');
+  if (ambiguousAttempt) {
+    const err = new Error('Invoice has an unresolved charge attempt with an ambiguous Stripe outcome');
+    err.code = 'STRIPE_AMBIGUOUS_OUTCOME';
+    err.paymentRecordId = ambiguousAttempt.id;
+    err.reconciliationRequired = true;
+    throw err;
+  }
+}
+
+async function claimInvoiceSavedCardCharge({
+  invoiceId,
+  paymentMethodId,
+  stripePaymentMethodId,
+  database = db,
+  attemptId = uuidv4(),
+}) {
+  const idempotencyKey = `inv_card_on_file_${invoiceId}_${attemptId}`;
+  try {
+    return await database.transaction(async (claimTrx) => {
+      // Public server-side confirm takes this same invoice lock for its final
+      // fence check. Whichever path wins serializes the decision: a committed
+      // claim blocks confirm, while a confirm already sent to Stripe leaves an
+      // attached live PI that the saved-card owner refuses to replace.
+      const lockedInvoice = await claimTrx('invoices')
+        .where({ id: invoiceId })
+        .forUpdate()
+        .first('id');
+      if (!lockedInvoice) throw new Error('Invoice not found');
+
+      const [attempt] = await claimTrx('stripe_invoice_charge_attempts')
+        .insert({
+          id: attemptId,
+          invoice_id: invoiceId,
+          payment_method_id: paymentMethodId,
+          stripe_payment_method_id: stripePaymentMethodId,
+          idempotency_key: idempotencyKey,
+          status: 'claimed',
+        })
+        .returning('*');
+      return attempt;
+    });
+  } catch (err) {
+    if (err.code !== '23505') throw err;
+    const blocking = await database('stripe_invoice_charge_attempts')
+      .where({ invoice_id: invoiceId })
+      .whereIn('status', ['claimed', 'ambiguous'])
+      .whereNull('resolved_at')
+      .first('id', 'status', 'stripe_payment_intent_id', 'idempotency_key', 'submitted_at', 'created_at');
+    let ambiguous = blocking?.status === 'ambiguous';
+    if (!ambiguous && savedCardClaimIsStale(blocking)) {
+      if (!savedCardClaimWasSubmitted(blocking)) {
+        const released = await releaseStalePreSubmitSavedCardClaim(blocking, database).catch((releaseErr) => {
+          logger.error(`[stripe] could not release collided stale pre-submit saved-card claim ${blocking.id}: ${releaseErr.message}`);
+          return 0;
+        });
+        if (released > 0) {
+          return claimInvoiceSavedCardCharge({
+            invoiceId,
+            paymentMethodId,
+            stripePaymentMethodId,
+            database,
+            attemptId,
+          });
+        }
+      } else {
+        const promoted = await promoteStaleSavedCardClaim(blocking, database).catch((promoteErr) => {
+          logger.error(`[stripe] could not promote collided stale saved-card claim ${blocking.id}: ${promoteErr.message}`);
+          return 0;
+        });
+        ambiguous = promoted > 0;
+        if (ambiguous) blocking.status = 'ambiguous';
+      }
+    }
+    const conflict = new Error(ambiguous
+      ? 'Invoice has an unresolved charge attempt with an ambiguous Stripe outcome'
+      : 'Invoice already has a saved-card charge in progress or awaiting reconciliation');
+    conflict.code = ambiguous ? 'STRIPE_AMBIGUOUS_OUTCOME' : 'STRIPE_CHARGE_IN_PROGRESS';
+    conflict.chargeAttemptId = blocking?.id || null;
+    conflict.stripePaymentIntentId = blocking?.stripe_payment_intent_id || null;
+    conflict.idempotencyKey = blocking?.idempotency_key || null;
+    conflict.reconciliationRequired = ambiguous;
+    throw conflict;
+  }
+}
+
+async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = db) {
+  const updated = await database('stripe_invoice_charge_attempts')
+    .where({ id: attemptId })
+    .whereIn('status', ['claimed', 'ambiguous'])
+    .whereNull('resolved_at')
+    .update({ ...updates, updated_at: new Date() });
+  if (!updated) {
+    const err = new Error(`Saved-card charge attempt ${attemptId} could not be updated`);
+    err.code = 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST';
+    throw err;
+  }
+}
+
+async function commitInvoiceSavedCardChargeSubmission({
+  attemptId,
+  amount,
+  creditAppliedDelta,
+  creditAppliedTotal,
+  database = db,
+}) {
+  // This transaction deliberately uses the root database handle, not the
+  // invoice transaction that calls it. Awaiting it proves submitted_at is
+  // committed before the Stripe request can leave this process; a crash after
+  // the network write can therefore never make the attempt look pre-submit.
+  return database.transaction(async (submissionTrx) => {
+    await markInvoiceSavedCardChargeAttempt(attemptId, {
+      amount,
+      credit_applied_delta: creditAppliedDelta,
+      credit_applied_total: creditAppliedTotal,
+      submitted_at: new Date(),
+    }, submissionTrx);
+  });
+}
+
+async function resolveSettledInvoiceSavedCardChargeAttempt({
+  attemptId,
+  invoiceId,
+  customerId,
+  stripePaymentIntentId,
+  amount,
+  database = db,
+}) {
+  if (!attemptId || !invoiceId || !customerId || !stripePaymentIntentId) return false;
+
+  return database.transaction(async (trx) => {
+    // The invoice/payment transaction may have committed before the owning
+    // request could close its durable attempt. A succeeded-webhook retry must
+    // repair that last write, but only after re-proving the exact local
+    // settlement while holding the attempt lock; a Stripe event by itself is
+    // not enough.
+    const attempt = await trx('stripe_invoice_charge_attempts')
+      .where({ id: attemptId, invoice_id: invoiceId })
+      .forUpdate()
+      .first('id', 'status', 'resolved_at', 'stripe_payment_intent_id');
+    if (!attempt || !['claimed', 'ambiguous', 'succeeded'].includes(attempt.status)) return false;
+    if (attempt.stripe_payment_intent_id
+      && String(attempt.stripe_payment_intent_id) !== String(stripePaymentIntentId)) return false;
+
+    const invoice = await trx('invoices')
+      .where({
+        id: invoiceId,
+        customer_id: customerId,
+        status: 'paid',
+        stripe_payment_intent_id: stripePaymentIntentId,
+      })
+      .first('id');
+    if (!invoice) return false;
+
+    const payment = await trx('payments')
+      .where({
+        customer_id: customerId,
+        status: 'paid',
+        stripe_payment_intent_id: stripePaymentIntentId,
+      })
+      .first('id', 'amount');
+    if (!payment) return false;
+
+    const settledAmount = amount != null && Number.isFinite(Number(amount))
+      ? Number(amount)
+      : Number(payment.amount);
+    const resolvedAttempt = await trx('stripe_invoice_charge_attempts')
+      .where({ id: attempt.id })
+      .whereIn('status', ['claimed', 'ambiguous'])
+      .whereNull('resolved_at')
+      .update({
+        status: 'succeeded',
+        stripe_payment_intent_id: stripePaymentIntentId,
+        ...(Number.isFinite(settledAmount) ? { amount: settledAmount } : {}),
+        error_message: null,
+        resolved_at: new Date(),
+        updated_at: new Date(),
+      });
+    // The request may have durably closed the attempt after writing the orphan
+    // ledger but before a succeeded webhook repaired the invoice/payment rows.
+    // Clear that exact orphan fence only after re-proving local settlement.
+    const resolvedOrphan = await trx('stripe_orphan_charges')
+      .where({
+        invoice_id: invoiceId,
+        stripe_payment_intent_id: stripePaymentIntentId,
+        resolved: false,
+      })
+      .update({
+        resolved: true,
+        resolved_at: new Date(),
+        resolution_notes: 'Automatically reconciled by succeeded webhook after local invoice/payment settlement',
+      });
+    return resolvedAttempt > 0 || resolvedOrphan > 0;
+  });
+}
+
+async function resolveNoFundsSavedCardChargeAttempt({
+  attemptId,
+  invoiceId,
+  failureMessage,
+  database = db,
+}) {
+  if (!attemptId || !invoiceId) return false;
+
+  return database.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!invoice) return false;
+    const attempt = await trx('stripe_invoice_charge_attempts')
+      .where({ id: attemptId, invoice_id: invoiceId })
+      .whereIn('status', ['claimed', 'ambiguous'])
+      .whereNull('resolved_at')
+      .forUpdate()
+      .first('id', 'status');
+    if (!attempt) return false;
+
+    // A second request can promote a five-minute claim and park the invoice
+    // while the original is still blocked in Stripe. Once that owner proves no
+    // funds can move (pre-create failure or definitive decline), restore
+    // collection only while its ambiguous no-PI attempt still owns the park.
+    let reopened = false;
+    if (attempt.status === 'ambiguous'
+      && String(invoice.status || '').toLowerCase() === 'processing'
+      && !invoice.stripe_payment_intent_id) {
+      await trx('invoices').where({ id: invoiceId }).update({
+        status: nextInvoiceStatusAfterFailedPayment(invoice),
+        stripe_payment_intent_id: null,
+        paid_at: null,
+        ach_processing_notified_at: null,
+        updated_at: new Date(),
+      });
+      reopened = true;
+    }
+
+    const resolved = await trx('stripe_invoice_charge_attempts')
+      .where({ id: attempt.id })
+      .whereIn('status', ['claimed', 'ambiguous'])
+      .whereNull('resolved_at')
+      .update({
+        status: 'failed',
+        error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
+        resolved_at: new Date(),
+        updated_at: new Date(),
+      });
+    return resolved > 0 ? { resolved: true, reopened } : false;
+  });
+}
+
+async function resolveFailedInvoiceSavedCardChargeAttempt({
+  attemptId,
+  invoiceId,
+  customerId,
+  stripePaymentIntentId,
+  failureMessage,
+  database = db,
+}) {
+  if (!attemptId || !invoiceId || !customerId || !stripePaymentIntentId) return false;
+
+  return database.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!invoice || String(invoice.customer_id) !== String(customerId)) return false;
+    const invoiceStatus = String(invoice.status || '').toLowerCase();
+    if (invoiceStatus !== 'processing' && !isInvoiceCollectibleStatus(invoiceStatus)) return false;
+    if (invoiceStatus === 'processing'
+      && invoice.stripe_payment_intent_id
+      && String(invoice.stripe_payment_intent_id) !== String(stripePaymentIntentId)) {
+      return false;
+    }
+
+    const attempt = await trx('stripe_invoice_charge_attempts')
+      .where({ id: attemptId, invoice_id: invoiceId })
+      .whereIn('status', ['claimed', 'ambiguous'])
+      .whereNull('resolved_at')
+      .forUpdate()
+      .first('id', 'credit_applied_delta', 'credit_applied_total');
+    if (!attempt) return false;
+
+    // A timeout ambiguity may have committed the credit reservation even
+    // though the Stripe PI ultimately failed. Return only the portion this
+    // attempt reserved; any pre-existing or later credit remains applied.
+    const { postCreditMovement, round2 } = require('./customer-credit');
+    const delta = Math.max(0, round2(attempt.credit_applied_delta || 0));
+    const target = Math.max(0, round2(attempt.credit_applied_total || 0));
+    const original = Math.max(0, round2(target - delta));
+    const current = Math.max(0, round2(invoice.credit_applied || 0));
+    const creditToRelease = Math.min(delta, Math.max(0, round2(current - original)));
+    if (creditToRelease > 0) {
+      await postCreditMovement({
+        customerId,
+        delta: creditToRelease,
+        source: 'adjustment',
+        invoiceId,
+        note: `Account credit released after failed saved-card attempt ${attempt.id}`,
+        createdBy: 'system:saved_card_reconciliation',
+      }, trx);
+      invoice.credit_applied = round2(current - creditToRelease);
+    }
+
+    await trx('invoices').where({ id: invoiceId }).update({
+      status: invoiceStatus === 'processing'
+        ? nextInvoiceStatusAfterFailedPayment(invoice)
+        : invoice.status,
+      stripe_payment_intent_id: null,
+      credit_applied: invoice.credit_applied,
+      paid_at: null,
+      ach_processing_notified_at: null,
+      updated_at: new Date(),
+    });
+    const resolved = await trx('stripe_invoice_charge_attempts')
+      .where({ id: attempt.id })
+      .whereIn('status', ['claimed', 'ambiguous'])
+      .whereNull('resolved_at')
+      .update({
+        status: 'failed',
+        stripe_payment_intent_id: stripePaymentIntentId,
+        error_message: String(failureMessage || 'Stripe reported payment failure').slice(0, 1000),
+        resolved_at: new Date(),
+        updated_at: new Date(),
+      });
+    await trx('stripe_orphan_charges')
+      .where({
+        invoice_id: invoiceId,
+        stripe_payment_intent_id: stripePaymentIntentId,
+        resolved: false,
+      })
+      .update({
+        resolved: true,
+        resolved_at: new Date(),
+        resolution_notes: 'Stripe reported final payment failure; no funds collected',
+      });
+    return resolved > 0;
+  });
+}
+
+function savedCardAttemptOutcome({ durableSettlementReady, paymentIntentStatus }) {
+  if (durableSettlementReady && paymentIntentStatus === 'succeeded') {
+    return { status: 'succeeded', resolved: true };
+  }
+  if (paymentIntentStatus === 'processing') {
+    return { status: 'ambiguous', resolved: false };
+  }
+  return { status: 'claimed', resolved: false };
+}
+
+async function persistSavedCardChargeCreditDelta({
+  invoiceId,
+  customerId,
+  attemptId = null,
+  originalCreditApplied,
+  creditDelta,
+  targetCreditApplied,
+  reference,
+  database = db,
+}) {
+  if (!(Number(creditDelta) > 0)) return true;
+  const { postCreditMovement, round2 } = require('./customer-credit');
+  return database.transaction(async (trx) => {
+    const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!locked) return false;
+    if (attemptId) {
+      const unresolvedAttempt = await trx('stripe_invoice_charge_attempts')
+        .where({ id: attemptId, invoice_id: invoiceId })
+        .whereIn('status', ['claimed', 'ambiguous'])
+        .whereNull('resolved_at')
+        .first('id');
+      // A definitive failed webhook may have resolved the claim while the
+      // request was unwinding its timeout. Never reserve credit after that.
+      if (!unresolvedAttempt) return false;
+    }
+    const current = round2(locked.credit_applied || 0);
+    const target = round2(targetCreditApplied ?? (
+      (Number(originalCreditApplied) || 0) + Number(creditDelta)
+    ));
+    if (current >= target) return true;
+    await postCreditMovement({
+      customerId,
+      delta: -round2(target - current),
+      source: 'adjustment',
+      invoiceId,
+      note: `Account credit reserved for saved-card reconciliation ${reference}`,
+      createdBy: 'system:saved_card_reconciliation',
+    }, trx);
+    await trx('invoices').where({ id: invoiceId }).update({
+      credit_applied: target,
+      updated_at: trx.fn.now(),
+    });
+    return true;
+  });
+}
+
+async function parkInvoiceForSavedCardReconciliation({
+  invoiceId,
+  error,
+  chargeAttemptId = error?.chargeAttemptId || null,
+  database = db,
+}) {
+  return database.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!invoice) return { reconciliationRequired: true, invoice: null };
+
+    if (chargeAttemptId) {
+      const unresolvedAttempt = await trx('stripe_invoice_charge_attempts')
+        .where({ id: chargeAttemptId, invoice_id: invoiceId })
+        .whereIn('status', ['claimed', 'ambiguous'])
+        .whereNull('resolved_at')
+        .forUpdate()
+        .first('id');
+      // A definitive webhook can resolve and reopen this invoice while the
+      // request is unwinding an ambiguous create error. Re-prove ownership
+      // under the same invoice lock before parking so the loser cannot strand
+      // the invoice in processing with no live reconciliation fence.
+      if (!unresolvedAttempt) {
+        return { reconciliationRequired: false, attemptResolved: true, invoice };
+      }
+    }
+
+    if (isInvoiceCollectibleStatus(invoice.status)) {
+      await trx('invoices').where({ id: invoiceId }).update({
+        status: 'processing',
+        // A no-PI ambiguity belongs to the new saved-card create request, not
+        // an abandoned public-pay PI that may have been attached beforehand.
+        // Clear that stale binding so the matching metadata webhook can bind.
+        stripe_payment_intent_id: error?.stripePaymentIntentId || null,
+        updated_at: new Date(),
+      });
+      invoice.status = 'processing';
+      invoice.stripe_payment_intent_id = error?.stripePaymentIntentId || null;
+    }
+    return { reconciliationRequired: true, invoice };
+  });
 }
 
 // Deposit quote/finalize both operate on a client-named PaymentIntent id —
@@ -1214,8 +1777,7 @@ const StripeService = {
       // moved no money and stay safe to auto-retry. The retry sweep
       // parks ambiguous rows for manual reconciliation.
       const errType = err.type || err.raw?.type || null;
-      const ambiguousOutcome = !piIdFromErr
-        && ['StripeConnectionError', 'StripeAPIError'].includes(errType);
+      const ambiguousOutcome = isAmbiguousStripeChargeError(err);
 
       // Replay-aware failure record: with durable idempotency keys,
       // overlapping workers can both receive the same replayed decline
@@ -1547,6 +2109,20 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
+    // Check the durable reconciliation fence before the invoice status. A
+    // prior ambiguous/orphaned attempt deliberately parks the invoice as
+    // `processing`; checking collectibility first would reduce the later
+    // request to a generic status error and let callers miss the terminal
+    // reconciliation semantics (and potentially expose a fallback pay rail).
+    try {
+      await assertNoInvoiceChargeReconciliationPending(invoiceId);
+    } catch (err) {
+      if (savedCardChargeNeedsReconciliation(err)) {
+        const parked = await parkInvoiceForSavedCardReconciliation({ invoiceId, error: err });
+        err.reconciliationRequired = parked.reconciliationRequired;
+      }
+      throw err;
+    }
     assertInvoiceCollectible(invoice.status);
     // Third-party Bill-To: never charge a card on file for a payer-billed
     // invoice — the saved card belongs to invoice.customer_id (the homeowner),
@@ -1565,6 +2141,24 @@ const StripeService = {
     }
 
     const stripeCustomerId = await this.ensureStripeCustomer(invoice.customer_id);
+    // Commit a durable, unique claim BEFORE Stripe sees a charge request. The
+    // partial unique index is what closes the cross-request/process race; an
+    // invoice-row lock inside the later transaction is not enough because a
+    // timeout rolls that transaction back before its catch can persist a fence.
+    let chargeAttempt;
+    try {
+      chargeAttempt = await claimInvoiceSavedCardCharge({
+        invoiceId,
+        paymentMethodId,
+        stripePaymentMethodId: card.stripe_payment_method_id,
+      });
+    } catch (err) {
+      if (savedCardChargeNeedsReconciliation(err)) {
+        const parked = await parkInvoiceForSavedCardReconciliation({ invoiceId, error: err });
+        err.reconciliationRequired = parked.reconciliationRequired;
+      }
+      throw err;
+    }
 
     // Link the PI to the invoice + write the payments-table ledger row.
     // BOTH writes happen after Stripe has already accepted the charge,
@@ -1579,12 +2173,16 @@ const StripeService = {
     let surcharge;
     let total;
     let coveredByCredit = false;
+    let stripeChargeSubmitted = false;
+    const idempotencyKey = chargeAttempt.idempotency_key;
     // Account credit this charge drew down (post-apply credit_applied − pre-apply).
     // Captured outside the transaction so the orphan path (Stripe charged, DB write
     // failed → rollback) can re-persist it: the rollback reverts the draw-down while
     // the card was charged the REDUCED amount, so without this the customer keeps
     // both the discount and the restored credit and the orphan no longer matches.
     let chargeAppliedCreditDelta = 0;
+    let chargeOriginalCreditApplied = Number(invoice.credit_applied) || 0;
+    let chargeCreditAppliedTotal = chargeOriginalCreditApplied;
     try {
       await db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
@@ -1593,6 +2191,11 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice.status);
+        // The pre-lock invoice read is only an early eligibility snapshot. Use
+        // this locked baseline for reservation ownership so credit applied by a
+        // concurrent request before our lock is never attributed to this attempt.
+        chargeOriginalCreditApplied = Number(lockedInvoice.credit_applied) || 0;
+        chargeCreditAppliedTotal = chargeOriginalCreditApplied;
         if (lockedInvoice.stripe_payment_intent_id) {
           const activePayment = await trx('payments')
             .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
@@ -1631,8 +2234,9 @@ const StripeService = {
             logger.warn(`[stripe] charge-time account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
           const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
           if (recredited) Object.assign(lockedInvoice, recredited);
+          chargeCreditAppliedTotal = Number(lockedInvoice.credit_applied) || 0;
           chargeAppliedCreditDelta = Math.round(
-            (((Number(lockedInvoice.credit_applied) || 0) - (Number(invoice.credit_applied) || 0)) * 100),
+            ((chargeCreditAppliedTotal - chargeOriginalCreditApplied) * 100),
           ) / 100;
           if (!(invoiceAmountDue(lockedInvoice) > 0)) {
             // Fully covered by account credit. COMMIT the credit draw-down +
@@ -1671,18 +2275,10 @@ const StripeService = {
 
         const invSurchargeDetails = buildSurchargeAmountDetails(invSurchargeCents);
 
-        // Idempotency-Key bound to invoice + amount + pm + 60-second
-        // bucket. The bucket dedupes a double-click within the same
-        // minute (we'd reuse the existing PI instead of charging twice)
-        // but lets a deliberate admin retry a minute later get a fresh
-        // attempt — Stripe replays cached responses for ~24 h on reused
-        // keys, including failures, so a deterministic key would freeze
-        // the admin "Charge card on file" flow on a transient decline
-        // until the cache TTL expired (Codex P2 #490). Amount + pm
-        // components mean re-totaling the invoice or switching cards
-        // also yields a fresh key as expected.
-        const minuteBucket = Math.floor(Date.now() / 60_000);
-        const idempotencyKey = `inv_card_on_file_${invoiceId}_${invTotalCents}_${card.id}_${minuteBucket}`;
+        // This key belongs to the durable attempt claim, not a clock bucket.
+        // Deterministic declines mark the claim failed so a deliberate retry
+        // receives a new claim/key. Ambiguous outcomes retain the exact key for
+        // Stripe reconciliation and keep the invoice fenced indefinitely.
         // Saved-method charges support BOTH tender families (owner ruling
         // 2026-07-09: per-application collects whatever method the customer
         // saved, card or bank). A PI without payment_method_types defaults to
@@ -1707,6 +2303,7 @@ const StripeService = {
           confirm: true,
           description: `Invoice ${invoice.invoice_number} — ${savedMethodIsBank ? 'bank account' : 'card'} on file`,
           metadata: {
+            saved_card_attempt_id: chargeAttempt.id,
             waves_invoice_id: invoiceId,
             invoice_number: invoice.invoice_number,
             waves_customer_id: invoice.customer_id,
@@ -1718,6 +2315,23 @@ const StripeService = {
           },
         };
         if (invSurchargeDetails) invPiParams.amount_details = invSurchargeDetails;
+        // This durable marker is the fail-closed submission boundary. It is
+        // written immediately before the synchronous SDK invocation: claims
+        // abandoned earlier remain releasable, while any process death from
+        // this point forward is treated as possibly submitted. That conservative
+        // ambiguity is required because a worker can die after the network write
+        // but before any post-call marker could be committed.
+        await commitInvoiceSavedCardChargeSubmission({
+          attemptId: chargeAttempt.id,
+          amount: total,
+          creditAppliedDelta: chargeAppliedCreditDelta,
+          creditAppliedTotal: chargeCreditAppliedTotal,
+          // Explicitly use the root handle: this small independent transaction
+          // must commit before Stripe is called, even though the invoice work
+          // around it is still inside `trx`.
+          database: db,
+        });
+        stripeChargeSubmitted = true;
         paymentIntent = await stripe.paymentIntents.create(
           invPiParams,
           invSurchargeDetails
@@ -1792,9 +2406,92 @@ const StripeService = {
           'Invoice is canceled and cannot be paid',
           'Invoice has a different active payment',
         ].includes(err.message)) {
+          await resolveNoFundsSavedCardChargeAttempt({
+            attemptId: chargeAttempt.id,
+            invoiceId,
+            failureMessage: err.message,
+          }).catch((attemptErr) => {
+            // The original committed claim remains active when this update
+            // fails, so collection stays fail-closed.
+            logger.error(`[stripe] charge-attempt release failed for deterministic error ${chargeAttempt.id}; claim remains blocking: ${attemptErr.message}`);
+          });
+          throw err;
+        }
+        if (!stripeChargeSubmitted) {
+          // A stale-PI retrieve/cancel or other setup lookup failed before the
+          // new PaymentIntent create request was sent. No new saved-card charge
+          // can exist, so release the claim and preserve normal collection.
+          await resolveNoFundsSavedCardChargeAttempt({
+            attemptId: chargeAttempt.id,
+            invoiceId,
+            failureMessage: err.message || 'Pre-charge setup failed',
+          }).catch((attemptErr) => {
+            logger.error(`[stripe] pre-charge attempt release failed for ${chargeAttempt.id}; claim remains blocking: ${attemptErr.message}`);
+          });
           throw err;
         }
         logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
+        const ambiguousOutcome = shouldTreatSavedCardFailureAsAmbiguous({
+          chargeSubmitted: stripeChargeSubmitted,
+          error: err,
+        });
+        if (ambiguousOutcome) {
+          let creditReservationReady = true;
+          await persistSavedCardChargeCreditDelta({
+            invoiceId,
+            customerId: invoice.customer_id,
+            attemptId: chargeAttempt.id,
+            originalCreditApplied: chargeOriginalCreditApplied,
+            creditDelta: chargeAppliedCreditDelta,
+            targetCreditApplied: chargeCreditAppliedTotal,
+            reference: `attempt ${chargeAttempt.id}`,
+          }).then((persisted) => {
+            creditReservationReady = persisted !== false;
+          }).catch((creditErr) => {
+            creditReservationReady = false;
+            logger.error(`[stripe] CRITICAL: ambiguous credit reservation failed for invoice ${invoiceId} (attempt ${chargeAttempt.id}); claim remains active so webhooks retry: ${creditErr.message}`);
+          });
+          // This is the primary durable ambiguity record. It was inserted as a
+          // committed `claimed` row before Stripe; if this update itself fails,
+          // that original status still blocks every later charge.
+          if (creditReservationReady) {
+            await markInvoiceSavedCardChargeAttempt(chargeAttempt.id, {
+              status: 'ambiguous',
+              error_message: String(err.message).slice(0, 1000),
+              resolved_at: null,
+            }).catch((attemptErr) => {
+              logger.error(`[stripe] CRITICAL: could not label charge attempt ${chargeAttempt.id} ambiguous; durable claimed fence remains active: ${attemptErr.message}`);
+            });
+          }
+          // Do not also create a payments.failed row: this attempt table is the
+          // single reconciliation source for new saved-card ambiguity. A second
+          // independently-resolved fence would keep the invoice blocked after
+          // an operator clears the durable attempt.
+          const ambiguousErr = new Error('Charge outcome ambiguous — Stripe may have processed the payment');
+          ambiguousErr.code = 'STRIPE_AMBIGUOUS_OUTCOME';
+          ambiguousErr.idempotencyKey = idempotencyKey;
+          ambiguousErr.chargeAttemptId = chargeAttempt.id;
+          ambiguousErr.reconciliationRequired = true;
+          let parked = null;
+          try {
+            parked = await parkInvoiceForSavedCardReconciliation({
+              invoiceId,
+              error: ambiguousErr,
+              chargeAttemptId: chargeAttempt.id,
+            });
+          } catch (parkErr) {
+            logger.error(`[stripe] CRITICAL: could not park ambiguous invoice ${invoiceId}; durable attempt ${chargeAttempt.id} still blocks saved-card collection: ${parkErr.message}`);
+          }
+          if (parked?.attemptResolved) {
+            // A definitive webhook won the race and reopened the invoice. Do
+            // not leak the now-stale ambiguity code to callers: they suppress
+            // pay links/retries whenever that code is present.
+            const resolvedFailure = new Error('Saved-card payment did not complete. Please try again.');
+            resolvedFailure.code = 'STRIPE_CHARGE_FAILED';
+            throw resolvedFailure;
+          }
+          throw ambiguousErr;
+        }
         try {
           // Stamp the invoice link: the obligation this attempt was collecting
           // lives on the invoice row, which stays 'sent' — an unlinked failed
@@ -1820,9 +2517,23 @@ const StripeService = {
             metadata: JSON.stringify({
               invoice_id: invoice.id,
               source: 'card_on_file_failed_attempt',
+              ambiguous_outcome: false,
+              idempotency_key: idempotencyKey || null,
             }),
           });
-        } catch { /* non-fatal */ }
+        } catch (recordErr) {
+          // No money moved for a deterministic decline. Preserve the log for
+          // diagnostics, then release the durable claim below so a deliberate
+          // retry remains possible.
+          logger.error(`[stripe] could not record saved-card failure for invoice ${invoiceId}: ${recordErr.message}`);
+        }
+        await resolveNoFundsSavedCardChargeAttempt({
+          attemptId: chargeAttempt.id,
+          invoiceId,
+          failureMessage: err.message || 'Card charge failed',
+        }).catch((attemptErr) => {
+          logger.error(`[stripe] charge-attempt release failed after deterministic decline ${chargeAttempt.id}; claim remains blocking: ${attemptErr.message}`);
+        });
         const chargeFailed = new Error(err.message || 'Card charge failed');
         // Structured decline facts for customer-facing notices. ONLY a real
         // processor decline on the confirm carries them (StripeCardError /
@@ -1843,7 +2554,8 @@ const StripeService = {
         throw chargeFailed;
       }
 
-      logger.error(`[stripe] CRITICAL: chargeInvoiceWithSavedCard succeeded at Stripe (PI ${paymentIntent.id}) but DB write failed: ${err.message}`);
+      logger.error(`[stripe] CRITICAL: Stripe accepted PI ${paymentIntent.id} but the saved-card DB write failed: ${err.message}`);
+      let orphanPersisted = false;
       try {
         await db('stripe_orphan_charges').insert({
           stripe_payment_intent_id: paymentIntent.id,
@@ -1854,6 +2566,7 @@ const StripeService = {
           source: 'invoice_card_on_file',
           original_db_error: String(err.message).slice(0, 1000),
         });
+        orphanPersisted = true;
       } catch (orphanErr) {
         logger.error(`[stripe] DOUBLE FAILURE: orphan-charges insert also failed for PI ${paymentIntent.id}: ${orphanErr.message}`);
       }
@@ -1864,36 +2577,79 @@ const StripeService = {
       // the customer keeps both the discount and the restored credit. Done directly
       // (not via applyAccountCreditToInvoice, which fail-closes on the still-attached
       // stale PI the rollback restored). Idempotent: only tops up to the charged level.
-      if (chargeAppliedCreditDelta > 0) {
-        try {
-          const { postCreditMovement, round2 } = require('./customer-credit');
-          await db.transaction(async (trx) => {
-            const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
-            if (!locked) return;
-            const current = round2(locked.credit_applied || 0);
-            const target = round2((Number(invoice.credit_applied) || 0) + chargeAppliedCreditDelta);
-            if (current < target) {
-              await postCreditMovement({
-                customerId: invoice.customer_id,
-                delta: -round2(target - current),
-                source: 'adjustment',
-                invoiceId,
-                note: `Account credit consumed by orphaned card charge ${paymentIntent.id} (DB write failed post-charge)`,
-                createdBy: 'system:orphan_charge',
-              }, trx);
-              await trx('invoices').where({ id: invoiceId }).update({ credit_applied: target, updated_at: trx.fn.now() });
-            }
-          });
-        } catch (reErr) {
-          logger.error(`[stripe] CRITICAL: orphan credit re-persist failed for invoice ${invoiceId} (PI ${paymentIntent.id}): ${reErr.message}`);
-        }
+      let orphanCreditReady = true;
+      try {
+        await persistSavedCardChargeCreditDelta({
+          invoiceId,
+          customerId: invoice.customer_id,
+          attemptId: chargeAttempt.id,
+          originalCreditApplied: chargeOriginalCreditApplied,
+          creditDelta: chargeAppliedCreditDelta,
+          targetCreditApplied: chargeCreditAppliedTotal,
+          reference: `orphan PI ${paymentIntent.id}`,
+        });
+      } catch (reErr) {
+        orphanCreditReady = false;
+        logger.error(`[stripe] CRITICAL: orphan credit re-persist failed for invoice ${invoiceId} (PI ${paymentIntent.id}): ${reErr.message}`);
       }
-      const chargedErr = new Error(`Stripe charge ${paymentIntent.id} succeeded but DB write failed for invoice ${invoice.invoice_number}`);
+      const chargedErr = new Error(`Stripe payment ${paymentIntent.id} was accepted but DB write failed for invoice ${invoice.invoice_number}`);
       chargedErr.code = 'STRIPE_CHARGED_DB_FAILED';
       chargedErr.stripePaymentIntentId = paymentIntent.id;
       chargedErr.amount = total;
+      chargedErr.reconciliationRequired = true;
+      let orphanParkReady = false;
+      await parkInvoiceForSavedCardReconciliation({ invoiceId, error: chargedErr })
+        .then((parked) => {
+          orphanParkReady = String(parked?.invoice?.status || '').toLowerCase() === 'processing'
+            && String(parked?.invoice?.stripe_payment_intent_id || '') === String(paymentIntent.id);
+        })
+        .catch((parkErr) => {
+          logger.error(`[stripe] CRITICAL: could not park orphaned invoice ${invoiceId}; durable attempt/orphan fences remain: ${parkErr.message}`);
+        });
+      const orphanFenceReady = orphanPersisted && orphanCreditReady && orphanParkReady;
+      const orphanAttemptOutcome = savedCardAttemptOutcome({
+        durableSettlementReady: orphanFenceReady,
+        paymentIntentStatus: paymentIntent.status,
+      });
+      await markInvoiceSavedCardChargeAttempt(chargeAttempt.id, {
+        // Close only after both the orphan ledger and any rolled-back credit
+        // reservation are durable. Otherwise keep `claimed` unresolved while
+        // attaching the exact PI so webhook reconciliation can finish safely.
+        // ACH `processing` is not a final success. Keep its exact attempt open
+        // so a later payment_failed webhook can reopen the invoice and clear
+        // the orphan fence. Only a final succeeded PI may close as succeeded.
+        status: orphanAttemptOutcome.status,
+        stripe_payment_intent_id: paymentIntent.id,
+        amount: total,
+        credit_applied_delta: chargeAppliedCreditDelta,
+        credit_applied_total: chargeCreditAppliedTotal,
+        error_message: String(err.message).slice(0, 1000),
+        resolved_at: orphanAttemptOutcome.resolved ? new Date() : null,
+      }).catch((attemptErr) => {
+        logger.error(`[stripe] CRITICAL: charge-attempt orphan update failed for ${chargeAttempt.id}; original durable claimed fence remains active: ${attemptErr.message}`);
+      });
       throw chargedErr;
     }
+
+    // The invoice/payment transaction committed (or account credit fully
+    // covered the balance). Release the blocking claim. If this bookkeeping
+    // update fails, the original committed `claimed` row remains fail-closed;
+    // the invoice status also prevents another collection after a cash charge.
+    const committedAttemptOutcome = savedCardAttemptOutcome({
+      durableSettlementReady: true,
+      paymentIntentStatus: paymentIntent?.status || 'succeeded',
+    });
+    await markInvoiceSavedCardChargeAttempt(chargeAttempt.id, {
+      // A committed `processing` ACH payment is locally recorded but not final.
+      // Keep its attempt unresolved so either final webhook can settle/reopen it.
+      status: committedAttemptOutcome.status,
+      stripe_payment_intent_id: paymentIntent?.id || null,
+      amount: total ?? 0,
+      error_message: null,
+      resolved_at: committedAttemptOutcome.resolved ? new Date() : null,
+    }).catch((attemptErr) => {
+      logger.error(`[stripe] charge-attempt success update failed for ${chargeAttempt.id}; durable claim remains blocking: ${attemptErr.message}`);
+    });
 
     if (coveredByCredit) {
       // Account credit fully covered the invoice inside the committed transaction
@@ -2461,6 +3217,17 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice.status);
+        try {
+          // Route preflight is intentionally duplicated under the invoice lock:
+          // a saved-card owner can claim after the public request's unlocked
+          // check but before this transaction mints/reuses a client secret.
+          await assertNoInvoiceChargeReconciliationPending(invoiceId, trx);
+        } catch (fenceErr) {
+          fenceErr.statusCode = 409;
+          fenceErr.inProgress = false;
+          fenceErr.savedCardPending = true;
+          throw fenceErr;
+        }
 
         // Auto-apply only does anything when the customer actually has account
         // credit. Resolve the available balance once up front and gate BOTH the
@@ -2797,6 +3564,17 @@ const StripeService = {
       };
     } catch (err) {
       if (err.statusCode) {
+        if (savedCardChargeNeedsReconciliation(err)) {
+          // The locked check aborts its invoice transaction before this catch.
+          // Park in a fresh committed transaction so the status change survives
+          // the 409 and status-only billing surfaces stop offering collection.
+          const parked = await parkInvoiceForSavedCardReconciliation({
+            invoiceId,
+            error: err,
+            chargeAttemptId: err.chargeAttemptId,
+          });
+          err.reconciliationRequired = parked.reconciliationRequired;
+        }
         logger.warn(`[stripe] Invoice PaymentIntent setup blocked for invoice ${invoiceId}: ${err.message}`);
         throw err;
       }
@@ -3282,18 +4060,40 @@ const StripeService = {
     }
 
     try {
-      await stripe.paymentIntents.update(
-        invoice.stripe_payment_intent_id,
-        updateParams,
-        usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
-      );
+      const confirmed = await db.transaction(async (finalizeTrx) => {
+        const lockedInvoice = await finalizeTrx('invoices')
+          .where({ id: invoiceId })
+          .forUpdate()
+          .first();
+        if (!lockedInvoice) throw new Error('Invoice not found');
+        assertInvoiceCollectible(lockedInvoice.status);
+        if (String(lockedInvoice.stripe_payment_intent_id || '')
+          !== String(invoice.stripe_payment_intent_id)) {
+          throw new Error('Invoice has a different active payment');
+        }
+        const lockedBaseAmount = invoiceAmountDue(lockedInvoice);
+        if (Math.abs(lockedBaseAmount - baseAmount) > 0.01) {
+          throw new Error('Invoice total changed since quote was created. Please request a new quote.');
+        }
 
-      // Confirm the PI server-side (attaches PM + charges the card)
-      const confirmed = await stripe.paymentIntents.confirm(
-        invoice.stripe_payment_intent_id,
-        {},
-        usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
-      );
+        // Final serialized fence: saved-card claims take this same invoice lock
+        // before inserting their durable attempt. Hold it through Stripe confirm
+        // so a claim cannot appear after the assertion but before money moves.
+        await assertNoInvoiceChargeReconciliationPending(invoiceId, finalizeTrx);
+
+        await stripe.paymentIntents.update(
+          lockedInvoice.stripe_payment_intent_id,
+          updateParams,
+          usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+        );
+
+        // Confirm the PI server-side (attaches PM + charges the card).
+        return stripe.paymentIntents.confirm(
+          lockedInvoice.stripe_payment_intent_id,
+          {},
+          usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+        );
+      });
 
       logger.info(`[stripe] Finalized invoice ${invoice.invoice_number}: funding=${funding} surcharge=${surchargeCents}c total=${totalCents}c PI=${confirmed.id} status=${confirmed.status}`);
 
@@ -3310,6 +4110,19 @@ const StripeService = {
         funding,
       };
     } catch (err) {
+      if (savedCardChargeSuppressesAlternateCollection(err)) {
+        if (savedCardChargeNeedsReconciliation(err)) {
+          const parked = await parkInvoiceForSavedCardReconciliation({
+            invoiceId,
+            error: err,
+            chargeAttemptId: err.chargeAttemptId,
+          });
+          err.reconciliationRequired = parked.reconciliationRequired;
+        }
+        err.statusCode = 409;
+        err.savedCardPending = true;
+        throw err;
+      }
       logger.error(`[stripe] Finalize failed for PI ${invoice.stripe_payment_intent_id}: ${err.message}`);
       throw new Error(`Failed to finalize payment: ${err.message}`);
     }
@@ -4165,3 +4978,19 @@ function friendlyStripeError(err) {
 
 module.exports = StripeService;
 module.exports.friendlyStripeError = friendlyStripeError;
+module.exports.isAmbiguousStripeChargeError = isAmbiguousStripeChargeError;
+module.exports.assertNoInvoiceChargeReconciliationPending = assertNoInvoiceChargeReconciliationPending;
+module.exports.claimInvoiceSavedCardCharge = claimInvoiceSavedCardCharge;
+module.exports.markInvoiceSavedCardChargeAttempt = markInvoiceSavedCardChargeAttempt;
+module.exports.commitInvoiceSavedCardChargeSubmission = commitInvoiceSavedCardChargeSubmission;
+module.exports.parkInvoiceForSavedCardReconciliation = parkInvoiceForSavedCardReconciliation;
+module.exports.savedCardChargeNeedsReconciliation = savedCardChargeNeedsReconciliation;
+module.exports.savedCardChargeSuppressesAlternateCollection = savedCardChargeSuppressesAlternateCollection;
+module.exports.savedCardClaimIsStale = savedCardClaimIsStale;
+module.exports.promoteStaleSavedCardClaim = promoteStaleSavedCardClaim;
+module.exports.shouldTreatSavedCardFailureAsAmbiguous = shouldTreatSavedCardFailureAsAmbiguous;
+module.exports.persistSavedCardChargeCreditDelta = persistSavedCardChargeCreditDelta;
+module.exports.resolveSettledInvoiceSavedCardChargeAttempt = resolveSettledInvoiceSavedCardChargeAttempt;
+module.exports.resolveFailedInvoiceSavedCardChargeAttempt = resolveFailedInvoiceSavedCardChargeAttempt;
+module.exports.resolveNoFundsSavedCardChargeAttempt = resolveNoFundsSavedCardChargeAttempt;
+module.exports.savedCardAttemptOutcome = savedCardAttemptOutcome;

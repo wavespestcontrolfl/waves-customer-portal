@@ -154,12 +154,18 @@ function isInstantLinkFailure(err) {
     || msg.includes('account cannot be connected');
 }
 
-function serverReportedError(message, { status = null, inProgress = false, microdepositPending = false } = {}) {
+function serverReportedError(message, {
+  status = null,
+  inProgress = false,
+  microdepositPending = false,
+  savedCardPending = false,
+} = {}) {
   const err = new Error(message || 'Payment error');
   err.serverReported = true;
   if (status != null) err.status = status;
   err.inProgress = !!inProgress;
   err.microdepositPending = !!microdepositPending;
+  err.savedCardPending = !!savedCardPending;
   return err;
 }
 
@@ -547,7 +553,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   useEffect(() => {
     if (!paymentIntentId || awaitingConfirm) return;
     syncAmountForMethod(selectedMethod, !!saveCard);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveCard]);
 
   useEffect(() => {
@@ -735,7 +740,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     })();
 
     return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publishableKey, clientSecret, loadNonce]);
 
   const isCardFamily = selectedMethod !== 'us_bank_account';
@@ -804,7 +808,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       try {
         // Let any in-flight tender sync settle so we re-lock from a known state.
         for (let i = 0; i < 100 && syncingAmountRef.current; i += 1) {
-          // eslint-disable-next-line no-await-in-loop
           await new Promise((resolve) => { setTimeout(resolve, 50); });
         }
         // Still running after the wait: a slow prior /update-amount could land
@@ -1447,6 +1450,10 @@ export default function PayPageV2() {
   // wrongly imply there's nothing left to do. When set, the same in-flight panel
   // shows verification guidance instead.
   const [microdepositVerifying, setMicrodepositVerifying] = useState(false);
+  // An off-session saved-method attempt owns the invoice fence. This is not an
+  // ACH-processing signal: the attempt can still decline/release, so show a
+  // distinct wait-and-refresh state instead of claiming a bank debit is moving.
+  const [savedCardAttemptPending, setSavedCardAttemptPending] = useState(false);
   // Account credit fully covered a REQUIRED-SAVE invoice: money is settled,
   // but the plan still needs a payment method on file (no PI was minted, so
   // the normal save-card path never ran). invoice.captureNeeded (from the
@@ -1588,7 +1595,6 @@ export default function PayPageV2() {
         }
       })();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navigate, token]);
 
   // Promote "capture needed, nothing started" → the minting state. Entry
@@ -1641,7 +1647,6 @@ export default function PayPageV2() {
         if (!cancelled) setSetupCapture({ status: 'mint-error', message: e.message });
       });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setupCapture?.status, token]);
 
   // Already paid / ACH pending → redirect to receipt page (no ?fresh=1 — this is a return visit).
@@ -1706,6 +1711,7 @@ export default function PayPageV2() {
             status: r.status,
             inProgress: setup.inProgress,
             microdepositPending: setup.microdepositPending,
+            savedCardPending: setup.savedCardPending,
           });
         }
         return setup;
@@ -1775,6 +1781,11 @@ export default function PayPageV2() {
           // renders verification guidance instead of "nothing more to do".
           if (err.microdepositPending) setMicrodepositVerifying(true);
           setBankProcessing(true);
+          setPaymentState('idle');
+          return;
+        }
+        if (err.status === 409 && err.savedCardPending) {
+          setSavedCardAttemptPending(true);
           setPaymentState('idle');
           return;
         }
@@ -2035,6 +2046,25 @@ export default function PayPageV2() {
                 </p>
               </>
             )}
+          </BrandCard>
+        </div>
+      </WavesShell>
+    );
+  }
+
+  if (savedCardAttemptPending) {
+    const invoiceLabel = data.invoice?.invoiceNumber || data.invoice?.invoice_number || '';
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
+          <BrandCard>
+            <SerifHeading style={{ marginBottom: SP.sm }}>We’re verifying a payment attempt</SerifHeading>
+            <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+              A saved payment method attempt is underway for invoice {invoiceLabel}. Please don’t
+              submit another payment yet. Refresh this page in a moment; if the attempt doesn’t
+              complete, the payment form will become available again. Questions? Give us a call
+              — <HelpPhoneLink tone="dark" inline />.
+            </p>
           </BrandCard>
         </div>
       </WavesShell>

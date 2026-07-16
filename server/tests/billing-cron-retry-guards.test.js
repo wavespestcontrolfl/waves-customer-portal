@@ -155,6 +155,24 @@ describe('processPaymentRetries — suppression guards', () => {
       expect.objectContaining({ paymentId: 'pay-failed-1' }));
   });
 
+  test('pause remains active through the final ET evening after UTC rolls to tomorrow', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-05-09T03:30:00Z')); // May 8, 11:30 PM ET
+    try {
+      mockCustomer.autopay_paused_until = '2026-05-08';
+      mockFailedPayments = [monthlyFailedPayment()];
+
+      await BillingCron.processPaymentRetries();
+
+      expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+      expect(mockPaymentUpdates).toHaveLength(0);
+      expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_paused',
+        expect.objectContaining({ paymentId: 'pay-failed-1' }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('annual prepay covering the OBLIGATION date: monthly row resolved non-collectible', async () => {
     coveredSpy.mockResolvedValue(new Set(['cust-1']));
     mockFailedPayments = [monthlyFailedPayment()];

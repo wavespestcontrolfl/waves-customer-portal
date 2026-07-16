@@ -46,6 +46,7 @@ export default function MobileCardOnFileSheet({
   const [loading, setLoading] = useState(true);
   const [chargingId, setChargingId] = useState(null);
   const [error, setError] = useState(null);
+  const [chargeBlocked, setChargeBlocked] = useState(false);
 
   const resolvedCustomerId = customerId || service?.customerId || service?.customer_id;
   const resolvedName = customerName || service?.customerName || service?.customer_name || 'Customer';
@@ -77,12 +78,23 @@ export default function MobileCardOnFileSheet({
         body: JSON.stringify({ paymentMethodId: card.id }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || 'Charge failed');
+      if (!r.ok) {
+        const terminal = d.orphan === true || d.ambiguous === true || d.in_progress === true;
+        const failure = new Error(d.error || 'Charge failed');
+        failure.terminal = terminal;
+        throw failure;
+      }
       onChargeSuccess?.(d);
       onClose?.();
     } catch (e) {
       setError(e.message || 'Charge failed');
-      setChargingId(null);
+      if (e.terminal) {
+        // The charge either succeeded upstream or may have succeeded. Keep every
+        // button disabled so a field retry cannot collect the invoice twice.
+        setChargeBlocked(true);
+      } else {
+        setChargingId(null);
+      }
     }
   }
 
@@ -122,7 +134,7 @@ export default function MobileCardOnFileSheet({
         {!loading && cards.map((c) => {
           const style = brandStyle(c.brand);
           const isCharging = chargingId === c.id;
-          const anotherCharging = chargingId && chargingId !== c.id;
+          const anotherCharging = chargeBlocked || (chargingId && chargingId !== c.id);
           return (
             <div
               key={c.id}
@@ -174,13 +186,13 @@ export default function MobileCardOnFileSheet({
                   flexShrink: 0,
                 }}
               >
-                {isCharging ? 'Charging…' : 'Charge'}
+                {chargeBlocked ? 'Do not retry' : isCharging ? 'Charging…' : 'Charge'}
               </button>
             </div>
           );
         })}
         {error && (
-          <div className="text-alert-fg" style={{ fontSize: 13, marginTop: 12, textAlign: 'center' }}>
+          <div role="alert" className="text-alert-fg" style={{ fontSize: 13, marginTop: 12, textAlign: 'center' }}>
             {error}
           </div>
         )}

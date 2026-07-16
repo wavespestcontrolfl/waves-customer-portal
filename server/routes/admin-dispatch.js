@@ -6,6 +6,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
+const StripeService = require('../services/stripe');
 const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
@@ -4755,6 +4756,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let payUrl = null;
     let invoice = null;
     let alreadyPaid = false;
+    let paymentCollectionSuppressed = false;
+    let paymentReconciliationRequired = false;
     try {
       if (!recapReviewOnly) {
         const existingPaid = await db('invoices')
@@ -5341,7 +5344,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
         const autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
         if (isChargeableAutopayMethod(autopayPm)) {
-          const StripeService = require('../services/stripe');
           // deferReceiptDelivery: with the combined text armed, the receipt
           // job is enqueued a few minutes out — nothing is pre-stamped, so a
           // crash/block anywhere before the combined text delivers leaves
@@ -5387,29 +5389,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
       } catch (chargeErr) {
-        if (chargeErr.code === 'STRIPE_CHARGED_DB_FAILED') {
-          // Stripe COLLECTED the money but the DB write failed — already
-          // recorded in stripe_orphan_charges for manual reconciliation.
-          // The invoice still reads open locally, so the normal fallback
-          // (pay-link SMS) would invite the customer to pay the SAME visit
-          // again. Mirror the card-hold convention: suppress the pay link /
-          // charge actions and leave the reconciliation to the orphan
-          // ledger — never re-collectible from this completion (Codex P1).
-          invoiceCreated = false;
-          payUrl = null;
-          // Suppressing THIS pay link isn't enough: the invoice would stay
-          // open, so /api/billing/balance and any later pay surface still
-          // offer it for payment (Codex round-3). Park it as 'processing' —
-          // the established money-in-flight status: excluded from balance
-          // sums (INVOICE_UNCOLLECTIBLE_STATUSES), pay routes 409 it,
-          // assertInvoiceCollectible refuses manual/auto collection. The
-          // PI's payment_intent.succeeded webhook still resolves the invoice
-          // via metadata waves_invoice_id (findInvoiceForPaymentIntent) and
-          // settles processing→paid — the designed ACH-style self-heal; if
-          // that write fails too, the stripe_orphan_charges row is the
-          // operator's reconcile queue. Best-effort: if parking fails, the
-          // loud error below still flags the invoice id.
-          try {
+        const suppressAlternateCollection = StripeService.savedCardChargeSuppressesAlternateCollection(chargeErr);
+        const reconciliationRequired = StripeService.savedCardChargeNeedsReconciliation(chargeErr);
+        const fallbackPolicy = completionSavedCardFallbackPolicy({
+          suppressAlternateCollection,
+          reconciliationRequired,
+        });
+        if (suppressAlternateCollection) {
+          // Stripe collected or may have collected the money. The service
+          // either owns an active charge claim or parked the invoice for
+          // reconciliation. Suppress this request's fallback collection rails.
+          paymentReconciliationRequired = reconciliationRequired;
+          // This completion response must never expose a second collection rail
+          // while another saved-card request owns the invoice. Even a fresh
+          // claim can still succeed, and status-only manual-payment endpoints do
+          // not have enough Stripe context to distinguish that in-flight owner.
+          if (fallbackPolicy.suppressFallback) {
+            invoiceCreated = false;
+            payUrl = null;
+            paymentCollectionSuppressed = true;
+          }
+          // Keep a defensive caller-side park for older/mocked service
+          // implementations. `processing` is excluded from balance and pay
+          // surfaces; when a PI is known, the webhook can still settle it.
+          if (reconciliationRequired) try {
             // Bind the succeeded PI to the row while parking: the webhook's
             // settle path refuses a 'processing' invoice whose active PI
             // doesn't match, so without this binding the self-heal never
@@ -5436,7 +5439,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           } catch (parkErr) {
             logger.error(`[dispatch] failed to park orphaned invoice ${invoice?.id} as processing: ${parkErr.message}`);
           }
-          logger.error(`[dispatch] per-application autopay charge ORPHANED for invoice ${invoice?.id} (PI ${chargeErr.stripePaymentIntentId || 'unknown'}) — pay link suppressed, invoice parked 'processing', see stripe_orphan_charges`);
+          logger.error(`[dispatch] per-application autopay charge fenced alternate collection for invoice ${invoice?.id} (${chargeErr.code}, PI ${chargeErr.stripePaymentIntentId || 'unknown'}, reconciliation=${reconciliationRequired}, fallbackSuppressed=${fallbackPolicy.suppressFallback})`);
         } else {
           logger.warn(`[dispatch] per-application autopay charge failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
           // Arm the decline notice ONLY off the charge service's structured
@@ -5452,7 +5455,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
         try {
           await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
-            details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', error: String(chargeErr.message || '').slice(0, 300) },
+            details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', collection_suppressed: fallbackPolicy.suppressFallback, collection_fenced: suppressAlternateCollection, reconciliation_required: reconciliationRequired, error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }
       } // end try/catch — paired with the above-quote guard's else
@@ -5468,7 +5471,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // marks the invoice already-paid so the completion SMS sends a receipt, not
     // a pay link. Best-effort — never blocks completion.
     if (invoice?.id) {
-      try {
+      if (paymentCollectionSuppressed) {
+        // A fresh in-progress collision suppresses this request's card-hold
+        // rail without mutating the hold: the owning request may still decline
+        // deterministically. Only a truly ambiguous/orphaned outcome is parked
+        // terminal for manual review.
+        if (paymentReconciliationRequired) {
+          await db('estimate_card_holds')
+            .where({ scheduled_service_id: svc.id })
+            .whereIn('status', ['held', 'charging'])
+            .update({ status: 'charge_review', updated_at: db.fn.now() })
+            .catch((e) => logger.error(`[admin-dispatch] failed to park card hold for payment reconciliation: ${e.message}`));
+        }
+      } else try {
         const CardHolds = require('../services/estimate-card-holds');
         const holdCharge = await CardHolds.chargeCardHoldOnCompletion({ scheduledServiceId: svc.id, invoiceId: invoice.id });
         // covered_by_credit means the charge call found the invoice already
@@ -5479,6 +5494,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           invoiceCreated = false;
           const fresh = await db('invoices').where({ id: invoice.id }).first('status', 'paid_at');
           if (fresh) invoice = { ...invoice, ...fresh };
+        } else if (holdCharge?.reason === 'charge_in_progress') {
+          // Keep the hold and completion fallbacks retryable. Every card rail
+          // now checks the durable attempt fence server-side, so it cannot mint
+          // a second PI while the owner is active; if that owner declines, the
+          // existing pay link/mobile action works without another delivery job.
+          logger.info(`[admin-dispatch] completion fallback retained while saved-card claim is active for invoice ${invoice.id}`);
         }
       } catch (e) { logger.error(`[admin-dispatch] completion card-hold charge failed: ${e.message}`); }
     }
@@ -6439,6 +6460,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // for "no-bill completion", redundant with the !!invoice/suppress checks)
     // would strand that invoice with neither a pay link nor an in-person prompt.
     const invoicePaymentActionRequired = !!invoice
+      && !paymentCollectionSuppressed
       // Collectible statuses only — 'processing' (an in-flight ACH autopay
       // debit, incl. the per-application completion charge and the orphaned-
       // charge park) must not reopen the mobile collection sheet for a visit
@@ -8185,6 +8207,15 @@ const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 // per-application row with no amount returns 0, the auto-invoice gate
 // declines it, and the visit is billed manually. Legacy (non-per-app) rows
 // keep the monthly_rate fallback the WaveGuard-membership flows depend on.
+function completionSavedCardFallbackPolicy({
+  suppressAlternateCollection,
+}) {
+  return {
+    suppressFallback: Boolean(suppressAlternateCollection),
+    retainRetryableFallback: false,
+  };
+}
+
 function completionInvoiceAmount({
   estimatedPrice,
   isCallback,
@@ -8415,4 +8446,5 @@ module.exports._test = {
   shouldAutoInvoiceCompletion,
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,
+  completionSavedCardFallbackPolicy,
 };

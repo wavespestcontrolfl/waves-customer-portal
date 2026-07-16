@@ -49,6 +49,7 @@ function dateKeyOf(paymentDate) {
 }
 
 const { isBillingDayMatch } = require('./billing-helpers');
+const { isPaused } = require('./autopay-eligibility');
 
 async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint }) {
   const sendResult = await sendCustomerMessage({
@@ -157,7 +158,7 @@ const BillingCron = {
         }
 
         // GUARD 2: autopay paused — skip, log
-        if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) >= new Date(now.toDateString())) {
+        if (isPaused(customer, now)) {
           await logAutopay(customer.id, 'skipped_paused', {
             details: { paused_until: customer.autopay_paused_until },
           });
@@ -741,7 +742,7 @@ const BillingCron = {
       // STATE GUARD (mirrors monthly GUARD 2): autopay paused — temporary
       // by definition, so skip WITHOUT disarming; the sweep re-evaluates
       // daily and collection resumes when the pause lapses.
-      if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) >= new Date(new Date().toDateString())) {
+      if (isPaused(customer)) {
         await logAutopay(payment.customer_id, 'skipped_paused', {
           paymentId: payment.id,
           details: { source: 'autopay_retry', paused_until: customer.autopay_paused_until },

@@ -45,4 +45,89 @@ function classifyExistingWebhookEvent(existing, { now = Date.now(), staleWindowM
   return 'inflight';
 }
 
-module.exports = { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS };
+function savedCardAttemptMatchesPaymentIntent({
+  attempt,
+  invoice,
+  paymentIntent,
+  allowResolvedSucceeded = false,
+}) {
+  if (!attempt || !invoice || !paymentIntent) return false;
+  const metadata = paymentIntent.metadata || {};
+  const paymentMethodId = typeof paymentIntent.payment_method === 'string'
+    ? paymentIntent.payment_method
+    : paymentIntent.payment_method?.id;
+  const metadataAttemptId = metadata.saved_card_attempt_id
+    ? String(metadata.saved_card_attempt_id)
+    : '';
+  const attachedPaymentIntentId = attempt.stripe_payment_intent_id
+    ? String(attempt.stripe_payment_intent_id)
+    : '';
+  const paymentIntentId = String(paymentIntent.id || '');
+  // A customer can reuse the same saved card for multiple attempts on the same
+  // invoice. Method/customer matching alone would let a late event from an old
+  // PI consume the current fence. New PIs carry the immutable attempt id; the
+  // exact PI recorded on a legacy/in-flight attempt is the only safe fallback.
+  const exactAttemptBinding = metadataAttemptId
+    ? metadataAttemptId === String(attempt.id)
+    : Boolean(attachedPaymentIntentId && attachedPaymentIntentId === paymentIntentId);
+  const activeAttempt = ['claimed', 'ambiguous'].includes(attempt.status) && !attempt.resolved_at;
+  const settledAttempt = allowResolvedSucceeded && attempt.status === 'succeeded' && attempt.resolved_at;
+  return (activeAttempt || settledAttempt)
+    && exactAttemptBinding
+    && (!attachedPaymentIntentId || attachedPaymentIntentId === paymentIntentId)
+    && String(attempt.invoice_id) === String(invoice.id)
+    && metadata.source === 'admin_card_on_file'
+    && String(metadata.waves_invoice_id || '') === String(invoice.id)
+    && String(metadata.waves_customer_id || '') === String(invoice.customer_id)
+    && Boolean(attempt.stripe_payment_method_id)
+    && String(attempt.stripe_payment_method_id) === String(paymentMethodId || '');
+}
+
+function savedCardCreditAdjustment({ attempt, invoice }) {
+  const target = Math.round((Number(attempt?.credit_applied_total) || 0) * 100) / 100;
+  const current = Math.round((Number(invoice?.credit_applied) || 0) * 100) / 100;
+  if (!(target > current)) return null;
+  return {
+    target,
+    delta: Math.round((target - current) * 100) / 100,
+  };
+}
+
+function invoicePaymentIntentBlocksFallback({
+  invoiceStatus,
+  activePaymentIntentId,
+  incomingPaymentIntentId,
+  terminalStatuses = [],
+  hasMatchingSavedCardAttempt = false,
+}) {
+  const status = String(invoiceStatus || '').toLowerCase();
+  const active = activePaymentIntentId ? String(activePaymentIntentId) : '';
+  const incoming = String(incomingPaymentIntentId || '');
+  return terminalStatuses.includes(status)
+    || (status === 'processing' && active !== incoming && !hasMatchingSavedCardAttempt)
+    || (active && active !== incoming && !hasMatchingSavedCardAttempt);
+}
+
+function lateSavedCardPaymentNeedsOrphan({
+  invoiceStatus,
+  activePaymentIntentId,
+  incomingPaymentIntentId,
+  terminalStatuses = [],
+  hasMatchingSavedCardAttempt = false,
+}) {
+  const status = String(invoiceStatus || '').toLowerCase();
+  const active = activePaymentIntentId ? String(activePaymentIntentId) : '';
+  const incoming = String(incomingPaymentIntentId || '');
+  return hasMatchingSavedCardAttempt
+    && terminalStatuses.includes(status)
+    && active !== incoming;
+}
+
+module.exports = {
+  classifyExistingWebhookEvent,
+  invoicePaymentIntentBlocksFallback,
+  lateSavedCardPaymentNeedsOrphan,
+  savedCardAttemptMatchesPaymentIntent,
+  savedCardCreditAdjustment,
+  STALE_CLAIM_WINDOW_MS,
+};

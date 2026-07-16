@@ -3,6 +3,7 @@
 // directly, and the trust-boundary verify path checked against Stripe.
 
 let mockDbHandler = () => { throw new Error('db handler not configured'); };
+let mockDbUpdates = [];
 jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
@@ -56,6 +57,15 @@ jest.mock('../services/stripe', () => ({
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
   chargeInvoiceWithSavedCard: (...a) => mockChargeInvoiceWithSavedCard(...a),
   chargeSavedPaymentMethodOffSession: (...a) => mockChargeOffSession(...a),
+  savedCardChargeNeedsReconciliation: (err) => [
+    'STRIPE_CHARGED_DB_FAILED',
+    'STRIPE_AMBIGUOUS_OUTCOME',
+  ].includes(err?.code),
+  savedCardChargeSuppressesAlternateCollection: (err) => [
+    'STRIPE_CHARGED_DB_FAILED',
+    'STRIPE_AMBIGUOUS_OUTCOME',
+    'STRIPE_CHARGE_IN_PROGRESS',
+  ].includes(err?.code),
 }));
 
 const {
@@ -70,6 +80,7 @@ const {
   cardHoldReminderLine,
   cardHoldReminderNote,
   recordCardHoldHeld,
+  chargeCardHoldOnCompletion,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -77,6 +88,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDbUpdates = [];
   process.env.ONE_TIME_CARD_HOLD = 'true';
 });
 afterEach(() => {
@@ -90,14 +102,17 @@ function stubDb(firstResults) {
   const queue = Array.isArray(firstResults) ? [...firstResults] : [firstResults];
   mockDbHandler = () => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
+    for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
       chain[m] = jest.fn(() => chain);
     }
     chain.first = jest.fn(() => {
       const v = queue.length ? queue.shift() : null;
       return v instanceof Error ? Promise.reject(v) : Promise.resolve(v);
     });
-    chain.update = jest.fn(() => Promise.resolve(1));
+    chain.update = jest.fn((payload) => {
+      mockDbUpdates.push(payload);
+      return Promise.resolve(1);
+    });
     chain.insert = jest.fn(() => Promise.resolve([{}]));
     return chain;
   };
@@ -109,6 +124,44 @@ describe('isCardHoldEnabled — dark by default', () => {
     for (const v of ['false', '0', 'off', '']) { process.env.ONE_TIME_CARD_HOLD = v; expect(isCardHoldEnabled()).toBe(false); }
     delete process.env.ONE_TIME_CARD_HOLD;
     expect(isCardHoldEnabled()).toBe(false);
+  });
+});
+
+describe('completion charge reconciliation outcomes', () => {
+  const hold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1' };
+  const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: 75 };
+  const paymentMethod = { id: 'pm-row-1' };
+
+  test.each([
+    ['STRIPE_CHARGED_DB_FAILED', { stripePaymentIntentId: 'pi-orphan-1' }],
+    ['STRIPE_AMBIGUOUS_OUTCOME', {}],
+  ])('parks invoice and card hold for terminal %s', async (code, extra) => {
+    stubDb([hold, invoice, paymentMethod]);
+    mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('reconcile me'), { code, ...extra }));
+
+    await expect(chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' }))
+      .resolves.toEqual(expect.objectContaining({ charged: false, reason: 'charge_review' }));
+
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'processing' }),
+      expect.objectContaining({ status: 'charge_review' }),
+    ]));
+  });
+
+  test('restores a fresh concurrent claim collision for retry without exposing another rail', async () => {
+    stubDb([hold, invoice, paymentMethod]);
+    mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('first attempt declined'), {
+      code: 'STRIPE_CHARGE_IN_PROGRESS',
+    }));
+
+    await expect(chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' }))
+      .resolves.toEqual(expect.objectContaining({ charged: false, reason: 'charge_in_progress' }));
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'charging' }),
+      expect.objectContaining({ status: 'held' }),
+    ]));
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'charge_review' })]));
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'processing' })]));
   });
 });
 
