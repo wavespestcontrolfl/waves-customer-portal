@@ -27,7 +27,9 @@ vi.mock('@capacitor/push-notifications', () => ({
   PushNotifications: nativeMocks.PushNotifications,
 }));
 
+import api from '../utils/api';
 import {
+  flushNativePushToken,
   initNativePush,
   nativePushPermissionState,
   requestNativePushPermission,
@@ -40,6 +42,8 @@ beforeEach(() => {
   nativeMocks.PushNotifications.checkPermissions.mockClear();
   nativeMocks.PushNotifications.requestPermissions.mockClear();
   nativeMocks.PushNotifications.register.mockClear();
+  api.request.mockClear();
+  localStorage.clear();
 });
 
 describe('nativePush permission and tap handling', () => {
@@ -68,5 +72,23 @@ describe('nativePush permission and tap handling', () => {
     expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
     expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
     await expect(nativePushPermissionState()).resolves.toBe('denied');
+  });
+
+  it('posts a pre-login device token through the refresh-aware customer API after login', async () => {
+    await initNativePush();
+    nativeMocks.state.listeners.registration({ value: 'device-token-1' });
+    expect(api.request).not.toHaveBeenCalled();
+
+    localStorage.setItem('waves_token', 'customer-access');
+    flushNativePushToken();
+
+    await vi.waitFor(() => expect(api.request).toHaveBeenCalledWith('/push/native-subscribe', {
+      method: 'POST',
+      body: JSON.stringify({
+        platform: 'ios',
+        token: 'device-token-1',
+        deviceInfo: 'ios · WavesApp',
+      }),
+    }));
   });
 });

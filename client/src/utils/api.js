@@ -24,7 +24,32 @@ function tokenSessionIdentity(token) {
 function sameRequestSession(left, right) {
   return Boolean(left && right
     && left.customerId === right.customerId
-    && left.sessionId === right.sessionId);
+    // Access tokens minted before durable refresh sessions shipped have no
+    // sessionId. Their first successful refresh upgrades them into a durable
+    // family, so null -> family is safe when the customer is unchanged. Once
+    // an access token has a family, keep matching it strictly so a concurrent
+    // logout/login or property-session replacement can never inherit a retry.
+    && (left.sessionId === null || left.sessionId === right.sessionId));
+}
+
+function isTrustedCustomerRequestUrl(url) {
+  try {
+    const pageHref = typeof window !== 'undefined' && window.location?.href
+      ? window.location.href
+      : 'http://localhost/';
+    const target = new URL(String(url), pageHref);
+    const page = new URL(pageHref);
+    const api = new URL(API_BASE, pageHref);
+    const sameAuthority = (left, right) => left.protocol === right.protocol
+      && left.hostname === right.hostname
+      && left.port === right.port;
+    // URL.origin is the literal string "null" for Capacitor/custom schemes,
+    // so comparing origins would accidentally trust every other opaque-origin
+    // URL. Compare protocol + network authority explicitly instead.
+    return sameAuthority(target, page) || sameAuthority(target, api);
+  } catch {
+    return false;
+  }
 }
 
 export class ApiClient {
@@ -69,23 +94,20 @@ export class ApiClient {
     this.inflightGets.clear();
   }
 
-  async request(path, options = {}) {
-    const url = `${API_BASE}${path}`;
-    const method = (options.method || 'GET').toUpperCase();
-    const canCacheGet = method === 'GET' && path.startsWith('/feed/');
-    const cacheKey = canCacheGet ? `${this.token || 'anon'}:${path}` : null;
+  /**
+   * Authenticated fetch that preserves the raw Response (PDFs and other
+   * non-JSON bodies need it). `url` may be relative or absolute and is used
+   * exactly as supplied; API-relative JSON callers should keep using request.
+   * Customer credentials are attached only to the app or configured API
+   * origin; other absolute URLs remain ordinary unauthenticated fetches.
+   * The 401 refresh/retry behavior and session-switch guard deliberately live
+   * here so every customer Bearer request follows one path.
+   */
+  async fetchRaw(url, options = {}) {
     const requestSession = tokenSessionIdentity(this.token);
-
-    if (canCacheGet) {
-      const cached = this.getCache.get(cacheKey);
-      if (cached && Date.now() - cached.ts < this.getCacheTtlMs) return cached.data;
-      const pending = this.inflightGets.get(cacheKey);
-      if (pending) return pending;
-    }
-
+    const trustedForCustomerAuth = isTrustedCustomerRequestUrl(url);
     const headers = {
-      'Content-Type': 'application/json',
-      ...(this.token && { Authorization: `Bearer ${this.token}` }),
+      ...(trustedForCustomerAuth && this.token && { Authorization: `Bearer ${this.token}` }),
       ...options.headers,
     };
     const fetchOptions = () => {
@@ -96,55 +118,69 @@ export class ApiClient {
         headers,
       };
     };
-
-    const execute = async () => {
-      let response;
+    const performFetch = async () => {
       try {
-        response = await fetch(url, fetchOptions());
+        return await fetch(url, fetchOptions());
       } catch (err) {
         throw new Error(err?.message || 'Network request failed. Check your connection and try again.');
       }
+    };
 
-      // Handle token expiry — attempt refresh
-      if (response.status === 401 && this.refreshToken) {
-        const outcome = await this.attemptRefresh();
-        if (outcome === 'refreshed') {
-          // A different property or login can replace tokens while this
-          // request is waiting on refresh. Retrying the old body under that
-          // newer identity is a cross-customer write. Routine rotations keep
-          // both customerId and sessionId, so only the safe case retries.
-          if (!sameRequestSession(requestSession, tokenSessionIdentity(this.token))) {
-            const superseded = new Error('Request canceled because the active account changed.');
-            superseded.requestSuperseded = true;
-            throw superseded;
-          }
-          headers.Authorization = `Bearer ${this.token}`;
-          response = await fetch(url, fetchOptions());
-        } else if (outcome === 'rejected') {
-          // The server refused the refresh token — the session is really
-          // over. Force logout, preserving the return path so re-login
-          // lands back on this page (mirrors ProtectedRoute).
-          this.clearTokens();
-          // Never carry /login itself as the return target — LoginPage
-          // honors `next` after verification, and bouncing back to /login
-          // (which renders null once authenticated) strands the customer
-          // on a blank page.
-          const path = window.location.pathname;
-          const next = path.startsWith('/login') ? '' : `${path}${window.location.search}`;
-          window.location.href = next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login';
-          const sessionErr = new Error('Session expired. Please sign in again.');
-          sessionErr.status = 401;
-          sessionErr.sessionExpired = true;
-          throw sessionErr;
-        } else {
-          // Transient refresh failure (offline, 5xx, 429): the 30-day
-          // refresh token may still be perfectly valid — keep the tokens
-          // and surface a retryable error. Deliberately NOT status 401 /
-          // sessionExpired, so useAuth's pending/retry path preserves the
-          // session instead of treating it as an auth rejection.
-          throw new Error('Unable to reach the server. Check your connection and try again.');
+    let response = await performFetch();
+
+    if (response.status === 401 && trustedForCustomerAuth && this.refreshToken) {
+      const outcome = await this.attemptRefresh();
+      if (outcome === 'refreshed') {
+        // A different property or login can replace tokens while this request
+        // is waiting on refresh. Never replay the old request under it.
+        if (!sameRequestSession(requestSession, tokenSessionIdentity(this.token))) {
+          const superseded = new Error('Request canceled because the active account changed.');
+          superseded.requestSuperseded = true;
+          throw superseded;
         }
+        headers.Authorization = `Bearer ${this.token}`;
+        response = await performFetch();
+      } else if (outcome === 'rejected') {
+        // Only an explicit refresh rejection ends the saved session. Preserve
+        // the return path so a fresh login lands back on the current page.
+        this.clearTokens();
+        const path = window.location.pathname;
+        const next = path.startsWith('/login') ? '' : `${path}${window.location.search}`;
+        window.location.href = next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login';
+        const sessionErr = new Error('Session expired. Please sign in again.');
+        sessionErr.status = 401;
+        sessionErr.sessionExpired = true;
+        throw sessionErr;
+      } else {
+        // Network/5xx/429 refresh failures say nothing about the 30-day
+        // credential. Keep it and surface a retryable error.
+        throw new Error('Unable to reach the server. Check your connection and try again.');
       }
+    }
+
+    return response;
+  }
+
+  async request(path, options = {}) {
+    const url = `${API_BASE}${path}`;
+    const method = (options.method || 'GET').toUpperCase();
+    const canCacheGet = method === 'GET' && path.startsWith('/feed/');
+    const cacheKey = canCacheGet ? `${this.token || 'anon'}:${path}` : null;
+
+    if (canCacheGet) {
+      const cached = this.getCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < this.getCacheTtlMs) return cached.data;
+      const pending = this.inflightGets.get(cacheKey);
+      if (pending) return pending;
+    }
+
+    const headers = {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    };
+
+    const execute = async () => {
+      const response = await this.fetchRaw(url, { ...options, headers });
 
       if (!response.ok) {
         const contentType = response.headers.get('content-type') || '';

@@ -150,6 +150,53 @@ describe('durable customer refresh sessions', () => {
     expect(refreshAfterLogout).toMatchObject({ ok: false, code: 'REFRESH_SESSION_REVOKED' });
   });
 
+  test('logout tombstones a valid pre-rollout token before its first refresh', async () => {
+    const rows = installMemoryDb();
+    const legacyToken = jwt.sign({
+      customerId: customer.id,
+      accountId: customer.account_id,
+      type: 'refresh',
+    }, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+    await expect(revokeRefreshSession(legacyToken, 'logout'))
+      .resolves.toEqual({ revoked: true });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      jti: expect.stringMatching(/^[a-f0-9]{64}$/),
+      customer_id: customer.id,
+      account_id: customer.account_id,
+      token_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      revoked_at: expect.any(Date),
+      revoke_reason: 'logout',
+    });
+    expect(rows[0].jti).toBe(rows[0].token_hash);
+    expect(JSON.stringify(rows)).not.toContain(legacyToken);
+
+    // Repeated logout is idempotent and the tombstone prevents the later
+    // one-time legacy migration exchange from minting a usable descendant.
+    await expect(revokeRefreshSession(legacyToken, 'logout'))
+      .resolves.toEqual({ revoked: true });
+    expect(rows).toHaveLength(1);
+    await expect(rotateRefreshSession(legacyToken))
+      .resolves.toMatchObject({ ok: false, code: 'REFRESH_SESSION_REVOKED' });
+  });
+
+  test('logout never inserts a legacy tombstone for an untrusted credential', async () => {
+    const rows = installMemoryDb();
+    const wrongAccountToken = jwt.sign({
+      customerId: customer.id,
+      accountId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      type: 'refresh',
+    }, process.env.JWT_SECRET, { expiresIn: '30d' });
+
+    await expect(revokeRefreshSession('not-a-jwt', 'logout'))
+      .resolves.toEqual({ revoked: false });
+    await expect(revokeRefreshSession(wrongAccountToken, 'logout'))
+      .resolves.toEqual({ revoked: false });
+    expect(rows).toHaveLength(0);
+  });
+
   test('property switching requires and consumes the current refresh credential', async () => {
     const rows = installMemoryDb();
     const session = await createRefreshSession(customer.id, customer.account_id);

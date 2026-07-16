@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
 import useLockBodyScroll from '../hooks/useLockBodyScroll.js';
 import useModalFocus from '../hooks/useModalFocus.js';
+import api from '../utils/api.js';
 import {
   isNativeApp,
   nativePushPermissionState,
@@ -52,10 +53,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const titleId = useId();
   const panelId = useId();
 
-  const tokenKey = type === 'admin' ? 'waves_admin_token' : 'waves_token';
   const basePath = type === 'admin' ? '/admin/notifications' : '/customer-notifications';
 
-  const activeToken = typeof localStorage === 'undefined' ? '' : (localStorage.getItem(tokenKey) || '');
+  const activeToken = typeof localStorage === 'undefined'
+    ? ''
+    : (localStorage.getItem(type === 'admin' ? 'waves_admin_token' : 'waves_token') || '');
   const activeCustomerId = type === 'customer' ? (customerId || tokenCustomerId(activeToken)) : null;
   const identityKey = type === 'customer' ? (activeCustomerId || 'signed-out') : 'admin';
 
@@ -63,10 +65,22 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const panelRef = useModalFocus(open, closePanel);
   useLockBodyScroll(open);
 
-  const getHeaders = () => ({
-    Authorization: `Bearer ${localStorage.getItem(tokenKey)}`,
+  const getAdminHeaders = () => ({
+    Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
     'Content-Type': 'application/json',
   });
+
+  // Customer requests use the shared refresh-aware client. Admin auth has a
+  // separate token/session model, so keep that surface on its existing fetch.
+  const requestNotificationData = async (path, options = {}) => {
+    if (type === 'customer') return api.request(path, options);
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: { ...getAdminHeaders(), ...options.headers },
+    });
+    if (!response.ok) throw new Error(`Notifications failed (${response.status})`);
+    return response.json();
+  };
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') {
@@ -100,11 +114,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     const fetchCount = () => {
       if (type === 'customer' && !activeCustomerId) return;
       try {
-        fetch(`${API_BASE}${basePath}/unread-count`, { headers: getHeaders() })
-          .then((r) => {
-            if (!r.ok) throw new Error(`Unread count failed (${r.status})`);
-            return r.json();
-          })
+        requestNotificationData(`${basePath}/unread-count`)
           .then((d) => { if (!cancelled) setUnreadCount(Number(d.count) || 0); })
           .catch(() => { /* keep the last confirmed count during transient polling failures */ });
       } catch { /* fetch can throw before returning a promise in test shims */ }
@@ -138,7 +148,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     const sync = () => {
       if (Date.now() - lastSyncAt < 60 * 60 * 1000) return;
       lastSyncAt = Date.now();
-      syncPushSubscription({ apiBase: API_BASE, token: localStorage.getItem(tokenKey) })
+      syncPushSubscription({ apiBase: API_BASE, token: localStorage.getItem('waves_admin_token') })
         .then((r) => { if (r?.ok) setPushOn(true); })
         .catch(() => {});
     };
@@ -155,7 +165,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     if (type === 'admin') {
       isPushEnabled({
         apiBase: API_BASE,
-        token: localStorage.getItem(tokenKey),
+        token: localStorage.getItem('waves_admin_token'),
         verifyServer: true,
       }).then(setPushOn).catch(() => setPushOn(false));
       return;
@@ -185,7 +195,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       // frontend is configured to talk to a different API origin.
       await ensurePushSubscription({
         apiBase: API_BASE,
-        token: localStorage.getItem(tokenKey),
+        token: localStorage.getItem('waves_admin_token'),
       });
       setPushOn(true);
     } catch (err) {
@@ -204,9 +214,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setActionError(null);
     setNotifications([]);
     try {
-      const r = await fetch(`${API_BASE}${basePath}?limit=30`, { headers: getHeaders() });
-      if (!r.ok) throw new Error(`Notifications failed (${r.status})`);
-      const d = await r.json();
+      const d = await requestNotificationData(`${basePath}?limit=30`);
       if (generation === requestGenerationRef.current) {
         setNotifications(Array.isArray(d.notifications) ? d.notifications : []);
       }
@@ -228,8 +236,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     const generation = requestGenerationRef.current;
     setActionError(null);
     try {
-      const response = await fetch(`${API_BASE}${basePath}/${id}/read`, { method: 'PUT', headers: getHeaders() });
-      if (!response.ok) throw new Error(`Mark read failed (${response.status})`);
+      await requestNotificationData(`${basePath}/${id}/read`, { method: 'PUT' });
       if (generation !== requestGenerationRef.current) return false;
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
       setUnreadCount(prev => Math.max(0, prev - 1));
@@ -246,8 +253,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     const generation = requestGenerationRef.current;
     setActionError(null);
     try {
-      const response = await fetch(`${API_BASE}${basePath}/read-all`, { method: 'PUT', headers: getHeaders() });
-      if (!response.ok) throw new Error(`Mark all read failed (${response.status})`);
+      await requestNotificationData(`${basePath}/read-all`, { method: 'PUT' });
       if (generation !== requestGenerationRef.current) return;
       setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
       setUnreadCount(0);

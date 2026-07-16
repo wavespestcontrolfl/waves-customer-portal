@@ -74,15 +74,10 @@ async function postToken(token) {
   const platform = nativePlatform() === 'android' ? 'android' : 'ios';
   try {
     if (inflightDeactivation) await inflightDeactivation;
-    const res = await fetch('/api/push/native-subscribe', {
+    await api.request('/push/native-subscribe', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
       body: JSON.stringify({ platform, token, deviceInfo: `${platform} · WavesApp` }),
     });
-    if (!res.ok) {
-      console.warn('[nativePush] token registration returned', res.status);
-      pendingToken = token; // let a later flush retry
-    }
   } catch (err) {
     console.warn('[nativePush] token registration failed:', err?.message || err);
     pendingToken = token; // retry on next flush

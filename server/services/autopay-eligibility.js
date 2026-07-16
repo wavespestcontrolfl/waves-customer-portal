@@ -88,17 +88,21 @@ function autopayActivePredicate() {
         AND pm.stripe_payment_method_id IS NOT NULL
         AND (
           pm.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
-          OR (
-            pm.exp_month BETWEEN 1 AND 12
-            AND pm.exp_year IS NOT NULL
-            AND (
-              pm.exp_year > EXTRACT(YEAR FROM CURRENT_DATE)
-              OR (
-                pm.exp_year = EXTRACT(YEAR FROM CURRENT_DATE)
-                AND pm.exp_month >= EXTRACT(MONTH FROM CURRENT_DATE)
+          OR CASE
+            WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
+              AND NULLIF(BTRIM(pm.exp_year), '') ~ '^[0-9]{4}$'
+            THEN (
+              NULLIF(BTRIM(pm.exp_month), '')::integer BETWEEN 1 AND 12
+              AND (
+                NULLIF(BTRIM(pm.exp_year), '')::integer > EXTRACT(YEAR FROM CURRENT_DATE)
+                OR (
+                  NULLIF(BTRIM(pm.exp_year), '')::integer = EXTRACT(YEAR FROM CURRENT_DATE)
+                  AND NULLIF(BTRIM(pm.exp_month), '')::integer >= EXTRACT(MONTH FROM CURRENT_DATE)
+                )
               )
             )
-          )
+            ELSE FALSE
+          END
         )
         AND (
           c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active'

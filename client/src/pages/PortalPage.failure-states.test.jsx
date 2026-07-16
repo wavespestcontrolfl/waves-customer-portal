@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
   default: {
+    request: vi.fn(),
+    fetchRaw: vi.fn(),
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
@@ -28,6 +30,7 @@ vi.mock('../utils/api', () => ({
 import api from '../utils/api';
 import {
   BillingTab,
+  ChatWidget,
   MyPlanTab,
   MyRequestsCard,
   PropertyTab,
@@ -44,6 +47,10 @@ const customer = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
   vi.spyOn(console, 'error').mockImplementation(() => {});
   api.getLawnHealth.mockResolvedValue({ available: false });
   api.getAutopay.mockResolvedValue({ state: 'disabled' });
@@ -52,10 +59,41 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  delete Element.prototype.scrollIntoView;
   vi.restoreAllMocks();
 });
 
 describe('authenticated portal partial failures', () => {
+  it('sends chat messages and AI reports through the refresh-aware API client', async () => {
+    api.request
+      .mockResolvedValueOnce({ reply: 'Your next visit is Tuesday.', canReport: true })
+      .mockResolvedValueOnce({ success: true });
+    render(<ChatWidget customer={customer} onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText('Chat message'), { target: { value: 'When is my visit?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    expect(await screen.findByText('Your next visit is Tuesday.')).toBeInTheDocument();
+    expect(api.request).toHaveBeenNthCalledWith(1, '/ai/chat', {
+      method: 'POST',
+      body: expect.any(String),
+    });
+    expect(JSON.parse(api.request.mock.calls[0][1].body)).toMatchObject({
+      message: 'When is my visit?',
+      sessionId: expect.stringMatching(/^chat-/),
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /report this ai response/i }));
+    await waitFor(() => expect(api.request).toHaveBeenNthCalledWith(2, '/ai/chat/report', {
+      method: 'POST',
+      body: expect.any(String),
+    }));
+    expect(JSON.parse(api.request.mock.calls[1][1].body)).toMatchObject({
+      messageContent: 'Your next visit is Tuesday.',
+      sessionId: expect.stringMatching(/^chat-/),
+    });
+  });
+
   it('does not invent an attachment warning when a request had no photos', () => {
     expect(getRequestPhotoConfirmationError(0, undefined)).toBe('');
     expect(getRequestPhotoConfirmationError(2, undefined)).toMatch(/confirmation was unavailable/i);

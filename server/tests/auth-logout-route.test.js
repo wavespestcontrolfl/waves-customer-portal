@@ -63,6 +63,23 @@ describe('POST /auth/logout', () => {
     });
     expect(revokeRefreshSession).not.toHaveBeenCalled();
   });
+
+  test('does not reveal whether the supplied credential produced a revocation', async () => {
+    revokeRefreshSession.mockResolvedValueOnce({ revoked: false });
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/auth/logout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: 'stale-or-invalid-refresh-token' }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ success: true });
+    });
+
+    expect(revokeRefreshSession)
+      .toHaveBeenCalledWith('stale-or-invalid-refresh-token', 'logout');
+  });
 });
 
 describe('POST /auth/refresh', () => {

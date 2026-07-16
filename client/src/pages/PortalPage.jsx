@@ -46,10 +46,9 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
 // auth) — same path DocumentsTab's handleDownload uses.
 async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
-  const token = localStorage.getItem('waves_token');
   let abs = url;
   try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
-  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  const r = await api.fetchRaw(abs);
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   const blob = await r.blob();
   // In the Capacitor shell the programmatic <a download> click below is a
@@ -68,10 +67,9 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
 // Authenticated fetch → PDF blob, with the JSON "not ready yet" body turned
 // into a readable error. Shared by the Documents + Visits report flows.
 async function fetchAuthedPdfBlob(url) {
-  const token = localStorage.getItem('waves_token');
   let abs = url;
   try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
-  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  const r = await api.fetchRaw(abs);
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   const contentType = r.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
@@ -12525,15 +12523,10 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
     if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
     setReportState(prev => ({ ...prev, [idx]: 'sending' }));
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/ai/chat/report`, {
+      await api.request('/ai/chat/report', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('waves_token')}`,
-        },
         body: JSON.stringify({ sessionId: sessionId.current, messageContent: content }),
       });
-      if (!res.ok) throw new Error('report failed');
       setReportState(prev => ({ ...prev, [idx]: 'done' }));
     } catch {
       setReportState(prev => ({ ...prev, [idx]: 'error' }));
@@ -12577,15 +12570,10 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
     setSending(true);
 
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/ai/chat`, {
+      const data = await api.request('/ai/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('waves_token')}`,
-        },
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
       });
-      const data = await res.json();
       // Only model-generated replies are reportable — the greeting and the
       // hardcoded fallback/error strings are not AI output.
       setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.", reportable: !!data.reply && data.canReport !== false }]);
@@ -13520,4 +13508,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, clearRequestDeepLink, getRequestPhotoConfirmationError };
+export { ChatWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, clearRequestDeepLink, getRequestPhotoConfirmationError };

@@ -247,10 +247,66 @@ async function revokeRefreshSession(refreshToken, reason = 'logout') {
   const suppliedHash = hashRefreshToken(refreshToken);
 
   return db.transaction(async (trx) => {
-    const query = trx(REFRESH_TABLE);
-    if (decoded.jti && decoded.familyId) query.where({ jti: decoded.jti, family_id: decoded.familyId });
-    else query.where({ token_hash: suppliedHash });
-    const row = await query.forUpdate().first();
+    let row;
+    if (decoded.jti && decoded.familyId) {
+      row = await trx(REFRESH_TABLE)
+        .where({ jti: decoded.jti, family_id: decoded.familyId })
+        .forUpdate()
+        .first();
+    } else {
+      row = await trx(REFRESH_TABLE)
+        .where({ token_hash: suppliedHash })
+        .forUpdate()
+        .first();
+
+      if (!row) {
+        // A signed pre-rollout token has no durable row until its first
+        // refresh. Logout must still leave a tombstone or that same token can
+        // later take the legacy migration path and create a live family.
+        // Validate the current customer/account exactly as rotation does
+        // before inserting anything; arbitrary, access, deleted-customer, or
+        // account-mismatched credentials never reach the session table.
+        const customer = await trx('customers')
+          .where({ id: decoded.customerId, active: true })
+          .whereNull('deleted_at')
+          .first();
+        if (!customer) return { revoked: false };
+
+        const accountId = decoded.accountId || accountIdForCustomer(customer);
+        if (!accountId
+          || (decoded.accountId
+            && String(decoded.accountId) !== String(accountIdForCustomer(customer)))) {
+          return { revoked: false };
+        }
+
+        const expiresAt = Number.isFinite(decoded.exp)
+          ? new Date(decoded.exp * 1000)
+          : null;
+        const now = new Date();
+        if (!expiresAt || expiresAt <= now) return { revoked: false };
+
+        const [inserted] = await trx(REFRESH_TABLE).insert({
+          // The legacy token has no JTI. Its collision-resistant fingerprint
+          // is already the rollout identifier used by rotateRefreshSession.
+          jti: suppliedHash,
+          family_id: crypto.randomUUID(),
+          customer_id: decoded.customerId,
+          account_id: accountId,
+          token_hash: suppliedHash,
+          expires_at: expiresAt,
+          revoked_at: now,
+          revoke_reason: reason,
+        }).onConflict('token_hash').ignore().returning('*');
+
+        // A concurrent logout/refresh may have won the unique-hash insert.
+        // Lock and revoke that winner's whole family, including a replacement
+        // created by a simultaneous legacy migration refresh.
+        row = inserted || await trx(REFRESH_TABLE)
+          .where({ token_hash: suppliedHash })
+          .forUpdate()
+          .first();
+      }
+    }
     if (!row || !tokenHashMatches(row.token_hash, suppliedHash)) return { revoked: false };
 
     const now = new Date();

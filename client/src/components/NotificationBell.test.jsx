@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import NotificationBell from './NotificationBell';
+import api from '../utils/api';
 
 vi.mock('../lib/push-subscribe.js', () => ({
   ensurePushSubscription: vi.fn(async () => ({ ok: true })),
@@ -62,6 +63,29 @@ afterEach(() => {
 });
 
 describe('NotificationBell panel', () => {
+  it('routes every customer notification operation through the refresh-aware API client', async () => {
+    const requestSpy = vi.spyOn(api, 'request');
+    render(<NotificationBell type="customer" customerId="customer-a" />);
+
+    await waitFor(() => expect(requestSpy)
+      .toHaveBeenCalledWith('/customer-notifications/unread-count', {}));
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    const row = await screen.findByRole('button', { name: 'Visit completed, unread' });
+    expect(requestSpy).toHaveBeenCalledWith('/customer-notifications?limit=30', {});
+
+    fireEvent.click(row);
+    await waitFor(() => expect(requestSpy).toHaveBeenCalledWith(
+      '/customer-notifications/1/read',
+      { method: 'PUT' },
+    ));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark all read' }));
+    await waitFor(() => expect(requestSpy).toHaveBeenCalledWith(
+      '/customer-notifications/read-all',
+      { method: 'PUT' },
+    ));
+  });
+
   it('portals a labelled modal dialog to body and restores focus after Escape', async () => {
     const { container } = render(<NotificationBell type="customer" customerId="customer-a" />);
     const bell = screen.getByRole('button', { name: /notifications/i });

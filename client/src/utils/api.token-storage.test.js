@@ -154,6 +154,146 @@ describe('API token publication', () => {
     expect(store).toEqual({});
   });
 
+  it('refreshes and retries raw absolute-URL requests without consuming the response body', async () => {
+    const originalAccess = jwtFor({ customerId: 'customer-a', sessionId: 'family-a' });
+    const refreshedAccess = jwtFor({ customerId: 'customer-a', sessionId: 'family-a' });
+    const store = {
+      waves_token: originalAccess,
+      waves_refresh_token: 'refresh-old',
+    };
+    vi.stubGlobal('localStorage', {
+      getItem: (key) => store[key] || null,
+      setItem: (key, value) => { store[key] = String(value); },
+      removeItem: (key) => { delete store[key]; },
+    });
+    vi.stubGlobal('navigator', {
+      locks: { request: (_name, _options, callback) => callback() },
+    });
+    const rawUrl = new URL('/api/documents/report.pdf', window.location.origin).toString();
+    const rawResponse = {
+      status: 200,
+      ok: true,
+      headers: { get: () => 'application/pdf' },
+      blob: vi.fn(async () => new Blob(['pdf'])),
+    };
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+      calls.push({ url, headers: { ...options.headers }, body: options.body });
+      if (calls.length === 1) {
+        return { status: 401, ok: false };
+      }
+      if (calls.length === 2) {
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ token: refreshedAccess, refreshToken: 'refresh-next' }),
+        };
+      }
+      return rawResponse;
+    }));
+    const { ApiClient } = await import('./api.js');
+    const api = new ApiClient();
+
+    await expect(api.fetchRaw(rawUrl))
+      .resolves.toBe(rawResponse);
+
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toMatchObject({
+      url: rawUrl,
+      headers: { Authorization: `Bearer ${originalAccess}` },
+    });
+    expect(calls[1]).toMatchObject({
+      url: '/api/auth/refresh',
+      body: JSON.stringify({ refreshToken: 'refresh-old' }),
+    });
+    expect(calls[2]).toMatchObject({
+      url: rawUrl,
+      headers: { Authorization: `Bearer ${refreshedAccess}` },
+    });
+    expect(rawResponse.blob).not.toHaveBeenCalled();
+  });
+
+  it('never sends or refreshes customer credentials for an untrusted absolute URL', async () => {
+    const store = {
+      waves_token: jwtFor({ customerId: 'customer-a', sessionId: 'family-a' }),
+      waves_refresh_token: 'refresh-a',
+    };
+    vi.stubGlobal('localStorage', {
+      getItem: (key) => store[key] || null,
+      setItem: (key, value) => { store[key] = String(value); },
+      removeItem: (key) => { delete store[key]; },
+    });
+    const unauthorized = { status: 401, ok: false };
+    const fetchMock = vi.fn(async () => unauthorized);
+    vi.stubGlobal('fetch', fetchMock);
+    const { ApiClient } = await import('./api.js');
+    const api = new ApiClient();
+
+    await expect(api.fetchRaw('https://files.example.test/report.pdf'))
+      .resolves.toBe(unauthorized);
+
+    // Capacitor/custom-scheme URLs have `origin === "null"`. A literal origin
+    // comparison would therefore mistake every opaque-origin URL for the app.
+    vi.stubGlobal('window', { location: { href: 'capacitor://localhost/' } });
+    await expect(api.fetchRaw('custom://evil/report.pdf'))
+      .resolves.toBe(unauthorized);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://files.example.test/report.pdf', {
+      headers: {},
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, 'custom://evil/report.pdf', {
+      headers: {},
+    });
+    expect(api.token).toBe(store.waves_token);
+    expect(api.refreshToken).toBe('refresh-a');
+  });
+
+  it('retries a legacy null-session request after refresh upgrades the same customer to a durable session', async () => {
+    const legacyAccess = jwtFor({ customerId: 'customer-a' });
+    const durableAccess = jwtFor({ customerId: 'customer-a', sessionId: 'family-a' });
+    const store = {
+      waves_token: legacyAccess,
+      waves_refresh_token: 'legacy-refresh',
+    };
+    vi.stubGlobal('localStorage', {
+      getItem: (key) => store[key] || null,
+      setItem: (key, value) => { store[key] = String(value); },
+      removeItem: (key) => { delete store[key]; },
+    });
+    vi.stubGlobal('navigator', {
+      locks: { request: (_name, _options, callback) => callback() },
+    });
+    const calls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+      calls.push({ url, headers: { ...options.headers } });
+      if (calls.length === 1) {
+        return { status: 401, ok: false };
+      }
+      if (calls.length === 2) {
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ token: durableAccess, refreshToken: 'durable-refresh' }),
+        };
+      }
+      return {
+        status: 200,
+        ok: true,
+        headers: { get: () => 'application/json' },
+        json: async () => ({ id: 'customer-a' }),
+      };
+    }));
+    const { ApiClient } = await import('./api.js');
+    const api = new ApiClient();
+
+    await expect(api.request('/auth/me')).resolves.toEqual({ id: 'customer-a' });
+
+    expect(calls).toHaveLength(3);
+    expect(calls[0].headers.Authorization).toBe(`Bearer ${legacyAccess}`);
+    expect(calls[2].headers.Authorization).toBe(`Bearer ${durableAccess}`);
+  });
+
   it('never retries an old mutation after the active property changes', async () => {
     const originalAccess = jwtFor({ customerId: 'customer-a', sessionId: 'family-a' });
     const targetAccess = jwtFor({ customerId: 'customer-b', sessionId: 'family-a' });
@@ -208,5 +348,52 @@ describe('API token publication', () => {
     expect(calls).toHaveLength(2);
     expect(api.token).toBe(targetAccess);
     expect(api.refreshToken).toBe('refresh-b');
+  });
+
+  it('never retries an old mutation after the same customer starts a different session', async () => {
+    const originalAccess = jwtFor({ customerId: 'customer-a', sessionId: 'family-a' });
+    const replacementAccess = jwtFor({ customerId: 'customer-a', sessionId: 'family-b' });
+    const store = {
+      waves_token: originalAccess,
+      waves_refresh_token: 'refresh-a',
+    };
+    vi.stubGlobal('localStorage', {
+      getItem: (key) => store[key] || null,
+      setItem: (key, value) => { store[key] = String(value); },
+      removeItem: (key) => { delete store[key]; },
+    });
+    vi.stubGlobal('navigator', {
+      locks: { request: (_name, _options, callback) => callback() },
+    });
+    let finishRefresh;
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) return { status: 401, ok: false };
+      if (fetchMock.mock.calls.length === 2) {
+        return new Promise((resolve) => { finishRefresh = resolve; });
+      }
+      throw new Error('old request was retried under a replacement login session');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { ApiClient } = await import('./api.js');
+    const api = new ApiClient();
+
+    const mutation = api.request('/property/preferences', {
+      method: 'PUT',
+      body: JSON.stringify({ gateCode: 'old-session-secret' }),
+    });
+    await vi.waitFor(() => expect(finishRefresh).toBeTypeOf('function'));
+    api.setTokens(replacementAccess, 'refresh-b');
+    finishRefresh({
+      status: 200,
+      ok: true,
+      json: async () => ({
+        token: jwtFor({ customerId: 'customer-a', sessionId: 'family-a' }),
+        refreshToken: 'refresh-a-next',
+      }),
+    });
+
+    await expect(mutation).rejects.toMatchObject({ requestSuperseded: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(api.token).toBe(replacementAccess);
   });
 });
