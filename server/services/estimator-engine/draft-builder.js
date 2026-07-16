@@ -27,7 +27,7 @@ const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
 } = require('../estimate-automation-duplicates');
-const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES } = require('./source-arbitration');
+const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
 
 const LANES = { GREEN: 'green', YELLOW: 'yellow', RED: 'red' };
 
@@ -68,10 +68,14 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     category: intent.category || (isCommercial ? 'COMMERCIAL' : 'RESIDENTIAL'),
     // Freshly-resolved type (lookup/extraction) beats the profile's saved
     // type — a stale "Single Family" on the customer row must not re-price a
-    // condo/townhome as detached.
+    // condo/townhome as detached. The profile fallback runs through the same
+    // pricing-key normalization (admin UI stores display labels like
+    // "Townhome" that the pest normalizer would silently default).
     propertyType: isCommercial
       ? 'commercial'
-      : (propertyFacts?.propertyType || context?.customer?.property_type || 'Single Family'),
+      : (propertyFacts?.propertyType
+        || pricingSafePropertyType(context?.customer?.property_type)
+        || 'Single Family'),
     // Existing-customer WaveGuard context: qualifying recurring services the
     // caller already has, so an add-on quote gets the combined tier discount
     // and recurring-customer perks (same key the admin save path feeds).
@@ -321,7 +325,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 
-  const notes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call });
+  // Operator-only review content (lane reasons, arbitration provenance,
+  // transcript evidence, model/call ids) lives in estimate_data — the public
+  // estimate endpoint returns the `notes` COLUMN to the customer, so it must
+  // never carry internal review material.
+  const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call });
   const customerPhone = intent.customer_phone || context?.phone || null;
 
   const creationResult = await withAutomatedEstimatePhoneLock(customerPhone, async (trx) => {
@@ -354,6 +362,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           comps,
           calibration,
           composer: { model: model || null, confidence: intent.confidence },
+          reviewNotes,
         },
       }),
       address: intent.address,
@@ -375,7 +384,6 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       waveguard_tier: engineResult?.waveGuard?.tier || null,
       token,
       expires_at: expiresAt,
-      notes,
       status: 'draft',
       source: 'estimator_engine',
       service_interest: intent.service_interest_label

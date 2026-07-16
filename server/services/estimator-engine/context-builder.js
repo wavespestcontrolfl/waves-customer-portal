@@ -43,11 +43,15 @@ function parseMaybeJson(value) {
 
 // Enriched extraction first (schema-versioned, validated); the raw v1 text
 // blob only as a fallback parse. Either may be null — the composer always
-// gets the raw transcript regardless.
+// gets the raw transcript regardless. The processor persists schema_failed
+// V2 payloads in ai_extraction_enriched for AUDIT — only status 'valid' may
+// drive behavior (same contract as the processor's canonical-write rule).
 function extractionFromCall(call) {
-  const enriched = parseMaybeJson(call.ai_extraction_enriched);
-  if (enriched && typeof enriched === 'object' && enriched.property) {
-    return { extraction: enriched, source: 'enriched' };
+  if (call.v2_extraction_status === 'valid') {
+    const enriched = parseMaybeJson(call.ai_extraction_enriched);
+    if (enriched && typeof enriched === 'object' && enriched.property) {
+      return { extraction: enriched, source: 'enriched' };
+    }
   }
   const v1 = parseMaybeJson(call.ai_extraction);
   if (v1 && typeof v1 === 'object') return { extraction: v1, source: 'v1' };
@@ -86,6 +90,7 @@ async function loadCustomerByPhone(phone, extraction) {
         'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
         'property_type', 'company_name')
       .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
+      .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
       .limit(5);
     return pickCustomerMatch(rows, extraction);
@@ -220,6 +225,7 @@ async function buildCallContext(callLogId) {
           'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
           'property_type', 'company_name')
         .where({ id: call.customer_id })
+        .whereNull('deleted_at')
         .first();
       if (resolved) customerMatch = { customer: resolved, ambiguous: false };
     } catch (err) {
@@ -227,14 +233,19 @@ async function buildCallContext(callLogId) {
     }
   }
 
-  const [phoneMatch, lead, smsThread, priorEstimates] = await Promise.all([
-    customerMatch.customer ? Promise.resolve(customerMatch) : loadCustomerByPhone(phone, extraction),
+  if (!customerMatch.customer) {
+    customerMatch = await loadCustomerByPhone(phone, extraction);
+  }
+  const customer = customerMatch.customer;
+
+  const [lead, smsThread, priorEstimates] = await Promise.all([
     loadLeadForCall(call, phone),
-    loadSmsThread(phone, { before: call.created_at }),
+    // A shared line with MULTIPLE profiles carries texts about other
+    // properties — feeding that history to the composer lets it lift an
+    // unrelated address as evidence. Ambiguous match → no SMS context.
+    customerMatch.ambiguous ? Promise.resolve([]) : loadSmsThread(phone, { before: call.created_at }),
     loadPriorEstimates(phone),
   ]);
-  if (!customerMatch.customer) customerMatch = phoneMatch;
-  const customer = customerMatch.customer;
 
   return {
     call,

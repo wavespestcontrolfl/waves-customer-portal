@@ -246,11 +246,16 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     const { address, propertyRecord, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup });
     result.addressUsed = address;
 
+    // An ambiguous shared-phone profile must not size the draft either —
+    // its saved sqft/lot describe SOMEBODY's home on this number, not
+    // verifiably the caller's.
+    const trustedCustomer = context.customerPhoneAmbiguous ? null : context.customer;
+
     let propertyFacts = resolvePropertyFacts({
       extraction: context.extraction,
       propertyRecord,
       parcelView,
-      customer: context.customer,
+      customer: trustedCustomer,
       isCommercial: commercialHint(context),
       subdivisionMedian,
     });
@@ -303,7 +308,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       extraction: context.extraction,
       propertyRecord: effectiveSignals.propertyRecord,
       parcelView: effectiveSignals.parcelView,
-      customer: addressRegathered ? null : context.customer,
+      customer: addressRegathered ? null : trustedCustomer,
       isCommercial: intent.is_commercial,
       subdivisionMedian: effectiveSignals.subdivisionMedian,
     });
