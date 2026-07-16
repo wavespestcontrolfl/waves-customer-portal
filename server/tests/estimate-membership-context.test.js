@@ -174,6 +174,39 @@ describe('computeMembershipContext', () => {
     expect(ctx.currentSpendPerVisitTotal).toBe(117);
   });
 
+  test('frozen membership snapshot expands every component of a combined active plan', async () => {
+    const database = fakeDb({
+      scheduledRows: [{
+        id: 'combo-1',
+        service_type: 'Quarterly Pest + Lawn',
+        scheduled_date: '2099-01-05',
+        estimated_price: 180,
+      }],
+    });
+
+    const snapshot = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: {
+        lineItems: [{
+          service: 'tree_shrub',
+          annualAfterDiscount: 840,
+          monthlyAfterDiscount: 70,
+          recurring: true,
+          frequency: 6,
+        }],
+      },
+    });
+
+    expect(snapshot).toMatchObject({
+      tier: 'gold',
+      tierLabel: 'Gold',
+      existingServiceKeys: ['pest_control', 'lawn_care'],
+    });
+    expect(snapshot.newServices).toEqual([
+      expect.objectContaining({ key: 'tree_shrub' }),
+    ]);
+  });
+
   test('the frozen snapshot lists non-tier recurring work, not just qualifying rows', async () => {
     const database = fakeDb({
       scheduledRows: [

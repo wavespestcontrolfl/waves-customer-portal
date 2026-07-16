@@ -444,10 +444,17 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
 
     const existingByKey = new Map();
     for (const row of existingRows) {
-      const key = toQualifyingKey(row.service_type);
-      if (!key) continue;
-      if (!existingByKey.has(key)) existingByKey.set(key, []);
-      existingByKey.get(key).push(row);
+      // Combined scheduled-service labels represent every component for
+      // membership and cross-sell purposes. A scalar toQualifyingKey call
+      // keeps only the first match (for example pest from "Pest + Lawn"),
+      // which makes the frozen snapshot disagree with Agent pricing.
+      const componentKeys = accountServiceKeys(row.service_type)
+        .map((component) => toQualifyingKey(component))
+        .filter(Boolean);
+      for (const key of componentKeys) {
+        if (!existingByKey.has(key)) existingByKey.set(key, []);
+        existingByKey.get(key).push(row);
+      }
     }
     const existingKeys = [...existingByKey.keys()];
 

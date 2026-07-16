@@ -1374,7 +1374,10 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       laneReasons.push(`${label} was used for pricing without a matching verified property fact`);
     }
   };
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.homeSqFt)), /home|building.*(sq|area|size)/i, 'home/building square footage', input.engineInputs.homeSqFt);
+  const effectiveBuildingSqFt = Number.isFinite(Number(input.engineInputs.homeSqFt))
+    ? input.engineInputs.homeSqFt
+    : input.engineInputs.buildingSqFt;
+  requirePricingFact(Number.isFinite(Number(effectiveBuildingSqFt)), /home|building.*(sq|area|size)/i, 'home/building square footage', effectiveBuildingSqFt);
   requirePricingFact(Number.isFinite(Number(input.engineInputs.stories)), /stor(y|ies)|floor.*count/i, 'story count', input.engineInputs.stories);
   requirePricingFact(Number.isFinite(Number(input.engineInputs.lotSqFt)), /lot|outdoor.*(sq|area|size)/i, 'lot square footage', input.engineInputs.lotSqFt);
   requirePricingFact(Number.isFinite(Number(input.engineInputs.palmCount)), /palm.*count|treated.*palm/i, 'treated palm count', input.engineInputs.palmCount);

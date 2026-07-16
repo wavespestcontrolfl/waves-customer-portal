@@ -280,6 +280,29 @@ describe('Agent Estimate draft tool', () => {
     ]));
   });
 
+  test('requires a verified fact when buildingSqFt supplies the effective home size', async () => {
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        buildingSqFt: 2500,
+        services: { pest: { frequency: 'quarterly' } },
+      },
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain(
+      'home/building square footage was used for pricing without a matching verified property fact',
+    );
+  });
+
   test('computes one-time collected margin when the engine exposes a cost basis', () => {
     expect(_private.compactAgentLine({
       service: 'trenching',
