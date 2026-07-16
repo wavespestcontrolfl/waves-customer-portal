@@ -9,31 +9,7 @@
  *   - tools flagged sonnetBacked
  */
 
-function buildMinimalInput(schema) {
-  if (!schema || typeof schema !== 'object') return {};
-  const out = {};
-  const required = Array.isArray(schema.required) ? schema.required : [];
-  const props = schema.properties || {};
-  for (const r of required) {
-    const p = props[r] || {};
-    out[r] = defaultFor(p);
-  }
-  return out;
-}
-
-function defaultFor(prop) {
-  const t = Array.isArray(prop.type) ? prop.type[0] : prop.type;
-  if (prop.enum && prop.enum.length) return prop.enum[0];
-  switch (t) {
-    case 'string':  return prop.default ?? 'test';
-    case 'number':
-    case 'integer': return prop.default ?? 0;
-    case 'boolean': return prop.default ?? false;
-    case 'array':   return [];
-    case 'object':  return {};
-    default:        return null;
-  }
-}
+const { buildMinimalInput } = require('../minimal-input');
 
 function withTimeout(p, ms) {
   return new Promise((resolve, reject) => {
@@ -60,7 +36,9 @@ async function run(tool) {
     result = await withTimeout(tool.execute(input), 10000);
   } catch (e) {
     errors.push(`execute threw: ${e.message}`);
-    return { validator: 'execute-smoke', tool: tool.name, surface: tool.surface, pass: false, severity: 'warning', errors };
+    // critical since 2026-07-16: minimal inputs are schema-valid and typed
+    // (nil UUID etc.), so a throw is a broken tool, not a bad probe.
+    return { validator: 'execute-smoke', tool: tool.name, surface: tool.surface, pass: false, severity: 'critical', errors };
   }
 
   if (result === undefined || result === null) errors.push('result is null/undefined');
@@ -72,7 +50,7 @@ async function run(tool) {
     tool: tool.name,
     surface: tool.surface,
     pass: errors.length === 0,
-    severity: errors.length ? 'warning' : 'info',
+    severity: errors.length ? 'critical' : 'info',
     errors,
   };
 }

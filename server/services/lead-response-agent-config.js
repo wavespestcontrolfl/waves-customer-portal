@@ -96,7 +96,7 @@ NEVER: send a generic template, promise pricing, book without availability check
       input_schema: {
         type: 'object',
         properties: {
-          customer_id: { type: 'string', description: 'Customer UUID linked to the lead' },
+          customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID linked to the lead' },
         },
         required: ['customer_id'],
       },
@@ -112,7 +112,7 @@ NEVER: send a generic template, promise pricing, book without availability check
         type: 'object',
         properties: {
           phone: { type: 'string', description: 'Customer phone number' },
-          customer_id: { type: 'string', description: 'Customer UUID (alternative)' },
+          customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID (alternative)' },
         },
       },
     },
@@ -124,7 +124,7 @@ NEVER: send a generic template, promise pricing, book without availability check
       input_schema: {
         type: 'object',
         properties: {
-          customer_id: { type: 'string', description: 'Customer UUID' },
+          customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           phone: { type: 'string', description: 'Phone number (alternative lookup)' },
         },
       },
@@ -167,7 +167,7 @@ NEVER: send a generic template, promise pricing, book without availability check
       input_schema: {
         type: 'object',
         properties: {
-          customer_id: { type: 'string', description: 'Customer UUID' },
+          customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           lead_id: { type: 'string', description: 'Lead UUID for activity tracking' },
           message: { type: 'string', description: 'SMS text to send (under 300 chars, signed as Adam)' },
         },
@@ -182,7 +182,7 @@ NEVER: send a generic template, promise pricing, book without availability check
       input_schema: {
         type: 'object',
         properties: {
-          customer_id: { type: 'string', description: 'Customer UUID' },
+          customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           lead_id: { type: 'string', description: 'Lead UUID' },
           draft_response: { type: 'string', description: 'Suggested SMS response for Adam to review/edit' },
           reason: { type: 'string', description: 'Why this needs Adam (high-value, commercial, complaint, etc.)' },
@@ -201,7 +201,7 @@ NEVER: send a generic template, promise pricing, book without availability check
       input_schema: {
         type: 'object',
         properties: {
-          customer_id: { type: 'string', description: 'Customer UUID' },
+          customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           lead_id: { type: 'string', description: 'Lead UUID' },
           stage: { type: 'string', description: 'New pipeline stage' },
           note: { type: 'string', description: 'Activity note explaining the transition' },
@@ -217,7 +217,7 @@ NEVER: send a generic template, promise pricing, book without availability check
       input_schema: {
         type: 'object',
         properties: {
-          customer_id: { type: 'string', description: 'Customer UUID' },
+          customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           lead_id: { type: 'string', description: 'Lead UUID' },
           service_interest: { type: 'string', description: 'What service they need' },
           address: { type: 'string', description: 'Service address' },
@@ -236,7 +236,7 @@ NEVER: send a generic template, promise pricing, book without availability check
         type: 'object',
         properties: {
           lead_id: { type: 'string', description: 'Lead UUID' },
-          customer_id: { type: 'string', description: 'Customer UUID' },
+          customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           action_taken: { type: 'string', description: 'auto_sent, queued_for_adam, or existing_customer_routed' },
           response_message: { type: 'string', description: 'The SMS sent or drafted' },
           response_time_seconds: { type: 'number', description: 'How many seconds from lead arrival to response' },

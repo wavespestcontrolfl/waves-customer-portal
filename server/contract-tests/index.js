@@ -78,6 +78,14 @@ const DRY = process.env.CONTRACT_DRY_RUN === 'true';
     console.error(`[contract] ${summary.critical} critical failures — blocking deploy`);
     process.exit(1);
   }
+  // Warnings block too (2026-07-16): the suite reached 0 warnings, so any
+  // new one is a regression demanding an explicit decision — fix it, flag
+  // sideEffects, or declare the contract in overrides/manual-contracts.js.
+  // CONTRACT_ALLOW_WARNINGS=true is the local escape hatch while iterating.
+  if (summary.warning > 0 && process.env.CONTRACT_ALLOW_WARNINGS !== 'true') {
+    console.error(`[contract] ${summary.warning} warnings — blocking (fix, flag sideEffects, or declare in manual-contracts.js; CONTRACT_ALLOW_WARNINGS=true to bypass locally)`);
+    process.exit(1);
+  }
   console.log('[contract] all tools pass');
   process.exit(0);
 })().catch(err => {
