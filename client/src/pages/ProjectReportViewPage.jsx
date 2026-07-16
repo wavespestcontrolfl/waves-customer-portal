@@ -361,14 +361,16 @@ export default function ProjectReportViewPage() {
   const [loadError, setLoadError] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
 
-  // Liquid-glass theme — now unconditional, except on the certificate view.
-  // This page has no client pdf/static render modes (the filed FDACS-13645
-  // PDF is a server-side artifact linked below, never rendered here), but the
-  // pre-construction termite Certificate of Compliance IS a state compliance
-  // document rendered on this page — it never mounts the scene, so the
-  // certificate stays the plain paper document.
+  // Liquid-glass theme — unconditional EXCEPT on official compliance
+  // documents, which stay the plain navy/beige paper (owner ruling
+  // 2026-07-16): the pre-construction termite Certificate of Compliance and
+  // WDO inspection reports never mount the scene. Regular termite
+  // inspection/treatment reports and the other project types stay glass.
+  // (This page has no client pdf/static render modes — the filed FDACS-13645
+  // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
-  const glassActive = !isCertificate;
+  const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
+  const glassActive = !isPaperDocument;
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
@@ -572,7 +574,15 @@ export default function ProjectReportViewPage() {
 
         {/* No generic project-report PDF render exists server-side (the FDACS
             form link below covers WDO certificates) — Share + Print only. */}
-        <DocumentActionBar shareTitle="Waves project report" />
+        {/* Owner rule 2026-07-16: every report shows the same four boxes.
+            A filed WDO report downloads the real FDACS PDF; everything else
+            falls back to the print dialog (Save as PDF). */}
+        <DocumentActionBar
+          shareTitle="Waves project report"
+          pdfUrl={data?.fdacsPdfAvailable ? `${API_BASE}/reports/project/${token}/fdacs-pdf` : null}
+          pdfFileName="FDACS-13645-WDO-Inspection-Report.pdf"
+          printFallbackDownload
+        />
 
         {/* Summary card — no "Report details" block (owner directive
             2026-07-03): the hero already carries the address, the At-a-glance
