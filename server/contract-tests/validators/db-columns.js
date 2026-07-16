@@ -66,9 +66,21 @@ const NOT_TABLES = new Set(['select', 'set', 'only', 'lateral', 'values', 'unnes
 // `const SOME_CONST = '...'` / backtick literals defined in the same file.
 const RAW_IDENT_CALL = /\b(?:db|trx|knex)\s*\.raw\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g;
 
-function analyzeSqlString(sql, rawTables, rawAliases) {
+function analyzeSqlString(sql, rawTables, rawAliases, rawColRefs) {
   // Returns true if a table position is interpolated/bound (dynamic).
   let dynamic = false;
+  // Qualified column refs ("alias.col" / "table.col") — collected for
+  // validation, but ONLY refs whose qualifier resolves to a table or alias
+  // this file actually declares get validated (extractFromSource filters).
+  // SQL string literals are blanked first so 'text.with.dots' can't match.
+  if (rawColRefs) {
+    const noLiterals = sql.replace(/'(?:[^'\\]|\\.)*'/g, "''");
+    let q;
+    const QUAL_COL = /\b([a-z_][\w]*)\.([a-z_][\w]*)\b/gi;
+    while ((q = QUAL_COL.exec(noLiterals)) !== null) {
+      rawColRefs.push([q[1].toLowerCase(), q[2].toLowerCase()]);
+    }
+  }
   // Bare "table" / "table as alias" fragment (e.g. .from(db.raw('sms_log as
   // reply'))) — a table reference with no query clause around it.
   const bare = /^\s*([a-z_][a-z0-9_]*)(?:\s+(?:as\s+)?([a-z_][\w]*))?\s*$/i.exec(sql);
@@ -84,10 +96,18 @@ function analyzeSqlString(sql, rawTables, rawAliases) {
   let t;
   TABLE_POS.lastIndex = 0;
   while ((t = TABLE_POS.exec(sql)) !== null) {
+    // "FROM" has non-table meanings: EXTRACT(field FROM expr), IS DISTINCT
+    // FROM, TRIM(... FROM ...). The word before this match disambiguates.
+    const before = /([a-z_]+)\s*$/i.exec(sql.slice(0, t.index));
+    if (before && /^(epoch|year|month|week|day|dow|doy|isodow|isoyear|hour|minute|second|quarter|millisecond|microsecond|century|decade|timezone_hour|timezone_minute|distinct|both|leading|trailing)$/i.test(before[1])) continue;
     const tok = t[1];
     if (tok === '${' || tok === '?' || tok === '??') { dynamic = true; continue; }
     if (tok === '(') continue; // subquery — its own FROMs are scanned too
     const parts = tok.replace(/"/g, '').split('.');
+    // Dotted token in table position: a real schema-qualified table is
+    // "public.x" here; anything else ("c.created_at" inside a function's
+    // FROM) is a column ref, not a table.
+    if (parts.length === 2 && parts[0].toLowerCase() !== 'public') continue;
     const table = parts[parts.length - 1].toLowerCase();
     if (ctes.has(table) || NOT_TABLES.has(table)) continue;
     const rest = sql.slice(t.index + t[0].length);
@@ -106,6 +126,7 @@ function analyzeSqlString(sql, rawTables, rawAliases) {
 function extractRawSql(src) {
   const rawTables = new Set();
   const rawAliases = []; // [alias, table] pairs
+  const rawColRefs = []; // [qualifier, column] pairs from qualified refs
   let dynamic = false;
   let literalCalls = 0;
   let m;
@@ -115,7 +136,7 @@ function extractRawSql(src) {
     // Expression fragments (COUNT(*), COALESCE(...) as x, intervals) carry
     // no FROM/JOIN — analyzeSqlString finds no table positions and they are
     // ignored, interpolated or not: only QUERY clauses can go stale.
-    if (analyzeSqlString(m[1].slice(1, -1), rawTables, rawAliases)) dynamic = true;
+    if (analyzeSqlString(m[1].slice(1, -1), rawTables, rawAliases, rawColRefs)) dynamic = true;
   }
   // db.raw(SOME_CONST): resolve the constant's literal in this file and
   // analyze it like an inline literal.
@@ -126,7 +147,7 @@ function extractRawSql(src) {
     const name = m[1];
     const def = new RegExp(`\\b${name}\\s*=\\s*(\`(?:[^\`\\\\]|\\\\.)*\`|'(?:[^'\\\\]|\\\\.)*'|"(?:[^"\\\\]|\\\\.)*")`).exec(src);
     if (def) {
-      if (analyzeSqlString(def[1].slice(1, -1), rawTables, rawAliases)) dynamic = true;
+      if (analyzeSqlString(def[1].slice(1, -1), rawTables, rawAliases, rawColRefs)) dynamic = true;
     } else {
       dynamic = true; // variable/parameter we can't resolve statically
     }
@@ -136,7 +157,7 @@ function extractRawSql(src) {
   const numericCalls = (src.match(/\b(?:db|trx|knex)\s*\.raw\(\s*\d+(?:\.\d+)?\s*[,)]/g) || []).length;
   const totalRawCalls = (src.match(/\b(?:db|trx|knex)\s*\.raw\(/g) || []).length;
   if (totalRawCalls > literalCalls + identCalls + numericCalls) dynamic = true;
-  return { rawTables: [...rawTables], rawAliases, dynamic };
+  return { rawTables: [...rawTables], rawAliases, rawColRefs, dynamic };
 }
 
 function stripAs(ref) {
@@ -203,6 +224,15 @@ function extractFromSource(src) {
     const raw = extractRawSql(src);
     rawTables = raw.rawTables;
     for (const [a, t] of raw.rawAliases) addAlias(a, t);
+    // Qualified refs from raw SQL: validate only those whose qualifier is a
+    // declared alias or a table this file queries — unknown qualifiers
+    // (CTEs, subquery aliases, pg_catalog) are ignored, never guessed at.
+    const rawTableSet = new Set(rawTables);
+    for (const [q, c] of raw.rawColRefs) {
+      if (aliasTables.has(q) || rawTableSet.has(q) || sourceTables.has(q)) {
+        columns.add(`${q}.${c}`);
+      }
+    }
     if (raw.dynamic) {
       warnings.push('dynamic db.raw SQL (interpolated/bound table position or unresolvable arg) — declare its tables in manual-contracts.js');
     }
