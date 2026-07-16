@@ -323,6 +323,9 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       key,
       label: accountServiceLabel(key, serviceRows[0]?.service_type),
       qualifiesForWaveGuard: existingServiceKeys.includes(key),
+      // Every property this service is active at — lets duplicate checks
+      // scope to the quoted property instead of blocking account-wide.
+      serviceAddresses: [...new Set(serviceRows.map((row) => row.effective_service_address).filter(Boolean))],
       currentPerVisit: currentPerVisit ?? null,
       spendSource: lastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
       lastPaidAt: lastPaid?.paidAt || null,
@@ -404,8 +407,11 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
 
     // Existing service prices remain exactly as contracted. Their current
     // spend is retained for staff context, but the new combined tier applies
-    // only to services priced in this estimate.
-    const currentSpend = await loadCurrentServiceSpendContext(database, customerId, { existingRows });
+    // only to services priced in this estimate. Do NOT pass existingRows here:
+    // those are the QUALIFYING rows only, and reusing them would drop non-tier
+    // recurring work (rodent bait, palm injection) from the frozen snapshot
+    // and underreport currentSpendPerVisitTotal.
+    const currentSpend = await loadCurrentServiceSpendContext(database, customerId);
     const existingServices = [];
 
     // ── New-service member discount ────────────────────────────

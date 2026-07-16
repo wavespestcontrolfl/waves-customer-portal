@@ -1310,3 +1310,146 @@ describe('Agent Estimate round-5 hardening', () => {
     expect(result.lane_reasons[0]).toBe('pest_control collected margin is below 35%');
   });
 });
+
+describe('Agent Estimate round-6 hardening', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGenerateEstimate.mockReturnValue(ENGINE_RESULT);
+    mockDuplicateBlock.mockResolvedValue(null);
+  });
+
+  test('an active commercial program blocks re-quoting its base service', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: [],
+        current_services: [{ key: 'commercial_pest_control', currentPerVisit: 210 }],
+      },
+    });
+
+    const result = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+
+    expect(result.error).toMatch(/already has active pest_control/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a multi-property customer can be quoted the same service at a DIFFERENT property', async () => {
+    const account = {
+      recognized: true,
+      customer_id: 'customer-1',
+      existing_service_keys: ['pest_control'],
+      current_services: [{
+        key: 'pest_control',
+        currentPerVisit: 117,
+        serviceAddresses: ['1 Test St, Bradenton FL 34208'],
+      }],
+    };
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({ customer_account: account });
+    const other = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      address: '500 Other Rd, Venice FL 34285',
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    expect(other.error).toBeUndefined();
+    expect(mockGenerateEstimate).toHaveBeenCalled();
+
+    mockGenerateEstimate.mockClear();
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({ customer_account: account });
+    const same = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      address: '1 Test St, Bradenton FL 34208',
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    expect(same.error).toMatch(/already has active pest_control/i);
+
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({ customer_account: account });
+    const unknown = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    expect(unknown.error).toMatch(/already has active pest_control/i);
+  });
+
+  test('a draft with an unpriced requested service is refused', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      summary: { recurringMonthlyAfterDiscount: 54.17, recurringAnnualAfterDiscount: 650, oneTimeTotal: 0 },
+      waveGuard: { tier: 'bronze' },
+      lineItems: [
+        {
+          service: 'pest_control', annualAfterDiscount: 650, monthlyAfterDiscount: 54.17,
+          costs: { annualCost: 420 }, pricingConfidence: 'high',
+        },
+        { service: 'bed_bug', quoteRequired: true, manualReviewReasons: ['needs inspection'] },
+      ],
+    });
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { ...INPUT.engineInputs, services: { pest: {}, bedBug: {} } },
+    }, { confirmed: true });
+
+    expect(result.error).toMatch(/no price for: bed_bug/i);
+    expect(result.error).toMatch(/manual quote/i);
+    expect(writes).toEqual([]);
+  });
+
+  test('a create never adopts a lead.customer_id that pricing did not recognize', async () => {
+    const { database, writes } = makeDatabase({
+      lead: {
+        id: 'lead-1', customer_id: 'customer-linked-late', estimate_id: null,
+        phone: '9415550100', email: 'road@example.com',
+      },
+      customer: { id: 'customer-linked-late' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.success).toBe(true);
+    const insert = writes.find((write) => write.table === 'estimates' && write.op === 'insert').payload;
+    expect(insert.customer_id).toBeNull();
+  });
+
+  test('a revision preserves authored proposal data in estimate_data', async () => {
+    const existing = {
+      id: 'estimate-old',
+      token: 'old-token',
+      status: 'draft',
+      source: 'estimator_engine',
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-1',
+        engineInputs: INPUT.engineInputs,
+        engineResult: ENGINE_RESULT,
+        estimatorEngine: { origin: 'manual_agent' },
+        proposal: { enabled: true, buildings: [{ name: 'Main office' }] },
+      }),
+    };
+    const { database, writes } = makeDatabase({ estimate: existing, estimateRows: [] });
+    mockDb.mockImplementation(database);
+    mockDb.transaction.mockImplementation(async (callback) => callback(database));
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      estimateId: existing.id,
+    }, { confirmed: true });
+
+    expect(result.success).toBe(true);
+    const update = writes.find((write) => write.table === 'estimates' && write.op === 'update').payload;
+    const stored = JSON.parse(update.estimate_data);
+    expect(stored.proposal).toEqual({ enabled: true, buildings: [{ name: 'Main office' }] });
+    expect(stored.estimatorEngine.origin).toBe('manual_agent');
+  });
+});

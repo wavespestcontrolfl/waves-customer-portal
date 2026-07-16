@@ -147,6 +147,23 @@ describe('computeMembershipContext', () => {
     expect(ctx.currentSpendPerVisitTotal).toBe(117);
   });
 
+  test('the frozen snapshot lists non-tier recurring work, not just qualifying rows', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+        { id: 'r1', service_type: 'Rodent Bait Stations', scheduled_date: '2099-02-05', estimated_price: 45 },
+      ],
+    });
+
+    const snapshot = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: { lineItems: [{ service: 'lawn_care', annualAfterDiscount: 840, monthlyAfterDiscount: 70, recurring: true, frequency: 6 }] },
+    });
+
+    expect(snapshot).not.toBeNull();
+    expect(snapshot.currentServices.map((service) => service.key).sort()).toEqual(['pest_control', 'rodent_bait']);
+  });
+
   test('a customer row with NO existing services is NOT flagged existing (keeps prepay eligible)', async () => {
     // Regression: a brand-new pest/lawn signup whose customer row already
     // exists (created at intake/onsite) carries zero qualifying recurring

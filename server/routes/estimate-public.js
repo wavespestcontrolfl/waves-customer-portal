@@ -12615,8 +12615,16 @@ function isRetiredLawnTierKey(tierKey) {
 // per-app never disagree, the pre-discount anchor never drops below the net
 // price, and the reported manual discount shrinks to what the floor actually
 // let through (never display savings the price doesn't reflect).
-function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount }) {
-  const minMonthly = lawnProgramMinimumMonthly();
+function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount, marginFloorAnnual }) {
+  const programMinMonthly = lawnProgramMinimumMonthly();
+  // Each cadence carries its OWN 35% collected-margin floor from the engine
+  // (minimumCollectedAnnualPrice). The program minimum alone would let a
+  // discounted alternate cadence render/bill below the margin its own cost
+  // basis requires.
+  const marginFloorMonthly = Number.isFinite(Number(marginFloorAnnual)) && Number(marginFloorAnnual) > 0
+    ? roundMonthly(Number(marginFloorAnnual) / 12)
+    : 0;
+  const minMonthly = Math.max(programMinMonthly > 0 ? programMinMonthly : 0, marginFloorMonthly);
   if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };
   const clampedMonthlyBase = monthlyBase != null ? Math.max(monthlyBase, minMonthly) : monthlyBase;
   let clampedMonthly = monthly != null ? Math.max(monthly, minMonthly) : monthly;
@@ -12668,7 +12676,12 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
     perTreatment: clampedPerTreatment,
     manualDiscount: clampedManualDiscount,
     manualDiscountSuppressed,
-    flooredAtMinimum: monthlyWasClamped || annualWasClamped,
+    // Decoy-hiding (owner ask 2026-07-10) applies to PROGRAM-MINIMUM pins,
+    // where every floored tier lands on the same $/mo and higher-app tiers
+    // dominate. A margin-floor clamp lands each cadence on its OWN cost-based
+    // price — those rows are real choices and must stay visible.
+    flooredAtMinimum: (monthlyWasClamped || annualWasClamped)
+      && programMinMonthly > 0 && minMonthly === programMinMonthly,
   };
 }
 
@@ -12848,6 +12861,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         perTreatment: rawPerTreatment,
         visits,
         manualDiscount: rawManualDiscountForTier,
+        marginFloorAnnual: finiteNumberOrNull(row.marginFloorAnnual),
       });
       // The engine itself may have already lifted the tier to the program
       // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that
@@ -12969,7 +12983,13 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
   // lawnFrequenciesFromRows, so only floor-bound tiers are capped.
   const requestedLawnDiscountPct = finiteNumberOrNull(lawnLine?.requestedDiscountPct)
     ?? finiteNumberOrNull(lawnLine?.discount?.effectiveDiscount);
-  const discountFactor = lawnLine?.programMinimumGuardApplied === true && requestedLawnDiscountPct != null
+  // Same treatment when the 35% MARGIN floor (not the program minimum) capped
+  // the selected line: the after/before ratio is the CAPPED ratio, and reusing
+  // it would strip discount headroom the alternate cadences actually have.
+  // Each tier re-clamps at its own floor below.
+  const selectedLineFloorCapped = lawnLine?.programMinimumGuardApplied === true
+    || lawnLine?.marginFloorGuardApplied === true;
+  const discountFactor = selectedLineFloorCapped && requestedLawnDiscountPct != null
     ? Math.min(1, Math.max(0, 1 - requestedLawnDiscountPct))
     : ((beforeAnnual && beforeAnnual > 0 && afterAnnual != null)
       ? afterAnnual / beforeAnnual
@@ -13005,6 +13025,9 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
       // (lawnFrequenciesFromRows flags it; display hides it).
       pricingSource: t.pricingSource || null,
       pricingBasis: t.pricingBasis || null,
+      // Per-cadence 35% collected-margin floor — the ladder clamp enforces it
+      // alongside the program minimum so no cadence renders below ITS floor.
+      marginFloorAnnual: finiteNumberOrNull(t.minimumCollectedAnnualPrice ?? t.costFloorAnnual),
       recommended: t.recommended === true,
       selected: t.tier === selectedTierKey,
     };

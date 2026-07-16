@@ -96,7 +96,25 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   const selectCols = ['id', 'service_type', 'scheduled_date'];
   if (cols.estimated_price) selectCols.push('estimated_price');
   if (cols.annual_prepay_term_id) selectCols.push('annual_prepay_term_id');
-  return query.select(selectCols);
+  const hasStampedAddress = !!cols.service_address_line1;
+  if (hasStampedAddress) {
+    selectCols.push('service_address_line1');
+    if (cols.service_address_city) selectCols.push('service_address_city');
+    if (cols.service_address_zip) selectCols.push('service_address_zip');
+  }
+  const rows = await query.select(selectCols);
+  // Stamp each row's EFFECTIVE service address (stamped columns, falling back
+  // to the customer's primary address) so duplicate checks can scope an
+  // active service to its property — a multi-property customer's pest plan at
+  // one address must not block a quote for another address.
+  const customerAddress = [customer.address_line1, customer.city, customer.zip]
+    .filter(Boolean).join(', ') || null;
+  return rows.map((row) => ({
+    ...row,
+    effective_service_address: (hasStampedAddress && row.service_address_line1)
+      ? [row.service_address_line1, row.service_address_city, row.service_address_zip].filter(Boolean).join(', ')
+      : customerAddress,
+  }));
 }
 
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan

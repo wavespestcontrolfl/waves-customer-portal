@@ -53,6 +53,7 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
       type: 'object',
       properties: {
         leadId: { type: 'string', description: 'Selected lead UUID. Required on Agent Estimate so existing-customer services and membership pricing are loaded server-side.' },
+        address: { type: 'string', description: 'Full service address being quoted. Scopes existing-customer duplicate checks to this property — a multi-property customer can be quoted the same service at a DIFFERENT property.' },
         homeSqFt: { type: 'number', description: 'Home interior square footage' },
         lotSqFt: { type: 'number', description: 'Lot size in square feet (defaults to ~4× homeSqFt if unknown)' },
         buildingSqFt: { type: 'number', description: 'Verified commercial building/treatment footprint square footage.' },
@@ -529,16 +530,31 @@ function accountPricingFromContext(context = {}) {
   // WaveGuard-qualifying set — rodent_bait / palm_injection live only in
   // current_services (loaded for spend recognition) and would otherwise be
   // quotable again as a duplicate draft. Pricing still uses the qualifying
-  // set only.
-  const currentServiceKeys = Array.isArray(account.current_services)
-    ? account.current_services.map((row) => row?.key).filter(Boolean)
-    : [];
+  // set only. Each entry carries the property addresses the service is
+  // active at, and commercial_* programs also match their base key so a
+  // requested `pest` collides with an active "Commercial Pest Control".
+  const activeServices = (Array.isArray(account.current_services) ? account.current_services : [])
+    .flatMap((row) => {
+      if (!row?.key) return [];
+      const addresses = Array.isArray(row.serviceAddresses) ? row.serviceAddresses.filter(Boolean) : [];
+      const entries = [{ key: row.key, addresses }];
+      if (row.key.startsWith('commercial_')) {
+        entries.push({ key: row.key.slice('commercial_'.length), addresses });
+      }
+      return entries;
+    });
+  const coveredKeys = new Set(activeServices.map((entry) => entry.key));
+  for (const key of priorQualifyingServices) {
+    // Qualifying keys normally also appear in current_services with address
+    // detail; a bare leftover stays an account-wide (address-less) block.
+    if (!coveredKeys.has(key)) activeServices.push({ key, addresses: [] });
+  }
   return {
     customerId: account.recognized ? account.customer_id : null,
     recognized: account.recognized === true,
     serviceContextUnavailable: account.service_context_unavailable === true,
     priorQualifyingServices,
-    activeServiceKeys: [...new Set([...priorQualifyingServices, ...currentServiceKeys])],
+    activeServices,
     customerAccount: account,
   };
 }
@@ -552,9 +568,20 @@ function serviceContextUnavailableError(accountPricing) {
   return 'This recognized customer\'s existing-service context could not be loaded. Retry shortly — pricing without their current services could misapply the membership tier or re-quote an active service.';
 }
 
-function duplicateCurrentServices(services = {}, activeServiceKeys = []) {
-  const current = new Set(activeServiceKeys);
-  return [...new Set(Object.keys(services).map(serviceTemplateKey).filter((key) => current.has(key)))];
+function duplicateCurrentServices(services = {}, activeServices = [], quoteAddress = null) {
+  const requestedKeys = [...new Set(Object.keys(services).map(serviceTemplateKey).filter(Boolean))];
+  return requestedKeys.filter((key) => activeServices.some((service) => {
+    if (service.key !== key) return false;
+    // Property scoping: when the quoted address and every one of this
+    // service's stamped addresses are known and street-differ, this is a
+    // multi-property expansion, not a duplicate. An unknown address on
+    // either side keeps the conservative account-wide block.
+    if (quoteAddress && service.addresses?.length
+      && service.addresses.every((address) => !sameStreetAddress(address, quoteAddress))) {
+      return false;
+    }
+    return true;
+  }));
 }
 
 // Transient input for generateEstimate only. The forbidden-input guard rejects
@@ -728,7 +755,7 @@ async function computeEstimate(input) {
   }
   const spendUnavailableError = serviceContextUnavailableError(accountPricing);
   if (spendUnavailableError) return { error: spendUnavailableError };
-  const duplicateServices = duplicateCurrentServices(services, accountPricing.activeServiceKeys);
+  const duplicateServices = duplicateCurrentServices(services, accountPricing.activeServices, input.address || null);
   if (duplicateServices.length) {
     return {
       error: `The customer already has active ${duplicateServices.join(', ')} service. Keep current services as account context and quote only requested additions.`,
@@ -1145,7 +1172,8 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   if (spendUnavailableError) return { error: spendUnavailableError };
   const duplicateServices = duplicateCurrentServices(
     input.engineInputs.services,
-    accountPricing.activeServiceKeys,
+    accountPricing.activeServices,
+    input.address || null,
   );
   if (duplicateServices.length) {
     return { error: `The customer already has active ${duplicateServices.join(', ')} service. Quote only requested additions.` };
@@ -1160,6 +1188,17 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   }
 
   const lines = (engineResult.lineItems || []).map(compactAgentLine);
+  // The aggregate check above passes as long as ANY line priced, which would
+  // let a mixed quote ship with an unpriced (quote-required/manual) service
+  // still listed in service_interest and never charged. Every line must
+  // carry a price or the whole draft is refused.
+  const unpricedLines = lines.filter((line) => line.monthly == null && line.annual == null && line.one_time == null);
+  if (unpricedLines.length) {
+    return {
+      error: `The engine returned no price for: ${unpricedLines.map((line) => line.service).join(', ')}. `
+        + 'That service needs a manual quote — remove it from this draft or quote it manually.',
+    };
+  }
   const laneReasons = [];
   const serviceKeys = Object.keys(input.engineInputs.services || {});
   const propertyFacts = input.propertyFacts && typeof input.propertyFacts === 'object'
@@ -1509,9 +1548,17 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     );
     if (duplicateBlock) return duplicateBlockResult(duplicateBlock);
     const payload = agentEstimatePayload(input, preview, currentData, accountPricing);
+    // Merge over the existing JSON instead of replacing it: an operator can
+    // author a commercial proposal on a draft (estimate_data.proposal), and a
+    // full overwrite would silently delete it. Agent-owned OPTIONAL keys are
+    // explicitly cleared when the new payload no longer carries them, so a
+    // lapsed membership or prior-services set can't survive the merge.
+    const mergedData = { ...currentData, ...payload.data };
+    if (!payload.data.membershipSnapshot) delete mergedData.membershipSnapshot;
+    if (!payload.data.priorQualifyingServices) delete mergedData.priorQualifyingServices;
     const [updated] = await trx('estimates').where({ id: estimate.id, status: 'draft', source: 'estimator_engine' })
       .update({
-        estimate_data: JSON.stringify(payload.data),
+        estimate_data: JSON.stringify(mergedData),
         ...payload.fields,
         // Recognition is reloaded for every confirmation — use ONLY the
         // current result. Falling back to the row's old customer_id would
@@ -1566,7 +1613,10 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     const [estimate] = await trx('estimates').insert({
       estimate_data: JSON.stringify(payload.data),
       ...payload.fields,
-      customer_id: accountPricing.customerId || lead.customer_id || null,
+      // ONLY the recognition this confirmation priced with. A lead.customer_id
+      // fallback could adopt a customer linked AFTER pricing ran, attaching an
+      // account whose services and tier the quote never accounted for.
+      customer_id: accountPricing.customerId || null,
       notes: null,
       token,
       expires_at: expiresAt,
