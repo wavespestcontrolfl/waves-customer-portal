@@ -83,7 +83,7 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?(?:\w+\s+){0,2}termites?\b|\btermites?\s+\w+\s+bait\s+stations?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b|\btermites?\s+(?:control|protection|monitor\w*|prevention|program|plan|coverage|bonds?|warrant(?:y|ies))\b|\btermites?\s+inspections?\s*(?:and|&|\+|plus|\/)\s*treat\w*/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?(?:\w+\s+){0,2}termites?\b|\btermites?\s+\w+\s+bait\s+stations?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b|\btermites?\s+(?:control|protection|monitor\w*|prevention|program|plan|coverage|bonds?|warrant(?:y|ies))\b|\btermites?\s+inspections?\s*(?:and|&|\+|plus|\/)\s*(?:a\s+|the\s+)?treat\w*/i;
 // ("termite service" — incl. the canonical "+ Termite Service" tail the V2
 // backfill carries forward — counts as work: it only ever got composed
 // because treatment wording passed this gate on the original scan, and a
@@ -160,7 +160,7 @@ function stripLocationPhrases(s) {
 // bare comma does NOT end the negation (that's how lists were leaking), but
 // a comma followed by a non-list continuation like "just …" reads as a new
 // segment via the contrast split below.
-const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just|sure)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH
+const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just|sure|a\s+customer|yet\s+a\s+customer)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH
 
 // Comparison declines ("instead of lawn care", "rather than mosquito
 // service") scope only to their own clause — a comma ends them, so
@@ -182,7 +182,7 @@ function stripComparedAway(s) {
 }
 // `except` is NOT here: it EXCLUDES what follows (handled by
 // COMPARED_AWAY_RE), unlike but/however which rescue a positive (codex r8).
-const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:needs?|wants?|do)|needs?|wants?)\b)|,\s*(?=[^,.;!?]{0,60}\b(?:too|as\s+well)\b)/gi;
+const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:needs?|wants?|do)|needs?|wants?)\b)|\band\b(?=\s+(?:wants?|needs?|looking)\b)|,\s*(?=[^,.;!?]{0,60}\b(?:too|as\s+well)\b)/gi;
 function stripNegatedClauses(s) {
   return s
     .split(SEGMENT_SPLIT_RE)
@@ -201,7 +201,14 @@ function stripNegatedClauses(s) {
 // as pest.
 const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|ticks?|roach(?:es)?|ants?|(?:wasps?|bees?|hornets?|yellow\s?jackets?)(?:\s+nests?)?|stinging\s+insects?|wdo)\s+exterminat\w*/gi;
 const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito|wasps?\b|bees?\b|hornets?\b|yellow\s?jackets?\b|stinging\s+insects?\b|fleas?\b|ticks?\b|roach(?:es)?\b|ants?\b)/gi;
-const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
+// Slash/comma exterminator pest lists are ONE job — collapse to the first
+// pest so "exterminator for fleas/ticks/roaches/ants" scans one family,
+// not flea + generic pest (codex r20).
+const EXTERMINATE_PEST_LIST_RE = /\b(fleas?|ticks?|roach(?:es)?|ants?|spiders?|bed[\s-]*bugs?)(?:\s*[/,]\s*(?:fleas?|ticks?|roach(?:es)?|ants?|spiders?|bed[\s-]*bugs?))+/gi;
+const normalizeExterminator = (s) => s
+  .replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment')
+  .replace(EXTERMINATE_FOR_RE, 'treat ')
+  .replace(EXTERMINATE_PEST_LIST_RE, '$1');
 
 // "palm injection for my palms" / "trunk injection into the palms" — the
 // trailing target noun is part of the SAME injection request, not a second
@@ -260,6 +267,16 @@ const V2_CATEGORY_PRIMARY_LABELS = {
 };
 function v2PrimaryLabelForCategory(category) {
   return V2_CATEGORY_PRIMARY_LABELS[category] || null;
+}
+
+// True when a label belongs to a specialty pest family (flea, stinging,
+// bed bug) whose V2 enum stand-in is the coarse pest_general category —
+// in that case the generic category word is the SAME job, not an extra
+// pest-control request (codex r20).
+function labelIsSpecialtyPestFamily(label) {
+  const text = cleanText(label);
+  if (!text) return false;
+  return familiesIn(text).some((fam) => fam.key === 'flea' || fam.key === 'stinging' || fam.key === 'bed_bug');
 }
 
 // opts.cueText: original caller wording consulted ONLY for the termite
@@ -391,6 +408,7 @@ module.exports = {
   composeServiceInterest,
   composeWordsForV2Category,
   v2PrimaryLabelForCategory,
+  labelIsSpecialtyPestFamily,
   primaryServiceInterest,
   v2InexpressibleFamilyWords,
 };

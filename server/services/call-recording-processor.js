@@ -30,7 +30,7 @@ const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
-const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -5838,8 +5838,16 @@ const CallRecordingProcessor = {
             // composeWordsForV2Category, NOT mapServiceCategoryToLegacy: the
             // legacy map collapses palm_injection into Tree & Shrub and
             // hard-labels termite as inspection (codex r11).
-            const cats = [v2ServiceRequest.primary_service_category,
+            let cats = [v2ServiceRequest.primary_service_category,
               ...(Array.isArray(v2ServiceRequest.secondary_categories) ? v2ServiceRequest.secondary_categories : [])];
+            // A specialty catalog pick (flea/stinging/bed-bug) rides the
+            // coarse pest_general category in the V2 enum — the generic
+            // category word is the SAME job, not an extra pest request
+            // (codex r20).
+            const v2SpecificPick = flatView(v2ApprovedExtraction).specific_service_name;
+            if (v2SpecificPick && labelIsSpecialtyPestFamily(v2SpecificPick)) {
+              cats = cats.filter((c) => c !== 'pest_general' && c !== 'bundled_waveguard');
+            }
             // Null-mapped categories (other/inspection_only/future enums)
             // yield an EMPTY category-authoritative request — never fall
             // back to V1 caller text under V2 approval (codex r12)…

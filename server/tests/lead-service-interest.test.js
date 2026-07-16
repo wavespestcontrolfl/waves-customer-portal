@@ -11,6 +11,7 @@ const {
   composeServiceInterest,
   composeWordsForV2Category,
   v2PrimaryLabelForCategory,
+  labelIsSpecialtyPestFamily,
   primaryServiceInterest,
   v2InexpressibleFamilyWords,
 } = require('../utils/lead-service-interest');
@@ -865,6 +866,39 @@ describe('composeServiceInterest', () => {
       matched_service: 'Quarterly Lawn Care Service',
       requested_service: 'lawn care and an exterminator for fleas',
     })).toBe('Quarterly Lawn Care Service + Flea Control Service');
+  });
+
+  test('non-decline "and wants/needs" phrasing keeps the request (codex r20)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'not a customer and wants pest control and lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'never had service and wants mosquito control',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+  });
+
+  test('slash-listed exterminator pests collapse to one job (codex r20)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and an exterminator for fleas/ticks/roaches/ants',
+    })).toBe('Quarterly Lawn Care Service + Flea Control Service');
+  });
+
+  test('article-separated inspection+treatment is work (codex r20)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control plus termite inspection and a treatment',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+  });
+
+  test('specialty labels are recognized for V2 category filtering (codex r20)', () => {
+    expect(labelIsSpecialtyPestFamily('Flea Control Service')).toBe(true);
+    expect(labelIsSpecialtyPestFamily('Bee / Wasp Nest Removal')).toBe(true);
+    expect(labelIsSpecialtyPestFamily('Bed Bug Treatment')).toBe(true);
+    expect(labelIsSpecialtyPestFamily('Quarterly Pest Control Service')).toBe(false);
+    expect(labelIsSpecialtyPestFamily(null)).toBe(false);
   });
 
   test('non-service chatter appends nothing', () => {
