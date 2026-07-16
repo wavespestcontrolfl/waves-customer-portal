@@ -787,6 +787,36 @@ describe('composeServiceInterest', () => {
     })).toBe('Liquid Termite Perimeter + WDO Inspection Service');
   });
 
+  test('rodent service/program wording is work evidence (codex r18)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'rodent service and exclusion',
+    })).toBe('Quarterly Pest Control Service + Rodent Control Service + Rodent Exclusion');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'mice program plus exclusion',
+    })).toBe('Quarterly Pest Control Service + Rodent Control Service + Rodent Exclusion');
+  });
+
+  test('wood-destroying insect wording stays WDO-only (codex r18)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'WDO Inspection Service',
+      requested_service: 'wood destroying insects inspection and report',
+    })).toBe('WDO Inspection Service');
+  });
+
+  test('vegetation locations stay locations before coordinated requests (codex r18)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'mosquitoes around palm trees and lawn care',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service + Lawn Care Service');
+    // "in"-shorthand requests still rescue
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'interested in lawn and mosquito service',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service + Mosquito Control Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',

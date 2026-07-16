@@ -2179,10 +2179,16 @@ export function LeadsSection() {
                                               // labels can be LONGER than the
                                               // catalog row ("Bee / Wasp Nest
                                               // Removal Service" vs seeded
-                                              // "Bee / Wasp Nest Removal").
+                                              // "Bee / Wasp Nest Removal") —
+                                              // but reverse containment only
+                                              // on SINGLE-segment candidates,
+                                              // or a composite would match a
+                                              // secondary's row before the
+                                              // loop sheds to the primary.
                                               return (
                                                 name.includes(cand) ||
-                                                (name.length >= 8 &&
+                                                (!cand.includes(" + ") &&
+                                                  name.length >= 8 &&
                                                   cand.includes(name))
                                               );
                                             }),

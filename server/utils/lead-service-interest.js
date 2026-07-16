@@ -51,7 +51,7 @@ const cleanText = (v) => {
 // distinct billable deliverables (project-types.js routes real-estate
 // transactions to WDO).
 const SERVICE_FAMILIES = [
-  { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed[\s-])\bbugs?\b|(?<!\bstinging\s)\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
+  { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed[\s-])(?<!\bdestroying\s)\bbugs?\b|(?<!\bstinging\s)(?<!\bdestroying\s)\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
   // Flea/tick work is its own catalog job (flea elimination packages) —
   // "pest program plus a flea treatment" must surface it (codex r16).
   { key: 'flea', label: 'Flea Control Service', re: /\bfleas?\b|\bticks?\b/i },
@@ -128,17 +128,25 @@ function stripLocationPhrases(s) {
     if (INTEREST_BEFORE_RE.test(whole.slice(0, offset))) return match;
     const after = whole.slice(offset + match.length);
     if (IMMEDIATE_SERVICE_WORD_RE.test(after)) {
-      // Article-marked AND coordinated: only the FINAL noun is bound to the
-      // service word — "ants in THE lawn and shrub care" requests shrub
-      // care, the lawn is where the ants are (codex r6). Article-less
-      // phrases stay whole ("interested in lawn and shrub care").
+      // Coordinated phrases keep only the FINAL noun bound to the service
+      // word — "ants in THE lawn and shrub care" requests shrub care, and
+      // "mosquitoes around palm trees and lawn care" requests lawn care
+      // (codex r6/r18). The ONE exception is article-less "in"-shorthand
+      // ("interested in lawn and shrub care"), which is a request list and
+      // stays whole.
       const parts = match.split(/\s+(?:and|or|&)\s+/i);
-      if (parts.length > 1 && LOCATION_HAS_ARTICLE_RE.test(match)) {
+      const inShorthand = /^\s*in\b/i.test(match) && !LOCATION_HAS_ARTICLE_RE.test(match);
+      if (parts.length > 1 && !inShorthand) {
         return ` ${parts[parts.length - 1]}`;
       }
       return match;
     }
-    if (!LOCATION_HAS_ARTICLE_RE.test(match) && COORDINATED_SERVICE_TAIL_RE.test(after)) return match;
+    // The coordinated-tail rescue is for "in"-shorthand requests only
+    // ("interested in lawn and mosquito service") — around/near/on a
+    // vegetation noun is a pest LOCATION even when another service follows
+    // ("mosquitoes around palm trees and lawn care", codex r18).
+    if (/^\s*in\b/i.test(match)
+      && !LOCATION_HAS_ARTICLE_RE.test(match) && COORDINATED_SERVICE_TAIL_RE.test(after)) return match;
     return ' ';
   });
 }
@@ -308,7 +316,7 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   // lawn "treatment" elsewhere in the sentence is not rodent work (codex
   // r17): rodent noun adjacent (±1 word) to a work verb, or the reverse.
   const rodentWorkEvidence = scanText
-    ? /\b(?:rodents?|rats?|mice|mouse)\s+(?:\w+\s+)?(?:trap\w*|bait\w*|remov\w*|treat\w*|exterminat\w*|control|infestation\w*)\b|\b(?:trap\w*|bait\w*|remov\w*|treat\w*|exterminat\w*)\s+(?:for\s+)?(?:the\s+)?(?:rodents?|rats?|mice|mouse)\b|\brodent\s+control\b|\bdroppings?\b/i.test(scanText)
+    ? /\b(?:rodents?|rats?|mice|mouse)\s+(?:\w+\s+)?(?:trap\w*|bait\w*|remov\w*|treat\w*|exterminat\w*|control|service|program|plan|infestation\w*)\b|\b(?:trap\w*|bait\w*|remov\w*|treat\w*|exterminat\w*)\s+(?:for\s+)?(?:the\s+)?(?:rodents?|rats?|mice|mouse)\b|\brodent\s+control\b|\bdroppings?\b/i.test(scanText)
     : false;
   let label = matched;
   for (const fam of scanFamilies) {
