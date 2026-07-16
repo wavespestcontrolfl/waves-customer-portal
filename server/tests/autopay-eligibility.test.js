@@ -78,7 +78,8 @@ describe('autopay eligibility', () => {
   });
 
   test('guards varchar expiry casts before aggregate numeric comparisons', () => {
-    const { sql, binding } = autopayActivePredicate();
+    const monthBoundaryUtc = new Date('2026-03-01T02:30:00Z');
+    const { sql, binding } = autopayActivePredicate(monthBoundaryUtc);
     const normalizedSql = sql.replace(/\s+/g, ' ').trim();
 
     const monthGuard = "NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'";
@@ -88,12 +89,25 @@ describe('autopay eligibility', () => {
 
     expect(normalizedSql).toContain(`CASE WHEN ${monthGuard} AND ${yearGuard} THEN (`);
     expect(normalizedSql).toContain(`${monthCast} BETWEEN 1 AND 12`);
-    expect(normalizedSql).toContain(`${yearCast} > EXTRACT(YEAR FROM CURRENT_DATE)`);
+    expect(normalizedSql).toContain('FROM (VALUES (?::date)) AS et(today)');
+    expect(normalizedSql).toContain('c.autopay_paused_until >= et.today');
+    expect(normalizedSql).toContain(`${yearCast} > EXTRACT(YEAR FROM et.today)`);
+    expect(normalizedSql).toContain(`${monthCast} >= EXTRACT(MONTH FROM et.today)`);
     expect(normalizedSql).toContain('ELSE FALSE END');
     expect(normalizedSql.indexOf(monthGuard)).toBeLessThan(normalizedSql.indexOf(monthCast));
     expect(normalizedSql.indexOf(yearGuard)).toBeLessThan(normalizedSql.indexOf(yearCast));
     expect(normalizedSql).not.toContain('pm.exp_month BETWEEN');
-    expect(binding).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(normalizedSql).not.toContain('CURRENT_DATE');
+    expect((sql.match(/\?/g) || [])).toHaveLength(1);
+    expect(binding).toBe('2026-02-28');
+  });
+
+  test('keeps JS and SQL card expiry on the prior ET month during UTC rollover', () => {
+    const utcMarchButEtFebruary = new Date('2026-03-01T02:30:00Z');
+
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: 2, exp_year: 2026 }, utcMarchButEtFebruary)).toBe(false);
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: 1, exp_year: 2026 }, utcMarchButEtFebruary)).toBe(true);
+    expect(autopayActivePredicate(utcMarchButEtFebruary).binding).toBe('2026-02-28');
   });
 
   test('finds the default Stripe autopay payment method row', async () => {
@@ -168,8 +182,7 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
           ('blank-year', 'stripe', true, true, 'pm_blank_year', 'card', '12', '    '),
           ('invalid-month', 'stripe', true, true, 'pm_invalid_month', 'card', 'xx', '2099'),
           ('invalid-year', 'stripe', true, true, 'pm_invalid_year', 'card', '12', 'nope'),
-          ('valid-card', 'stripe', true, true, 'pm_valid', 'card', '12',
-            (EXTRACT(YEAR FROM CURRENT_DATE)::integer + 1)::text)
+          ('valid-card', 'stripe', true, true, 'pm_valid', 'card', '12', '2099')
       )
       SELECT c.id, ${sql} AS active
       FROM c
@@ -182,6 +195,34 @@ describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
       'invalid-month': false,
       'invalid-year': false,
       'valid-card': true,
+    });
+  });
+
+  test('uses the bound ET month during the UTC month-rollover window', async () => {
+    const utcMarchButEtFebruary = new Date('2026-03-01T02:30:00Z');
+    const { sql, binding } = autopayActivePredicate(utcMarchButEtFebruary);
+    const result = await database.raw(`
+      WITH c(id, autopay_enabled, autopay_paused_until, ach_status) AS (
+        VALUES
+          ('february-card', true, NULL::date, NULL::text),
+          ('january-card', true, NULL::date, NULL::text)
+      ), payment_methods(
+        customer_id, processor, is_default, autopay_enabled,
+        stripe_payment_method_id, method_type, exp_month, exp_year
+      ) AS (
+        VALUES
+          ('february-card', 'stripe', true, true, 'pm_february', 'card', '02', '2026'),
+          ('january-card', 'stripe', true, true, 'pm_january', 'card', '01', '2026')
+      )
+      SELECT c.id, ${sql} AS active
+      FROM c
+      ORDER BY c.id
+    `, [binding]);
+
+    expect(binding).toBe('2026-02-28');
+    expect(Object.fromEntries(result.rows.map((row) => [row.id, row.active]))).toEqual({
+      'february-card': true,
+      'january-card': false,
     });
   });
 });

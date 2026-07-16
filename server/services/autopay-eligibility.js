@@ -73,15 +73,18 @@ async function customerOnAutopay(customer, options = {}) {
 // payment_methods row exists — with the ACH-not-active → card-only fallback, where
 // a NULL/'' ach_status is treated as "no ACH block" (matching the JS, where '' is
 // falsy). Requires the customers table to be aliased `c` in the caller's query.
-// The single `?` binds today's ET date. Returns { sql, binding } so callers can
-// also NOT() it.
-function autopayActivePredicate() {
-  const sql = `(
-    c.autopay_enabled IS NOT FALSE
-    AND NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= ?::date)
-    AND EXISTS (
-      SELECT 1 FROM payment_methods pm
-      WHERE pm.customer_id = c.id
+// The single `?` binds today's ET date once; pause and card-expiry checks both
+// read that same value so a UTC month rollover cannot split their definition of
+// "today". Returns { sql, binding } so callers can also NOT() it.
+function autopayActivePredicate(now = new Date()) {
+  const sql = `EXISTS (
+    SELECT 1
+    FROM (VALUES (?::date)) AS et(today)
+    WHERE c.autopay_enabled IS NOT FALSE
+      AND NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= et.today)
+      AND EXISTS (
+        SELECT 1 FROM payment_methods pm
+        WHERE pm.customer_id = c.id
         AND pm.processor = 'stripe'
         AND pm.is_default = true
         AND pm.autopay_enabled = true
@@ -94,10 +97,10 @@ function autopayActivePredicate() {
             THEN (
               NULLIF(BTRIM(pm.exp_month), '')::integer BETWEEN 1 AND 12
               AND (
-                NULLIF(BTRIM(pm.exp_year), '')::integer > EXTRACT(YEAR FROM CURRENT_DATE)
+                NULLIF(BTRIM(pm.exp_year), '')::integer > EXTRACT(YEAR FROM et.today)
                 OR (
-                  NULLIF(BTRIM(pm.exp_year), '')::integer = EXTRACT(YEAR FROM CURRENT_DATE)
-                  AND NULLIF(BTRIM(pm.exp_month), '')::integer >= EXTRACT(MONTH FROM CURRENT_DATE)
+                  NULLIF(BTRIM(pm.exp_year), '')::integer = EXTRACT(YEAR FROM et.today)
+                  AND NULLIF(BTRIM(pm.exp_month), '')::integer >= EXTRACT(MONTH FROM et.today)
                 )
               )
             )
@@ -108,9 +111,9 @@ function autopayActivePredicate() {
           c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active'
           OR pm.method_type = 'card'
         )
-    )
+      )
   )`;
-  return { sql, binding: etDateString() };
+  return { sql, binding: etDateString(now) };
 }
 
 // Bank rows appear under BOTH aliases — savePaymentMethod writes 'ach',
