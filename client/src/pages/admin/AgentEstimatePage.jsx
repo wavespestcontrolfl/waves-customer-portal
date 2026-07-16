@@ -583,6 +583,9 @@ export default function AgentEstimatePage() {
   const quickActions = intelligence.quickActions || [];
   const buildDisabled = !context || contextLoading || intelligence.loading;
   const openLead = ["new", "contacted", "estimate_sent", "estimate_viewed"].includes(String(contact?.status || "new"));
+  // Closed (won/lost/unresponsive/duplicate) leads must not reach the draft
+  // tool through ANY entry — Build, quick actions, or a typed Ask AI prompt.
+  const askDisabled = buildDisabled || !openLead;
 
   const chooseLead = (leadId) => {
     setSearchParams(leadId ? { leadId } : {});
@@ -590,6 +593,10 @@ export default function AgentEstimatePage() {
 
   const sendDraft = async (sendMethod) => {
     if (!draft?.id || draft.status !== "draft" || draft.editable_here !== true || sending) return;
+    // Capture the lead this send belongs to — if the operator switches leads
+    // before the request resolves, the completion must not mark the newly
+    // selected draft as sent or reload the old lead under the new URL.
+    const sendLeadId = selectedLeadId;
     setSending(true);
     setSendMessage("");
     try {
@@ -600,6 +607,7 @@ export default function AgentEstimatePage() {
           idempotencyKey: globalThis.crypto?.randomUUID?.() || `agent-estimate-send-${Date.now()}`,
         }),
       });
+      if (activeLeadRef.current !== sendLeadId) return;
       const label = sendMethod === "sms" ? "SMS" : sendMethod === "email" ? "email" : "SMS and email";
       const channelIssues = Object.entries(data.channels || {})
         .filter(([, value]) => value && !value.ok)
@@ -608,6 +616,7 @@ export default function AgentEstimatePage() {
       setDraft((current) => ({ ...current, status: "sent" }));
       await loadContext();
     } catch (error) {
+      if (activeLeadRef.current !== sendLeadId) return;
       setSendMessage(`Send failed: ${error.message}`);
     } finally {
       setSending(false);
@@ -682,9 +691,14 @@ export default function AgentEstimatePage() {
 
               <SectionCard title="3 · Ask the estimator" subtitle="Corrections here adapt this estimate immediately. Permanent learning stays approval-controlled.">
                 <div className="space-y-3 p-4">
+                  {!openLead && (
+                    <div className="rounded-sm bg-zinc-50 p-3 text-[14px] leading-5 text-zinc-700">
+                      This lead is {String(contact?.status || "closed").replaceAll("_", " ")} — Agent Estimate drafting works on open leads only. Reopen the lead to build or revise a draft here.
+                    </div>
+                  )}
                   <button
                     type="button"
-                    disabled={buildDisabled || !openLead}
+                    disabled={askDisabled}
                     onClick={() => intelligence.submit(context.suggested_prompt || BUILD_PROMPT)}
                     className="flex min-h-14 w-full items-center justify-center gap-2 rounded-sm bg-zinc-900 px-5 text-[16px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -697,7 +711,7 @@ export default function AgentEstimatePage() {
                       <button
                         key={action.id}
                         type="button"
-                        disabled={intelligence.loading}
+                        disabled={askDisabled}
                         onClick={() => intelligence.submit(action.prompt)}
                         className="h-11 shrink-0 rounded-sm border border-zinc-300 bg-white px-3 text-[14px] font-medium text-zinc-800 disabled:opacity-40"
                       >
@@ -710,7 +724,7 @@ export default function AgentEstimatePage() {
                     value={intelligence.prompt}
                     onChange={(event) => intelligence.setPrompt(event.target.value)}
                     onKeyDown={(event) => {
-                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) intelligence.submit();
+                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !askDisabled) intelligence.submit();
                     }}
                     placeholder="Ask a property question, change scope, or tell AI what to double-check…"
                     className="min-h-28 w-full rounded-sm border border-zinc-300 bg-white p-3 text-[16px] leading-6 text-zinc-950 outline-none placeholder:text-zinc-400 focus:border-zinc-900"
@@ -751,7 +765,7 @@ export default function AgentEstimatePage() {
                     />
                     <button
                       type="button"
-                      disabled={!intelligence.prompt.trim() || intelligence.loading || intelligence.attachmentsLoading}
+                      disabled={!intelligence.prompt.trim() || askDisabled || intelligence.attachmentsLoading}
                       onClick={() => intelligence.submit()}
                       className="flex h-12 flex-1 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-5 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                     >
@@ -781,6 +795,13 @@ export default function AgentEstimatePage() {
                         variant="light"
                         touchFriendly
                         onResolved={(action, decision, body) => {
+                          // This callback is the closure from the render the card
+                          // was confirmed in; the pending-action payload is
+                          // display-only and may omit leadId. Compare the render's
+                          // lead against the live ref so a confirmation that
+                          // resolves after a lead switch never applies the old
+                          // lead's draft to the new one.
+                          if (activeLeadRef.current !== selectedLeadId) return;
                           if (action?.params?.leadId && String(action.params.leadId) !== String(selectedLeadId)) return;
                           if (decision === "confirm" && body?.success) {
                             handleAfterSubmit({
