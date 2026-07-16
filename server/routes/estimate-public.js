@@ -12628,6 +12628,10 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
     ? Math.ceil((Number(marginFloorAnnual) / 12) * 100) / 100
     : 0;
   const minMonthly = Math.max(programMinMonthly > 0 ? programMinMonthly : 0, marginFloorMonthly);
+  const minAnnual = Math.max(
+    programMinMonthly > 0 ? roundMonthly(programMinMonthly * 12) : 0,
+    Number.isFinite(Number(marginFloorAnnual)) ? Number(marginFloorAnnual) : 0,
+  );
   if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };
   const clampedMonthlyBase = monthlyBase != null ? Math.max(monthlyBase, minMonthly) : monthlyBase;
   let clampedMonthly = monthly != null ? Math.max(monthly, minMonthly) : monthly;
@@ -12635,9 +12639,9 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
   // Only re-derive annual/per-app when the floor actually moved a number —
   // untouched rows keep their stored annual (it is the billing source of
   // truth and carries exact cents the monthly×12 round-trip would lose).
-  const clampedAnnual = monthlyWasClamped
-    ? roundMonthly(clampedMonthly * 12)
-    : (annual != null && monthly == null ? Math.max(annual, roundMonthly(minMonthly * 12)) : annual);
+  const clampedAnnual = annual != null
+    ? Math.max(annual, minAnnual)
+    : (monthlyWasClamped ? roundMonthly(clampedMonthly * 12) : annual);
   const annualWasClamped = clampedAnnual != null && annual != null && clampedAnnual !== annual;
   // An annual-only row the floor moved must ALSO carry a derived monthly:
   // accept reads selectedFrequency.monthly first and otherwise falls back to

@@ -568,7 +568,10 @@ export default function AgentEstimatePage() {
       if (contextRequestRef.current !== requestId) return;
       setContext(data.context || null);
       setDraft(data.context?.current_estimate || null);
-      setFailedChannels(readStoredFailedChannels(data.context?.current_estimate?.id));
+      const serverFailedChannels = data.context?.current_estimate?.failed_delivery_channels;
+      setFailedChannels(Array.isArray(serverFailedChannels)
+        ? serverFailedChannels
+        : readStoredFailedChannels(data.context?.current_estimate?.id));
     } catch (error) {
       if (contextRequestRef.current !== requestId) return;
       setContextError(error.message);

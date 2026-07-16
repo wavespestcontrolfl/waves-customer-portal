@@ -1200,6 +1200,17 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   }
 
   const lines = (engineResult.lineItems || []).map(compactAgentLine);
+  const emittedServiceKeys = new Set((engineResult.lineItems || []).map((line) => serviceTemplateKey(line?.service)));
+  const missingRequestedServices = Object.keys(input.engineInputs.services || {}).filter((rawKey) => {
+    const requestedKey = serviceTemplateKey(rawKey);
+    if (emittedServiceKeys.has(requestedKey)) return false;
+    return !(requestedKey === 'lawn_pest_knockdown' && emittedServiceKeys.has('one_time_lawn'));
+  });
+  if (missingRequestedServices.length) {
+    return {
+      error: `The pricing engine emitted no line for: ${missingRequestedServices.join(', ')}. Remove it or quote it manually.`,
+    };
+  }
   // The aggregate check above passes as long as ANY line priced, which would
   // let a mixed quote ship with an unpriced (quote-required/manual) service
   // still listed in service_interest and never charged. Every line must
@@ -1242,8 +1253,25 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     return hasValue && !!fact.source && !!confidence
       && !['low', 'weak', 'unknown', 'unverified'].includes(confidence);
   };
+  const factMatchesPricingInput = (key, fact) => {
+    if (!isVerifiedFact(fact)) return false;
+    if (/address/i.test(key)) return sameStreetAddress(String(fact.value), input.address);
+    const candidateKeys = /lawn|turf|treatable/i.test(key)
+      ? ['measuredTurfSf', 'lawnSqFt', 'estimatedTurfSf']
+      : (/building|home|unit/i.test(key)
+        ? ['buildingSqFt', 'homeSqFt']
+        : (/lot|outdoor/i.test(key)
+          ? ['lotSqFt']
+          : (/perimeter|linear/i.test(key) ? ['perimeterLF'] : [])));
+    if (!candidateKeys.length) return true;
+    const expected = candidateKeys.map((name) => Number(input.engineInputs[name]))
+      .find((value) => Number.isFinite(value));
+    const observed = Number(fact.value);
+    return Number.isFinite(expected) && Number.isFinite(observed)
+      && Math.abs(expected - observed) <= Math.max(1, expected * 0.01);
+  };
   const verifiedFactKeys = propertyFactEntries
-    .filter(([, fact]) => isVerifiedFact(fact))
+    .filter(([key, fact]) => factMatchesPricingInput(key, fact))
     .map(([key]) => key);
   if (!propertyFactEntries.length) {
     laneReasons.push('property facts were not verified');
@@ -1257,6 +1285,8 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   for (const [key, fact] of propertyFactEntries) {
     if (!isVerifiedFact(fact)) {
       laneReasons.push(`${key} lacks a verified value, source, or confidence`);
+    } else if (!factMatchesPricingInput(key, fact)) {
+      laneReasons.push(`${key} does not match the price-driving estimate input`);
     }
     const confidence = String(fact?.confidence || '').toLowerCase();
     if (['low', 'weak', 'unknown', 'unverified'].includes(confidence)) {
@@ -1554,6 +1584,9 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     await trx('leads').where({ id: input.leadId }).forUpdate().select('id');
     const leadCheck = await loadAgentEstimateLead(input.leadId, trx);
     if (leadCheck.error) return leadCheck;
+    if (leadCheck.lead.estimate_id && String(leadCheck.lead.estimate_id) !== String(estimateId)) {
+      return { error: 'The selected lead is now linked to a different estimate. Refresh before revising.' };
+    }
     // Re-anchor recipients from the LOCKED lead row: a contact correction
     // that landed between the pre-transaction anchor and this lock must win,
     // or the draft persists (and later sends to) the stale phone/email.

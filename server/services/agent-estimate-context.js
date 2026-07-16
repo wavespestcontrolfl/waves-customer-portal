@@ -371,6 +371,9 @@ async function buildAgentEstimateContext(leadId) {
         && currentEngine.origin === 'manual_agent',
       presentation_template: currentEngine.presentationTemplate || null,
       service_template_keys: currentEngine.serviceTemplateKeys || [],
+      failed_delivery_channels: Array.isArray(currentEstimateData.deliveryState?.failedChannels)
+        ? currentEstimateData.deliveryState.failedChannels.filter((channel) => ['sms', 'email'].includes(channel))
+        : [],
       updated_at: currentEstimate.updated_at,
     } : null,
     approved_learning: memories,

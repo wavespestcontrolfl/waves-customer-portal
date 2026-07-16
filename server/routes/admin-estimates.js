@@ -896,7 +896,15 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     // authored proposal) so a proposal save committing mid-send isn't clobbered
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
     // never a nested write, so the `||` merge can't drop the proposal itself.
-    const mergePatch = { sendSnapshot: snapshot.sendSnapshot || {} };
+    const mergePatch = {
+      sendSnapshot: snapshot.sendSnapshot || {},
+      deliveryState: {
+        attemptedAt: now().toISOString(),
+        sentChannels,
+        failedChannels,
+        channels,
+      },
+    };
     if (proposalEnabledForDelivery) {
       mergePatch.proposalDelivery = {
         stampedAt: now().toISOString(),
