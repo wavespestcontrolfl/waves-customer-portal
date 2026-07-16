@@ -1315,24 +1315,13 @@ export default function CreateProjectModal({
     }
   }
 
-  // Re-read the stripped signature metadata after the pad saves or clears a
-  // signature — the pad's own "✓ Signed" view keys off the prop, exactly like
-  // the report page's reload-after-change. A failed refresh leaves the pad on
-  // its form (the saved signature is intact server-side; Done stays available).
-  async function refreshSignStep() {
-    const projectId = signStep?.project?.id;
-    if (!projectId) return;
-    try {
-      const r = await adminFetch(`/admin/projects/${projectId}`);
-      const d = await r.json().catch(() => null);
-      if (r.ok && d?.project) {
-        setSignStep(prev => (prev ? {
-          ...prev,
-          applicator: d.project.wdo_applicator || prev.applicator,
-          signature: d.project.wdo_signature || null,
-        } : prev));
-      }
-    } catch { /* keep current step state */ }
+  // The pad reports the authoritative outcome of its own mutation (signed
+  // metadata from the POST response, or null after a clear) — applied
+  // directly, no refetch: a slow or failed detail GET must never leave the
+  // step claiming unsigned after a successful save (Codex P2). The pad
+  // AWAITS this inside its busy window, so exits can't race it either.
+  function applySignatureOutcome(meta) {
+    setSignStep(prev => (prev ? { ...prev, signature: meta } : prev));
   }
 
   // The only exit from the sign step — signed or not, the draft is already
@@ -1492,7 +1481,7 @@ export default function CreateProjectModal({
               signature={signStep.signature}
               defaultSignerName={signStep.applicator?.name || ''}
               defaultSignerIdCard={signStep.applicator?.idCardNo || ''}
-              onChanged={refreshSignStep}
+              onChanged={applySignatureOutcome}
               onBusyChange={setSignBusy}
             />
           </div>

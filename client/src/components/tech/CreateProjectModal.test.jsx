@@ -25,7 +25,11 @@ vi.mock('../AddressAutocomplete', () => ({ default: () => null }));
 vi.mock('./WdoSignaturePad', () => ({
   default: (props) => (
     <div data-testid="sign-pad" data-project-id={props.projectId} data-signer={props.defaultSignerName} data-idcard={props.defaultSignerIdCard}>
-      <button type="button" onClick={props.onChanged}>mock-sign-saved</button>
+      <button
+        type="button"
+        onClick={() => props.onChanged({ signed: true, signer_name: 'Adam Benetti', signed_at: '2026-07-16T23:00:00.000Z' })}
+      >mock-sign-saved</button>
+      <button type="button" onClick={() => props.onChanged(null)}>mock-sign-cleared</button>
       <button type="button" onClick={() => props.onBusyChange?.(true)}>mock-busy-start</button>
       <button type="button" onClick={() => props.onBusyChange?.(false)}>mock-busy-end</button>
     </div>
@@ -242,17 +246,13 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('a saved signature flips the exit to Done via the refetched metadata', async () => {
+  it('a saved signature flips the exit to Done via the pad-reported outcome (no refetch)', async () => {
     const onCreated = vi.fn();
     const onClose = vi.fn();
     await saveIntoSignStep({ onCreated, onClose });
 
-    // The pad saved a signature server-side; its onChanged triggers the
-    // metadata refetch, which now reports signed.
-    detailPayload = {
-      wdo_applicator: { name: 'Adam Benetti', idCardNo: 'JE362022' },
-      wdo_signature: { signed: true, signer_name: 'Adam Benetti' },
-    };
+    // The pad passes the POST response's metadata straight to the host —
+    // there is no detail refetch to race or fail (Codex P2).
     fireEvent.click(screen.getByText('mock-sign-saved'));
 
     const done = await screen.findByRole('button', { name: 'Done' });
@@ -260,6 +260,17 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     fireEvent.click(done);
     expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a cleared signature flips the exit back to Sign later', async () => {
+    await saveIntoSignStep({ onCreated: vi.fn(), onClose: vi.fn() });
+
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    await screen.findByRole('button', { name: 'Done' });
+
+    fireEvent.click(screen.getByText('mock-sign-cleared'));
+    await screen.findByRole('button', { name: 'Sign later' });
+    expect(screen.getByText("Unsigned reports can’t be sent yet.")).toBeTruthy();
   });
 
   it('closing from the sign step still reports the created project', async () => {

@@ -113,12 +113,20 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         method: "POST",
         body: { signature: dataUrl, signer_name: signerName.trim(), signer_id_card: signerIdCard.trim() },
       });
+      const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
         throw new Error(d.error || "Could not save signature");
       }
       setEditing(false);
-      onChanged?.();
+      // Pass the authoritative outcome (the POST response's metadata) and
+      // AWAIT the host's handler inside the busy window — a host that only
+      // refreshes on onChanged must not see busy end before it has the new
+      // signed state (it could exit with stale unsigned metadata).
+      await onChanged?.({
+        signed: true,
+        signer_name: d.signer_name || signerName.trim(),
+        signed_at: d.signed_at || new Date().toISOString(),
+      });
     } catch (e) {
       setError(e.message || "Could not save signature");
     } finally {
@@ -137,7 +145,8 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         throw new Error(d.error || "Could not clear signature");
       }
       setEditing(true);
-      onChanged?.();
+      // null = cleared; awaited for the same reason as save().
+      await onChanged?.(null);
     } catch (e) {
       setError(e.message || "Could not clear signature");
     } finally {
