@@ -125,4 +125,25 @@ describe('transactional email provider retry classification', () => {
     expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
+
+  test('recovers interrupted retry-worker claims after the stale window', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.whereNull = jest.fn(() => chain);
+    chain.update = jest.fn(async () => 1);
+    db.mockReturnValue(chain);
+    const now = new Date('2026-07-16T12:30:00Z');
+
+    await expect(retry.recoverStaleClaims(now)).resolves.toBe(1);
+
+    expect(chain.where).toHaveBeenCalledWith({ status: 'queued' });
+    expect(chain.where).toHaveBeenCalledWith('provider_retry_count', '>', 0);
+    expect(chain.where).toHaveBeenCalledWith('queued_at', '<=', new Date('2026-07-16T12:20:00Z'));
+    expect(chain.whereNull).toHaveBeenCalledWith('provider_message_id');
+    expect(chain.whereNull).toHaveBeenCalledWith('sent_at');
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed',
+      provider_retry_next_at: now,
+    }));
+  });
 });

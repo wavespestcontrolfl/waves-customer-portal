@@ -8,6 +8,7 @@ const NotificationService = require('./notification-service');
 const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
 const CLAIM_LIMIT = 10;
+const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 function asArray(value) {
   if (Array.isArray(value)) return value;
@@ -95,6 +96,27 @@ async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
     }
     return claimed;
   });
+}
+
+async function recoverStaleClaims(now = new Date()) {
+  const staleBefore = new Date(now.getTime() - STALE_CLAIM_MS);
+  return db('email_messages')
+    // provider_retry_count > 0 distinguishes retry-worker claims from normal
+    // sendTemplate rows that are independently protected by their own stale
+    // in-flight logic.
+    .where({ status: 'queued' })
+    .where('provider_retry_count', '>', 0)
+    .whereNull('provider_retry_next_at')
+    .whereNull('provider_retry_exhausted_at')
+    .whereNull('provider_message_id')
+    .whereNull('sent_at')
+    .where('queued_at', '<=', staleBefore)
+    .update({
+      status: 'failed',
+      provider_retry_next_at: now,
+      error_message: 'Interrupted provider retry claim recovered',
+      updated_at: now,
+    });
 }
 
 async function alertExhausted(message, reason) {
@@ -214,6 +236,8 @@ async function retryOne(message) {
 }
 
 async function runDueRetries({ limit = CLAIM_LIMIT } = {}) {
+  const recovered = await recoverStaleClaims();
+  if (Number(recovered) > 0) logger.warn(`[email-provider-retry] recovered ${recovered} stale claim(s)`);
   const claimed = await claimDueRetries(limit);
   const results = [];
   for (const message of claimed) {
@@ -239,6 +263,7 @@ module.exports = {
   isTransactionalRetryEligible,
   retryStateForProviderBlock,
   alertIfProviderRetriesExhausted,
+  recoverStaleClaims,
   claimDueRetries,
   markRetryFailure,
   retryOne,
