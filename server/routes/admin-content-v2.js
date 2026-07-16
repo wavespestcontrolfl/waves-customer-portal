@@ -844,6 +844,7 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
   // publishing+pr_open auto-merge authorization (that marker stays the
   // scheduler's alone). A crashed publish self-expires via the claim window.
   let claimStamp = null;
+  let renewTimer = null;
   try {
     assertBlogPostId(req.params.id);
     // claimStamp doubles as the release token: only the request that wrote
@@ -874,6 +875,30 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     }
     claimStamp = stamp;
 
+    // Lease heartbeat: publishAstro has no total timeout (GitHub/LLM/image
+    // calls can stall), and a lease that silently expires at 30m would let a
+    // second publisher take over while this one is still alive and later
+    // persists PR markers over the newer attempt's state. Renewing at a
+    // third of the window keeps a LIVE request owner for as long as it
+    // runs (awaited I/O leaves the event loop free to fire the timer);
+    // only a dead process stops renewing and expires. Renewal is CAS'd on
+    // our current stamp — if we ever lose the lease anyway, stop renewing
+    // rather than fight the new owner.
+    renewTimer = setInterval(async () => {
+      try {
+        const next = new Date();
+        const renewed = await db('blog_posts')
+          .where('id', req.params.id)
+          .where('publish_claimed_at', claimStamp)
+          .update({ publish_claimed_at: next, updated_at: new Date() });
+        if (renewed) claimStamp = next;
+        else clearInterval(renewTimer);
+      } catch (e) {
+        logger.warn(`[content] publish-astro lease renewal failed for ${req.params.id}: ${e.message}`);
+      }
+    }, Math.floor(PUBLISH_CLAIM_STALE_MS / 3));
+    if (typeof renewTimer.unref === 'function') renewTimer.unref();
+
     const AstroPublisher = require('../services/content-astro/astro-publisher');
     const result = await AstroPublisher.publishAstro(req.params.id);
     res.json({ success: true, ...result });
@@ -886,6 +911,7 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
       || err.code === 'BLOG_COMPARISON_GATE_FAILED';
     res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   } finally {
+    if (renewTimer) clearInterval(renewTimer);
     if (claimStamp) {
       try {
         await db('blog_posts')

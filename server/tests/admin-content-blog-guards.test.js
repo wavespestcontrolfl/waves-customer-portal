@@ -324,6 +324,35 @@ describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invis
     expect(calls.deletes).toBe(0);
   });
 
+  test('the lease renews while publishAstro runs and releases the RENEWED stamp (heartbeat, codex r8)', async () => {
+    jest.useFakeTimers();
+    try {
+      const calls = setupDb();
+      tableState.post = { id: POST_ID, status: 'draft', astro_status: null, publish_claimed_at: null };
+      const AstroPublisher = require('../services/content-astro/astro-publisher');
+      let finish;
+      AstroPublisher.publishAstro.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+
+      const pending = invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
+      await Promise.resolve(); // let the claim land
+      await jest.advanceTimersByTimeAsync(11 * 60 * 1000); // one renewal interval
+      finish({ pr_number: 9 });
+      const r = await pending;
+      expect(r.statusCode).toBe(200);
+
+      const claimWrites = calls.updates.filter((u) => 'publish_claimed_at' in u.updates);
+      // claim, >=1 renewal, release
+      expect(claimWrites.length).toBeGreaterThanOrEqual(3);
+      const release = claimWrites[claimWrites.length - 1];
+      expect(release.updates.publish_claimed_at).toBeNull();
+      const renewal = claimWrites[claimWrites.length - 2];
+      // the release CAS targets the RENEWED stamp, not the original claim
+      expect(release.filters.publish_claimed_at).toEqual(renewal.updates.publish_claimed_at);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('retryable failed states can still claim (admin Retry path — publishAstro reconciles the stale PR/branch)', async () => {
     const calls = setupDb();
     tableState.post = { id: POST_ID, status: 'draft', astro_status: 'build_failed', astro_pr_number: 12, astro_branch_name: 'content/blog-x', publish_claimed_at: null };
