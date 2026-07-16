@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import AddressAutocomplete from "../AddressAutocomplete";
+import useModalFocus from "../../hooks/useModalFocus";
 import { PROPERTY_LABEL_OPTIONS } from "../../lib/customerFormOptions";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -58,6 +59,7 @@ export default function MobileNewCustomerSheet({
   const [form, setForm] = useState(() => formFromInitialValues(initialValues));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const sheetRef = useModalFocus(open, onClose);
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
@@ -116,6 +118,11 @@ export default function MobileNewCustomerSheet({
 
   return (
     <div
+      ref={sheetRef}
+      tabIndex={-1}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="mobile-new-customer-title"
       className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden"
       style={{ fontFamily: "Roboto, Arial, sans-serif" }}
     >
@@ -166,6 +173,7 @@ export default function MobileNewCustomerSheet({
       >
         {/* Heading */}
         <h1
+          id="mobile-new-customer-title"
           className="text-zinc-900"
           style={{
             fontSize: 30,

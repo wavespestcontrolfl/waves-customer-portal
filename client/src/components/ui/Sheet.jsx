@@ -1,28 +1,19 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import useModalFocus from '../../hooks/useModalFocus';
 import { cn } from './cn';
 
 // Right-side slide-in panel. Customer Detail in spec §5.6 lives here.
 // Same focus-trap strategy as Dialog — swap root for Radix if needed.
-export function Sheet({ open, onClose, children, width = 'md', className }) {
-  const panelRef = useRef(null);
+export function Sheet({ open, onClose, children, width = 'md', className, ariaLabel = 'Details' }) {
+  const panelRef = useModalFocus(open, onClose);
 
   useEffect(() => {
     if (!open) return undefined;
-    const onKey = (e) => {
-      if (e.key === 'Escape') onClose && onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    const prevOverflow = document.body.style.overflow;
+    const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const prevFocus = document.activeElement;
-    setTimeout(() => panelRef.current && panelRef.current.focus(), 0);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.body.style.overflow = prevOverflow;
-      if (prevFocus && prevFocus.focus) prevFocus.focus();
-    };
-  }, [open, onClose]);
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [open]);
 
   if (!open) return null;
 
@@ -34,6 +25,7 @@ export function Sheet({ open, onClose, children, width = 'md', className }) {
       className="fixed inset-0 z-50"
       role="dialog"
       aria-modal="true"
+      aria-label={ariaLabel}
     >
       <div className="absolute inset-0 bg-zinc-900/30" onClick={onClose} />
       <div

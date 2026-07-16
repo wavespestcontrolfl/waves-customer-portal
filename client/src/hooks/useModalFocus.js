@@ -1,17 +1,9 @@
 import { useEffect, useRef } from 'react';
 
-// Shared focus management for the hand-rolled customer-surface modals
-// (legacy inline-style pages — no Radix). On open: remembers the trigger,
-// moves focus into the dialog, and keeps Tab / Shift+Tab cycling inside it.
-// On close/unmount: restores focus to the remembered trigger.
-//
-// Usage:
-//   const dialogRef = useModalFocus(open);        // `open` optional, defaults true
-//   ...
-//   <div ref={dialogRef} role="dialog" aria-modal="true" ...>
-//
-// For modals that only mount while open, call it with no argument.
-// Escape handling stays with each modal — this hook only handles focus.
+// Shared focus management for hand-rolled modals. On open: remembers the
+// trigger, moves focus into the dialog, and keeps Tab / Shift+Tab cycling
+// inside it. On close/unmount: restores focus to the remembered trigger.
+// An optional second argument adds Escape dismissal for admin overlays.
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -23,22 +15,30 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-export default function useModalFocus(active = true) {
-  const dialogRef = useRef(null);
+function isAvailable(element) {
+  if (element.closest('[hidden], [aria-hidden="true"]')) return false;
+  let current = element;
+  while (current instanceof HTMLElement) {
+    const style = window.getComputedStyle(current);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    current = current.parentElement;
+  }
+  return true;
+}
 
-  // Capture the opener during render on the closed→open transition. With an
-  // autoFocus child (e.g. the chat input in PortalPage), React moves focus
-  // INTO the dialog at commit — before the passive effect below runs — so
-  // reading document.activeElement there records the modal's own child and
-  // close never restores focus to the trigger. At render time focus is still
-  // on the opener. `openedRef` flips inside the effect (not during render) so
-  // a render that never commits can't strand it.
+export default function useModalFocus(active = true, onClose) {
+  const dialogRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  // Capture the opener during render on the closed→open transition. An
+  // autoFocus child can otherwise move focus before the passive effect runs.
   const openerRef = useRef(null);
   const openedRef = useRef(false);
   if (active && !openedRef.current) {
-    const el = document.activeElement;
-    if (!(dialogRef.current && dialogRef.current.contains(el))) {
-      openerRef.current = el;
+    const element = document.activeElement;
+    if (!(dialogRef.current && dialogRef.current.contains(element))) {
+      openerRef.current = element;
     }
   }
 
@@ -49,38 +49,37 @@ export default function useModalFocus(active = true) {
 
     openedRef.current = true;
     const previouslyFocused = openerRef.current;
-
     const getFocusable = () =>
-      Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
-        (el) => !el.hasAttribute('hidden') && el.getAttribute('aria-hidden') !== 'true'
-      );
+      Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter(isAvailable);
 
-    // Make the container itself focusable so dialogs with zero focusable
-    // children (or async-mounted content, e.g. Stripe elements) still work.
     if (!dialog.hasAttribute('tabindex')) dialog.setAttribute('tabindex', '-1');
-    // Respect an autoFocus element inside the dialog (e.g. the chat input);
-    // otherwise move focus to the dialog container itself.
-    if (!dialog.contains(document.activeElement)) dialog.focus();
+    if (!dialog.contains(document.activeElement)) dialog.focus({ preventScroll: true });
 
-    const onKeyDown = (e) => {
-      if (e.key !== 'Tab') return;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape' && onCloseRef.current) {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
       const focusable = getFocusable();
       if (focusable.length === 0) {
-        e.preventDefault();
-        dialog.focus();
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
         return;
       }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       const current = document.activeElement;
-      if (e.shiftKey) {
+      if (event.shiftKey) {
         if (current === first || current === dialog || !dialog.contains(current)) {
-          e.preventDefault();
-          last.focus();
+          event.preventDefault();
+          last.focus({ preventScroll: true });
         }
       } else if (current === last || !dialog.contains(current)) {
-        e.preventDefault();
-        first.focus();
+        event.preventDefault();
+        first.focus({ preventScroll: true });
       }
     };
 
@@ -89,11 +88,11 @@ export default function useModalFocus(active = true) {
       document.removeEventListener('keydown', onKeyDown, true);
       openedRef.current = false;
       if (
-        previouslyFocused &&
-        typeof previouslyFocused.focus === 'function' &&
-        document.contains(previouslyFocused)
+        previouslyFocused
+        && typeof previouslyFocused.focus === 'function'
+        && document.contains(previouslyFocused)
       ) {
-        previouslyFocused.focus();
+        previouslyFocused.focus({ preventScroll: true });
       }
     };
   }, [active]);

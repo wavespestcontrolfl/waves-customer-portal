@@ -6,6 +6,7 @@ import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/
 import { computePretreatChemistry } from '../../lib/termitePretreatRates';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 import DictationButton from './DictationButton';
+import useModalFocus from '../../hooks/useModalFocus';
 
 const ESTIMATE_BG = '#FFFFFF';
 const ESTIMATE_BORDER = '#E4E4E7';
@@ -367,6 +368,7 @@ export default function CreateProjectModal({
   const [aiUseComms, setAiUseComms] = useState(true);
   const [error, setError] = useState(null);
   const [createdProject, setCreatedProject] = useState(null);
+  const dialogRef = useModalFocus(true, () => { if (!saving) onClose?.(); });
 
   // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
   // company's treatment sticker/notice (or visible evidence) into the
@@ -1293,8 +1295,11 @@ export default function CreateProjectModal({
   // are unaffected: the card sets P.bodyFont per theme.
   return createPortal(
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
+      aria-labelledby="create-project-title"
       style={isSheet ? {
         // Complete Service frame: scrim + full-height sheet docked right
         // (100% width on phones via maxWidth), body scrolls inside.
@@ -1335,7 +1340,7 @@ export default function CreateProjectModal({
           background: P.card,
         }}>
           <div>
-            <div style={{
+            <div id="create-project-title" style={{
               fontSize: isEstimateStyle ? 18 : 16,
               fontWeight: wStrong,
               color: P.heading,

@@ -1,28 +1,22 @@
-import React, { useEffect, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useId } from 'react';
 import { createPortal } from 'react-dom';
+import useModalFocus from '../../hooks/useModalFocus';
 import { cn } from './cn';
+
+const DialogTitleContext = createContext(null);
 
 // Hand-rolled modal. If focus-trap edge cases accumulate, swap the root
 // for @radix-ui/react-dialog (see DECISIONS.md 2026-04-18 entry on primitives).
 export function Dialog({ open, onClose, children, size = 'md', className, style }) {
-  const panelRef = useRef(null);
+  const panelRef = useModalFocus(open, onClose);
+  const titleId = useId();
 
   useEffect(() => {
     if (!open) return undefined;
-    const onKey = (e) => {
-      if (e.key === 'Escape') onClose && onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    const prevOverflow = document.body.style.overflow;
+    const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const prevFocus = document.activeElement;
-    setTimeout(() => panelRef.current && panelRef.current.focus(), 0);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.body.style.overflow = prevOverflow;
-      if (prevFocus && prevFocus.focus) prevFocus.focus();
-    };
-  }, [open, onClose]);
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [open]);
 
   if (!open) return null;
 
@@ -34,6 +28,7 @@ export function Dialog({ open, onClose, children, size = 'md', className, style 
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
+      aria-labelledby={titleId}
       style={{
         paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
         paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
@@ -56,7 +51,9 @@ export function Dialog({ open, onClose, children, size = 'md', className, style 
           className
         )}
       >
-        {children}
+        <DialogTitleContext.Provider value={titleId}>
+          {children}
+        </DialogTitleContext.Provider>
       </div>
     </div>,
     document.body
@@ -78,8 +75,10 @@ export function DialogHeader({ className, children, ...rest }) {
 }
 
 export function DialogTitle({ className, children, ...rest }) {
+  const titleId = useContext(DialogTitleContext);
   return (
     <h2
+      id={rest.id || titleId}
       className={cn('text-18 font-medium tracking-tight text-zinc-900', className)}
       {...rest}
     >
