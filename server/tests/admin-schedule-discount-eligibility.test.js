@@ -16,6 +16,8 @@ const {
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   loadStoredDiscountScope,
+  clearAppointmentDiscountCatalogFields,
+  appointmentDiscountInputChanged,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -202,5 +204,37 @@ describe('admin schedule appointment discount eligibility', () => {
       service_id: 'missing-service',
       discount_service_key_filter: 'general_pest',
     })).rejects.toThrow(/catalog service is missing/);
+  });
+
+  test('clears an old scope snapshot when an appointment discount changes', () => {
+    expect(appointmentDiscountInputChanged({
+      discount_type: 'percentage',
+      discount_amount: 10,
+    }, 'fixed_amount', 25)).toBe(true);
+    expect(appointmentDiscountInputChanged({
+      discount_type: 'percentage',
+      discount_amount: 10,
+    }, 'percentage', 10)).toBe(false);
+
+    const updates = {
+      discount_id: 'discount-1',
+      discount_name: 'Scoped discount',
+      discount_service_key_filter: 'general_pest',
+      discount_service_category_filter: 'pest_control',
+    };
+    const cols = {
+      discount_id: {},
+      discount_name: {},
+      discount_service_key_filter: {},
+      discount_service_category_filter: {},
+    };
+    clearAppointmentDiscountCatalogFields(updates, cols);
+
+    expect(updates).toMatchObject({
+      discount_id: null,
+      discount_name: null,
+      discount_service_key_filter: null,
+      discount_service_category_filter: null,
+    });
   });
 });

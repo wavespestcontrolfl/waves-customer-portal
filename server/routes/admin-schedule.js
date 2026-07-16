@@ -587,6 +587,27 @@ function copyAppointmentDiscountFields(target, source, cols) {
   if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
 }
 
+function clearAppointmentDiscountCatalogFields(target, cols) {
+  if (!target || !cols) return;
+  if (cols.discount_id) target.discount_id = null;
+  if (cols.discount_name) target.discount_name = null;
+  if (cols.discount_service_key_filter) target.discount_service_key_filter = null;
+  if (cols.discount_service_category_filter) target.discount_service_category_filter = null;
+}
+
+function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
+  const existingType = existing?.discount_type || null;
+  const existingAmount = existing?.discount_amount == null || existing.discount_amount === ''
+    ? null
+    : Number(existing.discount_amount);
+  const nextType = discountType === undefined ? existingType : (discountType || null);
+  const nextAmount = discountAmount === undefined
+    ? existingAmount
+    : (discountAmount == null || discountAmount === '' ? null : Number(discountAmount));
+  return nextType !== existingType
+    || (nextAmount == null ? existingAmount != null : existingAmount == null || Math.abs(nextAmount - existingAmount) >= 0.005);
+}
+
 function copyAddonDiscountFields(target, source, cols) {
   if (!target || !source || !cols) return;
   if (cols.base_price && source.base_price != null) target.base_price = source.base_price;
@@ -3334,6 +3355,19 @@ router.put('/:id/update-details', async (req, res, next) => {
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
+    let appointmentDiscountChanged = false;
+    let appointmentDiscountCols = null;
+    if (discountType !== undefined || discountAmount !== undefined) {
+      appointmentDiscountCols = await db('scheduled_services').columnInfo();
+      const existingDiscount = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .first('discount_type', 'discount_amount');
+      appointmentDiscountChanged = appointmentDiscountInputChanged(
+        existingDiscount,
+        discountType,
+        discountAmount
+      );
+    }
     // When the Edit appointment "Services and items" section sends an explicit
     // `addons` array, we treat it as the full desired set of additional service
     // lines for this appointment (replace strategy) and recompute the stored
@@ -3468,8 +3502,9 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
         if (cols.skip_weekends && skipWeekends !== undefined) updates.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && weekendShift !== undefined) updates.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
-        if (cols.discount_type) updates.discount_type = discountType || null;
-        if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (cols.discount_type && discountType !== undefined) updates.discount_type = discountType || null;
+        if (cols.discount_amount && discountAmount !== undefined) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
         if (cols.create_invoice_on_complete && createInvoice !== undefined) updates.create_invoice_on_complete = !!createInvoice;
       } catch {}
     }
@@ -3622,8 +3657,7 @@ router.put('/:id/update-details', async (req, res, next) => {
         // Only rewrite the appointment-level discount columns when the request
         // explicitly carried a discount value; otherwise leave them as-is.
         if (discountProvided) {
-          if (cols.discount_id) updates.discount_id = null;
-          if (cols.discount_name) updates.discount_name = null;
+          if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
           if (cols.discount_type) updates.discount_type = effDiscountType;
           if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
         }
@@ -3673,8 +3707,7 @@ router.put('/:id/update-details', async (req, res, next) => {
         const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
         if (cols.primary_line_price) updates.primary_line_price = primaryGross;
-        if (cols.discount_id) updates.discount_id = null;
-        if (cols.discount_name) updates.discount_name = null;
+        clearAppointmentDiscountCatalogFields(updates, cols);
         if (cols.discount_type) updates.discount_type = discountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
         if (cols.discount_amount) {
           updates.discount_amount = (discountAmount != null && discountAmount !== '')
@@ -3696,7 +3729,11 @@ router.put('/:id/update-details', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.discount_type) updates.discount_type = discountType || null;
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
       } catch {}
+    }
+    if (appointmentDiscountChanged) {
+      clearAppointmentDiscountCatalogFields(updates, appointmentDiscountCols);
     }
     // Converting an existing priced visit to a WaveGuard re-service: the price
     // handling above may have stored the prior service's carried-over price.
@@ -7257,6 +7294,8 @@ router._test = {
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   loadStoredDiscountScope,
+  clearAppointmentDiscountCatalogFields,
+  appointmentDiscountInputChanged,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,
