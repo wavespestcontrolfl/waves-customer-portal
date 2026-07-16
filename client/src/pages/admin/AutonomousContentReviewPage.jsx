@@ -62,7 +62,10 @@ function formatDate(value) {
 
 function gateTag(summary) {
   if (!summary) return { tone: "neutral", label: "—" };
-  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false) {
+  // comparison_ok === false means the comparison-table gate failed (named
+  // competitors); it previously wasn't checked here, so a failing draft
+  // could show "Gate passed".
+  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false || summary.comparison_ok === false) {
     return { tone: "alert", label: "Needs fix" };
   }
   if ((summary.soft_failures || []).length > 0) return { tone: "neutral", label: "Soft flags" };
@@ -181,33 +184,42 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
-      return;
+      return undefined;
     }
+    // Stale-response guard: clicking row A then B can resolve A's fetch last,
+    // leaving A's draft rendered while B is highlighted (decisions were
+    // already safe server-side via the run-id 409; this fixes the display).
+    let stale = false;
     setDetail(null);
     setDetailLoading(true);
     adminFetch(`/admin/content/autonomous/review/${selectedId}`)
       .then((next) => {
+        if (stale) return;
         setDetail(next.item);
         setReviewNote("");
       })
-      .catch((err) => setError(err.message))
-      .finally(() => setDetailLoading(false));
+      .catch((err) => { if (!stale) setError(err.message); })
+      .finally(() => { if (!stale) setDetailLoading(false); });
+    return () => { stale = true; };
   }, [selectedId]);
 
   useEffect(() => {
     if (!selectedLinkId) {
       setLinkDetail(null);
-      return;
+      return undefined;
     }
+    let stale = false;
     setLinkDetail(null);
     setLinkDetailLoading(true);
     adminFetch(`/admin/content/internal-links/${selectedLinkId}`)
       .then((next) => {
+        if (stale) return;
         setLinkDetail(next.item);
         setLinkReviewNote("");
       })
-      .catch((err) => setError(err.message))
-      .finally(() => setLinkDetailLoading(false));
+      .catch((err) => { if (!stale) setError(err.message); })
+      .finally(() => { if (!stale) setLinkDetailLoading(false); });
+    return () => { stale = true; };
   }, [selectedLinkId]);
 
   const submitDecision = async (decision) => {
@@ -278,9 +290,11 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const hardFailures = gateSummary?.hard_failures || [];
   const softFailures = gateSummary?.soft_failures || [];
   const uniquenessFailures = gateSummary?.uniqueness_failures || [];
+  const comparisonFindings = gateSummary?.comparison_findings || [];
   const seoCompletion = selected?.run?.seo_completion;
   const seoFindings = seoCompletion?.findings || [];
   const recommendedLinks = seoCompletion?.recommended_links || [];
+  const remediation = selected?.run?.remediation;
   const pendingCount = counts.pending_review || 0;
   const shadowCount = useMemo(() => items.filter((item) => item.run?.shadow_mode).length, [items]);
   const reviewActions = selected?.review_actions || {};
@@ -360,7 +374,11 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
               {loading ? (
                 <Empty>Loading…</Empty>
               ) : items.length === 0 ? (
-                <Empty>No pending review rows.</Empty>
+                <Empty>
+                  {data?.unavailable
+                    ? "Review queue unavailable — the review tables are missing or the query failed. Check server logs."
+                    : "No pending review rows."}
+                </Empty>
               ) : (
                 <div className="flex flex-col gap-2.5">
                   {items.map((item) => {
@@ -418,6 +436,34 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                       <Field label="Run" value={selected.run?.outcome || "—"} />
                     </div>
 
+                    {selected.run?.astro_pr_url && <ExternalAnchor href={selected.run.astro_pr_url} label="Open Astro PR" />}
+
+                    {(selected.run?.poll_pending_reason || remediation) && (
+                      <Section
+                        icon={selected.run?.poll_pending_reason || remediation?.status === "parked" ? AlertTriangle : CheckCircle2}
+                        ok={!selected.run?.poll_pending_reason && remediation?.status !== "parked"}
+                        title="Pipeline status"
+                      >
+                        <div className="grid gap-1 text-13 text-zinc-600">
+                          {selected.run?.poll_pending_reason && (
+                            <div>
+                              Auto-merge waiting on <span className="font-medium text-zinc-900">{selected.run.poll_pending_reason}</span>
+                              {selected.run.poll_pending_since ? ` since ${formatDate(selected.run.poll_pending_since)}` : ""}
+                            </div>
+                          )}
+                          {remediation && (
+                            <div>
+                              Codex remediation: <span className="font-medium text-zinc-900">{remediation.status}</span>
+                              {Number.isFinite(remediation.rounds) ? ` · ${remediation.rounds} round(s)` : ""}
+                            </div>
+                          )}
+                          {remediation?.park_reason && (
+                            <div className="text-[#B42318]">Parked: {remediation.park_reason}</div>
+                          )}
+                        </div>
+                      </Section>
+                    )}
+
                     {selected.status === "pending_review" && (
                       <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
                         <Textarea
@@ -452,8 +498,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                     )}
 
                     <Section
-                      icon={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false ? CheckCircle2 : AlertTriangle}
-                      ok={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false}
+                      icon={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false && gateSummary?.comparison_ok !== false ? CheckCircle2 : AlertTriangle}
+                      ok={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false && gateSummary?.comparison_ok !== false}
                       title="Gate summary"
                     >
                       <div className="grid gap-1 text-13 text-zinc-600">
@@ -462,8 +508,22 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                         <div>Soft: {softFailures.length ? softFailures.join(", ") : "none"}</div>
                         <div>Uniqueness: {uniquenessFailures.length ? uniquenessFailures.join(", ") : (gateSummary?.uniqueness_ok === false ? "failed" : "none")}</div>
                         <div>SEO completion: {seoCompletion?.available ? `P0 ${seoCompletion.p0} / P1 ${seoCompletion.p1} / P2 ${seoCompletion.p2}` : "not run"}</div>
+                        <div>Comparison: {gateSummary?.comparison_ok == null ? "not run" : gateSummary.comparison_ok ? "ok" : "failed"}</div>
+                        {gateSummary?.comparison_ok === false && comparisonFindings.slice(0, 4).map((finding, i) => (
+                          <div key={`${finding.code}-${i}`} className="text-[#B42318]">
+                            <span className="font-medium">{finding.severity} {finding.code}</span>: {finding.message}
+                          </div>
+                        ))}
                       </div>
                     </Section>
+
+                    {selected.run?.reviewer_notes && (
+                      <Section title="Run notes">
+                        <div className="max-h-48 overflow-y-auto whitespace-pre-wrap text-13 leading-relaxed text-zinc-600">
+                          {selected.run.reviewer_notes}
+                        </div>
+                      </Section>
+                    )}
 
                     {seoCompletion?.available && (
                       <Section icon={seoCompletion.p0 === 0 ? CheckCircle2 : AlertTriangle} ok={seoCompletion.p0 === 0} title="SEO completion">
