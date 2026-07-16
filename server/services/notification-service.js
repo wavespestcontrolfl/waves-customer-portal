@@ -2,9 +2,47 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
+const CUSTOMER_PREFERENCE_KEYS = new Set([
+  'appointment_confirmation',
+  'service_reminder_72h',
+  'service_reminder_24h',
+  'tech_en_route',
+  'tech_arrived',
+  'service_completed',
+  'billing_reminder',
+  'payment_confirmation_sms',
+]);
+
+async function customerPreferenceEnabled(customerId, preferenceKey) {
+  if (!preferenceKey) return true;
+  if (!CUSTOMER_PREFERENCE_KEYS.has(preferenceKey)) {
+    logger.error(`[notifications] Unknown customer preference key: ${preferenceKey}`);
+    return false;
+  }
+
+  try {
+    const prefs = await db('notification_prefs')
+      .where({ customer_id: customerId })
+      .first(preferenceKey);
+    return !prefs || prefs[preferenceKey] !== false;
+  } catch (err) {
+    // Preference lookup uncertainty must not become an unwanted native push.
+    logger.warn(`[notifications] Customer preference lookup failed (${preferenceKey}): ${err.message}`);
+    return false;
+  }
+}
+
+async function existingCustomerNotification(customerId, dedupeKey, connection = db) {
+  if (!dedupeKey) return null;
+  return connection('notifications')
+    .where({ recipient_type: 'customer', recipient_id: customerId })
+    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+    .first();
+}
+
 const NotificationService = {
   // Create a notification
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata }) {
+  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -23,7 +61,7 @@ const NotificationService = {
         // as success-without-a-row.
         return { id: null, suppressed: true };
       }
-      const [notif] = await db('notifications').insert({
+      const [notif] = await connection('notifications').insert({
         recipient_type: recipientType,
         recipient_id: recipientId || null,
         category,
@@ -47,7 +85,75 @@ const NotificationService = {
 
   // Create customer notification
   async notifyCustomer(customerId, category, title, body, opts = {}) {
-    return this.create({ recipientType: 'customer', recipientId: customerId, category, title, body, ...opts });
+    const { preferenceKey, dedupeKey, ...createOpts } = opts;
+
+    if (!(await customerPreferenceEnabled(customerId, preferenceKey))) {
+      return { id: null, suppressed: true, reason: 'preference_disabled' };
+    }
+
+    const metadata = {
+      ...(createOpts.metadata || {}),
+      ...(dedupeKey ? { dedupeKey } : {}),
+    };
+    const createArgs = {
+      recipientType: 'customer',
+      recipientId: customerId,
+      category,
+      title,
+      body,
+      ...createOpts,
+      metadata,
+    };
+
+    let notification;
+    if (dedupeKey) {
+      try {
+        const persisted = await db.transaction(async (trx) => {
+          // Serialize this customer's event key across pods. The lock lives
+          // only for the transaction; the provider call happens after commit.
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${customerId}:${dedupeKey}`]);
+          const existing = await existingCustomerNotification(customerId, dedupeKey, trx);
+          if (existing) return { notification: existing, deduped: true };
+          return {
+            notification: await this.create({ ...createArgs, connection: trx }),
+            deduped: false,
+          };
+        });
+        if (persisted.deduped) return { ...persisted.notification, deduped: true, push: null };
+        notification = persisted.notification;
+      } catch (err) {
+        // A failed lock/read cannot safely prove this event is new. Fail closed
+        // instead of risking a duplicate bell + native push.
+        logger.warn(`[notifications] Customer notification dedupe failed: ${err.message}`);
+        return null;
+      }
+    } else {
+      notification = await this.create(createArgs);
+    }
+    if (!notification || notification.suppressed) return notification;
+
+    let pushQueued = false;
+    try {
+      const PushService = require('./push-notifications');
+      const dispatch = PushService.sendToCustomer(customerId, {
+        title,
+        body: body || '',
+        url: createOpts.link || '/',
+        category,
+        notificationId: String(notification.id),
+        tag: dedupeKey || `customer-notification:${notification.id}`,
+      });
+      pushQueued = true;
+      // The bell is already durable, and request paths such as status changes
+      // and estimate acceptance must not wait on external push providers.
+      void Promise.resolve(dispatch).catch((err) => {
+        logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
+      });
+    } catch (err) {
+      // Preserve the successful bell even if dispatch fails synchronously.
+      logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
+    }
+    return { ...notification, push: { queued: pushQueued } };
   },
 
   // Get notifications for admin
@@ -116,3 +222,8 @@ function getCategoryIcon(category) {
 }
 
 module.exports = NotificationService;
+module.exports._private = {
+  CUSTOMER_PREFERENCE_KEYS,
+  customerPreferenceEnabled,
+  existingCustomerNotification,
+};
