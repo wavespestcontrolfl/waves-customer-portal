@@ -278,6 +278,55 @@ describe('the send', () => {
   });
 });
 
+describe('inline delivery (the /book wizard card step)', () => {
+  test('creates the tokenized capture with no SMS, no template, no one-text claim', async () => {
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow', delivery: 'inline' });
+    expect(res.action).toBe('link_created');
+    expect(res.requested).toBe(true);
+    expect(res.secureUrl).toMatch(/\/secure\/[a-f0-9]{64}$/);
+
+    const insert = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))[0];
+    expect(insert[1]).toMatchObject({ status: 'pending', trigger: 'book_flow' });
+    expect(insert[1].sent_at).toBeUndefined();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockGetTemplate).not.toHaveBeenCalled();
+    // card_link_sent_at untouched: the visit stays eligible for its one
+    // future text if the customer abandons the inline step.
+    const ssUpdates = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'));
+    expect(ssUpdates).toHaveLength(0);
+  });
+
+  test('re-running returns the SAME pending link, never a second row', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ id: 'req-1', status: 'pending', token: 'c'.repeat(64) });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline' });
+    expect(res.action).toBe('link_created');
+    expect(res.requested).toBe(false);
+    expect(res.secureUrl).toMatch(new RegExp(`/secure/${'c'.repeat(64)}$`));
+    const inserts = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
+  });
+
+  test('inline still honors exemptions and saved-method auto-secure', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
+    const exempt = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline' });
+    expect(exempt.reason).toBe('payer_billed');
+
+    mockFindConsentedChargeableCard.mockResolvedValueOnce({ id: 'pm-row-1', stripe_payment_method_id: 'pm_x' });
+    const secured = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline' });
+    expect(secured.action).toBe('auto_secured');
+  });
+
+  test('a customer with no phone can still get an inline link (SMS path would skip)', async () => {
+    mockTableHandlers.customers.first = () => ({ ...CUSTOMER, phone: null });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline' });
+    expect(res.action).toBe('link_created');
+  });
+});
+
 describe('dateLineFor', () => {
   test('renders a clause for a real date and empty for junk', () => {
     expect(_test.dateLineFor('2099-07-20')).toMatch(/^ on \w{3}, Jul 20$/);

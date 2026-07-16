@@ -7085,6 +7085,21 @@ const CallRecordingProcessor = {
                   .ignore()
                   .catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
               }
+              // Card-on-file spec §3 Phase 5.3: phone bookings ride the same
+              // request-card funnel as every other channel. The funnel owns
+              // ALL the logic (gate, exemptions, saved-method auto-secure,
+              // dedup, one-text-ever), so this is fire-and-observe — safe on
+              // reused/attached rows too. Pending outbound-review bookings
+              // wait for the office confirmation, same posture as reminders.
+              // Dark until APPOINTMENT_CARD_REQUEST + the template flip.
+              if (!outboundReviewBooking) {
+                try {
+                  const { requestCardForAppointment } = require('./appointment-card-request');
+                  await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'ai_call_pipeline' });
+                } catch (cardErr) {
+                  logger.warn(`[call-proc] card-request funnel failed for visit ${svc.id}: ${cardErr.message}`);
+                }
+              }
               }
               if (followUpCreated) {
                 // Intentionally NO registerScheduleSideEffects here: the

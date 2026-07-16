@@ -94,14 +94,18 @@ The repo moved between the spec (2026-07-12) and this audit. Verified against ma
   #2742 decline notice), T4 (#2729 payment-step abandonment, dark).
 - **Owner actions outstanding:** T1c (`ONE_TIME_CARD_HOLD` flip), T2h
   (`RECURRING_CARD_ON_FILE` flip), D1–D3 confirmations.
-- **Open code:** Wave 5. Implemented 2026-07-16 on this branch: T5e (AI
-  pre-book duplicate guard widening), T5a (idempotent request-card funnel:
-  `appointment-card-request.js`, dark behind `APPOINTMENT_CARD_REQUEST` + the
-  inactive `secure_appointment_card` template), and T5b (the `/secure/:token`
+- **Open code:** none — Wave 5 completed in code 2026-07-16 on this branch:
+  T5e (AI pre-book duplicate guard widening), T5a (idempotent request-card
+  funnel: `appointment-card-request.js`, dark behind `APPOINTMENT_CARD_REQUEST`
+  + the inactive `secure_appointment_card` template), T5b (the `/secure/:token`
   capture page: `secure-card-public.js` routes + `SecureAppointmentPage.jsx`,
-  live-verified SetupIntent → save → consent → enroll, unreachable until the
-  funnel sends links). Remaining: T5c (wire the AI call pipeline into T5a) and
-  T5d (/book wizard card step).
+  live-verified SetupIntent → save → consent → enroll), T5c (AI call pipeline
+  fires the funnel post-booking, SMS delivery), and T5d (/book confirmation
+  renders the funnel's inline capture link as a "secure your booking" step —
+  no SMS, one-text stamp unconsumed). The whole lane stays dark until the
+  owner flips the gate and activates the template.
+- **Graph remainder is owner territory:** D1–D3 confirmations, T1c/T2h flips,
+  template copy review, and the runbook smoke tests.
 
 ## Nodes and contracts
 

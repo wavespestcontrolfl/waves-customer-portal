@@ -2031,7 +2031,29 @@ async function createSelfBooking(payload = {}) {
       logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
     }
 
-    return { ok: true, body: { booking, confirmationCode: confCode } };
+    // Card-on-file spec §3 Phase 5.4: the /book wizard's card step. The
+    // customer is on the confirmation screen, so the funnel creates the
+    // tokenized capture INLINE (no SMS, one-text stamp unconsumed) and the
+    // wizard renders a "secure your booking" step linking to /secure/:token.
+    // The funnel owns gate/exemptions/saved-card/dedup — exempt and
+    // auto-secured bookings yield no step. Best-effort: the booking is
+    // already committed, so a funnel failure never fails the response.
+    let secureCard = null;
+    try {
+      const { requestCardForAppointment } = require('../services/appointment-card-request');
+      const cardReq = await requestCardForAppointment({
+        scheduledServiceId: serviceRow.id,
+        trigger: 'book_flow',
+        delivery: 'inline',
+      });
+      if (cardReq?.action === 'link_created' && cardReq.secureUrl) {
+        secureCard = { url: cardReq.secureUrl };
+      }
+    } catch (err) {
+      logger.warn(`[booking:confirm] card-request funnel failed for visit ${serviceRow.id}: ${err.message}`);
+    }
+
+    return { ok: true, body: { booking, confirmationCode: confCode, ...(secureCard ? { secureCard } : {}) } };
 }
 
 // Public shape for a self_booked_appointments row — an EXPLICIT allow-list,

@@ -155,12 +155,16 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
 
 /**
  * The one entry point. Returns { requested, action, reason }:
- *   action 'sent'         — the single card-link SMS went out.
+ *   action 'sent'         — the single card-link SMS went out (delivery 'sms').
+ *   action 'link_created' — delivery 'inline': the tokenized capture exists
+ *                           and secureUrl points at /secure/:token — the
+ *                           caller renders it in-flow (the /book wizard's
+ *                           card step); no SMS, no one-text claim consumed.
  *   action 'auto_secured' — covered by an existing consented saved method.
  *   action 'skipped'      — reason says why (gate_off, exemption, dedup...).
  * Never throws — every trigger path treats this as fire-and-observe.
  */
-async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified' }) {
+async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms' }) {
   try {
     if (!isAppointmentCardRequestEnabled()) return skip('gate_off');
     if (!scheduledServiceId) return skip('no_scheduled_service_id');
@@ -189,21 +193,59 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     }
     if (savedMethod) return autoSecureFromSavedMethod({ visit, savedMethod, trigger });
 
-    // 3. Existing pending/complete capture for this appointment.
+    // 3. Existing pending/complete capture for this appointment. An inline
+    // caller re-running (page refresh, booking retry) gets the SAME pending
+    // link back — idempotent, never a second row.
     const existing = await db('appointment_card_requests')
       .where({ scheduled_service_id: visit.id })
-      .first('id', 'status');
-    if (existing) return skip('request_exists', { status: existing.status });
+      .first('id', 'status', 'token');
+    if (existing) {
+      if (delivery === 'inline' && existing.status === 'pending' && existing.token) {
+        return { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: portalUrl(`/secure/${existing.token}`) };
+      }
+      return skip('request_exists', { status: existing.status });
+    }
 
     // Render before claiming: an inactive/missing template (the second dark
     // lever) must not consume the one-text-ever stamp.
     const customer = await db('customers')
       .where({ id: visit.customer_id })
       .first('id', 'first_name', 'phone');
-    if (!customer?.phone) return skip('no_customer_phone');
+    if (delivery !== 'inline' && !customer?.phone) return skip('no_customer_phone');
 
     const token = crypto.randomBytes(32).toString('hex');
     const longUrl = portalUrl(`/secure/${token}`);
+
+    // Inline delivery: the customer is ON the booking surface — create the
+    // tokenized capture and hand the URL back for the wizard's card step.
+    // No SMS, no template dependency, and the one-text-ever stamp stays
+    // unconsumed: if the customer abandons the step, the visit is still
+    // eligible for exactly one text later (Phase 4's nudge or an office
+    // trigger through this same funnel).
+    if (delivery === 'inline') {
+      const inserted = await db('appointment_card_requests')
+        .insert({
+          scheduled_service_id: visit.id,
+          customer_id: visit.customer_id,
+          status: 'pending',
+          trigger,
+          token,
+        })
+        .onConflict('scheduled_service_id')
+        .ignore()
+        .returning('id');
+      if (!inserted || !inserted.length) {
+        const raced = await db('appointment_card_requests')
+          .where({ scheduled_service_id: visit.id })
+          .first('status', 'token');
+        if (raced?.status === 'pending' && raced.token) {
+          return { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: portalUrl(`/secure/${raced.token}`) };
+        }
+        return skip('request_exists');
+      }
+      logger.info(`[appt-card-request] inline capture link created for visit ${visit.id} (trigger ${trigger})`);
+      return { requested: true, action: 'link_created', reason: 'created', secureUrl: longUrl };
+    }
     // Never-expiring short code, same posture as reschedule links: the
     // /secure/:token page owns eligibility for stale links.
     const secureLink = await shortenOrPassthrough(longUrl, {
