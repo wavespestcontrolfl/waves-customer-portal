@@ -1372,7 +1372,10 @@ const SocialMediaService = {
       // RSS backstop recover it once platforms come back.
       const existing = await trx('social_media_posts')
         .where('source_url', normalized)
-        .whereNotIn('status', ['dry_run', 'failed'])
+        // Same exclusions as the RSS path above: a REJECTED studio draft is
+        // an admin killing that copy, not vetoing the URL — nothing posted,
+        // so it must not block (or worse, park) an auto-share.
+        .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
         .first();
       // blocking_status lets callers distinguish "definitively sent/queued"
       // (published/scheduled — safe to stamp the source row as shared) from
