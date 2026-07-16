@@ -1741,6 +1741,9 @@ describe('newsletter findHallucinatedClaims', () => {
     expect(findHallucinatedClaims('<p>Our pet-safe formula</p>').length).toBeGreaterThan(0);
     expect(findHallucinatedClaims('<p>child-safe spray</p>').length).toBeGreaterThan(0);
     expect(findHallucinatedClaims('<p>EPA-approved blend</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>Safe for pets once dry.</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>Our chemical-free, non-toxic treatment is harmless.</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>You can return inside safely after 30 minutes.</p>').length).toBeGreaterThan(0);
   });
 
   test('dedupes repeated patterns — one error per label', () => {

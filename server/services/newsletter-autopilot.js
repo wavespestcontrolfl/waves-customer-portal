@@ -22,7 +22,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, defaultTargetSendAt, weekLockKey } = require('./event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
-const { createNewsletterDraft } = require('./newsletter-draft');
+const { createNewsletterDraft, persistNewsletterDraft } = require('./newsletter-draft');
 const { getFlagshipType } = require('../config/newsletter-types');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
@@ -362,6 +362,18 @@ async function autoDraftFlagship() {
   //    two paths can't both create a draft for the same week.
   const lockKey = weekLockKey(weekOf);
 
+  // Paid/network work stays outside the DB transaction and advisory lock.
+  // The short locked section below only dedupes + persists. Two truly
+  // concurrent runners may both generate, but only one can create a row.
+  const generated = await createNewsletterDraft({
+    prompt,
+    eventIds: safeEventIds,
+    homeownerMinuteTopic,
+    topic,
+    newsletterType: NEWSLETTER_TYPE,
+    persist: false,
+  });
+
   let send;
   let earlyReturn = null;
 
@@ -380,17 +392,13 @@ async function autoDraftFlagship() {
       return; // transaction commits → lock auto-releases
     }
 
-    // 8. Delegate AI drafting to the shared service
-    const result = await createNewsletterDraft({
+    // 8. Persist the already-generated draft while the dedupe lock is held.
+    send = await persistNewsletterDraft({
+      draft: generated.draft,
       prompt,
-      eventIds: safeEventIds,
-      homeownerMinuteTopic,
-      topic,
       newsletterType: NEWSLETTER_TYPE,
-      trx,
+      knex: trx,
     });
-
-    send = result.send;
     // transaction commits → lock auto-releases
   });
 

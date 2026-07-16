@@ -20,6 +20,7 @@ import {
   Search,
   Send,
   Sparkles,
+  Upload,
   UserPlus,
   Wand2,
   XCircle,
@@ -35,6 +36,57 @@ const TEXTAREA_CLS = `${INPUT_CLS} font-mono leading-relaxed`;
 // whether the body already carries a quiz (one quiz per email).
 const QUIZ_TOKEN_RE = /\{\{quiz(?:-text)?(?::[a-z0-9-]+)?\}\}/i;
 const PANEL_CLS = "bg-white border-hairline border-zinc-200 rounded-sm";
+
+function formatEtDateTime(value) {
+  if (!value) return "";
+  return new Date(value).toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+function parseSubscriberCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  const input = String(text || "").replace(/^\uFEFF/, "");
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch === '"') {
+      if (quoted && input[i + 1] === '"') { cell += '"'; i += 1; }
+      else quoted = !quoted;
+    } else if (ch === "," && !quoted) {
+      row.push(cell); cell = "";
+    } else if ((ch === "\n" || ch === "\r") && !quoted) {
+      if (ch === "\r" && input[i + 1] === "\n") i += 1;
+      row.push(cell); cell = "";
+      if (row.some((value) => value.trim())) rows.push(row);
+      row = [];
+    } else {
+      cell += ch;
+    }
+  }
+  row.push(cell);
+  if (row.some((value) => value.trim())) rows.push(row);
+  if (rows.length < 2) return [];
+  const headers = rows[0].map((value) => value.trim().toLowerCase().replace(/[^a-z0-9]/g, ""));
+  const indexOf = (...keys) => headers.findIndex((header) => keys.includes(header));
+  const emailIndex = indexOf("email", "emailaddress");
+  if (emailIndex < 0) throw new Error("CSV needs an email column");
+  const firstIndex = indexOf("firstname", "first");
+  const lastIndex = indexOf("lastname", "last");
+  return rows.slice(1).map((values) => ({
+    email: values[emailIndex]?.trim() || "",
+    firstName: firstIndex >= 0 ? values[firstIndex]?.trim() || "" : "",
+    lastName: lastIndex >= 0 ? values[lastIndex]?.trim() || "" : "",
+  })).filter((subscriber) => subscriber.email);
+}
 const SOURCE_SEGMENTS = [
   { value: "footer", label: "Footer" },
   { value: "newsletter_landing", label: "Landing" },
@@ -260,6 +312,7 @@ export function ComposeView({
   // weekly one.
   const [searchParams] = useSearchParams();
   const autopilotTypeParam = searchParams.get("autopilotType");
+  const editDraftIdParam = searchParams.get("draftId");
   const [draftId, setDraftId] = useState(null);
   const [subject, setSubject] = useState("");
   const [subjectB, setSubjectB] = useState("");
@@ -404,6 +457,7 @@ export function ComposeView({
 
   // Send confirm dialog
   const [sendConfirmOpen, setSendConfirmOpen] = useState(false);
+  const [sendConfirmId, setSendConfirmId] = useState(null);
 
   // AI modal
   const [aiOpen, setAiOpen] = useState(false);
@@ -505,6 +559,47 @@ export function ComposeView({
     segmentRegions.length > 0 ||
     segmentLineCount !== "any";
 
+  const hydrateSavedSend = (saved, { autopilot = false } = {}) => {
+    setDraftId(saved.id);
+    setSubject(saved.subject || "");
+    setSubjectB(saved.subject_b || "");
+    setAbEnabled(!!saved.subject_b);
+    setPreviewText(saved.preview_text || "");
+    setHtmlBody(saved.html_body || "");
+    setTextBody(saved.text_body || "");
+    setFromName(saved.from_name || "Waves Pest Control");
+    setFromEmail(saved.from_email || "newsletter@wavespestcontrol.com");
+    setAutoShareSocial(saved.auto_share_social !== false);
+    const eventIds = Array.isArray(saved.event_ids)
+      ? saved.event_ids
+      : (() => { try { return JSON.parse(saved.event_ids || "[]"); } catch { return []; } })();
+    setDraftEventIds(Array.isArray(eventIds) ? eventIds : []);
+    setEventIdsDirty(false);
+
+    const filter = saved.segment_filter || {};
+    setSegmentMode(filter.customersOnly
+      ? "customers"
+      : filter.leadsOnly
+        ? "leads"
+        : Array.isArray(filter.sources) && filter.sources.length
+          ? "custom"
+          : "all");
+    setSegmentSources(Array.isArray(filter.sources) ? filter.sources : []);
+    setSegmentTags(Array.isArray(filter.tags) ? filter.tags : []);
+    setSegmentHasLines(Array.isArray(filter.has_service) ? filter.has_service : []);
+    setSegmentMissingLines(Array.isArray(filter.missing_service) ? filter.missing_service : []);
+    setSegmentRegions(Array.isArray(filter.region_zone) ? filter.region_zone : []);
+    setSegmentLineCount(
+      Number(filter.min_line_count) >= 2 ? "multi"
+        : Number(filter.min_line_count) === 1 && Number(filter.max_line_count) === 1 ? "single"
+          : Number(filter.min_line_count) === 1 ? "members"
+            : "any",
+    );
+    const tplForType = TEMPLATES.find((t) => t.newsletterType === saved.newsletter_type);
+    setSelectedTemplate(tplForType?.key || null);
+    setAutopilotBanner(autopilot);
+  };
+
   useEffect(() => {
     adminFetch("/admin/newsletter/subscribers?status=active&limit=1")
       .then((d) => setActiveCount(d.counts?.active || 0))
@@ -532,6 +627,14 @@ export function ComposeView({
   useEffect(() => {
     if (draftId || pendingEventRef.current) return; // already editing a draft or event-seeded
     let cancelled = false;
+    if (editDraftIdParam) {
+      adminFetch(`/admin/newsletter/sends/${encodeURIComponent(editDraftIdParam)}`)
+        .then((d) => {
+          if (!cancelled && d?.send && !userHasEdited.current) hydrateSavedSend(d.send);
+        })
+        .catch((e) => { if (!cancelled) setStatus(`Draft load failed: ${e.message}`); });
+      return () => { cancelled = true; };
+    }
     // ?autopilotType= comes from autopilot notifications (e.g. the monthly
     // Pest Insider) so the click lands on THAT lane's draft instead of the
     // weekly default.
@@ -542,16 +645,7 @@ export function ComposeView({
       .then((d) => {
         if (cancelled || pendingEventRef.current || userHasEdited.current) return;
         if (!d?.draft) return;
-        const ap = d.draft;
-        setDraftId(ap.id);
-        setSubject(ap.subject || "");
-        setPreviewText(ap.preview_text || "");
-        setHtmlBody(ap.html_body || "");
-        setTextBody(ap.text_body || "");
-        setAutoShareSocial(ap.auto_share_social !== false);
-        const tplForType = TEMPLATES.find((t) => t.newsletterType === ap.newsletter_type);
-        setSelectedTemplate(tplForType?.key || "weekend");
-        setAutopilotBanner(true);
+        hydrateSavedSend(d.draft, { autopilot: true });
       })
       .catch(() => { /* no autopilot draft — nothing to do */ });
     return () => { cancelled = true; };
@@ -626,17 +720,22 @@ export function ComposeView({
           method: "PATCH",
           body: JSON.stringify(saveBody),
         });
+        setEventIdsDirty(false);
+        setStatus("Draft saved.");
+        return draftId;
       } else {
         const d = await adminFetch("/admin/newsletter/sends", {
           method: "POST",
           body: JSON.stringify(saveBody),
         });
         setDraftId(d.send.id);
+        setEventIdsDirty(false);
+        setStatus("Draft saved.");
+        return d.send.id;
       }
-      setEventIdsDirty(false);
-      setStatus("Draft saved.");
     } catch (e) {
       setStatus("Save failed: " + e.message);
+      return null;
     }
   };
 
@@ -660,13 +759,11 @@ export function ComposeView({
   };
 
   const sendTest = async () => {
-    if (!draftId) {
-      setStatus("Save a draft first.");
-      return;
-    }
+    const savedId = await saveDraft();
+    if (!savedId) return;
     setStatus(`Sending test to ${testEmail}...`);
     try {
-      await adminFetch(`/admin/newsletter/sends/${draftId}/test`, {
+      await adminFetch(`/admin/newsletter/sends/${savedId}/test`, {
         method: "POST",
         body: JSON.stringify({ email: testEmail }),
       });
@@ -681,13 +778,11 @@ export function ComposeView({
   const [validationResult, setValidationResult] = useState(null);
 
   const sendNow = async () => {
-    if (!draftId) {
-      setStatus("Save a draft first.");
-      return;
-    }
+    const savedId = await saveDraft();
+    if (!savedId) return;
     try {
       setStatus("Validating…");
-      const v = await adminFetch(`/admin/newsletter/sends/${draftId}/validate`, {
+      const v = await adminFetch(`/admin/newsletter/sends/${savedId}/validate`, {
         method: "POST",
       });
       setValidationResult(v);
@@ -695,6 +790,7 @@ export function ComposeView({
         setStatus("Validation failed — fix errors before sending.");
         return;
       }
+      setSendConfirmId(savedId);
       setSendConfirmOpen(true);
     } catch (e) {
       setStatus("Validation check failed: " + e.message);
@@ -703,6 +799,11 @@ export function ComposeView({
 
   const confirmSend = async () => {
     setSendConfirmOpen(false);
+    const id = sendConfirmId || draftId;
+    if (!id) {
+      setStatus("Send cancelled: the saved draft could not be identified.");
+      return;
+    }
     const audience = segmentCount ?? activeCount ?? "?";
     setStatus(`Queuing send to ${audience} subscribers...`);
     try {
@@ -710,11 +811,12 @@ export function ComposeView({
       // synchronous send was timing out the proxy and prompting double-
       // clicks). Operator polls History for the final delivered/failed
       // counts.
-      await adminFetch(`/admin/newsletter/sends/${draftId}/send`, {
+      await adminFetch(`/admin/newsletter/sends/${id}/send`, {
         method: "POST",
       });
       setStatus(`Send queued. Opening History…`);
       resetForm();
+      setSendConfirmId(null);
       // Brief delay so the operator sees the status before the tab
       // switches; History view will refresh when the parent flips
       // refreshKey, surfacing the new row at status='sending'.
@@ -725,10 +827,6 @@ export function ComposeView({
   };
 
   const schedule = async () => {
-    if (!draftId) {
-      setStatus("Save a draft first.");
-      return;
-    }
     if (!scheduleAt) {
       setStatus("Pick a date/time first.");
       return;
@@ -738,17 +836,19 @@ export function ComposeView({
       setStatus("Pick a time in the future.");
       return;
     }
+    const savedId = await saveDraft();
+    if (!savedId) return;
     setStatus("Scheduling...");
     try {
       const res = await adminFetch(
-        `/admin/newsletter/sends/${draftId}/schedule`,
+        `/admin/newsletter/sends/${savedId}/schedule`,
         {
           method: "POST",
           body: JSON.stringify({ scheduledFor: when.toISOString() }),
         },
       );
       setStatus(
-        `Scheduled for ${new Date(res.send.scheduled_for).toLocaleString()}.`,
+        `Scheduled for ${formatEtDateTime(res.send.scheduled_for)}.`,
       );
       resetForm();
     } catch (e) {
@@ -767,6 +867,7 @@ export function ComposeView({
     setTextBody("");
     setDraftEventIds([]);
     setEventIdsDirty(false);
+    setSendConfirmId(null);
     setScheduleAt("");
     setSelectedTemplate(null);
   };
@@ -1318,7 +1419,7 @@ export function ComposeView({
             <Button
               onClick={sendTest}
               variant="secondary"
-              disabled={!draftId || !testEmail}
+              disabled={!testEmail}
               className="w-full"
             >
               {" "}
@@ -1332,7 +1433,7 @@ export function ComposeView({
             </Button>{" "}
             <Button
               onClick={sendNow}
-              disabled={!draftId || !htmlBody || segmentCount === 0}
+              disabled={!htmlBody || segmentCount === 0}
               className="w-full"
             >
               {" "}
@@ -1377,7 +1478,7 @@ export function ComposeView({
             <Button
               onClick={schedule}
               variant="secondary"
-              disabled={!draftId || !scheduleAt || !htmlBody}
+              disabled={!scheduleAt || !htmlBody}
               className="w-full"
             >
               {" "}
@@ -1965,6 +2066,7 @@ function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }
 // ── History ────────────────────────────────────────────────────────
 
 export function HistoryView() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [sends, setSends] = useState([]);
   const [aggregate, setAggregate] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2003,6 +2105,37 @@ export function HistoryView() {
       load();
     } catch (e) {
       alert("Cancel failed: " + e.message);
+    }
+  };
+
+  const editDraft = (id) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", "compose");
+    next.set("draftId", id);
+    next.delete("autopilotType");
+    setSearchParams(next);
+  };
+
+  const deleteDraft = async (id) => {
+    if (!confirm("Delete this draft? A linked weekly calendar entry will be marked skipped so autopilot cannot recreate it.")) return;
+    try {
+      await adminFetch(`/admin/newsletter/sends/${id}`, { method: "DELETE" });
+      load();
+    } catch (e) {
+      alert("Delete failed: " + e.message);
+    }
+  };
+
+  const resumeSend = async (send) => {
+    const recovery = send.status === "sending";
+    if (!confirm(recovery
+      ? "Recover this stalled campaign? Only recipients without a success signal will be retried."
+      : "Resume this campaign? Only failed or unfinished recipients will be retried.")) return;
+    try {
+      await adminFetch(`/admin/newsletter/sends/${send.id}/resume`, { method: "POST" });
+      load();
+    } catch (e) {
+      alert(`${recovery ? "Recovery" : "Resume"} failed: ${e.message}`);
     }
   };
 
@@ -2148,9 +2281,9 @@ export function HistoryView() {
                     <div className="text-11 text-ink-tertiary">
                       {s.created_by_name || "Admin"} ·{" "}
                       {s.status === "scheduled" && s.scheduled_for
-                        ? `scheduled for ${new Date(s.scheduled_for).toLocaleString()}`
+                        ? `scheduled for ${formatEtDateTime(s.scheduled_for)}`
                         : s.sent_at
-                          ? new Date(s.sent_at).toLocaleString()
+                          ? formatEtDateTime(s.sent_at)
                           : "draft (not sent)"}
                     </div>
                     {isAb && (
@@ -2160,6 +2293,33 @@ export function HistoryView() {
                     )}
                   </div>{" "}
                   <div className="grid grid-cols-2 sm:grid-cols-4 lg:flex lg:items-center gap-3 lg:gap-5 text-12 flex-shrink-0">
+                    {s.status === "draft" && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => editDraft(s.id)}
+                          className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteDraft(s.id)}
+                          className="text-11 px-2 py-1 border-hairline border-zinc-300 rounded-sm text-ink-secondary hover:text-zinc-900 hover:border-zinc-900 u-focus-ring"
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
+                    {(s.status === "failed" || s.sending_stale) && (
+                      <button
+                        type="button"
+                        onClick={() => resumeSend(s)}
+                        className="text-11 px-2 py-1 border-hairline border-zinc-900 rounded-sm text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+                      >
+                        {s.sending_stale ? "Recover stalled send" : "Resume"}
+                      </button>
+                    )}
                     {s.status === "scheduled" ? (
                       <button
                         type="button"
@@ -2433,32 +2593,42 @@ export function SubscribersView() {
   const [hasMore, setHasMore] = useState(false);
   const [offset, setOffset] = useState(0);
   const [status, setStatus] = useState("");
+  const [importPreConsented, setImportPreConsented] = useState(false);
+  const importInputRef = useRef(null);
+  const subscribersAbortRef = useRef(null);
 
   // Initial / filter-changed fetch — resets the list. Re-runs whenever
   // the filter or search query changes (via the useEffect below).
   const load = useCallback(() => {
+    subscribersAbortRef.current?.abort();
+    const controller = new AbortController();
+    subscribersAbortRef.current = controller;
     setLoading(true);
     const qs = new URLSearchParams();
     if (filter !== "all") qs.set("status", filter);
     if (q) qs.set("q", q);
     qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
     qs.set("offset", "0");
-    adminFetch(`/admin/newsletter/subscribers?${qs}`)
+    adminFetch(`/admin/newsletter/subscribers?${qs}`, { signal: controller.signal })
       .then((d) => {
+        if (controller.signal.aborted) return;
         const next = d.subscribers || [];
         setSubs(next);
         setCounts(d.counts || {});
         setOffset(next.length);
         setHasMore(next.length === SUBSCRIBERS_PAGE_SIZE);
       })
-      .catch(() => {
-        setSubs([]);
-        setHasMore(false);
+      .catch((e) => {
+        if (e.name !== "AbortError") {
+          setSubs([]);
+          setHasMore(false);
+        }
       })
-      .finally(() => setLoading(false));
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
   }, [filter, q]);
   useEffect(() => {
     load();
+    return () => subscribersAbortRef.current?.abort();
   }, [load]);
 
   const loadMore = async () => {
@@ -2528,6 +2698,27 @@ export function SubscribersView() {
     }
   };
 
+  const importCsv = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const subscribers = parseSubscriberCsv(await file.text());
+      if (!subscribers.length) throw new Error("No subscriber rows found");
+      const destination = importPreConsented ? "active and immediately mailable" : "pending confirmation";
+      if (!confirm(`Import ${subscribers.length.toLocaleString()} subscriber rows as ${destination}?`)) return;
+      setStatus(`Importing ${subscribers.length.toLocaleString()} rows…`);
+      const result = await adminFetch("/admin/newsletter/subscribers/import", {
+        method: "POST",
+        body: JSON.stringify({ subscribers, source: "admin_import", preConsented: importPreConsented }),
+      });
+      setStatus(`Imported ${result.inserted.toLocaleString()} subscriber${result.inserted === 1 ? "" : "s"}; ${result.skipped.toLocaleString()} skipped or already present.`);
+      load();
+    } catch (e) {
+      setStatus("Import failed: " + e.message);
+    }
+  };
+
   const removeSubscriber = async (id, email) => {
     if (!confirm(`Unsubscribe ${email}?`)) return;
     try {
@@ -2555,6 +2746,25 @@ export function SubscribersView() {
           </p>{" "}
         </div>{" "}
         <div className="flex items-center gap-2 flex-wrap">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            onChange={importCsv}
+            className="hidden"
+          />
+          <label className="inline-flex items-center gap-1.5 text-11 text-ink-secondary" title="Leave unchecked for unverified lists; they remain pending and cannot receive campaigns.">
+            <input
+              type="checkbox"
+              checked={importPreConsented}
+              onChange={(e) => setImportPreConsented(e.target.checked)}
+            />
+            Existing opt-in consent
+          </label>
+          <Button onClick={() => importInputRef.current?.click()} variant="secondary">
+            <Upload size={14} strokeWidth={1.75} className="mr-2" aria-hidden />
+            Import CSV
+          </Button>
           {" "}
           <Button onClick={exportCsv} variant="secondary">
             {" "}
@@ -2579,7 +2789,7 @@ export function SubscribersView() {
         </div>{" "}
       </div>{" "}
       <div className="p-4 border-b border-hairline border-zinc-100 flex items-center gap-2 flex-wrap">
-        {["active", "unsubscribed", "bounced", "all"].map((f) => {
+        {["active", "pending", "unsubscribed", "bounced", "all"].map((f) => {
           const active = filter === f;
           const count =
             f === "all"
@@ -2660,7 +2870,10 @@ export function SubscribersView() {
                   {s.status === "unsubscribed" && (
                     <Badge tone="muted">Unsubscribed</Badge>
                   )}
-                  {s.status === "bounced" && (
+                  {s.status === "pending" && (
+                    <Badge tone="neutral">Pending confirmation</Badge>
+                  )}
+                  {s.bounce_count > 0 && (
                     <Badge tone="alert">Bounced</Badge>
                   )}
                   {s.customer_id && <Badge tone="muted">Customer</Badge>}

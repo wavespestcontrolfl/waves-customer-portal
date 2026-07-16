@@ -377,6 +377,16 @@ async function assemblePestInsiderNewsletter(draft) {
   const crawlGif = await pickUniqueGifWithRetry(draft.crawlGifTerm, crawlCandidates, usedGifIds, gifRetryBudget);
   const pitchGif = await pickUniqueGifWithRetry(draft.pitchGifTerm, pitchCandidates, usedGifIds, gifRetryBudget);
 
+  // The generator already paid for and uploaded this issue-specific artwork.
+  // Render it as the lead image just like the flagship assembler does; keeping
+  // it out of the body silently burned an image-generation call every month.
+  const heroUrl = safeUrl(draft.heroImageUrl);
+  if (heroUrl) {
+    parts.push(`<div style="text-align:center;margin:0 0 24px 0;">
+<img src="${heroUrl}" alt="${escapeHtml(draft.selectedSubject || draft.subject || 'Pest Insider')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
+</div>`);
+  }
+
   // TOC — the repeatable skeleton trains the reader.
   const tocItems = [
     draft.crawlHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-crawl" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.crawlHeading)}</a></li>`,
@@ -520,7 +530,7 @@ const COLORS = {
 // at divider size anyway), self-hosted on our CDN. Replaces the Beehiiv-era
 // mascot GIF that (a) was the old logo art and (b) lived on media.beehiiv.com,
 // a platform we left — that asset can vanish without notice.
-const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026.gif';
+const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 
 // The exact words the hero poster letters into the artwork: the issue's
 // subject line, emoji stripped (image models render emoji glyphs as mush;
@@ -984,9 +994,10 @@ function linkifyFirst(html, text, url) {
 }
 
 function gifBlock(url, caption) {
-  if (!url) return '';
+  const safeGifUrl = safeUrl(url);
+  if (!safeGifUrl) return '';
   let html = `<div style="text-align:center;margin:12px 0 8px 0;">
-<img src="${url}" alt="" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+<img src="${safeGifUrl}" alt="" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
 </div>`;
   if (caption) {
     html += `\n<p style="text-align:center;margin:0 0 16px 0;font-size:14px;font-style:italic;color:${COLORS.muted};line-height:1.4;">${escapeHtml(caption)}</p>`;
@@ -1460,10 +1471,18 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     return { send: null, draft };
   }
 
-  // 6. Generate slug
+  const send = await persistNewsletterDraft({ draft, prompt, newsletterType, knex });
+
+  // 8. Return { send, draft }
+  return { send, draft };
+}
+
+async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db }) {
+  // Generate slug only at persistence time. This lets callers do paid/network
+  // generation before opening a short advisory-locked DB transaction.
   const slug = generateSlug(draft.subject);
 
-  // 7. Insert newsletter_sends row
+  // Insert newsletter_sends row
   const [send] = await knex('newsletter_sends').insert({
     subject: draft.subject,
     subject_b: null,
@@ -1485,13 +1504,12 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     // actually shipped, on the first 'sent' transition.
     event_ids: JSON.stringify((draft.events || []).map((e) => e.eventId).filter(Boolean)),
   }).returning('*');
-
-  // 8. Return { send, draft }
-  return { send, draft };
+  return send;
 }
 
 module.exports = {
   createNewsletterDraft,
+  persistNewsletterDraft,
   lockEventFactsFromDb,
   // Exported for unit testing the injection/prose defenses
   escapeHtml,

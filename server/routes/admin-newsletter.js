@@ -16,14 +16,14 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
-const { linkToCustomer, subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const { linkToCustomer, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 const { isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
 const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt, weekLockKey } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
-const { createNewsletterDraft } = require('../services/newsletter-draft');
+const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -55,6 +55,15 @@ const aiDraftLimiter = rateLimit({
 const FROM_EMAIL_ALLOWLIST = (process.env.NEWSLETTER_FROM_ALLOWLIST
   || 'newsletter@wavespestcontrol.com,events@wavespestcontrol.com,weekly@wavespestcontrol.com'
 ).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Every :id route in this router addresses a UUID-backed newsletter row.
+// Reject malformed input before Knex/Postgres tries to cast it, yielding a
+// stable client error instead of an avoidable database 500.
+router.param('id', (req, res, next, id) => {
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'invalid id' });
+  next();
+});
 
 function normalizeFromEmail(email) {
   if (!email) return 'newsletter@wavespestcontrol.com';
@@ -192,7 +201,7 @@ router.get('/subscribers.csv', async (req, res, next) => {
 // Designed for a Beehiiv CSV export → POST flow.
 router.post('/subscribers/import', async (req, res, next) => {
   try {
-    const { subscribers, source = 'beehiiv_import', preConsented = true } = req.body;
+    const { subscribers, source = 'admin_import', preConsented = false } = req.body;
     if (!Array.isArray(subscribers) || subscribers.length === 0) {
       return res.status(400).json({ error: 'subscribers[] required' });
     }
@@ -206,7 +215,7 @@ router.post('/subscribers/import', async (req, res, next) => {
     // subscribers) land 'active'. Pass preConsented:false to import an
     // unverified list as 'pending' so it can't be mailed until each address
     // double-opts-in, rather than silently becoming a sendable audience.
-    const importStatus = preConsented === false ? 'pending' : 'active';
+    const importStatus = preConsented === true ? 'active' : 'pending';
 
     // Two-pass: filter to valid rows in JS (so we have a clean count of
     // bad inputs), then a single bulk INSERT ... ON CONFLICT DO NOTHING
@@ -216,7 +225,7 @@ router.post('/subscribers/import', async (req, res, next) => {
     const rows = [];
     for (const s of subscribers) {
       const email = (s.email || '').trim().toLowerCase();
-      if (!email || !email.includes('@')) continue;
+      if (!EMAIL_RE.test(email)) continue;
       if (seen.has(email)) continue;  // dedupe within this CSV
       seen.add(email);
       rows.push({
@@ -323,7 +332,11 @@ router.get('/sends', async (req, res, next) => {
     // Attach derived engagement rates per send so the History view renders
     // open/click/bounce/unsub/complaint rates without re-deriving the math
     // client-side.
-    const sends = rows.map((row) => ({ ...row, rates: computeSendRates(row) }));
+    const sends = rows.map((row) => ({
+      ...row,
+      rates: computeSendRates(row),
+      sending_stale: NewsletterSender.sendingClaimIsStale(row),
+    }));
 
     // Pooled aggregate is summed across ALL sent campaigns in the DB — not
     // the capped 500-row window above — so accounts with >500 rows still get
@@ -516,7 +529,10 @@ router.patch('/sends/:id', async (req, res, next) => {
           .filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, 12))
       : (typeof send.event_ids === 'string' ? send.event_ids : JSON.stringify(send.event_ids ?? []));
 
-    await db('newsletter_sends').where({ id: req.params.id }).update({
+    const updatedCount = await db('newsletter_sends')
+      .where({ id: req.params.id })
+      .whereIn('status', ['draft', 'scheduled'])
+      .update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,
       html_body: htmlBody ?? send.html_body,
@@ -532,6 +548,9 @@ router.patch('/sends/:id', async (req, res, next) => {
       event_ids: nextEventIds,
       updated_at: new Date(),
     });
+    if (!updatedCount) {
+      return res.status(409).json({ error: 'campaign changed while it was being saved; reload before editing' });
+    }
 
     const updated = await db('newsletter_sends').where({ id: req.params.id }).first();
     res.json({ success: true, send: updated });
@@ -544,9 +563,33 @@ router.delete('/sends/:id', async (req, res, next) => {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
     if (send.status !== 'draft') return res.status(400).json({ error: 'can only delete drafts' });
-    await db('newsletter_sends').where({ id: req.params.id }).del();
+    await db.transaction(async (trx) => {
+      const calendarIds = await trx('newsletter_calendar')
+        .where({ send_id: req.params.id })
+        .pluck('id');
+      const deleted = await trx('newsletter_sends')
+        .where({ id: req.params.id, status: 'draft' })
+        .del();
+      if (!deleted) {
+        const err = new Error('campaign changed while it was being deleted');
+        err.code = 'SEND_STATE_CONFLICT';
+        throw err;
+      }
+      if (calendarIds.length) {
+        // A deliberately deleted weekly campaign stays retired. Leaving a
+        // calendar row as drafted + send_id=NULL makes autopilot resurrect it.
+        await trx('newsletter_calendar').whereIn('id', calendarIds).update({
+          status: 'skipped',
+          send_id: null,
+          updated_at: new Date(),
+        });
+      }
+    });
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'SEND_STATE_CONFLICT') return res.status(409).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/newsletter/sends/:id/test — send preview to one email
@@ -658,7 +701,7 @@ router.post('/sends/:id/send', async (req, res) => {
       }
       logger.error(`[newsletter] background send ${req.params.id} failed: ${err.message}`, { stack: err.stack });
       try {
-        await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' });
+        await db('newsletter_sends').where({ id: req.params.id, status: 'sending' }).update({ status: 'failed' });
       } catch { /* swallow */ }
     });
 
@@ -695,7 +738,7 @@ router.post('/sends/:id/resume', async (req, res) => {
       }
       logger.error(`[newsletter] background resume ${req.params.id} failed: ${err.message}`, { stack: err.stack });
       try {
-        await db('newsletter_sends').where({ id: req.params.id }).update({ status: 'failed' });
+        await db('newsletter_sends').where({ id: req.params.id, status: 'sending' }).update({ status: 'failed' });
       } catch { /* swallow */ }
     });
 
@@ -726,11 +769,12 @@ router.post('/sends/:id/schedule', async (req, res, next) => {
     if (send.status !== 'draft') return res.status(400).json({ error: 'can only schedule drafts' });
     if (!send.html_body && !send.text_body) return res.status(400).json({ error: 'body required before scheduling' });
 
-    await db('newsletter_sends').where({ id: send.id }).update({
+    const scheduled = await db('newsletter_sends').where({ id: send.id, status: 'draft' }).update({
       status: 'scheduled',
       scheduled_for: when,
       updated_at: new Date(),
     });
+    if (!scheduled) return res.status(409).json({ error: 'campaign changed before it could be scheduled' });
     // Keep the calendar lifecycle in lockstep with the linked send so the
     // documented state machine self-drives (drafted → scheduled → sent)
     // instead of relying on manual PATCHes.
@@ -746,11 +790,12 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
     if (send.status !== 'scheduled') return res.status(400).json({ error: 'not scheduled' });
-    await db('newsletter_sends').where({ id: send.id }).update({
+    const cancelled = await db('newsletter_sends').where({ id: send.id, status: 'scheduled' }).update({
       status: 'draft',
       scheduled_for: null,
       updated_at: new Date(),
     });
+    if (!cancelled) return res.status(409).json({ error: 'scheduled send was already claimed; it was not cancelled' });
     // Roll the linked calendar row back to 'drafted' to match the send.
     await db('newsletter_calendar').where({ send_id: send.id }).update({ status: 'drafted', updated_at: new Date() });
     const updated = await db('newsletter_sends').where({ id: send.id }).first();
@@ -873,7 +918,6 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     // DB-locked event facts — AI-supplied dates/venues/URLs are overwritten
     // from events_raw, not trusted from the model.
     if (isFlagshipType(newsletterType)) {
-      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       let resolvedEventIds;
       if (Array.isArray(eventIds) && eventIds.length > 0) {
         resolvedEventIds = eventIds.filter((id) => typeof id === 'string' && UUID_RE.test(id));
@@ -1371,8 +1415,6 @@ router.post('/events/bulk-action', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 // POST /api/admin/newsletter/events/merge — collapse cross-source duplicate
 // events into one survivor. The losing rows are marked admin_status='rejected'
 // (which already excludes them from the queue + digest) with merged_into set
@@ -1723,12 +1765,6 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
       },
     };
 
-    // Mark as exported
-    await db('newsletter_sends').where({ id: send.id }).update({
-      blog_exported_at: new Date(),
-      updated_at: new Date(),
-    });
-
     const escYaml = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
 
     const yaml = Object.entries(frontmatter)
@@ -2046,19 +2082,40 @@ router.patch('/calendar/:id', async (req, res, next) => {
 
 router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, next) => {
   try {
+    // Snapshot + generate before opening the advisory-locked transaction.
+    // Image/LLM calls can take tens of seconds and must not pin a DB
+    // connection, row lock, and per-week advisory lock for their duration.
+    const wk = await db('newsletter_calendar')
+      .where({ id: req.params.id })
+      .first(db.raw("to_char(week_of, 'YYYY-MM-DD') as week_of"));
+    if (!wk) return res.status(404).json({ error: 'not found' });
+    const snapshot = await db('newsletter_calendar').where({ id: req.params.id }).first();
+    if (!snapshot) return res.status(404).json({ error: 'not found' });
+    if (snapshot.send_id) {
+      const existingSend = await db('newsletter_sends').where({ id: snapshot.send_id }).first();
+      return res.json({ success: true, existing: true, send: existingSend });
+    }
+    if (snapshot.status === 'skipped') return res.status(400).json({ error: 'Cannot draft a skipped week' });
+
+    const eventIds = Array.isArray(snapshot.event_ids) ? snapshot.event_ids : [];
+    const prompt = snapshot.topic
+      ? `This week's theme: ${snapshot.topic}. Fresh events from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`
+      : `Fresh events this week from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`;
+    const generated = await createNewsletterDraft({
+      prompt,
+      eventIds,
+      homeownerMinuteTopic: snapshot.homeowner_minute_topic,
+      topic: snapshot.topic,
+      newsletterType: 'local-weekly-fresh-events',
+      audience: 'Waves subscribers — North Port to Tampa',
+      tone: 'Neighborly, FOMO-driven, local friend energy',
+      includeCTA: true,
+      persist: false,
+    });
+
     const result = await db.transaction(async (trx) => {
-      // Read week_of first (no row lock) to derive the per-week advisory-lock
-      // key, then take that lock BEFORE the forUpdate. Acquiring the advisory
-      // lock first in BOTH this path and the autopilot avoids a lock-order
-      // deadlock (autopilot takes the advisory lock before touching any row).
-      const wk = await trx('newsletter_calendar')
-        .where({ id: req.params.id })
-        .first(trx.raw("to_char(week_of, 'YYYY-MM-DD') as week_of"));
-      if (!wk) {
-        const err = new Error('not found');
-        err.status = 404;
-        throw err;
-      }
+      // Take the shared per-week lock BEFORE the row lock; autopilot uses the
+      // same order. The transaction now contains DB work only.
       await trx.raw('SELECT pg_advisory_xact_lock(?)', [weekLockKey(wk.week_of)]);
 
       const calendar = await trx('newsletter_calendar')
@@ -2077,6 +2134,12 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
       if (calendar.status === 'skipped') {
         const err = new Error('Cannot draft a skipped week');
         err.status = 400;
+        throw err;
+      }
+
+      if (new Date(calendar.updated_at).getTime() !== new Date(snapshot.updated_at).getTime()) {
+        const err = new Error('Calendar changed while the draft was generating; review the latest plan and try again');
+        err.status = 409;
         throw err;
       }
 
@@ -2102,22 +2165,11 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
         return { existing: true, send: autopilotDraft };
       }
 
-      // Build prompt from calendar plan
-      const eventIds = Array.isArray(calendar.event_ids) ? calendar.event_ids : [];
-      const prompt = calendar.topic
-        ? `This week's theme: ${calendar.topic}. Fresh events from North Port to Tampa.${calendar.homeowner_minute_topic ? ` Homeowner Minute: ${calendar.homeowner_minute_topic}.` : ''}`
-        : `Fresh events this week from North Port to Tampa.${calendar.homeowner_minute_topic ? ` Homeowner Minute: ${calendar.homeowner_minute_topic}.` : ''}`;
-
-      const { send } = await createNewsletterDraft({
+      const send = await persistNewsletterDraft({
+        draft: generated.draft,
         prompt,
-        eventIds,
-        homeownerMinuteTopic: calendar.homeowner_minute_topic,
-        topic: calendar.topic,
         newsletterType: 'local-weekly-fresh-events',
-        audience: 'Waves subscribers — North Port to Tampa',
-        tone: 'Neighborly, FOMO-driven, local friend energy',
-        includeCTA: true,
-        trx,
+        knex: trx,
       });
 
       // Link send to calendar

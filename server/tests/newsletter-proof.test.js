@@ -153,6 +153,9 @@ describe('isApprovalReply', () => {
     'hold off on approving', 'wait to approve', 'no, do not approve',
     'approved? no', "approved — wait, don't send", 'approved... actually hold off',
     'approved but stop the send',
+    'approved — actually cancel that', 'approved, abort',
+    'approved. Nevermind.', 'approved; never mind',
+    'approved — disregard that', 'approved, revoke it',
     'approved — don’t send yet', 'can’t approve yet', // smart apostrophes (iOS/macOS)
     'looks good', 'send it', '', undefined,
   ])('rejects %j', (t) => expect(isApprovalReply(t)).toBe(false));

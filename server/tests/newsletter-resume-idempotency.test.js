@@ -32,7 +32,7 @@ jest.mock('../services/conversations', () => ({
 }));
 
 const db = require('../models/db');
-const { sendCampaign, resumeCampaign } = require('../services/newsletter-sender');
+const { sendCampaign, prepareResumeCampaign, resumeCampaign } = require('../services/newsletter-sender');
 
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
 // invoice-receipt-email-idempotency.test.js / portal-url.test.js so the
@@ -321,6 +321,30 @@ describe('resumeCampaign — preconditions', () => {
       throw new Error(`unexpected ${table}`);
     });
     await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'STILL_SENDING' });
+  });
+
+  test("reclaims an expired 'sending' lease after a crash, even before delivery seeding", async () => {
+    const staleSend = {
+      id: 's',
+      status: 'sending',
+      updated_at: new Date(Date.now() - 60 * 60 * 1000),
+      html_body: 'x',
+      text_body: 'x',
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: staleSend }),
+        chain({ returning: [{ id: 's' }] }),
+      ],
+      newsletter_send_deliveries: [chain({ count: 0 })],
+    };
+    db.mockImplementation((table) => queues[table].shift());
+
+    await expect(prepareResumeCampaign('s')).resolves.toEqual({
+      sendId: 's',
+      existingDeliveriesOnly: false,
+      preclaimed: true,
+    });
   });
 
   test("rejects 'sent' with NOTHING_TO_RESUME when existing rows are all terminal-success", async () => {

@@ -83,12 +83,7 @@ router.post('/unsubscribe/:token', async (req, res) => {
     const sub = isUuid
       ? await db('newsletter_subscribers').where({ unsubscribe_token: req.params.token }).first()
       : null;
-    if (!sub) {
-      // 200 not 404 — don't leak which tokens are real to a scraper, and a
-      // stale unsub click from an old email is not a user-visible error.
-      return res.status(200).json({ success: true });
-    }
-    if (sub.status !== 'unsubscribed') {
+    if (sub && sub.status !== 'unsubscribed') {
       await db('newsletter_subscribers').where({ id: sub.id }).update({
         status: 'unsubscribed',
         unsubscribed_at: new Date(),
@@ -96,7 +91,19 @@ router.post('/unsubscribe/:token', async (req, res) => {
       });
       logger.info(`[newsletter] One-click unsubscribe for subscriber id=${sub.id}`);
     }
-    res.status(200).json({ success: true });
+
+    // A deliberate browser form submit gets a useful result page. RFC 8058
+    // mail-client POSTs and API clients keep the uniform JSON response; both
+    // valid and stale tokens return 200 so this is not an enumeration oracle.
+    const isFormSubmission = req.body?.confirm_unsubscribe === '1';
+    if (!isFormSubmission) return res.status(200).json({ success: true });
+
+    const email = sub ? escapeHtml(sub.email) : '';
+    const bodyHtml = sub
+      ? `<p>We won't send any more newsletters${email ? ` to <span class="email">${email}</span>` : ''}.</p>
+         <p style="margin-bottom:0">If this was a mistake, sign up again at <a href="https://www.wavespestcontrol.com/newsletter/">/newsletter</a>.</p>`
+      : `<p>This unsubscribe link is expired or invalid.</p><p style="margin-bottom:0">Email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we'll help.</p>`;
+    return res.status(200).type('html').send(renderConfirmPage("You're unsubscribed.", bodyHtml));
   } catch (err) {
     logger.error(`[newsletter] unsubscribe POST failed: ${err.message}`);
     res.status(200).json({ success: true });  // still 200 for mail clients
@@ -104,9 +111,10 @@ router.post('/unsubscribe/:token', async (req, res) => {
 });
 
 // GET /api/public/newsletter/unsubscribe/:token
-// Human-visible unsubscribe confirmation. Users who click the in-body link
-// land here; we also flip status in case they didn't come via the one-click
-// POST path.
+// Human-visible unsubscribe confirmation. This GET is deliberately read-only:
+// corporate link scanners prefetch message URLs, so mutating here would opt a
+// recipient out before they ever opened the email. The form POST is the human
+// gesture; RFC 8058 mail clients continue to POST directly to the same route.
 router.get('/unsubscribe/:token', async (req, res) => {
   try {
     // Guard against non-uuid input — Postgres rejects the cast with a 500.
@@ -117,51 +125,27 @@ router.get('/unsubscribe/:token', async (req, res) => {
       ? await db('newsletter_subscribers').where({ unsubscribe_token: req.params.token }).first()
       : null;
 
-    if (sub && sub.status !== 'unsubscribed') {
-      await db('newsletter_subscribers').where({ id: sub.id }).update({
-        status: 'unsubscribed',
-        unsubscribed_at: new Date(),
-        updated_at: new Date(),
-      });
-      logger.info(`[newsletter] GET unsubscribe for subscriber id=${sub.id}`);
-    }
-
-    // Minimal self-contained HTML page — no template engine, no client code.
-    // Escape the email even though signup validation rejects HTML-special
-    // chars now (see EMAIL_RE) — historic rows pre-dating that validation
-    // could still contain anything.
+    // Escape historic rows defensively even though current signup validation
+    // rejects HTML-special characters.
     const email = sub ? escapeHtml(sub.email) : '';
-    res.type('html').send(`
-      <!doctype html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>Unsubscribed — Waves Pest Control</title>
-        <style>
-          * { box-sizing: border-box; }
-          body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: clamp(40px, 8vw, 72px) 20px; color: #1B2C5B; background: #FAF8F3; min-height: 100vh; }
-          main { max-width: 520px; margin: 0 auto; }
-          h1 { font-family: 'Source Serif 4', Georgia, serif; font-size: 32px; line-height: 1.12; font-weight: 500; margin: 0 0 10px; color: #1B2C5B; letter-spacing: 0; }
-          p { line-height: 1.6; color: #3F4A65; }
-          a { color: #1B2C5B; }
-          .box { background: #fff; border: 1px solid #E7E2D7; border-radius: 14px; padding: 26px; margin-top: 24px; }
-          .email { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #1B2C5B; }
-          .footer { margin-top: 32px; font-size: 13px; color: #6B7280; text-align: center; }
-        </style>
-      </head>
-      <body>
-        <main>
-          <h1>You're unsubscribed.</h1>
-          <div class="box">
-            <p>We won't send any more newsletters ${email ? `to <span class="email">${email}</span>` : 'to this address'}.</p>
-            <p style="margin-bottom:0">If this was a mistake, email us at <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we'll resubscribe you.</p>
-          </div>
-          <p class="footer">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
-        </main>
-      </body>
-      </html>
-    `);
+    let heading; let bodyHtml;
+    if (sub?.status === 'unsubscribed') {
+      heading = "You're already unsubscribed.";
+      bodyHtml = `<p>No more newsletters will be sent${email ? ` to <span class="email">${email}</span>` : ' to this address'}.</p>`;
+    } else if (sub) {
+      const tokenSafe = escapeHtml(req.params.token);
+      heading = 'Confirm unsubscribe.';
+      bodyHtml = `
+        <p>Stop newsletter emails${email ? ` to <span class="email">${email}</span>` : ''}?</p>
+        <form method="POST" action="/api/public/newsletter/unsubscribe/${tokenSafe}">
+          <button type="submit" name="confirm_unsubscribe" value="1" class="btn">Unsubscribe</button>
+        </form>
+        <p style="margin-bottom:0; font-size:12px; color:#888;">Nothing changes until you click the button.</p>`;
+    } else {
+      heading = 'Link expired or invalid.';
+      bodyHtml = `<p>This unsubscribe link no longer matches a subscription.</p><p style="margin-bottom:0">Email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we'll help.</p>`;
+    }
+    res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
     logger.error(`[newsletter] unsubscribe GET failed: ${err.message}`);
     res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com to unsubscribe.');
@@ -321,7 +305,7 @@ function renderConfirmPage(heading, bodyHtml) {
           <div class="box">
             ${bodyHtml}
           </div>
-          <p class="footer">Waves Pest Control &amp; Lawn Care · Bradenton, FL</p>
+          <p class="footer">Waves Pest Control · Bradenton, FL</p>
         </main>
       </body>
       </html>

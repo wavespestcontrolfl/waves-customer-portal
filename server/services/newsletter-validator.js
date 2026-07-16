@@ -24,6 +24,10 @@ const HALLUCINATED_CLAIM_PATTERNS = [
   { pattern: /\b(?:guaranteed|100\s*%)\s+(?:safe|effective|results?|kill|elimination)\b/i, label: 'efficacy guarantee' },
   { pattern: /\bpet[-\s]safe\b/i, label: '"pet-safe" claim' },
   { pattern: /\bchild[-\s]safe\b/i, label: '"child-safe" claim' },
+  { pattern: /\bsafe\s+for\s+(?:pets?|dogs?|cats?|kids?|children)\b/i, label: 'absolute people/pet safety claim' },
+  { pattern: /\b(?:non[-\s]?toxic|chemical[-\s]?free|harmless|no\s+risk|pesticide[-\s]?free)\b/i, label: 'absolute treatment safety claim' },
+  { pattern: /\b(?:eliminat(?:e[sd]?|ing|ion)|eradicat(?:e[sd]?|ing|ion)|pest[-\s]?free|permanent\s+solution|one[-\s]?time\s+fix)\b/i, label: 'absolute efficacy claim' },
+  { pattern: /\b(?:re[-\s]?entry|return(?:ing)?\s+(?:inside|indoors?|home))\b.{0,30}\b(?:\d+\s*(?:minutes?|mins?|hours?|hrs?)|safe)\b/i, label: 'fixed/safe re-entry claim' },
   { pattern: /\bEPA[-\s]approved\b/i, label: '"EPA-approved" claim' },
 ];
 

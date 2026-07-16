@@ -258,6 +258,21 @@ function assignAbVariant() {
 // operator-triggered resume would double-send.
 const TERMINAL_SUCCESS_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
 const RETRYABLE_DELIVERY_STATUSES = ['queued', 'failed', 'sending'];
+const DEFAULT_SENDING_LEASE_MINUTES = 30;
+
+function sendingLeaseMinutes() {
+  const configured = Number(process.env.NEWSLETTER_SENDING_LEASE_MINUTES);
+  return Number.isFinite(configured) && configured >= 5 && configured <= 1440
+    ? configured
+    : DEFAULT_SENDING_LEASE_MINUTES;
+}
+
+function sendingClaimIsStale(send, now = new Date()) {
+  if (send?.status !== 'sending') return false;
+  const claimedAt = new Date(send.updated_at || send.created_at || 0).getTime();
+  if (!Number.isFinite(claimedAt) || claimedAt <= 0) return false;
+  return claimedAt <= now.getTime() - sendingLeaseMinutes() * 60 * 1000;
+}
 
 function isRetryableDelivery(delivery) {
   if (!delivery) return false;
@@ -636,7 +651,9 @@ async function sendCampaign(sendId, opts = {}) {
   if (!opts.preserveSentAt || !send.sent_at) {
     finalSendUpdate.sent_at = new Date();
   }
-  await db('newsletter_sends').where({ id: send.id }).update(finalSendUpdate);
+  // Only a worker that still owns the parent 'sending' state may finalize.
+  // A late completion must not overwrite a newer recovery lifecycle.
+  await db('newsletter_sends').where({ id: send.id, status: 'sending' }).update(finalSendUpdate);
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
     // Advance the calendar lifecycle (idempotent) so a sent newsletter's
@@ -698,11 +715,10 @@ async function prepareResumeCampaign(sendId) {
     err.code = 'NOT_RESUMABLE';
     throw err;
   }
-  if (send.status === 'sending') {
-    // An active sendCampaign holds the work — refuse the resume so we
-    // don't race two writers on the same delivery rows. Operator can
-    // wait or, if the send genuinely stalled (worker died, status stuck),
-    // flip the row to 'failed' manually first.
+  const reclaimingStaleSend = send.status === 'sending' && sendingClaimIsStale(send);
+  if (send.status === 'sending' && !reclaimingStaleSend) {
+    // An active sendCampaign owns the work. A crash/deploy claim ages out
+    // after a bounded lease, giving the operator recovery without prod SQL.
     const err = new Error('campaign is actively sending; refusing to resume');
     err.code = 'STILL_SENDING';
     throw err;
@@ -717,7 +733,7 @@ async function prepareResumeCampaign(sendId) {
     .count('* as c')
     .first();
   const totalDeliveries = Number(deliveryTotal?.c || 0);
-  if (totalDeliveries === 0 && send.status !== 'failed') {
+  if (totalDeliveries === 0 && send.status !== 'failed' && !reclaimingStaleSend) {
     const err = new Error('no outstanding deliveries to resume');
     err.code = 'NOTHING_TO_RESUME';
     throw err;
@@ -745,8 +761,12 @@ async function prepareResumeCampaign(sendId) {
   // Claim directly as 'sending' only if the row is still in the state we
   // inspected above. This avoids a generic 'scheduled' window where the normal
   // /send path or scheduler could claim the send without resume constraints.
-  const claimed = await db('newsletter_sends')
-    .where({ id: send.id, status: send.status })
+  const claimQuery = db('newsletter_sends')
+    .where({ id: send.id, status: send.status });
+  if (reclaimingStaleSend) {
+    claimQuery.where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000));
+  }
+  const claimed = await claimQuery
     .update({ status: 'sending', scheduled_for: null, updated_at: new Date() })
     .returning('id');
   if (!claimed.length) {
@@ -789,6 +809,14 @@ async function processScheduledSends() {
   let processed = 0;
   for (const row of due) {
     try {
+      // Proof-approved rows remain governed by the proof kill switch even
+      // after approval. A manual future schedule has no proof_approved_at and
+      // is unaffected; an approved autopilot send stays queued until the gate
+      // is deliberately re-enabled.
+      if (row.proof_approved_at && process.env.GATE_NEWSLETTER_PROOF_APPROVAL !== 'true') {
+        logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
+        continue;
+      }
       // Validate AI-generated sends (flagship + Pest Insider) before dispatching
       if (requiresClaimValidation(row.newsletter_type)) {
         const recipientCount = Number(
@@ -797,11 +825,12 @@ async function processScheduledSends() {
         const { errors } = validateNewsletterDraft(row, { recipientCount });
         if (errors.length > 0) {
           logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
-          await db('newsletter_sends').where({ id: row.id }).update({
+          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
             status: 'draft',
             scheduled_for: null,
             updated_at: new Date(),
           });
+          if (!reverted) continue;
           // Keep the calendar in lockstep: this send is no longer scheduled, so
           // roll its linked calendar row back to 'drafted'. Without this the
           // row would stay 'scheduled' forever (autopilot then skips the week)
@@ -821,7 +850,7 @@ async function processScheduledSends() {
         continue;
       }
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);
-      try { await db('newsletter_sends').where({ id: row.id }).update({ status: 'failed' }); } catch { /* swallow */ }
+      try { await db('newsletter_sends').where({ id: row.id, status: 'sending' }).update({ status: 'failed' }); } catch { /* swallow */ }
     }
   }
   return { processed };
@@ -868,4 +897,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, markEventsFeatured };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, markEventsFeatured, sendingClaimIsStale };

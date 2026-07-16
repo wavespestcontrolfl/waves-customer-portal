@@ -142,7 +142,7 @@ function isApprovalReply(text) {
   // closed — "not approved", "can't approve yet", and equally "approved?
   // no" / "approved — wait, don't send" must all leave the draft alone.
   // Ambiguity always loses; the owner can reply a clean "approved".
-  if (/\b(not|no|nope|don'?t|do\s+not|can'?t|cannot|can\s+not|won'?t|isn'?t|never|hold|wait|stop|reject)\b/.test(t)) return false;
+  if (/\b(not|no|nope|don'?t|do\s+not|can'?t|cannot|can\s+not|won'?t|isn'?t|never|nevermind|never\s+mind|hold|wait|stop|reject|cancel|abort|disregard|revoke)\b/.test(t)) return false;
   return true;
 }
 
@@ -483,7 +483,7 @@ async function maybeHandleProofApproval(email) {
     }
     logger.error(`[newsletter-proof] approved campaign ${send.id} failed: ${err.message}`, { stack: err.stack });
     try {
-      await db('newsletter_sends').where({ id: send.id }).update({ status: 'failed' });
+      await db('newsletter_sends').where({ id: send.id, status: 'sending' }).update({ status: 'failed' });
     } catch { /* swallow */ }
   });
 
