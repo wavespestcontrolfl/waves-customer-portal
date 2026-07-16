@@ -137,9 +137,17 @@ describe('pollLivePost live-flip auto-share', () => {
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
   });
 
-  test('skipped/failed/dry-run shares never stamp shared_to_social; a throw never blocks the flip', async () => {
+  test('stamping: already_posted stamps, other skips/dry-run do not; a throw never blocks the flip', async () => {
+    // already_posted = the URL is definitively out (another lane won the
+    // dedupe) — STAMP it so the scheduler's non-shareUrlOnce path can't
+    // double-post later.
     let updates = setupDb();
     social.shareUrlOnce.mockResolvedValue({ skipped: 'already_posted' });
+    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    expect(updates.find((u) => u.updates.shared_to_social === true)).toBeDefined();
+
+    updates = setupDb();
+    social.shareUrlOnce.mockResolvedValue({ skipped: 'automation_disabled' });
     expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
     expect(updates.find((u) => u.updates.shared_to_social === true)).toBeUndefined();
 

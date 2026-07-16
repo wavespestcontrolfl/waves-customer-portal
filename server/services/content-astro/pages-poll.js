@@ -337,9 +337,15 @@ async function pollLivePost(post) {
             const status = r?.skipped ? `skipped (${r.skipped})`
               : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');
             logger.info(`[pages-poll] live-flip social share for ${url}: ${status}`);
-            if (r?.shared && r?.success && !r?.dryRun) {
+            // Stamp on a real success AND on already_posted (the URL is
+            // definitively out — another lane won the dedupe; leaving the
+            // row unstamped would let the scheduler's own share path, which
+            // does not go through shareUrlOnce, double-post it later).
+            // Other skips (automation_disabled, no_url) and failures stay
+            // unstamped so the RSS backstop can recover them.
+            if ((r?.shared && r?.success && !r?.dryRun) || r?.skipped === 'already_posted') {
               await db('blog_posts').where({ id: post.id })
-                .update({ shared_to_social: true, updated_at: new Date() });
+                .update({ shared_to_social: true, shared_at: new Date(), updated_at: new Date() });
             }
           }
         }
