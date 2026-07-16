@@ -25,14 +25,18 @@ Enforced mechanically: `npm run check:domain-rules` fails the build on a
 
 ## 2. Picking a tier
 
-| Tier | Resolves to | Use for |
-|---|---|---|
-| `DEEP` | claude-fable-5 | Deepest reasoning, latency-tolerant, low-volume: agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate |
-| `FLAGSHIP` | claude-opus-4-8 | Best general reasoning: Intelligence Bar, advisors, analysis, agents |
-| `WORKHORSE` | claude-opus-4-8 | Drafting + content generation |
-| `FAST` | claude-opus-4-8 | High-volume classification, tagging, signals |
-| `VOICE` | claude-sonnet-4-6 | Customer-facing copy where warm/natural beats raw reasoning: SMS replies, service recaps, social posts. High-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site |
-| `VISION` | claude-sonnet-4-6 | Image scoring — the Opus line removed `temperature` and scoring needs it (pinned 0.2 to match the Gemini scorer) |
+Tiers are semantic; the model each tier CURRENTLY resolves to lives only in
+`server/config/models.js` (fallback string + env override) — read it there,
+never from docs, which go stale.
+
+| Tier | Use for |
+|---|---|
+| `DEEP` | Deepest reasoning, latency-tolerant, low-volume (fable line: always-on thinking, minutes-long turns possible): agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate |
+| `FLAGSHIP` | Best general reasoning: Intelligence Bar, advisors, analysis, agents |
+| `WORKHORSE` | Drafting + content generation |
+| `FAST` | High-volume classification, tagging, signals |
+| `VOICE` | Customer-facing copy where warm/natural beats raw reasoning: SMS replies, service recaps, social posts. High-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site |
+| `VISION` | Image scoring — needs the `temperature` parameter (pinned 0.2 to match the Gemini scorer), which the Opus line removed |
 
 ## 3. DEEP call sites — the helper is mandatory
 
@@ -56,8 +60,8 @@ Also required at DEEP sites:
 - `max_tokens` **≥ 4096** — thinking spends from the same budget.
 - Pass your own Anthropic client (per-site timeout/retry config and test
   mocks keep working).
-- Kill switch: `MODEL_DEEP=claude-opus-4-8` reverts every DEEP lane to Opus
-  with no deploy.
+- Kill switch: setting `MODEL_DEEP` to the current FLAGSHIP Opus ID (see
+  `models.js`) reverts every DEEP lane to Opus with no deploy.
 
 Enforced mechanically: `check:domain-rules` fails on a file referencing
 `MODELS.DEEP` without the helper.

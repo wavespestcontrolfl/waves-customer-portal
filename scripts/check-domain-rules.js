@@ -26,12 +26,14 @@
  *      Legacy import migrations/scripts are outside the scan scope.
  *
  *   4. banned-vendors — "All automation and site infra is native." No
- *      Zapier / make.com / Elementor / NitroPack / RankMath in portal code.
+ *      Zapier / Make (make.com, Integromat, MAKE_* env keys — the bare word
+ *      "Make" is English and can't be flagged) / Elementor / NitroPack /
+ *      RankMath in portal code.
  *
- * Scope: current portal source (server/services, server/routes,
- * server/config, server/index.js, client/src). Tests, mocks, migrations,
- * one-off scripts, and ops tooling are NOT scanned — they legitimately
- * pin model IDs in assertions and reference Square-era import history.
+ * Scope: the whole production server tree (server/) + client/src.
+ * Tests, mocks, fixtures, migrations, seeds, contract-tests, one-off
+ * scripts, and ops tooling are NOT scanned — they legitimately pin model
+ * IDs in assertions and reference Square-era import history.
  *
  * Run: `node scripts/check-domain-rules.js` or `npm run check:domain-rules`.
  * Exit code 0 = clean, 1 = violations found.
@@ -46,14 +48,24 @@ const path = require('path');
 // =========================================================================
 const ROOT = path.join(__dirname, '..');
 const SCAN_DIRS = [
-  path.join(ROOT, 'server/services'),
-  path.join(ROOT, 'server/routes'),
-  path.join(ROOT, 'server/config'),
+  path.join(ROOT, 'server'),
   path.join(ROOT, 'client/src'),
 ];
-const SCAN_FILES = [path.join(ROOT, 'server/index.js')];
+const SCAN_FILES = [];
 const EXTENSIONS = new Set(['.js', '.jsx']);
-const EXCLUDE_PATTERNS = [/\.test\.jsx?$/, /__mocks__/, /node_modules/];
+const EXCLUDE_PATTERNS = [
+  /\.test\.jsx?$/,
+  /__mocks__/,
+  /node_modules/,
+  // Non-runtime server subtrees: assertions pin model IDs, migrations and
+  // import scripts carry Square-era history.
+  /server\/tests\//,
+  /server\/scripts\//,
+  /server\/contract-tests\//,
+  /server\/fixtures\//,
+  /server\/models\/migrations\//,
+  /server\/models\/seeds\//,
+];
 
 const rel = (f) => path.relative(ROOT, f);
 
@@ -65,15 +77,29 @@ const rel = (f) => path.relative(ROOT, f);
 // Model-ID shapes only ("claude-" + family or version), so prose like
 // "Claude-powered" or the claude-api skill name never false-positives.
 const ANTHROPIC_MODEL_ID = /claude-(fable|mythos|opus|sonnet|haiku|instant|[0-9])[\w.-]*/gi;
-const DEEP_TIER_REF = /MODELS\.DEEP\b/;
+// All the ways the DEEP tier gets imported — MODELS.DEEP, a direct
+// require('...config/models').DEEP, or destructuring { DEEP } from the
+// registry (agronomic-wiki.js uses the direct-require form).
+const DEEP_TIER_REFS = [
+  /MODELS\.DEEP\b/,
+  /models(?:\.js)?['"`]\s*\)\s*\.DEEP\b/,
+  /\{[^}]*\bDEEP\b[^}]*\}\s*=\s*require\(\s*['"][^'"]*models/,
+];
 const DEEP_HELPER_REF = /createDeepMessage|llm\/deep/;
 const SQUARE_PATTERNS = [
   /squareup/gi,
   /square_(customer|payment|invoice|order|location|token|txn|checkout)/gi,
   /SQUARE_[A-Z][A-Z_]+/g,
   /\bSquare (API|SDK|webhook|checkout|terminal|POS|payment)/gi,
+  // SDK usage: require('square') / import ... from 'square' / SquareClient.
+  /require\(\s*['"]square['"]\s*\)/gi,
+  /from\s+['"]square['"]/gi,
+  /\bSquareClient\b/g,
 ];
-const BANNED_VENDORS = /\b(zapier|elementor|nitropack|rankmath|make\.com)\b/gi;
+// Bare "Make" (the vendor) is not greppable — it's an English word — so the
+// vendor is caught via its domain, its old name, and its env-key shapes.
+const BANNED_VENDOR_NAMES = /\b(zapier|elementor|nitropack|rankmath|integromat|make\.com)\b/gi;
+const BANNED_VENDOR_ENV_KEYS = /\bMAKE_(?:WEBHOOK|API|SCENARIO)[A-Z_]*\b/g;
 
 function matchLines(src, regex) {
   const hits = [];
@@ -102,9 +128,9 @@ const RULES = [
       'File references MODELS.DEEP but not createDeepMessage / llm/deep. Every DEEP call site must go through server/services/llm/deep.js (thinking-block stripping + refusal fallback).',
     allowlist: new Set(['server/config/models.js', 'server/services/llm/deep.js']),
     check(file, src) {
-      if (!DEEP_TIER_REF.test(src)) return [];
+      if (!DEEP_TIER_REFS.some((p) => p.test(src))) return [];
       if (DEEP_HELPER_REF.test(src)) return [];
-      return matchLines(src, /MODELS\.DEEP\b/g);
+      return DEEP_TIER_REFS.flatMap((p) => matchLines(src, new RegExp(p.source, 'g')));
     },
   },
   {
@@ -122,7 +148,7 @@ const RULES = [
       'Banned external automation/CMS vendor. All automation and site infra is native (CLAUDE.md rule 9).',
     allowlist: new Set(),
     check(file, src) {
-      return matchLines(src, BANNED_VENDORS);
+      return [...matchLines(src, BANNED_VENDOR_NAMES), ...matchLines(src, BANNED_VENDOR_ENV_KEYS)];
     },
   },
 ];
