@@ -4774,21 +4774,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autopay_payment_method_id: svc.cust_autopay_payment_method_id,
       ach_status: svc.cust_ach_status,
     });
-    // Never let the homeowner's autopay cover a payer-billed WaveGuard visit —
-    // the AP invoice must still be cut and sent to the payer.
-    // autopayCoversVisit is the MONTHLY-MEMBERSHIP suppression ("the 8AM cron
-    // collects the dues, the visit itself is free") — it must never suppress a
-    // per-application customer's visit bill: their autopay card is HOW the
-    // per-visit charge collects, not a reason to skip it.
-    const autopayCoversVisit = !visitIsPayerBilled
-      && !perApplicationBilling
-      // The 8AM cron never bills annual_prepay (GUARD 3b) — "dues cover the
-      // visit" would be a fiction; real coverage is the prepaid stamps.
-      && !annualPrepayBilling
-      && customerAutopayActive
-      && !hasVisitPrice
-      && !!svc.cust_waveguard_tier
-      && Number(svc.cust_monthly_rate || 0) > 0;
+    const autopayCoversVisit = membershipDuesCoverVisit({
+      visitIsPayerBilled,
+      perApplicationBilling,
+      annualPrepayBilling,
+      customerAutopayActive,
+      hasVisitPrice,
+      isRecurring: svc.is_recurring,
+      waveguardTier: svc.cust_waveguard_tier,
+      monthlyRate: svc.cust_monthly_rate,
+    });
+    if (autopayCoversVisit && hasVisitPrice) {
+      logger.info(`[dispatch] visit ${svc.id}: monthly membership dues cover this recurring visit — stamped estimated_price $${Number(svc.estimated_price).toFixed(2)} NOT invoiced`);
+    }
     // Skip invoice creation if a paid invoice already exists for this service record
     // (covers the "customer paid prior to service report" case)
     let invoiceCreated = false;
@@ -8270,6 +8268,37 @@ function completionInvoiceAmount({
   return monthlyRate && Number(monthlyRate) > 0 ? Number(monthlyRate) : 0;
 }
 
+// The MONTHLY-MEMBERSHIP suppression ("the 8AM cron collects the dues, the
+// visit itself is free"). Never for a payer-billed visit — the AP invoice must
+// still be cut and sent to the payer. Never for a per-application customer:
+// their autopay card is HOW the per-visit charge collects, not a reason to
+// skip it. Never for annual_prepay — the 8AM cron never bills them (GUARD 3b),
+// so "dues cover the visit" would be a fiction; real coverage is the prepaid
+// stamps. Dues cover a RECURRING plan visit even when the booking flow stamped
+// a per-visit estimated_price on the row — cadence generators stamp display
+// prices routinely, and honoring the stamp here double-billed membership
+// customers (dues + a phantom per-visit invoice at completion). A priced
+// ONE-OFF visit (isRecurring=false: add-on treatment, WDO, special) still
+// bills its price; callback pricing stays with completionInvoiceAmount.
+function membershipDuesCoverVisit({
+  visitIsPayerBilled,
+  perApplicationBilling,
+  annualPrepayBilling,
+  customerAutopayActive,
+  hasVisitPrice,
+  isRecurring,
+  waveguardTier,
+  monthlyRate,
+}) {
+  return !visitIsPayerBilled
+    && !perApplicationBilling
+    && !annualPrepayBilling
+    && !!customerAutopayActive
+    && (!hasVisitPrice || !!isRecurring)
+    && !!waveguardTier
+    && Number(monthlyRate || 0) > 0;
+}
+
 function shouldAutoInvoiceCompletion({
   recapReviewOnly,
   alreadyPaid,
@@ -8483,6 +8512,7 @@ module.exports._test = {
   internalOnlyProductsBlockPayload,
   completionOwnershipError,
   serviceReportEmailEligible,
+  membershipDuesCoverVisit,
   shouldAutoInvoiceCompletion,
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,

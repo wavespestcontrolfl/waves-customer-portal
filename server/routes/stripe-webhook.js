@@ -1084,6 +1084,13 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   const paymentUpdates = {
     status: 'paid',
     stripe_charge_id: paymentIntent.latest_charge || null,
+    // An async-settling row (ACH) was inserted with a "(bank payment
+    // pending)" description and metadata.payment_state='processing'; the
+    // status flip alone left both stale, so the ledger read "pending"
+    // forever on settled bank payments. REPLACE is a no-op for rows without
+    // the marker. Constant strings only — no request-derived input.
+    description: db.raw("REPLACE(description, ' (bank payment pending)', '')"),
+    metadata: db.raw(`jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"')`),
   };
   if (chargedTotal !== null) paymentUpdates.amount = chargedTotal;
   if (details.receiptUrl) paymentUpdates.receipt_url = details.receiptUrl;

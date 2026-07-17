@@ -461,7 +461,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         'customers.zip',
         'customers.waveguard_tier',
         'customers.nearest_location_id',
-        'customers.lifetime_revenue'
+        // Payments-derived net — customers.lifetime_revenue has no production
+        // writer and reads $0/stale for every real customer.
+        db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue")
       )
       .orderBy('customers.last_contact_date', 'desc')
       .limit(200);
