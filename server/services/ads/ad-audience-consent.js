@@ -97,10 +97,19 @@ async function loadMarketingSuppression() {
   const emailRows = await db('email_suppressions')
     .where({ status: 'active' })
     .whereIn('suppression_type', EMAIL_OPTOUT_TYPES)
-    .select('email');
+    .select('email', 'suppression_type', 'group_key');
   for (const r of emailRows) {
     const n = canonicalEmail(r.email);
     if (!n) continue;
+    // Preference-group scope (mirrors the delivery gate): spam_complaint /
+    // do_not_email are GLOBAL opt-outs regardless of group; unsubscribe /
+    // manual count for ads only when global (no group_key) or scoped to a
+    // marketing_* stream. A stream-scoped unsubscribe (service_operational)
+    // is not a marketing opt-out and must not pull the person from ads.
+    const type = String(r.suppression_type || '').trim().toLowerCase();
+    const group = String(r.group_key || '').trim().toLowerCase();
+    const globalType = type === 'spam_complaint' || type === 'do_not_email';
+    if (!globalType && group && !group.startsWith('marketing_')) continue;
     emails.add(n);
     rawOptOutEmails.push(r.email);
   }
@@ -133,32 +142,42 @@ async function loadMarketingSuppression() {
  *
  * Throws if the opt-out lists can't be loaded (fail-closed).
  */
-async function filterMarketingSuppressed(members, { audienceKey, mode = 'full' } = {}) {
-  if (!Array.isArray(members) || members.length === 0) return members || [];
+async function partitionMarketingSuppressed(members, { audienceKey, mode = 'full' } = {}) {
+  if (!Array.isArray(members) || members.length === 0) return { kept: members || [], dropped: [] };
   const sup = await loadMarketingSuppression();
   const kept = [];
-  let droppedOptOut = 0;
+  // Members removed entirely (person opt-out, or no usable identifier left).
+  // Callers use these to derive platform-side removal hashes from the SAME
+  // raw source values the original upload hashed — the only reliable way to
+  // match a prior row when the suppression stores a different gmail variant.
+  const dropped = [];
   let strippedPhones = 0;
   for (const m of members) {
-    if (mode === 'full' && sup.isSuppressed(m)) { droppedOptOut += 1; continue; }
+    if (mode === 'full' && sup.isSuppressed(m)) { dropped.push(m); continue; }
     const ph = normPhone(m && m.phone);
     if (ph && sup.invalidPhones.has(ph)) {
       const cleaned = { ...m, phone: null };
       strippedPhones += 1;
-      if (!cleaned.email) { droppedOptOut += 1; continue; } // no usable identifier left
+      if (!cleaned.email) { dropped.push(m); continue; } // no usable identifier left
       kept.push(cleaned);
       continue;
     }
     kept.push(m);
   }
-  if (droppedOptOut > 0 || strippedPhones > 0) {
-    logger.info(`[ad-consent] ${audienceKey || 'audience'}: dropped ${droppedOptOut}/${members.length} contacts, stripped ${strippedPhones} invalid phones (mode=${mode})`);
+  if (dropped.length > 0 || strippedPhones > 0) {
+    logger.info(`[ad-consent] ${audienceKey || 'audience'}: dropped ${dropped.length}/${members.length} contacts, stripped ${strippedPhones} invalid phones (mode=${mode})`);
   }
+  return { kept, dropped };
+}
+
+async function filterMarketingSuppressed(members, opts = {}) {
+  const { kept } = await partitionMarketingSuppressed(members, opts);
   return kept;
 }
 
 module.exports = {
   loadMarketingSuppression,
+  partitionMarketingSuppressed,
   filterMarketingSuppressed,
   normPhone,
   normEmail,

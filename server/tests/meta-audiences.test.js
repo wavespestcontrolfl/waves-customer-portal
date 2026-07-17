@@ -292,3 +292,32 @@ describe('consent (r2)', () => {
     expect(JSON.parse(saved.row.member_keys)).toEqual([]);
   });
 });
+
+// ── r3 (Codex): variant-uploaded rows removed via dropped-member hashing ──
+describe('consent (r3)', () => {
+  test('a canonical-variant suppression removes the row uploaded under the raw source variant', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    // l1's SOURCE email is a dotted gmail variant; the suppression stores the
+    // canonical form. The uploaded row hashed the raw variant, so the raw
+    // suppression hash alone can never match it — the dropped member's own
+    // source string must drive the removal. l1 also shares a household phone
+    // with current lead l2 (the retention case).
+    tableData.leads = [
+      { id: 'l1', email: 'o.p.t.e.d@gmail.com', phone: '9415551111' },
+      { id: 'l2', email: 'fine@x.com', phone: '9415551111' },
+    ];
+    tableData.email_suppressions = [{ email: 'opted@gmail.com' }];
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [
+      { k: 'lead:l1', d: ['h:o.p.t.e.d@gmail.com', 'h:19415551111'] },
+      { k: 'lead:l2', d: ['h:fine@x.com', 'h:19415551111'] },
+    ] };
+    const r = await MetaAudiences.syncAudience('unbooked_leads', {});
+    expect(r.eligible).toBe(1); // l1 dropped at collection (canonical match)
+    expect(r.consentRemovals).toBe(1);
+    expect(r.toRemove).toBe(1);
+    expect(r.retained).toBe(0);
+    const del = global.fetch.mock.calls.find((c) => c[1] && c[1].method === 'DELETE');
+    expect(JSON.parse(del[1].body).payload.data).toEqual([['h:o.p.t.e.d@gmail.com', 'h:19415551111']]);
+  });
+});

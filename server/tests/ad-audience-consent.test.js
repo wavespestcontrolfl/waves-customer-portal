@@ -150,3 +150,40 @@ test('loadMarketingSuppression exposes raw identifiers for platform-side removal
   expect(sup.rawOptOutPhones).toEqual(['+1 (941) 555-1234']);
   expect(sup.rawOptOutEmails).toEqual(['Opted.Out@Example.com']);
 });
+
+// ── r3 (Codex): preference-group scope ───────────────────────────────
+
+test('a stream-scoped unsubscribe (service_operational) is NOT an ads opt-out', async () => {
+  mockEmailRows = [{ email: 'a@x.com', suppression_type: 'unsubscribe', group_key: 'service_operational' }];
+  const kept = await filterMarketingSuppressed([{ key: 'lead:1', email: 'a@x.com', phone: null }]);
+  expect(kept).toHaveLength(1);
+});
+
+test('a marketing-stream unsubscribe IS an ads opt-out', async () => {
+  mockEmailRows = [{ email: 'a@x.com', suppression_type: 'unsubscribe', group_key: 'marketing_newsletter' }];
+  const kept = await filterMarketingSuppressed([{ key: 'lead:1', email: 'a@x.com', phone: null }]);
+  expect(kept).toHaveLength(0);
+});
+
+test('spam_complaint / do_not_email suppress regardless of group scope', async () => {
+  mockEmailRows = [
+    { email: 'a@x.com', suppression_type: 'spam_complaint', group_key: 'service_operational' },
+    { email: 'b@x.com', suppression_type: 'do_not_email', group_key: 'service_operational' },
+  ];
+  const kept = await filterMarketingSuppressed([
+    { key: 'lead:1', email: 'a@x.com', phone: null },
+    { key: 'lead:2', email: 'b@x.com', phone: null },
+  ]);
+  expect(kept).toHaveLength(0);
+});
+
+test('partitionMarketingSuppressed returns the dropped members for removal hashing', async () => {
+  const { partitionMarketingSuppressed } = require('../services/ads/ad-audience-consent');
+  mockEmailRows = [{ email: 'opted@x.com' }];
+  const { kept, dropped } = await partitionMarketingSuppressed([
+    { key: 'lead:1', email: 'opted@x.com', phone: '9415551111' },
+    { key: 'lead:2', email: 'fine@x.com', phone: null },
+  ]);
+  expect(kept.map((m) => m.key)).toEqual(['lead:2']);
+  expect(dropped.map((m) => m.key)).toEqual(['lead:1']);
+});
