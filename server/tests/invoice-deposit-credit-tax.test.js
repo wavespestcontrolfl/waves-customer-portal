@@ -411,6 +411,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
   // payment_plans for an active plan and the payments ledger for the
   // applied-money fence.
   function guardDb(storedInvoice, { activePlan = null, appliedMoneyRow = null } = {}) {
+    const captured = { paymentsQ: null };
     db.mockImplementation((table) => {
       if (table === 'invoices') {
         const q = { where: jest.fn(() => q), first: jest.fn(async () => storedInvoice) };
@@ -426,10 +427,12 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereRaw: jest.fn(() => q),
           first: jest.fn(async () => appliedMoneyRow),
         };
+        captured.paymentsQ = q;
         return q;
       }
       throw new Error(`Unexpected table query: ${table}`);
     });
+    return captured;
   }
 
   it('refuses to rewrite an invoice that already raced to paid', async () => {
@@ -475,12 +478,20 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     // A chargeback reopens the invoice as overdue and clears its PI; the
     // dispute-won handler restores the original payment against whatever the
     // invoice then says — amounts must stay frozen while disputed (codex P1).
-    guardDb(
+    const captured = guardDb(
       { id: 'inv-1', status: 'overdue', customer_id: 'cust-1', line_items: '[]' },
       { appliedMoneyRow: { id: 'pay-1', status: 'disputed' } },
     );
     await expect(InvoiceService.update('inv-1', { tax_rate: 0.07 }))
       .rejects.toThrow(/payment dispute/);
+    // The ledger probe must cover every payment→invoice linkage key the
+    // webhook supports — the dispute handler stamps dispute_invoice_id, not
+    // invoice_id (codex r2).
+    const [probeSql, probeBindings] = captured.paymentsQ.whereRaw.mock.calls[0];
+    expect(probeSql).toContain("'invoice_id'");
+    expect(probeSql).toContain("'dispute_invoice_id'");
+    expect(probeSql).toContain("'waves_invoice_id'");
+    expect(probeBindings).toEqual(['inv-1', 'inv-1', 'inv-1']);
   });
 
   it('refuses to retotal once a customer has a live PaymentIntent', async () => {
@@ -645,7 +656,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       throw new Error(`Unexpected table query: ${table}`);
     });
     await InvoiceService.update('inv-1', { due_date: '2026-08-15' });
-    expect(mockRescheduleForInvoiceEdit).toHaveBeenCalledWith('inv-1');
+    expect(mockRescheduleForInvoiceEdit).toHaveBeenCalledWith('inv-1', {
+      previousDueDate: '2026-07-30',
+      newDueDate: '2026-08-15',
+    });
   });
 
   it('does NOT re-anchor the follow-up sequence when the due date is unchanged', async () => {
@@ -676,6 +690,39 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     // a send-anchored cadence onto the due-date formula.
     await InvoiceService.update('inv-1', { due_date: '2026-07-30' });
     expect(mockRescheduleForInvoiceEdit).not.toHaveBeenCalled();
+  });
+
+  it('writes the audit row when a scheduled send completes mid-edit (saved row came back sent)', async () => {
+    // The atomic predicate deliberately allows this race now that sent is
+    // editable — but the audit trail must key on the SAVED status, not the
+    // stale pre-read draft status (codex r2 P2).
+    const stored = { id: 'inv-1', status: 'scheduled', customer_id: 'cust-1', invoice_number: 'INV-104', line_items: '[]' };
+    const activityInsert = jest.fn(async () => [1]);
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, status: 'sent', notes: 'updated' }]) })),
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'activity_log') {
+        return { insert: activityInsert };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await InvoiceService.update('inv-1', { notes: 'updated' });
+    expect(activityInsert).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'invoice_edited_after_send',
+    }));
   });
 
   it('does NOT write the edited-after-send audit row for a draft edit', async () => {

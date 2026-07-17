@@ -506,7 +506,9 @@ async function fireStep(row) {
   }
 
   const nextIndex = row.step_index + 1;
-  const anchorAt = row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
+  // anchor_at (set when an admin edit shifted the due date) overrides the
+  // send-time anchor so the whole remaining cadence stays on one timeline.
+  const anchorAt = row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
   const nextAt = computeNextTouchAt(anchorAt, nextIndex);
 
   await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -663,21 +665,35 @@ async function resumeSequence(invoiceId) {
 }
 
 /**
- * Re-anchor an ACTIVE sequence after an admin edits a delivered invoice's
- * due date (the 2026-07-17 ruling made sent/viewed/overdue invoices
- * editable). The stored next_touch_at was computed against the old
- * timeline; left alone it can dun the customer on the pre-edit schedule.
- * Uses the same due_date-anchored formula as resume/release. Held / paused /
- * stopped rows keep their null next_touch_at and are re-anchored by their
- * own release paths.
+ * Shift an ACTIVE sequence's whole timeline after an admin edits a
+ * delivered invoice's due date (the 2026-07-17 ruling made
+ * sent/viewed/overdue invoices editable). Moving the due date +N days
+ * moves the cadence anchor +N days and stamps it on the row
+ * (`anchor_at`), so BOTH the current touch and every later step (fireStep
+ * progression reads anchor_at first) stay on one shifted timeline —
+ * re-anchoring only the current step would leave progression computing
+ * later steps from sent_at in the past and burst the remaining reminders
+ * on consecutive cron runs. Held / paused / stopped rows keep their null
+ * next_touch_at and are re-anchored by their own release paths.
  */
-async function rescheduleForInvoiceEdit(invoiceId) {
+async function rescheduleForInvoiceEdit(invoiceId, { previousDueDate, newDueDate } = {}) {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const prev = previousDueDate ? new Date(previousDueDate) : null;
+  const next = newDueDate ? new Date(newDueDate) : null;
+  if (!prev || !next || Number.isNaN(prev.getTime()) || Number.isNaN(next.getTime())) return;
+  const deltaDays = Math.round((next.getTime() - prev.getTime()) / dayMs);
+  if (!deltaDays) return;
+
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq || seq.status !== 'active') return;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
+
+  const baseAnchor = seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
+  const shiftedAnchor = new Date(new Date(baseAnchor).getTime() + deltaDays * dayMs);
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
-    next_touch_at: computeNextTouchAt(invoice.due_date || invoice.created_at, seq.step_index),
+    anchor_at: shiftedAnchor,
+    next_touch_at: computeNextTouchAt(shiftedAnchor, seq.step_index),
   });
 }
 

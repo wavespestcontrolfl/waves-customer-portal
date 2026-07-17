@@ -2989,9 +2989,16 @@ const InvoiceService = {
       }
       let appliedMoneyRow = null;
       try {
+        // All three supported payment→invoice linkage keys (mirrors the
+        // webhook's findInvoiceForPayment): the dispute handler stamps
+        // dispute_invoice_id — checking only invoice_id would let a
+        // dispute-reopened invoice slip through this fence.
         appliedMoneyRow = await db("payments")
           .whereIn("status", ["paid", "processing", "disputed"])
-          .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id])
+          .whereRaw(
+            "(metadata::jsonb ->> 'invoice_id' = ? OR metadata::jsonb ->> 'dispute_invoice_id' = ? OR metadata::jsonb ->> 'waves_invoice_id' = ?)",
+            [id, id, id],
+          )
           .first("id", "status");
       } catch (err) {
         throw new Error(
@@ -3173,7 +3180,7 @@ const InvoiceService = {
             this.select(db.raw("1"))
               .from("payments")
               .whereRaw(
-                "payments.metadata::jsonb ->> 'invoice_id' = invoices.id::text",
+                "(payments.metadata::jsonb ->> 'invoice_id' = invoices.id::text OR payments.metadata::jsonb ->> 'dispute_invoice_id' = invoices.id::text OR payments.metadata::jsonb ->> 'waves_invoice_id' = invoices.id::text)",
               )
               .whereIn("payments.status", ["paid", "processing", "disputed"]);
           });
@@ -3215,7 +3222,10 @@ const InvoiceService = {
       asDateOnly(existing.due_date) !== asDateOnly(data.due_date)
     ) {
       try {
-        await require("./invoice-followups").rescheduleForInvoiceEdit(id);
+        await require("./invoice-followups").rescheduleForInvoiceEdit(id, {
+          previousDueDate: existing.due_date,
+          newDueDate: data.due_date,
+        });
       } catch (err) {
         logger.warn(
           `[invoice-followups] rescheduleForInvoiceEdit failed for invoice ${id}: ${err.message}`,
@@ -3223,10 +3233,14 @@ const InvoiceService = {
       }
     }
     // Audit trail: a delivered invoice was rewritten after the customer could
-    // have seen it — the emailed PDF is now stale until it's resent. Outside
-    // the write on purpose (best-effort; a logging failure must not roll back
-    // or fail a committed edit).
-    if (["sent", "viewed", "overdue"].includes(currentStatus)) {
+    // have seen it — the emailed PDF is now stale until it's resent. Keyed on
+    // the SAVED row's status, not the pre-read one: a scheduled send can
+    // complete between the guard read and the atomic write (the predicate
+    // deliberately allows that edit in its new 'sent' state), and that rewrite
+    // must leave the same trail. Outside the write on purpose (best-effort; a
+    // logging failure must not roll back or fail a committed edit).
+    const editedStatus = String(edited?.status || "").toLowerCase();
+    if (["sent", "viewed", "overdue"].includes(editedStatus)) {
       await db("activity_log")
         .insert({
           customer_id: existing.customer_id,
