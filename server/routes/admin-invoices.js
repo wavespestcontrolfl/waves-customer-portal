@@ -981,7 +981,7 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
 // Body: { paymentMethodId } (our internal payment_methods.id).
 // The card must belong to the invoice customer. Succeeds by calling
 // Stripe off-session with confirm:true; webhook marks the invoice paid.
-router.post('/:id/charge-card', async (req, res, next) => {
+router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
   try {
     const { paymentMethodId } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });

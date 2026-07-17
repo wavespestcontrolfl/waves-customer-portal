@@ -1,7 +1,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
@@ -74,7 +74,7 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
  * and pulls receipt/card details automatically. Otherwise it records a
  * manual reconciliation (cash/check/off-platform).
  */
-router.post('/reconcile', async (req, res, next) => {
+router.post('/reconcile', requireAdmin, async (req, res, next) => {
   try {
     const { invoiceId, stripeChargeId, collectedVia, amount, note } = req.body || {};
     if (!invoiceId) return res.status(400).json({ error: 'invoiceId required' });
@@ -157,6 +157,32 @@ router.post('/reconcile', async (req, res, next) => {
       if (already && already.id !== invoiceId) {
         return res.status(409).json({ error: `Charge already linked to invoice ${already.invoice_number}` });
       }
+      // Also check the payments LEDGER, not just invoices.stripe_charge_id:
+      // on-platform charges (webhook, saved-card, pay page) book their own
+      // payments row, sometimes without stamping the invoice column —
+      // reconciling one of those here would record the same money twice.
+      const alreadyBooked = await db('payments').where({ stripe_charge_id: stripeChargeId }).first();
+      if (alreadyBooked) {
+        return res.status(409).json({ error: 'Charge is already recorded in the payments ledger — it cannot be reconciled again' });
+      }
+      // Verify the charge belongs to THIS invoice's customer when the charge
+      // carries an identity we can map. Portal-created charges pin
+      // metadata.waves_customer_id and/or a Stripe customer id; Tap-to-Pay
+      // charges from the native Terminal app carry neither, so absence of
+      // both stays reconcilable (that is this route's whole purpose).
+      const chargeWavesCustomerId = chargeDetails.metadata?.waves_customer_id;
+      if (chargeWavesCustomerId && String(chargeWavesCustomerId) !== String(invoice.customer_id)) {
+        return res.status(400).json({ error: 'Charge belongs to a different customer than this invoice' });
+      }
+      const chargeStripeCustomer = typeof chargeDetails.customer === 'string'
+        ? chargeDetails.customer
+        : chargeDetails.customer?.id || null;
+      if (chargeStripeCustomer) {
+        const owner = await db('customers').where({ stripe_customer_id: chargeStripeCustomer }).first('id');
+        if (owner && String(owner.id) !== String(invoice.customer_id)) {
+          return res.status(400).json({ error: 'Charge belongs to a different customer than this invoice' });
+        }
+      }
 
       updates.stripe_charge_id = stripeChargeId;
       updates.payment_method = chargeDetails.payment_method_details?.type || null;
@@ -180,21 +206,6 @@ router.post('/reconcile', async (req, res, next) => {
       updates.payment_method = collectedVia;
     }
 
-    // Conditional update closes the TOCTOU window: if the invoice became
-    // uncollectible (paid/processing/void/refunded/canceled) between our read
-    // and this write, the UPDATE matches 0 rows and we bail instead of
-    // double-marking it.
-    const updatedRows = await db('invoices')
-      .where({ id: invoiceId })
-      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
-      .update(updates);
-    if (!updatedRows) {
-      const current = await db('invoices').where({ id: invoiceId }).first('status');
-      return res.status(409).json({
-        error: `Invoice status changed to '${current?.status || 'unknown'}' while reconciling — no changes applied`,
-      });
-    }
-
     // What was actually collected: Stripe reconciles record the verified
     // charge amount (a caller-supplied amount must not override it); manual
     // reconciles honor the operator-supplied amount, else the invoice total.
@@ -202,9 +213,26 @@ router.post('/reconcile', async (req, res, next) => {
       ? chargeDetails.amount / 100
       : (amount != null ? Number(amount) : invoiceAmountDue(invoice));
 
-    // Also create a payments ledger row so revenue reports pick up the collection
-    try {
-      await db('payments').insert({
+    // Conditional update closes the TOCTOU window: if the invoice became
+    // uncollectible (paid/processing/void/refunded/canceled) between our read
+    // and this write, the UPDATE matches 0 rows and we bail instead of
+    // double-marking it.
+    //
+    // The payments-ledger insert rides the SAME transaction as the status
+    // flip (mirroring record-payment in admin-invoices.js): the ledger row is
+    // load-bearing for every revenue rollup, and a best-effort insert after
+    // the flip left collected money permanently missing on a transient DB
+    // failure. Either both commit or the operator gets a retryable error and
+    // nothing changed.
+    const updatedRows = await db.transaction(async (trx) => {
+      const rows = await trx('invoices')
+        .where({ id: invoiceId })
+        .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+        .update(updates);
+      if (!rows) return 0;
+
+      // Payments ledger row so revenue reports pick up the collection
+      await trx('payments').insert({
         customer_id: invoice.customer_id,
         amount: collectedAmount,
         status: 'paid',
@@ -217,8 +245,13 @@ router.post('/reconcile', async (req, res, next) => {
           source: 'admin_payment_reconcile',
         }),
       });
-    } catch (e) {
-      logger.warn(`[reconcile] payments ledger insert skipped: ${e.message}`);
+      return rows;
+    });
+    if (!updatedRows) {
+      const current = await db('invoices').where({ id: invoiceId }).first('status');
+      return res.status(409).json({
+        error: `Invoice status changed to '${current?.status || 'unknown'}' while reconciling — no changes applied`,
+      });
     }
 
     try {
