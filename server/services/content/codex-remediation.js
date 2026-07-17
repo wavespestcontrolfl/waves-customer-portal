@@ -864,13 +864,35 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // converges instead of looping.
     const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
     const currentHead = String(headSha || '').trim().toLowerCase();
-    if (!currentHead || (parkedHead && parkedHead === currentHead)) {
+    // A 'moved past' park claims ANOTHER push superseded ours mid-round. If
+    // the live head IS the push we parked against, that claim was a stale
+    // getPr read-after-write (PR #383) — and because such parks stamp OUR
+    // pushed head, the head-advanced re-arm below can never fire (the stamp
+    // equals the real head). The premise is contradicted by the observation
+    // in hand, so re-arm on it. Other same-head parks (sync failures, gate
+    // failures) keep holding for a human as designed.
+    let staleMovedPastPark = Boolean(parkedHead) && parkedHead === currentHead
+      && /^pr head moved past the remediation push/.test(String(state.park_reason || ''));
+    if (staleMovedPastPark) {
+      // The same-head observation could ITSELF be a stale getPr read of a
+      // genuine parallel push (park correctly recorded our push B, a real C
+      // landed, and getPr still serves B). Only the branch ref agreeing that
+      // the parked push IS the tip proves the park's premise false. Ref
+      // disagrees (or is unreadable) → stay parked; the next tick observes
+      // the true head and the ordinary head-advance re-arm carries it.
+      let refHead = null;
+      try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+      if (refHead !== currentHead) staleMovedPastPark = false;
+    }
+    if (!currentHead || (parkedHead && parkedHead === currentHead && !staleMovedPastPark)) {
       return { skipped: true, reason: 'parked' };
     }
     await saveState(db, prNumber, { status: 'active', rounds: 0, park_reason: null, parked_head_sha: null });
     state.status = 'active';
     state.rounds = 0;
-    logger.info(`[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
+    logger.info(staleMovedPastPark
+      ? `[codex-remediation] re-armed parked PR #${prNumber}: 'moved past' park contradicted — the branch head IS the parked push ${currentHead.slice(0, 7)} (stale read at park time)`
+      : `[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
   }
 
   const reviewComments = await gh.listPrReviewComments(prNumber);
@@ -1063,13 +1085,48 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     }
     if (fresh.head?.sha && newHead
       && String(fresh.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
-      // A parallel push (usually a human) landed mid-round: our fix is no
-      // longer the head, so syncing it would mirror content the merge won't
-      // take. Park like the other withheld-sync paths — and stamp OUR
-      // pushed head, so the parked row re-arms on the very next blocked
-      // tick (branch head ≠ parked head) and remediation re-evaluates the
-      // newer content with fresh rounds instead of going silent.
-      return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(fresh.head.sha)}); sync withheld`, onPark, newHead);
+      // Ambiguous mismatch: either a parallel push landed mid-round, or getPr
+      // served a stale read-after-write snapshot behind our OWN putFile (PR
+      // #383 — the "moved past" head was the parent of our commit, and the
+      // park below then wedged forever because it stamps the real head). The
+      // branch ref is authoritative for putFile's own write; consult it
+      // before withholding the sync. A getBranchSha failure falls through to
+      // the park (fail closed — the parked-branch contradiction re-arm
+      // recovers it if the read was stale).
+      let refHead = null;
+      try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+      if (refHead !== String(newHead).trim().toLowerCase()) {
+        // A parallel push (usually a human) landed mid-round: our fix is no
+        // longer the head, so syncing it would mirror content the merge won't
+        // take. Park like the other withheld-sync paths — and stamp OUR
+        // pushed head, so the parked row re-arms on the very next blocked
+        // tick (branch head ≠ parked head) and remediation re-evaluates the
+        // newer content with fresh rounds instead of going silent.
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(refHead || fresh.head.sha)}); sync withheld`, onPark, newHead);
+      }
+      // The ref confirms our push IS the branch head — but the snapshot that
+      // misreported the head may misreport PR state too (a close landing
+      // right behind the push). Re-fetch and re-run the terminal-state check
+      // on the fresher read before any post-commit sync; a throw here lands
+      // in the outer catch (park, sync withheld — fail closed).
+      const recheck = await gh.getPr(prNumber);
+      if (!recheck || recheck.merged || recheck.merged_at || recheck.state !== 'open') {
+        const terminal = recheck && (recheck.merged || recheck.merged_at) ? 'merged' : 'closed';
+        await markPrTerminal(prNumber, terminal, db);
+        logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} not in main)`);
+        return { skipped: true, reason: 'pr left the open state during remediation (post-push check)' };
+      }
+      // The re-read must ALSO agree our push is the head: a concurrent push C
+      // can land between the ref confirmation and this read, and proceeding
+      // would sync content the merge won't take. Park on any disagreement —
+      // stamped with OUR push, both cases converge: a real C re-arms via
+      // head-advance next tick; a still-stale read re-arms via the
+      // contradiction check (the ref will again confirm our push is the tip).
+      if (!recheck.head?.sha
+        || String(recheck.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead);
+      }
+      // Open AND at our head on the re-read → proceed with the round.
     }
   } catch (e) {
     // Fail CLOSED: proceeding could mirror a fix into portal state that
