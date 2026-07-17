@@ -43,6 +43,7 @@ const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
+const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -314,18 +315,6 @@ function uiConfirmEnabled() {
 
 async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
-}
-
-async function approvedAgentEstimateMemoryPrompt() {
-  const rows = await db('agent_estimate_memory')
-    .where({ status: 'approved' })
-    .orderBy('version', 'asc')
-    .limit(30)
-    .select('version', 'rule_text')
-    .catch(() => []);
-  if (!rows.length) return '';
-  const rules = rows.map((row) => `- v${row.version}: ${String(row.rule_text || '').slice(0, 1600)}`);
-  return `\n\nAPPROVED AGENT ESTIMATE LEARNING (operator-reviewed; apply as policy, never as pricing data):\n${rules.join('\n')}`;
 }
 
 function summarizeProposal(toolName, params) {
@@ -1169,7 +1158,7 @@ router.post('/query', async (req, res, next) => {
       systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
     }
     if (context === 'agent_estimate') {
-      systemPrompt += await approvedAgentEstimateMemoryPrompt();
+      systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
     }
     const uiConfirmActive = uiConfirmEnabled() || context === 'agent_estimate';
     // Write-confirmation guidance must match the active mechanism (#1568) —

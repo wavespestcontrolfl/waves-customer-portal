@@ -32,6 +32,8 @@ const { performPropertyLookup } = require('../../routes/property-lookup-v2');
 const { buildAgentEstimateContext } = require('../agent-estimate-context');
 const { toQualifyingKey } = require('../waveguard-existing-services');
 const { computeMembershipContext, loadCurrentServiceSpendContext } = require('../estimate-membership-context');
+const { getProtocol, normalizeProtocolKey } = require('../protocol-reader');
+const { executeProcurementTool } = require('./procurement-tools');
 
 const PROPERTY_FACT_TOKEN_TTL_MS = 15 * 60 * 1000;
 const PROPERTY_FACT_FALLBACK_SECRET = crypto.randomBytes(32);
@@ -251,6 +253,7 @@ Use for: the final step on the Agent Estimate page, after lookup_property, proto
             properties: {
               serviceKey: { type: 'string' },
               programKey: { type: 'string' },
+              lawnTrack: { type: 'string', description: 'Selected lawn protocol track when serviceKey belongs to lawn.' },
               visitCount: { type: 'number' },
               warning: { type: 'string' },
             },
@@ -263,6 +266,7 @@ Use for: the final step on the Agent Estimate page, after lookup_property, proto
             type: 'object',
             properties: {
               serviceKey: { type: 'string' },
+              productId: { type: 'string' },
               productName: { type: 'string' },
               status: { type: 'string' },
               onHand: { type: ['number', 'null'] },
@@ -404,9 +408,9 @@ function isMeasurementFactName(value) {
 
 function propertyLookupCredentialFacts(property, enriched) {
   const facts = [];
-  const add = (key, value) => {
+  const add = (key, value, source = 'property_record', confidence = 'high') => {
     const numeric = finiteNumericFactValue(value);
-    if (numeric !== null) facts.push({ key, value: numeric });
+    if (numeric !== null) facts.push({ key, value: numeric, source, confidence });
   };
   add('homeSqFt', property?.home_sqft);
   add('buildingSqFt', property?.home_sqft);
@@ -414,10 +418,88 @@ function propertyLookupCredentialFacts(property, enriched) {
   add('bedrooms', property?.bedrooms);
   add('stories', property?.stories);
   add('yearBuilt', property?.year_built);
-  const enrichedFacts = collectNumericFacts(enriched)
-    .filter((fact) => isMeasurementFactName(fact.key));
-  facts.push(...enrichedFacts);
+  // buildEnrichedProfile deliberately contains defaults and operator-prefill
+  // estimates (stories: 1, estimated attic/slab/perimeter, etc.). Signing the
+  // whole object would upgrade those derived values into authoritative facts.
+  // Only explicit turf inputs retain a credential, and their original key
+  // carries the estimated-vs-confirmed provenance through verification.
+  const allowedEnrichedFacts = new Set(['estimatedturfsf', 'measuredturfsf', 'lawnsqft']);
+  for (const fact of collectNumericFacts(enriched).filter((row) => (
+    isMeasurementFactName(row.key)
+      && allowedEnrichedFacts.has(normalizeFactName(String(row.key).split('.').pop()))
+  ))) {
+    const estimated = /estimated/i.test(fact.key);
+    facts.push({
+      ...fact,
+      source: estimated ? 'property_lookup_estimate' : 'property_lookup_measurement',
+      confidence: estimated ? 'moderate' : 'high',
+    });
+  }
   return facts;
+}
+
+function quoteClauseAt(text, index, valueLength) {
+  const separators = [...String(text || '').matchAll(/(?:;|\n+|[.!?](?:\s+|$)|,\s+|\b(?:and|but|while|whereas)\b)/gi)];
+  let start = 0;
+  let end = text.length;
+  for (const separator of separators) {
+    const separatorStart = Number(separator.index);
+    const separatorEnd = separatorStart + separator[0].length;
+    if (separatorEnd <= index) start = separatorEnd;
+    else if (separatorStart >= index + valueLength) {
+      end = separatorStart;
+      break;
+    }
+  }
+  return text.slice(start, end);
+}
+
+function canonicalProductName(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+async function validateInventoryReviewRows(rows = []) {
+  const validatedRows = [];
+  const reasons = [];
+  for (const row of rows) {
+    const requestedName = String(row?.productName || row?.product || '').trim();
+    if (!requestedName) {
+      reasons.push(`${row?.serviceKey || 'inventory'}: product name missing`);
+      validatedRows.push({ ...row, productName: null, onHand: null, status: 'unverified' });
+      continue;
+    }
+    const lookup = await executeProcurementTool('query_stock', { search: requestedName, limit: 10 });
+    if (lookup?.error) {
+      reasons.push(`${requestedName}: live stock lookup failed`);
+      validatedRows.push({ ...row, productName: requestedName, onHand: null, status: 'unverified' });
+      continue;
+    }
+    const products = Array.isArray(lookup?.products) ? lookup.products : [];
+    const exact = products.filter((product) => (
+      canonicalProductName(product?.name) === canonicalProductName(requestedName)
+    ));
+    if (exact.length !== 1) {
+      reasons.push(`${requestedName}: live catalog product was not uniquely resolved`);
+      validatedRows.push({ ...row, productName: requestedName, onHand: null, status: 'unverified' });
+      continue;
+    }
+    const product = exact[0];
+    const onHand = finiteNumericFactValue(product.on_hand);
+    const status = onHand == null ? 'untracked' : (onHand > 0 ? 'in_stock' : 'unavailable');
+    const verified = {
+      serviceKey: row?.serviceKey || null,
+      productId: product.id || null,
+      productName: product.name,
+      onHand,
+      status,
+      inventoryUnit: product.unit || null,
+      verifiedLive: true,
+    };
+    validatedRows.push(verified);
+    if (onHand == null) reasons.push(`${product.name}: count untracked`);
+    else if (onHand <= 0) reasons.push(`${product.name}: unavailable (${onHand} on hand)`);
+  }
+  return { rows: validatedRows, reasons };
 }
 
 function propertyFactSecret() {
@@ -1415,6 +1497,9 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const propertyFactEntries = Object.entries(propertyFacts);
   const protocolReview = Array.isArray(input.protocolReview) ? input.protocolReview : [];
   const inventoryReview = Array.isArray(input.inventoryReview) ? input.inventoryReview : [];
+  const inventoryValidation = inventoryReview.length
+    ? await validateInventoryReviewRows(inventoryReview)
+    : { rows: [], reasons: [] };
 
   if (accountPricing.recognized) {
     laneReasons.push('existing-customer expansion: verify current services, spend, and added-service scope before sending');
@@ -1438,25 +1523,41 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const numericValuesMatch = (left, right) => Number.isFinite(Number(left))
     && Number.isFinite(Number(right))
     && Math.abs(Number(left) - Number(right)) <= Math.max(1, Math.abs(Number(right)) * 0.01);
-  const credentialGroundsFact = (key, fact) => {
-    if (!propertyCredential) return false;
-    if (/address/i.test(key)) return sameStreetAddress(String(fact.value), propertyCredential.address);
-    if (!Number.isFinite(Number(fact.value))) return false;
-    return (propertyCredential.facts || []).some((candidate) => (
-      factNamesCompatible(key, candidate.key) && numericValuesMatch(fact.value, candidate.value)
+  const credentialGrounding = (key, fact) => {
+    if (!propertyCredential) return null;
+    if (/address/i.test(key)) {
+      return sameStreetAddress(String(fact.value), propertyCredential.address)
+        ? { source: 'property_lookup', confidence: 'high' }
+        : null;
+    }
+    if (!Number.isFinite(Number(fact.value))) return null;
+    const candidate = (propertyCredential.facts || []).find((row) => (
+      factNamesCompatible(key, row.key) && numericValuesMatch(fact.value, row.value)
     ));
+    return candidate ? {
+      source: candidate.source || 'property_lookup',
+      confidence: candidate.confidence || 'high',
+    } : null;
   };
   const structuredFacts = [
-    ...collectNumericFacts(evidenceContext?.quote_form?.extracted_data, ['quote_form']),
-    ...(evidenceContext?.calls || []).flatMap((call) => collectNumericFacts(call?.extraction, ['call_extraction'])),
+    ...collectNumericFacts(evidenceContext?.quote_form?.extracted_data, ['quote_form_extraction'])
+      .map((fact) => ({ ...fact, source: 'quote_form_extraction', confidence: 'low' })),
+    ...(evidenceContext?.calls || []).flatMap((call) => (
+      collectNumericFacts(call?.extraction, ['call_extraction'])
+        .map((fact) => ({ ...fact, source: 'call_extraction', confidence: 'low' }))
+    )),
   ].filter((fact) => isMeasurementFactName(fact.key));
   if (sameStreetAddress(evidenceContext?.customer_profile?.address, input.address)) {
     structuredFacts.push(...collectNumericFacts(evidenceContext.customer_profile, ['customer_profile'])
-      .filter((fact) => isMeasurementFactName(fact.key)));
+      .filter((fact) => isMeasurementFactName(fact.key))
+      .map((fact) => ({ ...fact, source: 'customer_profile', confidence: 'high' })));
   }
-  const structuredEvidenceGroundsFact = (key, fact) => Number.isFinite(Number(fact.value))
-    && structuredFacts.some((candidate) => factNamesCompatible(key, candidate.key)
-      && numericValuesMatch(fact.value, candidate.value));
+  const structuredEvidenceGrounding = (key, fact) => {
+    if (!Number.isFinite(Number(fact.value))) return null;
+    const candidate = structuredFacts.find((row) => factNamesCompatible(key, row.key)
+      && numericValuesMatch(fact.value, row.value));
+    return candidate ? { source: candidate.source, confidence: candidate.confidence } : null;
+  };
   const semanticPatternForFact = (key) => {
     const familyPatterns = {
       building_slab: /building.{0,20}slab|slab.{0,20}building/i,
@@ -1481,41 +1582,69 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       .find((token) => token.length >= 4 && !/^(count|area|size|feet|sqft)$/i.test(token));
     return meaningfulToken ? new RegExp(meaningfulToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
   };
-  const verifiedQuoteGroundsFact = (key, fact) => {
+  const verifiedQuoteGrounding = (key, fact) => {
     const observed = Number(fact.value);
-    if (!Number.isFinite(observed)) return false;
+    if (!Number.isFinite(observed)) return null;
     const semanticPattern = semanticPatternForFact(key);
-    if (!semanticPattern) return false;
-    return (Array.isArray(input.evidence) ? input.evidence : []).some((row) => {
+    if (!semanticPattern) return null;
+    const matchedRow = (Array.isArray(input.evidence) ? input.evidence : []).find((row) => {
       const quote = String(row?.quote || '');
       const quoteValues = [...quote.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
       const groundedValue = quoteValues.some((match) => {
         if (!numericValuesMatch(match[0].replace(/,/g, ''), observed)) return false;
-        const start = Math.max(0, Number(match.index) - 80);
-        const end = Math.min(quote.length, Number(match.index) + match[0].length + 80);
-        return semanticPattern.test(quote.slice(start, end));
+        return semanticPattern.test(quoteClauseAt(quote, Number(match.index), match[0].length));
       });
       if (!groundedValue) return false;
       return verifyAgentEvidenceQuotes([row], evidenceContext).verified === 1;
     });
+    return matchedRow ? {
+      source: 'operator_confirmation',
+      confidence: 'high',
+      evidenceSource: String(matchedRow.source || ''),
+    } : null;
   };
-  const serverEvidenceGroundsFact = (key, fact) => {
-    if (credentialGroundsFact(key, fact)) return true;
+  const serverEvidenceGrounding = (key, fact) => {
+    const credential = credentialGrounding(key, fact);
+    if (credential) return credential;
     if (/address/i.test(key)) {
-      const addresses = [evidenceContext?.lead?.address, evidenceContext?.customer_profile?.address]
-        .filter(Boolean);
-      return addresses.some((address) => sameStreetAddress(String(fact.value), address));
+      if (evidenceContext?.lead?.address
+        && sameStreetAddress(String(fact.value), evidenceContext.lead.address)) {
+        return { source: 'lead', confidence: 'high' };
+      }
+      if (evidenceContext?.customer_profile?.address
+        && sameStreetAddress(String(fact.value), evidenceContext.customer_profile.address)) {
+        return { source: 'customer_profile', confidence: 'high' };
+      }
+      return null;
     }
-    return structuredEvidenceGroundsFact(key, fact) || verifiedQuoteGroundsFact(key, fact);
+    return verifiedQuoteGrounding(key, fact) || structuredEvidenceGrounding(key, fact);
   };
+  const groundingByKey = new Map(propertyFactEntries.map(([key, fact]) => [
+    key,
+    serverEvidenceGrounding(key, fact),
+  ]));
   const isVerifiedFact = (key, fact) => {
     if (!fact || typeof fact !== 'object') return false;
     const hasValue = fact.value !== undefined && fact.value !== null && String(fact.value).trim() !== '';
-    const confidence = String(fact.confidence || '').trim().toLowerCase();
-    return hasValue && !!fact.source && !!confidence
-      && !['low', 'weak', 'unknown', 'unverified'].includes(confidence)
-      && serverEvidenceGroundsFact(key, fact);
+    const claimedConfidence = String(fact.confidence || '').trim().toLowerCase();
+    const grounding = groundingByKey.get(key);
+    const verifiedConfidence = String(grounding?.confidence || '').toLowerCase();
+    return hasValue && !!fact.source && !!claimedConfidence
+      && !['low', 'weak', 'unknown', 'unverified'].includes(claimedConfidence)
+      && !!grounding
+      && !['low', 'weak', 'unknown', 'unverified'].includes(verifiedConfidence);
   };
+  const verifiedPropertyFacts = Object.fromEntries(propertyFactEntries.map(([key, fact]) => {
+    const grounding = groundingByKey.get(key);
+    return [key, {
+      ...fact,
+      claimedSource: fact?.source || null,
+      claimedConfidence: fact?.confidence || null,
+      source: grounding?.source || null,
+      confidence: grounding?.confidence || 'unverified',
+      ...(grounding?.evidenceSource ? { evidenceSource: grounding.evidenceSource } : {}),
+    }];
+  }));
   const getPath = (object, path) => path.split('.').reduce((value, part) => value?.[part], object);
   const normalizedMeasurementName = (value) => String(value || '')
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
@@ -1529,7 +1658,8 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       if (nested && typeof nested === 'object') {
         collectNumericEngineMeasurements(nested, nextPath);
       } else if (Number.isFinite(Number(nested))
-        && /(?:sqft|sq_ft|sf|area|count|bedrooms?|units?|linear|perimeter|feet|lf)$/i.test(name)) {
+        && (path[0] === 'services'
+          || /(?:sqft|sq_ft|sf|area|count|bedrooms?|rooms?|units?|linear|perimeter|feet|lf)$/i.test(name))) {
         numericEngineMeasurements.push({ path: nextPath.join('.'), name, value: Number(nested) });
       }
     }
@@ -1614,8 +1744,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     for (const [name, nested] of Object.entries(value)) {
       const nextPath = [...path, name];
       if (nested && typeof nested === 'object') collectMeasurements(nested, nextPath);
-      else if (Number.isFinite(Number(nested))
-        && /(?:sqft|sq_ft|sf|area|count|bedrooms?|units?|linear|perimeter|feet|lf)$/i.test(name)) {
+      else if (Number.isFinite(Number(nested))) {
         nestedMeasurements.push({ path: nextPath.join('.'), name, value: Number(nested) });
       }
     }
@@ -1684,7 +1813,22 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       }
     }
     for (const row of protocolReview) {
-      if (!row?.programKey || !Number.isFinite(Number(row?.visitCount)) || Number(row.visitCount) <= 0) {
+      const protocol = getProtocol({
+        service_type: row?.serviceKey,
+        lawn_track: row?.lawnTrack,
+      });
+      const expectedProgram = normalizeProtocolKey(row?.serviceKey);
+      const suppliedProgram = normalizeProtocolKey(row?.programKey);
+      const expectedVisitCount = Array.isArray(protocol?.protocol?.visits)
+        ? protocol.protocol.visits.length
+        : null;
+      if (!protocol?.protocol) {
+        laneReasons.push(`protocol review for ${row?.serviceKey || 'a selected service'} did not resolve to a server protocol`);
+      } else if (!suppliedProgram || suppliedProgram !== expectedProgram) {
+        laneReasons.push(`protocol review for ${row?.serviceKey || 'a selected service'} names the wrong program`);
+      } else if (!Number.isFinite(Number(row?.visitCount))
+        || Number(row.visitCount) <= 0
+        || (expectedVisitCount != null && Number(row.visitCount) !== expectedVisitCount)) {
         laneReasons.push(`protocol review for ${row?.serviceKey || 'a selected service'} lacks program/cadence metadata`);
       }
     }
@@ -1701,6 +1845,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   }
   for (const text of input.assumptions || []) laneReasons.push(`assumption: ${text}`);
   for (const text of input.uncertainty || []) laneReasons.push(`open question: ${text}`);
+  laneReasons.push(...inventoryValidation.reasons);
   // Pricing/margin failures are collected separately and placed FIRST in the
   // stored/displayed list — a draft with 30+ evidence/protocol reasons must
   // not truncate "collected margin is below 35%" out of the operator-visible
@@ -1713,19 +1858,6 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       pricingLaneReasons.push(`${line.service} pricing confidence is ${line.pricing_confidence}`);
     }
     for (const reason of line.review_reasons || []) pricingLaneReasons.push(`${line.service}: ${reason}`);
-  }
-  for (const row of inventoryReview) {
-    if (row?.onHand == null) {
-      laneReasons.push(`${row?.productName || row?.product || 'inventory'}: count untracked`);
-    } else if (!Number.isFinite(Number(row.onHand)) || Number(row.onHand) < 0) {
-      laneReasons.push(`${row?.productName || row?.product || 'inventory'}: invalid inventory count`);
-    } else if (Number(row.onHand) === 0) {
-      laneReasons.push(`${row?.productName || row?.product || 'inventory'}: unavailable (zero on hand)`);
-    } else if (!row?.status) {
-      laneReasons.push(`${row?.productName || row?.product || 'inventory'}: status missing`);
-    } else if (!['in_stock', 'ok', 'available', 'not_applicable'].includes(String(row.status).toLowerCase())) {
-      laneReasons.push(`${row.productName || row.product || 'inventory'}: ${row.status}`);
-    }
   }
   for (const row of protocolReview) {
     if (row?.warning) laneReasons.push(`protocol: ${row.warning}`);
@@ -1740,6 +1872,8 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     lane: allLaneReasons.length ? 'yellow' : 'green',
     lane_reasons: allLaneReasons.slice(0, 30),
     engineResult,
+    propertyFacts: verifiedPropertyFacts,
+    inventoryReview: inventoryValidation.rows,
     customer_account: accountPricing.customerAccount,
     presentation: presentationForServices(input.engineInputs.services, engineResult),
   };
@@ -1781,10 +1915,10 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
         laneReasons: preview.lane_reasons,
         evidence: Array.isArray(input.evidence) ? input.evidence.slice(0, 30) : [],
         evidenceVerification: input.evidenceVerification || null,
-        propertyFacts: input.propertyFacts || {},
+        propertyFacts: preview.propertyFacts || {},
         contactVerification: input.contactVerification || null,
         protocolReview: Array.isArray(input.protocolReview) ? input.protocolReview.slice(0, 30) : [],
-        inventoryReview: Array.isArray(input.inventoryReview) ? input.inventoryReview.slice(0, 50) : [],
+        inventoryReview: Array.isArray(preview.inventoryReview) ? preview.inventoryReview.slice(0, 50) : [],
         reasoning: String(input.reasoning || '').slice(0, 5000),
         assumptions: Array.isArray(input.assumptions) ? input.assumptions.slice(0, 30) : [],
         uncertainty: Array.isArray(input.uncertainty) ? input.uncertainty.slice(0, 30) : [],

@@ -17,6 +17,14 @@ const mockComputeMembershipContext = jest.fn(async () => null);
 const mockLoadCurrentServiceSpendContext = jest.fn(async () => ({
   existingServiceKeys: [], currentServices: [], currentSpendPerVisitTotal: 0,
 }));
+const mockExecuteProcurementTool = jest.fn(async (_toolName, input) => ({
+  products: [{
+    id: `product-${String(input.search || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+    name: input.search,
+    on_hand: 8,
+    unit: 'oz',
+  }],
+}));
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/pricing-engine', () => ({
@@ -41,6 +49,10 @@ jest.mock('../services/agent-estimate-context', () => ({
 jest.mock('../services/estimate-membership-context', () => ({
   computeMembershipContext: (...args) => mockComputeMembershipContext(...args),
   loadCurrentServiceSpendContext: (...args) => mockLoadCurrentServiceSpendContext(...args),
+}));
+jest.mock('../services/intelligence-bar/procurement-tools', () => ({
+  PROCUREMENT_TOOLS: [{ name: 'query_stock' }],
+  executeProcurementTool: (...args) => mockExecuteProcurementTool(...args),
 }));
 jest.mock('../routes/property-lookup-v2', () => ({ performPropertyLookup: jest.fn() }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
@@ -104,7 +116,7 @@ const INPUT = {
     address: { value: '1 Test St, Bradenton FL 34208', source: 'lead', confidence: 'high' },
     homeSqFt: { value: 2000, source: 'county', confidence: 'high' },
   },
-  protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 4 }],
+  protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
   inventoryReview: [{ serviceKey: 'pest', productName: 'Pest protocol products', status: 'in_stock', onHand: 8 }],
 };
 
@@ -289,7 +301,7 @@ describe('Agent Estimate draft tool', () => {
         atticSqFt: { value: 1200, source: 'satellite', confidence: 'high' },
         stationCount: { value: 12, source: 'inspection', confidence: 'high' },
       },
-      protocolReview: [{ serviceKey: 'rodentTrapping', programKey: 'rodent', visitCount: 3 }],
+      protocolReview: [{ serviceKey: 'rodentTrapping', programKey: 'rodent', visitCount: 4 }],
       inventoryReview: [{ serviceKey: 'rodentTrapping', productName: 'Traps', status: 'in_stock', onHand: 12 }],
     });
 
@@ -561,6 +573,79 @@ describe('Agent Estimate draft tool', () => {
     expect(result.lane_reasons).toContain('draft service address differs from the selected lead address');
   });
 
+  test('validates protocol program and cadence against the server protocol catalog', async () => {
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      protocolReview: [{ serviceKey: 'pest', programKey: 'anything', visitCount: 1 }],
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain('protocol review for pest names the wrong program');
+  });
+
+  test('uses live stock instead of a model-asserted available inventory row', async () => {
+    mockExecuteProcurementTool.mockResolvedValueOnce({
+      products: [{ id: 'product-pest', name: 'Pest protocol products', on_hand: 0, unit: 'oz' }],
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      inventoryReview: [{
+        serviceKey: 'pest', productName: 'Pest protocol products', status: 'in_stock', onHand: 99,
+      }],
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain('Pest protocol products: unavailable (0 on hand)');
+    expect(result.inventoryReview[0]).toEqual(expect.objectContaining({
+      onHand: 0,
+      status: 'unavailable',
+      verifiedLive: true,
+    }));
+  });
+
+  test('requires evidence for every numeric nested service price driver including rooms', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      summary: {
+        recurringMonthlyAfterDiscount: 0,
+        recurringAnnualAfterDiscount: 0,
+        oneTimeTotal: 500,
+      },
+      waveGuard: { tier: 'bronze' },
+      lineItems: [{
+        service: 'bed_bug', price: 500, costs: { total: 250 }, pricingConfidence: 'high',
+      }],
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        homeSqFt: 2000,
+        services: { bedBug: { rooms: 2, method: 'chemical' } },
+      },
+      protocolReview: [{ serviceKey: 'bedBug', programKey: 'bed_bug', visitCount: 3 }],
+      inventoryReview: [{
+        serviceKey: 'bedBug', productName: 'Bed Bug Product', status: 'in_stock', onHand: 8,
+      }],
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain(
+      'services.bedBug.rooms was used for pricing without a matching verified property fact',
+    );
+  });
+
   test('will not revise an Agent Estimate draft that belongs to another lead', async () => {
     const existing = {
       id: 'estimate-other',
@@ -727,6 +812,70 @@ describe('Agent Estimate property lookup safety', () => {
     ]));
   });
 
+  test('binds a structure fact to its own value when one quote names multiple dimensions', async () => {
+    const quote = 'The home is 2,000 square feet and the lot is 8,000 square feet';
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: {
+        id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+      calls: [], sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 8000, services: { pest: { frequency: 'quarterly' } } },
+      evidence: [{ source: 'quote_form', quote, decision: 'home square footage' }],
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 8000, source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain(
+      'home/building square footage was used for pricing without a matching verified property fact',
+    );
+  });
+
+  test('does not let a low-confidence call extraction masquerade as operator confirmation', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: {
+        id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: 'quarterly pest' }], extracted_data: {} },
+      calls: [{ transcript: '', transcript_summary: '', extraction: { homeSqFt: 2000 } }],
+      sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' } } },
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain(
+      'homeSqFt lacks a server-verified value, source, confidence, or evidence binding',
+    );
+    expect(result.propertyFacts.homeSqFt).toEqual(expect.objectContaining({
+      claimedSource: 'operator_confirmation',
+      source: 'call_extraction',
+      confidence: 'low',
+    }));
+  });
+
   test('does not promote an estimated turf lookup into a measured turf credential', async () => {
     performPropertyLookup.mockResolvedValue({
       propertyRecord: { formattedAddress: INPUT.address, squareFootage: 2000, _source: 'county' },
@@ -789,7 +938,7 @@ describe('Agent Estimate property lookup safety', () => {
     );
   });
 
-  test('does not sign missing lookup measurements as zero', async () => {
+  test('does not sign missing or derived-default lookup measurements', async () => {
     performPropertyLookup.mockResolvedValue({
       propertyRecord: {
         formattedAddress: INPUT.address,
@@ -798,6 +947,11 @@ describe('Agent Estimate property lookup safety', () => {
         _source: 'county',
       },
       satellite: { inServiceArea: true },
+      enriched: {
+        stories: 1,
+        estimatedAtticSqFt: 1000,
+        estimatedSlabSqFt: 1000,
+      },
     });
     const lookup = await executeEstimateTool('lookup_property', { address: INPUT.address });
     const { database } = makeDatabase();
@@ -809,18 +963,24 @@ describe('Agent Estimate property lookup safety', () => {
       engineInputs: {
         homeSqFt: 2000,
         stories: 1,
+        atticSqFt: 1000,
+        slabSqFt: 1000,
         services: { pest: { frequency: 'quarterly' } },
       },
       propertyFactVerificationToken: lookup.property_fact_verification_token,
       propertyFacts: {
         ...INPUT.propertyFacts,
         stories: { value: 1, source: 'property_lookup', confidence: 'high' },
+        atticSqFt: { value: 1000, source: 'property_lookup', confidence: 'high' },
+        slabSqFt: { value: 1000, source: 'property_lookup', confidence: 'high' },
       },
     });
 
     expect(result.lane).toBe('yellow');
     expect(result.lane_reasons).toEqual(expect.arrayContaining([
       'story count was used for pricing without a matching verified property fact',
+      'attic square footage was used for pricing without a matching verified property fact',
+      'slab square footage was used for pricing without a matching verified property fact',
       expect.stringMatching(/stories lacks a server-verified/i),
     ]));
   });
