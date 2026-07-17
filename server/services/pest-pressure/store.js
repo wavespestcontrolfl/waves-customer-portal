@@ -426,7 +426,34 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
   // activity-scores-store); the legacy no-row fallback keeps the date bound.
   if (currentServiceRecordId) {
     const currentIdx = rows.findIndex((row) => String(row.service_record_id) === String(currentServiceRecordId));
-    return (currentIdx >= 0 ? rows.slice(currentIdx) : rows).slice(0, limit);
+    if (currentIdx >= 0) return rows.slice(currentIdx).slice(0, limit);
+    // Current row absent from the fetched window: either it was never stored
+    // (legacy report) or enough later same-day siblings exist to push it past
+    // the limit+8 cap. Check directly and FAIL CLOSED in the stored case —
+    // chart the current row plus strictly-earlier days only — instead of
+    // falling back to the newest rows, which would include the very visits
+    // the trim exists to hide (codex P2 #2824 r3).
+    const currentRow = await knex('pest_pressure_scores as pps')
+      .where('pps.customer_id', customerId)
+      .where('pps.service_record_id', currentServiceRecordId)
+      .select(
+        'pps.id', 'pps.service_record_id', 'pps.service_date', 'pps.service_line',
+        'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
+        'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
+        'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
+        'pps.calculation_version', 'pps.calculated_at',
+      )
+      .first();
+    if (currentRow) {
+      const dayKey = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10));
+      const currentDay = dayKey(currentRow.service_date);
+      // Dropping the whole tied day also drops legitimate earlier same-day
+      // siblings — accepted: this branch only fires in the pathological
+      // ≥limit+8-same-day-rows case, and closed beats leaking later visits.
+      const earlierDays = rows.filter((row) => dayKey(row.service_date) !== currentDay);
+      return [currentRow, ...earlierDays].slice(0, limit);
+    }
+    return rows.slice(0, limit);
   }
   return rows;
 }

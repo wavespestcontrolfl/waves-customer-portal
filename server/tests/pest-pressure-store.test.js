@@ -178,15 +178,23 @@ describe('loadHistoryForCustomer — same-day sibling trim (audit 2026-07-16 P3)
     { service_record_id: 105, service_date: '2026-06-01', displayed_score: 2.8 },
   ];
 
-  function historyKnex() {
-    const chain = {};
-    chain.leftJoin = jest.fn(() => chain);
-    chain.where = jest.fn(() => chain);
-    chain.orderBy = jest.fn(() => chain);
-    chain.orderByRaw = jest.fn(() => chain);
-    chain.limit = jest.fn(() => chain);
-    chain.select = jest.fn(async () => [...rows]);
-    return jest.fn(() => chain);
+  // First knex() call = the windowed history query (select resolves rows);
+  // any later call = the fail-closed current-row lookup (select→chain, first
+  // resolves the stored row or undefined).
+  function historyKnex({ windowRows = rows, currentRow = undefined } = {}) {
+    const mainChain = {};
+    mainChain.leftJoin = jest.fn(() => mainChain);
+    mainChain.where = jest.fn(() => mainChain);
+    mainChain.orderBy = jest.fn(() => mainChain);
+    mainChain.orderByRaw = jest.fn(() => mainChain);
+    mainChain.limit = jest.fn(() => mainChain);
+    mainChain.select = jest.fn(async () => [...windowRows]);
+    const lookupChain = {};
+    lookupChain.where = jest.fn(() => lookupChain);
+    lookupChain.select = jest.fn(() => lookupChain);
+    lookupChain.first = jest.fn(async () => currentRow);
+    let calls = 0;
+    return jest.fn(() => { calls += 1; return calls === 1 ? mainChain : lookupChain; });
   }
 
   test('token-scoped history trims a later same-day sibling at the report own row', async () => {
@@ -201,6 +209,21 @@ describe('loadHistoryForCustomer — same-day sibling trim (audit 2026-07-16 P3)
       limit: 8, beforeOrOnServiceDate: '2026-07-10', currentServiceRecordId: 999,
     });
     expect(out.map((r) => r.service_record_id)).toEqual([202, 201, 105]);
+  });
+
+  test('FAIL CLOSED when the stored current row falls outside the fetched window', async () => {
+    // ≥limit+8 later same-day siblings push the report's own row past the
+    // query cap — the fallback must not return those later visits.
+    const laterSiblings = Array.from({ length: 10 }, (_, i) => (
+      { service_record_id: 300 + i, service_date: '2026-07-10', displayed_score: 4.0 }
+    ));
+    const windowRows = [...laterSiblings, { service_record_id: 105, service_date: '2026-06-01', displayed_score: 2.8 }];
+    const currentRow = { service_record_id: 201, service_date: '2026-07-10', displayed_score: 3.2 };
+    const out = await loadHistoryForCustomer(historyKnex({ windowRows, currentRow }), 9, {
+      limit: 8, beforeOrOnServiceDate: '2026-07-10', currentServiceRecordId: 201,
+    });
+    expect(out.map((r) => r.service_record_id)).toEqual([201, 105]);
+    expect(out.some((r) => r.service_record_id >= 300)).toBe(false);
   });
 
   test('admin callers without currentServiceRecordId are unchanged', async () => {

@@ -72,10 +72,12 @@ function Page({ children }) {
   );
 }
 
-function SectionCard({ children, style }) {
+function SectionCard({ children, style, ...rest }) {
   // data-glass is inert without html[data-glass-theme] — the non-glass render is unchanged.
+  // Rest props forward so callers can set role/aria attributes (the NotFound
+  // card's role="alert" was silently dropped before — codex P2 #2824 r3).
   return (
-    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
+    <section {...rest} data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
       {children}
     </section>
   );
