@@ -15211,6 +15211,7 @@ const PRODUCT_DESCRIPTIONS = {
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
+  tritek: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
   zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
   kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",

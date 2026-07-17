@@ -133,21 +133,12 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('products_catalog'))) return;
-
-  const seeded = await knex('products_catalog')
-    .where({ label_source_note: SEED_ID })
-    .whereIn('name', PRODUCTS.map((p) => p.name))
-    .select('id');
-  const seededIds = seeded.map((row) => row.id);
-  if (!seededIds.length) return;
-
-  if (await knex.schema.hasTable('product_aliases')) {
-    await knex('product_aliases')
-      .whereIn('product_id', seededIds)
-      .whereIn('alias_name', PRODUCTS.flatMap((p) => p.aliases))
-      .del();
-  }
-  await knex('products_catalog').whereIn('id', seededIds).del();
+exports.down = async function down() {
+  // Non-destructive by design: once completion actions attach these
+  // products, catalog rows accrue operational references — and
+  // product_inventory_movements.product_id is ON DELETE CASCADE
+  // (20260504000001), so deleting the rows on an ordinary deployment
+  // rollback would erase job-cost and inventory audit history. Seeded rows
+  // stay identifiable via label_source_note = 'seed_siteone_treeshrub_2026_07_16'
+  // if manual cleanup is ever wanted.
 };

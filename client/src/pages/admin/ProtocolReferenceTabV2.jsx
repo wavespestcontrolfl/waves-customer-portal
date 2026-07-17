@@ -56,26 +56,34 @@ function parseProductLines(text) {
     .map((line) => {
       const warning = /^\u26a0/.test(line.trim());
       let clean = line.replace(/^[\u2605\u26a0]\s*/, "").trim();
-      // Cost annotation anywhere in the line: "($4.68)", "($6.56 est)",
-      // combined "($1.91+$21.79)"; suffix text after it is preserved
-      // ("Headway ONLY if severe ($26.13) — resets FRAC 11 clock").
+      // Cost annotations anywhere in the line, ALL occurrences summed:
+      // "($4.68)", "($6.56 est)", combined "($1.91+$21.79)", and multiple
+      // separate annotations ("Hydretain ($10.59) + Chelated AM ($1.40)").
+      // Surrounding text is preserved ("Headway ONLY if severe ($26.13) —
+      // resets FRAC 11 clock").
       let cost = null;
       let estimated = false;
-      const costMatch = clean.match(
-        /\(\$([\d.]+(?:\s*\+\s*\$?[\d.]+)*)(\s+est)?\)/,
-      );
-      if (costMatch) {
-        cost = costMatch[1]
-          .split("+")
-          .reduce((sum, part) => sum + (parseFloat(part.replace(/[^\d.]/g, "")) || 0), 0);
-        estimated = Boolean(costMatch[2]);
-        clean = (
-          clean.slice(0, costMatch.index) +
-          clean.slice(costMatch.index + costMatch[0].length)
+      let costTotal = 0;
+      let costFound = false;
+      clean = clean
+        .replace(
+          /\(\$([\d.]+(?:\s*\+\s*\$?[\d.]+)*)(\s+est)?\)/g,
+          (_full, amounts, estFlag) => {
+            costFound = true;
+            costTotal += amounts
+              .split("+")
+              .reduce(
+                (sum, part) =>
+                  sum + (parseFloat(part.replace(/[^\d.]/g, "")) || 0),
+                0,
+              );
+            if (estFlag) estimated = true;
+            return "";
+          },
         )
-          .replace(/\s{2,}/g, " ")
-          .trim();
-      }
+        .replace(/\s{2,}/g, " ")
+        .trim();
+      if (costFound) cost = costTotal;
       const conditional = CONDITIONAL_LINE_RE.test(clean);
       // "Product name: rate and detail" \u2192 split name from detail
       let name = clean;
