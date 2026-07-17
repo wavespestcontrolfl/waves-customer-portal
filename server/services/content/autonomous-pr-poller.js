@@ -703,6 +703,10 @@ async function maybeAutoMerge(run, pr) {
   // 2. Codex review must be clear for the current head (fail closed —
   //    same gate mergeAstro applies on the scheduler path).
   const publisher = require('../content-astro/astro-publisher');
+  // Set when the P2-only merge bar (not a clean review) authorized this
+  // merge; annotated onto the run ONLY after the merge actually succeeds —
+  // the guards between here and gh.mergePr can all still defer.
+  let p2MergeInfo = null;
   try {
     await publisher.assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
   } catch (err) {
@@ -720,22 +724,8 @@ async function maybeAutoMerge(run, pr) {
         const { p2OnlyMergeEligible } = require('./codex-remediation');
         const p2Bar = await p2OnlyMergeEligible(pr.number, pr.head?.sha);
         if (p2Bar.eligible) {
-          logger.info(`[autonomous-pr-poller] P2-only merge bar met for run ${run.id} PR #${pr.number}: ${p2Bar.p2Count} P2 finding(s) after ${p2Bar.rounds} remediation round(s) — proceeding to merge`);
-          // Best-effort visibility note (append-only, fresh read like the
-          // park/pending annotations) — an annotation failure must never
-          // block the merge itself.
-          try {
-            const fresh = await db('autonomous_runs').where({ id: run.id }).first();
-            if (fresh) {
-              const note = `Merging with ${p2Bar.p2Count} open Codex P2 finding(s) on head ${String(pr.head?.sha || '').slice(0, 7)} after ${p2Bar.rounds} remediation round(s) (P2-only merge bar — P0/P1 always block; kill switch AUTONOMOUS_CODEX_P2_MERGE=false).`;
-              await db('autonomous_runs').where('id', run.id).update({
-                reviewer_notes: [fresh.reviewer_notes, note].filter(Boolean).join(' | '),
-                updated_at: new Date(),
-              });
-            }
-          } catch (noteErr) {
-            logger.warn(`[autonomous-pr-poller] P2-merge annotation failed for run ${run.id}: ${noteErr.message}`);
-          }
+          logger.info(`[autonomous-pr-poller] P2-only merge bar met for run ${run.id} PR #${pr.number}: ${p2Bar.p2Count} P2 finding(s) after ${p2Bar.rounds} remediation round(s) — proceeding toward merge (downstream guards still apply)`);
+          p2MergeInfo = { p2Count: p2Bar.p2Count, rounds: p2Bar.rounds };
         } else {
           err.p2BarReason = p2Bar.reason;
         }
@@ -871,7 +861,24 @@ async function maybeAutoMerge(run, pr) {
     }
     throw err; // anything else → transient via pollRun's catch
   }
-  logger.info(`[autonomous-pr-poller] auto-merged PR #${pr.number} for run ${run.id} (build green + Codex clear)`);
+  logger.info(`[autonomous-pr-poller] auto-merged PR #${pr.number} for run ${run.id} (build green + ${p2MergeInfo ? 'P2-only merge bar' : 'Codex clear'})`);
+  if (p2MergeInfo) {
+    // The merge actually happened — NOW record that it went through on the
+    // P2 bar. Best-effort (append-only, fresh read like the park/pending
+    // annotations); a note failure must never fail a completed merge.
+    try {
+      const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+      if (fresh) {
+        const note = `Merged with ${p2MergeInfo.p2Count} open Codex P2 finding(s) on head ${String(pr.head?.sha || '').slice(0, 7)} after ${p2MergeInfo.rounds} remediation round(s) (P2-only merge bar — P0/P1 always block; kill switch AUTONOMOUS_CODEX_P2_MERGE=false).`;
+        await db('autonomous_runs').where('id', run.id).update({
+          reviewer_notes: [fresh.reviewer_notes, note].filter(Boolean).join(' | '),
+          updated_at: new Date(),
+        });
+      }
+    } catch (noteErr) {
+      logger.warn(`[autonomous-pr-poller] P2-merge annotation failed for run ${run.id}: ${noteErr.message}`);
+    }
+  }
   // finalizeMerged may legitimately stay pending here (production deploy of
   // the merge takes 30–45 min) — `autoMerged` must still be true on the
   // result so pollPending counts this tick's merge against the per-poll cap.

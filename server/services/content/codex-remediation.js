@@ -100,6 +100,7 @@ function parseCodexFindings(reviewComments = [], headSha = null) {
       path: c.path || null,
       line: c.line ?? c.original_line ?? null,
       body: String(c.body || '').trim(),
+      created_at: c.created_at || c.createdAt || null,
     }))
     .filter((f) => f.body);
 }
@@ -141,10 +142,28 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   const state = await getState(db, prNumber);
   if ((state.rounds || 0) < 1) return { eligible: false, reason: 'no remediation round spent yet' };
   const reviewComments = await gh.listPrReviewComments(prNumber);
-  const findings = parseCodexFindings(reviewComments, headSha);
+  let findings = parseCodexFindings(reviewComments, headSha);
   // No findings tied to this head = either review still pending or truly
   // clean — both are the normal path's business, never this bar's.
   if (findings.length === 0) return { eligible: false, reason: 'no findings for current head' };
+  // A review request can be RE-POSTED for the SAME head (usage-limit bounce
+  // recovery). Findings from the PREVIOUS response must not make the PR
+  // mergeable while the newer review is still pending — mirror
+  // assertCodexReviewClear's request-timestamp posture: only findings
+  // POSTED AFTER the latest current-head request count as its response, and
+  // a request with no response yet is a pending review, not an eligible one.
+  const h = shortSha(headSha);
+  const issueComments = await gh.listIssueComments(prNumber);
+  const latestRequestAt = (Array.isArray(issueComments) ? issueComments : [])
+    .filter((c) => /@codex\s+review/i.test(String(c && c.body || '')) && (!h || String(c.body || '').includes(h)))
+    .map((c) => Date.parse(c.created_at || c.createdAt || 0) || 0)
+    .reduce((a, b) => Math.max(a, b), 0);
+  if (latestRequestAt > 0) {
+    findings = findings.filter((f) => (Date.parse(f.created_at || 0) || 0) >= latestRequestAt);
+    if (findings.length === 0) {
+      return { eligible: false, reason: 'latest same-head review request has no response yet (pending)' };
+    }
+  }
   const severities = findings.map((f) => findingSeverity(f.body));
   if (severities.some((s) => s === 'P0' || s === 'P1')) {
     return { eligible: false, reason: `blocking findings present (${severities.join(', ')})` };

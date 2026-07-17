@@ -115,7 +115,7 @@ const CTX = { prNumber: 5, branch: 'content/blog-x', slug: 'pest-control/roaches
 
 describe('parseCodexFindings', () => {
   test('keeps Codex findings on the current head', () => {
-    expect(parseCodexFindings([finding()], HEAD)).toEqual([{ path: 'src/content/blog/pest-control/roaches.md', line: 42, body: 'Fix the broken link.' }]);
+    expect(parseCodexFindings([finding()], HEAD)).toEqual([{ path: 'src/content/blog/pest-control/roaches.md', line: 42, body: 'Fix the broken link.', created_at: null }]);
   });
   test('drops non-Codex authors + wrong-commit + empty body', () => {
     expect(parseCodexFindings([finding({ user: { login: 'human' } })], HEAD)).toEqual([]);
@@ -1799,5 +1799,48 @@ describe('p2OnlyMergeEligible (P2-only merge bar)', () => {
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
     expect(r.eligible).toBe(false);
     expect(r.reason).toMatch(/disabled/);
+  });
+});
+
+describe('p2OnlyMergeEligible — same-head re-request handling (Codex round-2 P1)', () => {
+  const p2At = (title, created_at) => finding({
+    body: `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${title}**\n\ndetail`,
+    created_at,
+  });
+
+  test('findings older than the latest same-head re-request do NOT qualify (pending review)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({
+      reviewComments: [p2At('old finding', '2026-07-17T01:00:00Z')],
+      issueComments: [
+        { body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T00:50:00Z' },
+        // usage-limit bounce → operator re-requested for the SAME head
+        { body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' },
+      ],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/no response yet/);
+  });
+
+  test('findings posted after the latest same-head request qualify', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({
+      reviewComments: [p2At('fresh finding', '2026-07-17T02:10:00Z')],
+      issueComments: [{ body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' }],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(true);
+    expect(r.p2Count).toBe(1);
+  });
+
+  test('undated findings fail closed when a request timestamp exists', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({
+      reviewComments: [p2At('undated finding', null)],
+      issueComments: [{ body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' }],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
   });
 });

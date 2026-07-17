@@ -834,3 +834,67 @@ describe('prevention-promise guard (P1 PREVENTION_PROMISE)', () => {
     expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
   });
 });
+
+describe('product-claim guard — round-2 hardening (Codex findings)', () => {
+  test('passive usage claim blocks ("Advion is applied…")', () => {
+    const r = guardrails.evaluate({ body: 'Advion is applied in pea-sized dabs along ant trails.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('inventory "rely on" phrasing blocks', () => {
+    const r = guardrails.evaluate({ body: 'Our technicians rely on Advion for sweet-feeding ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('efficacy claims after the brand block', () => {
+    for (const body of ['Advion works best for ants in Florida kitchens.', 'Advion kills ants quickly and quietly.']) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+    }
+  });
+
+  test('ambiguous brand words in ordinary prose pass', () => {
+    const r = guardrails.evaluate({ body: 'Use these prevention steps in tandem, and use labeled bait to target phantom ants on the premises.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('ambiguous brand word next to a product noun blocks', () => {
+    const r = guardrails.evaluate({ body: 'A can of Phantom aerosol handles the voids.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+});
+
+describe('prevention-promise guard — round-2 hardening (Codex findings)', () => {
+  test('a later promise is caught even after an exempt disclaimer of the same shape', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant. Our service means you will never see another ant.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('future-period promise requires a pest object', () => {
+    const ok = guardrails.evaluate({ body: 'Autopay prevents next month’s water bill surprise.' }, {});
+    expect(ok.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    const bad = guardrails.evaluate({ body: 'One treatment prevents next month’s ant trail.' }, {});
+    expect(bad.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('bare service-subject promises block', () => {
+    for (const body of [
+      'This quarterly treatment prevents infestations.',
+      'Our treatment eliminates ants in your home.',
+      'A professional application eradicates cockroaches.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+    }
+  });
+
+  test('qualifier promises block (comparison-table row shape)', () => {
+    const r = guardrails.evaluate({ body: '<ComparisonTable rows={[{"label":"Prevents future infestations","values":["No","Yes"]}]} />' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('question framing and homeowner how-to phrasing stay legal', () => {
+    const r = guardrails.evaluate({ body: 'How do I get rid of sugar ants? This guide walks you through the bait-first plan that reduces recurrence, and these steps make it harder for the next scout.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+});

@@ -588,11 +588,17 @@ function keywordStuffingFinding(body, primaryKeyword) {
 // Raid/Ortho" warnings stay legal — the lists below cover professional
 // products and active ingredients only.
 const PRO_PRODUCT_TERMS = [
-  'advion', 'termidor', 'taurus sc', 'alpine wsg', 'phantom', 'temprid',
+  'advion', 'termidor', 'taurus sc', 'alpine wsg', 'temprid',
   'demand cs', 'suspend sc', 'suspend polyzone', 'talstar', 'maxforce',
-  'optigard', 'vendetta', 'premise', 'arilon', 'tandem', 'intice',
+  'optigard', 'arilon', 'intice',
   'essentria', 'sentricon', 'trelona', 'altriset', 'terro pro',
 ];
+// Brand names that are ALSO ordinary English words ("use these steps in
+// tandem", "phantom ants", "on the premises", "a vendetta against roaches").
+// Bare word matching P1'd valid prose, so these only count as products when
+// adjacent to a product noun/formulation.
+const AMBIGUOUS_PRODUCT_TERMS = ['phantom', 'premise', 'tandem', 'vendetta'];
+const PRODUCT_NOUN_SRC = '(?:insecticide|termiticide|pesticide|aerosol|foam|gel|bait|granules?|spray|dust|label|sc|wsg|wg|xt)';
 const ACTIVE_INGREDIENT_TERMS = [
   'indoxacarb', 'fipronil', 'dinotefuran', 'imidacloprid', 'bifenthrin',
   'hydramethylnon', 'abamectin', 'avermectin', 'thiamethoxam', 'clothianidin',
@@ -602,8 +608,8 @@ const ACTIVE_INGREDIENT_TERMS = [
   'chlorantraniliprole',
 ];
 const INVENTORY_CLAIM_RES = [
-  // "our techs carry / use / apply / lean on / prefer …"
-  /\b(?:our|waves(?:'s?)?)\s+(?:techs?|technicians?|team|pros?|crews?)\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\s+on|prefer|prefers|spray|sprays)\b/i,
+  // "our techs carry / use / apply / lean on / rely on / prefer …"
+  /\b(?:our|waves(?:'s?)?)\s+(?:techs?|technicians?|team|pros?|crews?)\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\s+on|rely|relies|prefer|prefers|spray|sprays|trust|trusts)\b/i,
   // "what our technicians carry", "which is what our techs use"
   /\bwhat\s+(?:our|the)\s+(?:techs?|technicians?|team|pros?)\s+(?:carry|carries|use|uses)\b/i,
   /\bwhich\s+is\s+what\s+(?:our\s+(?:techs?|technicians?|team)|we)\s+(?:carry|carries|use|uses)\b/i,
@@ -626,12 +632,33 @@ function productClaimFinding(text) {
     }
   }
   const brandAlt = PRO_PRODUCT_TERMS.map(escapeRegExp).join('|');
-  // Context that turns a brand TOPIC into a recommendation/endorsement:
-  // usage verbs before the brand, or endorsement phrasing near it.
-  const brandInRecommendation = new RegExp(`\\b${PRODUCT_CONTEXT_VERBS_SRC}\\b[^.!?\\n]{0,120}\\b(?:${brandAlt})\\b|\\b(?:${brandAlt})\\b[^.!?\\n]{0,120}\\b(?:is\\s+what|which\\s+is\\s+what|pro\\s+choice|go-?to|top\\s+pick|favorite|best\\s+(?:bait|gel|product|option|choice))\\b`, 'i');
+  // Context that turns a brand TOPIC into a recommendation/endorsement/usage
+  // claim: usage verbs before the brand; endorsement, EFFICACY ("works best",
+  // "kills ants quickly"), or PASSIVE-USAGE ("is applied in pea-sized dabs")
+  // phrasing after it. A bare brand mention with none of these stays legal
+  // (informational topic).
+  const POST_BRAND_CLAIM_SRC = [
+    'is\\s+what', 'which\\s+is\\s+what', 'pro\\s+choice', 'go-?to', 'top\\s+pick', 'favorite',
+    'best\\s+(?:bait|gel|product|option|choice)',
+    // efficacy claims
+    'works?\\b', 'kills?\\b', 'knocks?\\s+(?:out|down)', 'wipes?\\s+out', 'eliminates?', 'eradicates?', 'outperforms?',
+    'is\\s+(?:the\\s+)?(?:best|most\\s+effective|effective|strongest|stronger)',
+    // passive usage
+    '(?:is|are|gets?)\\s+(?:applied|used|placed|sprayed|injected|installed|put\\s+(?:down|out))',
+  ].join('|');
+  const brandInRecommendation = new RegExp(`\\b(?:${PRODUCT_CONTEXT_VERBS_SRC}|rel(?:y|ies|ying)\\s+on)\\b[^.!?\\n]{0,120}\\b(?:${brandAlt})\\b|\\b(?:${brandAlt})\\b[^.!?\\n]{0,120}\\b(?:${POST_BRAND_CLAIM_SRC})`, 'i');
   const brandMatch = s.match(brandInRecommendation);
   if (brandMatch) {
-    return finding('P1', 'PRODUCT_CLAIM', `Recommends the professional product in "${brandMatch[0].trim().slice(0, 120)}" — unsupported by the facts bank. Name the product class generically and defer specifics to the label; product names are only legal as an informational topic, never as a usage recommendation.`);
+    return finding('P1', 'PRODUCT_CLAIM', `Recommends the professional product in "${brandMatch[0].trim().slice(0, 120)}" — unsupported by the facts bank. Name the product class generically and defer specifics to the label; product names are only legal as an informational topic, never as a usage/efficacy claim.`);
+  }
+  // Ambiguous brand words only count when adjacent to a product noun
+  // ("Phantom aerosol", "Premise granules") — bare "in tandem"/"phantom ants"
+  // is ordinary prose.
+  const ambiguousAlt = AMBIGUOUS_PRODUCT_TERMS.map(escapeRegExp).join('|');
+  const ambiguousProduct = new RegExp(`\\b(?:${ambiguousAlt})\\s+${PRODUCT_NOUN_SRC}\\b`, 'i');
+  const ambiguousMatch = s.match(ambiguousProduct);
+  if (ambiguousMatch) {
+    return finding('P1', 'PRODUCT_CLAIM', `Names the professional product "${ambiguousMatch[0].trim()}" — unsupported by the facts bank. Name the product class generically instead.`);
   }
   for (const re of INVENTORY_CLAIM_RES) {
     const m = s.match(re);
@@ -650,23 +677,40 @@ function productClaimFinding(text) {
 // never prevention. Patterns are pest-anchored to avoid the bare-'never'
 // false-positive class that got the old signal removed (PR #2776).
 const PEST_OBJ_SRC = "(?:ants?|pests?|bugs?|roaches|cockroaches|termites?|rodents?|mice|rats?|mosquito(?:es)?|spiders?|fleas?|ticks?|infestations?|colon(?:y|ies)|trails?|them|they)";
-const PREVENTION_PROMISE_RES = [
+// Every pattern is pest-anchored — the OBJECT (or the promised state) must be
+// a pest term, so "prevents next month's water bill" / "prevents moisture
+// buildup" stay legal. Source strings (not RegExp literals) so the finding
+// scanner can run each with the global flag and inspect EVERY match — a
+// single negated-disclaimer match must not exempt later matches of the same
+// pattern.
+const PREVENTION_PROMISE_SRCS = [
   // "prevents/keeps/stops <pest> from coming back / returning / getting in"
-  new RegExp(`\\b(?:prevents?|keeps?|stops?)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+from\\s+(?:coming\\s+back|returning|re-?infest\\w*|ever\\s+\\w+|getting\\s+(?:back\\s+)?in(?:side)?\\b)`, 'i'),
+  `\\b(?:prevents?|keeps?|stops?)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+from\\s+(?:coming\\s+back|returning|re-?infest\\w*|ever\\s+\\w+|getting\\s+(?:back\\s+)?in(?:side)?\\b)`,
   // "<pest> won't / will not come back or return"
-  new RegExp(`\\b${PEST_OBJ_SRC}\\s+(?:won'?t|will\\s+not|never)\\s+(?:come\\s+back|return|be\\s+back)`, 'i'),
+  `\\b${PEST_OBJ_SRC}\\s+(?:won'?t|will\\s+not|never)\\s+(?:come\\s+back|return|be\\s+back)`,
   // "never see/deal with another <pest>"
-  new RegExp(`\\bnever\\s+(?:see|have|deal\\s+with|worry\\s+about)\\s+(?:another\\s+)?${PEST_OBJ_SRC}`, 'i'),
+  `\\bnever\\s+(?:see|have|deal\\s+with|worry\\s+about)\\s+(?:another\\s+)?${PEST_OBJ_SRC}`,
   // guaranteed / promised elimination or 100% anything
-  /\b(?:guarantees?d?|promises?d?)\s+(?:[\w'’]+\s+){0,3}?(?:eliminat\w+|exterminat\w+|eradicat\w+|pest[-\s]?free|100\s?%)/i,
-  /\b100\s?%\s+(?:effective|eliminat\w+|eradicat\w+|pest[-\s]?free|guaranteed?|success)/i,
+  "\\b(?:guarantees?d?|promises?d?)\\s+(?:[\\w'’]+\\s+){0,3}?(?:eliminat\\w+|exterminat\\w+|eradicat\\w+|pest[-\\s]?free|100\\s?%)",
+  "\\b100\\s?%\\s+(?:effective|eliminat\\w+|eradicat\\w+|pest[-\\s]?free|guaranteed?|success)",
   // "eliminates/gets rid of <pest> for good / permanently / forever"
-  new RegExp(`\\b(?:eliminates?|gets?\\s+rid\\s+of|removes?|clears?\\s+out)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+(?:for\\s+good|permanently|forever|once\\s+and\\s+for\\s+all)`, 'i'),
-  // "prevents next month's/season's trail/infestation" (the PR #383 shape)
-  new RegExp(`\\bprevents?\\s+(?:the\\s+)?(?:next|future)\\s+(?:month|year|season|week)[\\w'’]*\\s*${PEST_OBJ_SRC}?`, 'i'),
+  `\\b(?:eliminates?|gets?\\s+rid\\s+of|removes?|clears?\\s+out)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+(?:for\\s+good|permanently|forever|once\\s+and\\s+for\\s+all)`,
+  // "prevents next month's/season's <pest>" (the PR #383 shape). Pest object
+  // REQUIRED — optional matching blocked "prevents next month's water bill".
+  `\\bprevents?\\s+(?:the\\s+)?(?:next|future)\\s+(?:month|year|season|week)[\\w'’]*\\s+(?:[\\w'’]+\\s+){0,2}?${PEST_OBJ_SRC}`,
+  // BARE unconditional promises with a service/treatment subject:
+  // "This quarterly treatment prevents infestations", "Our treatment
+  // eliminates ants in your home", "A professional application eradicates
+  // cockroaches". The subject anchor keeps question headings and homeowner
+  // how-to framing ("How do I get rid of ants?") legal.
+  `\\b(?:treatments?|applications?|services?|programs?|plans?|visits?|products?|this|it)\\s+(?:[\\w'’]+\\s+){0,2}?(?:prevents?|eliminates?|eradicates?|exterminates?|wipes?\\s+out)\\s+(?:all\\s+|any\\s+|future\\s+|the\\s+|your\\s+)?${PEST_OBJ_SRC}`,
+  // Qualifier promises with no subject needed: "prevents future infestations",
+  // "prevents all ants" — incl. comparison-table row labels.
+  `\\bprevents?\\s+(?:all|any|every|future)\\s+${PEST_OBJ_SRC}`,
   // "keeps your home/kitchen/yard pest-free" as an unconditional state
-  /\bkeeps?\s+(?:your\s+)?(?:home|house|kitchen|yard|lawn|property)\s+(?:pest|ant|roach|termite|rodent|bug)[-\s]?free\b/i,
+  "\\bkeeps?\\s+(?:your\\s+)?(?:home|house|kitchen|yard|lawn|property)\\s+(?:pest|ant|roach|termite|rodent|bug)[-\\s]?free\\b",
 ];
+const PREVENTION_PROMISE_RES = PREVENTION_PROMISE_SRCS.map((src) => new RegExp(src, 'i'));
 
 // Honest-disclaimer context: "no honest company will promise you'll never
 // see another ant" is the phrasing we WANT — a match preceded by a negated
@@ -675,11 +719,19 @@ const NEGATED_PROMISE_CONTEXT_RE = /(?:no\s+(?:honest\s+)?(?:company|one|body|pr
 
 function preventionPromiseFinding(text) {
   const s = String(text || '');
-  for (const re of PREVENTION_PROMISE_RES) {
-    const m = re.exec(s);
-    if (m) {
+  for (const src of PREVENTION_PROMISE_SRCS) {
+    // Global scan: every match is judged individually. A negated-disclaimer
+    // FIRST match must not exempt a genuine promise later in the same text
+    // ("No honest company will promise you'll never see another ant. Our
+    // service means you will never see another ant." — the second flags).
+    const re = new RegExp(src, 'gi');
+    let m;
+    while ((m = re.exec(s)) !== null) {
       const before = s.slice(Math.max(0, m.index - 80), m.index);
-      if (NEGATED_PROMISE_CONTEXT_RE.test(before)) continue;
+      if (NEGATED_PROMISE_CONTEXT_RE.test(before)) {
+        if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
+        continue;
+      }
       return finding('P1', 'PREVENTION_PROMISE', `Prevention/elimination promise "${m[0].trim()}" — the facts bank prohibits guaranteed-outcome claims. Describe reduced recurrence and the free re-treatment (callback) guarantee instead.`);
     }
   }

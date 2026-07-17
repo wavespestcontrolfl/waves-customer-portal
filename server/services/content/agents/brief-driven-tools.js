@@ -223,7 +223,31 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           .modify((qb) => { if (city) qb.where('city', city); })
           .select('id', 'slug', 'title', 'tag', 'city', 'keyword', 'status')
           .limit(20);
-        return { keyword, city, matches };
+        // Autonomous-lane drafts have NO blog_posts row — a PR-backed draft
+        // parked in review is invisible to the query above, so two briefs on
+        // the same intent could each see "no match" and ship parallel
+        // competing pages. Surface in-flight autonomous runs too (own
+        // try/catch: a miss here must not hide the blog_posts matches).
+        let pendingAutonomous = [];
+        try {
+          pendingAutonomous = await db('autonomous_runs')
+            .where({ outcome: 'completed_pending_review' })
+            .where((qb) => {
+              qb.whereRaw("LOWER(draft_payload->'frontmatter'->>'title') LIKE ?", [`%${keyword.toLowerCase()}%`])
+                .orWhereRaw("LOWER(draft_payload->'frontmatter'->>'primary_keyword') LIKE ?", [`%${keyword.toLowerCase()}%`]);
+            })
+            .select(
+              'id',
+              'action_type',
+              'astro_pr_url',
+              db.raw("draft_payload->'frontmatter'->>'title' AS title"),
+              db.raw("draft_payload->'frontmatter'->>'primary_keyword' AS keyword"),
+            )
+            .limit(20);
+        } catch (pendingErr) {
+          pendingAutonomous = [{ error: `autonomous_runs read failed: ${pendingErr.message}` }];
+        }
+        return { keyword, city, matches, pending_autonomous_drafts: pendingAutonomous };
       } catch (err) {
         return { error: `blog_posts read failed: ${err.message}` };
       }

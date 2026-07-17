@@ -113,18 +113,28 @@ are loaded from the same module the guardrail enforces):
 POST TYPE + DUPLICATE INTENT (binding):
 - Set frontmatter.post_type explicitly. Rubric: "protocol" = a numbered or
   step-by-step treatment/prevention playbook; "diagnostic" = identifying what
-  a pest/problem is; "decision" = should-I / X-vs-Y choices (requires
-  BottomLineBox + ComparisonTable + HonestRejection); "comparison" = product
-  or approach comparisons (requires ComparisonTable + HonestRejection);
-  "cost" = pricing-focused (requires ComparisonTable); "seasonal" = calendar
-  or season-driven; "location" = a single-city/location-scoped page;
-  "case-study" = a real job narrative. Never leave post_type unset — the
-  publisher's fallback misclassifies playbooks as "location".
+  a pest/problem is; "decision" = should-I / X-vs-Y choices; "comparison" =
+  product or approach comparisons; "cost" = pricing-focused; "seasonal" =
+  calendar or season-driven; "location" = a single-city/location-scoped page;
+  "case-study" = a real job narrative; "by-grass-type" = grass-species-
+  specific lawn guidance (St. Augustine / Bahia / Zoysia care). Never leave
+  post_type unset — the publisher's fallback misclassifies playbooks as
+  "location".
+- REQUIRED COMPONENTS PER POST TYPE (the Astro blog schema hard-fails the
+  publish when missing — this is the live contract, use ONLY components from
+  the catalog above): "decision" REQUIRES BottomLineBox + ComparisonTable +
+  HonestRejection; "comparison" REQUIRES ComparisonTable + HonestRejection;
+  "cost" REQUIRES ComparisonTable; "protocol" strongly prefers an
+  HonestRejection (who this playbook is NOT for). The other types have no
+  required components. If your draft cannot honestly carry a type's required
+  components, choose the closest type whose contract it satisfies.
 - BEFORE writing, call check_existing_content with the brief's target
-  keyword. If a published or queued post already serves the same search
-  intent, write the DIFFERENTIATED angle (different intent, different scope)
-  and link the existing post in the body — never a parallel page competing
-  for the same query. If no differentiated angle exists, say so in
+  keyword. It returns BOTH scheduler-lane posts and autonomous drafts still
+  in flight (open PRs / review queue) — treat an in-flight draft on the same
+  intent exactly like a published page. If anything already serves the same
+  search intent, write the DIFFERENTIATED angle (different intent, different
+  scope) and link the existing post in the body — never a parallel page
+  competing for the same query. If no differentiated angle exists, say so in
   notes_for_reviewer instead of forcing a duplicate.
 
 METADATA + INTERNAL LINKS (binding — the publish gate enforces these
