@@ -407,10 +407,25 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     });
   }
 
-  it('refuses to rewrite an invoice that already raced to sent/paid', async () => {
+  it('refuses to rewrite an invoice that already raced to paid', async () => {
     guardDb({ id: 'inv-1', status: 'paid', customer_id: 'cust-1', line_items: '[]' });
     await expect(InvoiceService.update('inv-1', { notes: 'late edit' }))
       .rejects.toThrow(/can be edited/);
+  });
+
+  it('refuses to rewrite an invoice with payment processing', async () => {
+    guardDb({ id: 'inv-1', status: 'processing', customer_id: 'cust-1', line_items: '[]' });
+    await expect(InvoiceService.update('inv-1', { notes: 'late edit' }))
+      .rejects.toThrow(/can be edited/);
+  });
+
+  it('refuses to retotal a DELIVERED invoice once a customer has a live PaymentIntent', async () => {
+    // The 2026-07-17 sent-editable ruling opened delivered invoices to edits,
+    // but the stale-pay-page fence is unchanged: once /pay/:token /setup has
+    // stamped a PI, a retotal could let the customer confirm the old amount.
+    guardDb({ id: 'inv-1', status: 'sent', customer_id: 'cust-1', line_items: '[]', stripe_payment_intent_id: 'pi_123' });
+    await expect(InvoiceService.update('inv-1', { line_items: [{ description: 'X', quantity: 1, unit_price: 10 }] }))
+      .rejects.toThrow(/already started paying/);
   });
 
   it('refuses to retotal once a customer has a live PaymentIntent', async () => {
@@ -480,5 +495,73 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     });
     const result = await InvoiceService.update('inv-1', { notes: 'updated' });
     expect(result.notes).toBe('updated');
+  });
+
+  it('allows an edit on a delivered (sent) invoice and writes the edited-after-send audit row', async () => {
+    // Owner ruling 2026-07-17: delivered-but-unpaid invoices are editable so
+    // Adam can fix and resend them. The edit must leave an activity_log trail
+    // because the emailed copy is stale until the resend goes out.
+    const stored = { id: 'inv-1', status: 'sent', customer_id: 'cust-1', invoice_number: 'INV-100', line_items: '[]' };
+    const activityInsert = jest.fn(async () => [1]);
+    let invoicesQ = null;
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'updated' }]) })),
+        };
+        invoicesQ = q;
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'activity_log') {
+        return { insert: activityInsert };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    const result = await InvoiceService.update('inv-1', { notes: 'updated' });
+    expect(result.notes).toBe('updated');
+    // The atomic write predicate must carry the full editable-status list —
+    // paid/processing/void/sending must never re-enter it.
+    expect(invoicesQ.whereIn).toHaveBeenCalledWith('status', ['draft', 'scheduled', 'sent', 'viewed', 'overdue']);
+    expect(activityInsert).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'invoice_edited_after_send',
+      customer_id: 'cust-1',
+    }));
+  });
+
+  it('does NOT write the edited-after-send audit row for a draft edit', async () => {
+    const stored = { id: 'inv-1', status: 'draft', customer_id: 'cust-1', line_items: '[]' };
+    const activityInsert = jest.fn(async () => [1]);
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'updated' }]) })),
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'activity_log') {
+        return { insert: activityInsert };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await InvoiceService.update('inv-1', { notes: 'updated' });
+    expect(activityInsert).not.toHaveBeenCalled();
   });
 });

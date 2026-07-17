@@ -74,6 +74,19 @@ const SEND_CLAIMABLE_STATUSES = [
 ];
 const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, "sending"];
 
+// Statuses the generic admin edit (InvoiceService.update) may rewrite.
+// sent/viewed/overdue joined draft/scheduled by owner ruling 2026-07-17
+// (edit a delivered invoice, then resend so the customer sees the new
+// version): a delivered-but-unpaid invoice is still collectible, and both
+// its pay page and a resent PDF render from the live row, so a rewrite is
+// consistent everywhere the customer can reach it — only the already-
+// delivered email/PDF goes stale, which the post-edit resend prompt exists
+// to fix. The money fences are unchanged: paid/prepaid/processing/void/
+// sending stay locked here, and the PaymentIntent / payment-plan /
+// prepay-term / credit guards in update() still block any invoice a
+// payment has actually touched.
+const EDIT_ALLOWED_STATUSES = [...SEND_CLAIMABLE_STATUSES];
+
 // Invoice statuses that are safe to auto-void when the underlying scheduled
 // service is cancelled. Mirrors assertInvoiceVoidable: paid / processing
 // money-states are off-limits (refund is the right path); 'scheduled' is
@@ -2886,12 +2899,14 @@ const InvoiceService = {
     // erase the audit trail. See INVOICE_UPDATE_ALLOWED_FIELDS export.
 
     // Editability guard. The generic update path can only safely rewrite an
-    // invoice that has not yet entered collection or accrued payment
-    // side-state. We re-read the CURRENT row here (not the one the editor was
-    // opened with) so a status race — the invoice gets sent/paid via the pay
-    // link, Charge in person, Add payment, or the scheduled-send cron after
-    // the edit form opened — is caught at the write:
-    //   - status must still be draft/scheduled (never rewrite sent/paid money)
+    // invoice that has not accrued payment side-state. We re-read the CURRENT
+    // row here (not the one the editor was opened with) so a status race — the
+    // invoice gets paid via the pay link, Charge in person, or Add payment
+    // after the edit form opened — is caught at the write:
+    //   - status must still be in EDIT_ALLOWED_STATUSES (draft/scheduled/
+    //     sent/viewed/overdue — see the constant for the owner ruling that
+    //     opened delivered-but-unpaid invoices to edits; paid money is never
+    //     rewritten)
     //   - no live Stripe PaymentIntent: /pay/:token /setup stamps
     //     stripe_payment_intent_id while the invoice stays collectible; a
     //     retotal here would leave a stale pay page able to confirm the old
@@ -2915,9 +2930,9 @@ const InvoiceService = {
       }
     }
     const currentStatus = String(existing.status || "").toLowerCase();
-    if (currentStatus !== "draft" && currentStatus !== "scheduled") {
+    if (!EDIT_ALLOWED_STATUSES.includes(currentStatus)) {
       throw new Error(
-        "Only draft or scheduled invoices can be edited — this invoice has already been sent or paid",
+        "Only unpaid invoices can be edited — this invoice has been paid, is collecting payment, or is voided",
       );
     }
     if (existing.stripe_payment_intent_id) {
@@ -3097,7 +3112,7 @@ const InvoiceService = {
       }
       const [edited] = await client("invoices")
         .where({ id })
-        .whereIn("status", ["draft", "scheduled"])
+        .whereIn("status", EDIT_ALLOWED_STATUSES)
         .whereNull("stripe_payment_intent_id")
         .whereNull("annual_prepay_term_id")
         .whereNotExists(function () {
@@ -3110,7 +3125,7 @@ const InvoiceService = {
         .returning("*");
       if (!edited) {
         throw new Error(
-          "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
+          "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
       }
       // Phase 2: an edited accrued invoice changes the statement total — reroll in
@@ -3123,7 +3138,29 @@ const InvoiceService = {
     };
     // An accrued invoice's edit + statement reroll must commit atomically; other
     // invoices keep the existing single-statement write (no transaction).
-    return existing.payer_statement_id ? db.transaction(runEdit) : runEdit(db);
+    const edited = await (existing.payer_statement_id
+      ? db.transaction(runEdit)
+      : runEdit(db));
+    // Audit trail: a delivered invoice was rewritten after the customer could
+    // have seen it — the emailed PDF is now stale until it's resent. Outside
+    // the write on purpose (best-effort; a logging failure must not roll back
+    // or fail a committed edit).
+    if (["sent", "viewed", "overdue"].includes(currentStatus)) {
+      await db("activity_log")
+        .insert({
+          customer_id: existing.customer_id,
+          action: "invoice_edited_after_send",
+          description:
+            `Invoice ${existing.invoice_number} was edited after delivery — ` +
+            "resend it so the customer sees the updated version",
+        })
+        .catch((err) =>
+          logger.warn(
+            `[invoice:update] activity_log insert failed: ${err.message}`,
+          ),
+        );
+    }
+    return edited;
   },
 
   async voidInvoice(id) {

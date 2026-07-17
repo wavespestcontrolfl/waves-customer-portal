@@ -10,7 +10,8 @@
 //   GET   /admin/invoices/stats
 //   POST  /admin/invoices/create
 //   GET   /admin/invoices/:id
-//   PUT   /admin/invoices/:id           (refund / void / mark paid)
+//   PUT   /admin/invoices/:id           (edit unpaid invoices — draft/
+//                                         scheduled/sent/viewed/overdue)
 //   POST  /admin/invoices/:id/send      (SMS + email pay link)
 //   POST  /admin/invoices/:id/refund    (manual refund)
 //   GET   /admin/customers/search       (autocomplete in create modal)
@@ -413,6 +414,9 @@ export default function AdminInvoicesPage() {
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
   const [editInvoice, setEditInvoice] = useState(null);
+  // Set when an already-delivered invoice was just edited: the list view
+  // opens the resend modal for this id so the customer gets the new version.
+  const [promptResendId, setPromptResendId] = useState(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   useEffect(() => {
@@ -471,16 +475,19 @@ export default function AdminInvoicesPage() {
           }}
           isMobile={isMobile}
           stats={stats}
+          promptResendId={promptResendId}
+          onPromptResendHandled={() => setPromptResendId(null)}
         />
       )}
       {tab === "create" && (
         <CreateInvoice
           showToast={showToast}
           editInvoice={editInvoice}
-          onCreated={() => {
+          onCreated={(opts) => {
             loadStats();
             setEditInvoice(null);
             setTab("list");
+            setPromptResendId(opts?.promptResendId || null);
           }}
           isMobile={isMobile}
         />
@@ -600,7 +607,15 @@ function FilterPill({ label, value, options, onChange, isMobile }) {
 }
 
 // ── Invoice List (mirrors attached UI) ──
-function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
+function InvoiceList({
+  showToast,
+  onRefresh,
+  onEdit,
+  isMobile,
+  stats,
+  promptResendId,
+  onPromptResendHandled,
+}) {
   const PAGE_SIZE = 100;
   const [invoices, setInvoices] = useState([]);
   const [total, setTotal] = useState(0);
@@ -683,6 +698,26 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
   const handleSend = (invoice) => {
     setSendModalInvoice(invoice);
   };
+
+  // After an already-delivered invoice was edited, open the resend modal for
+  // it so the customer gets the updated version. Fetched by id (not from the
+  // list rows) so the modal shows the fresh totals even when the invoice is
+  // outside the current page/filter.
+  useEffect(() => {
+    if (!promptResendId) return;
+    let alive = true;
+    (async () => {
+      const inv = await adminFetch(`/admin/invoices/${promptResendId}`).catch(
+        () => null,
+      );
+      if (!alive) return;
+      onPromptResendHandled?.();
+      if (inv) setSendModalInvoice(inv);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [promptResendId, onPromptResendHandled]);
 
   const handleVoid = async (id) => {
     if (!confirm("Void this invoice?")) return;
@@ -1246,14 +1281,22 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                             </button>
                           )}
                           {(inv.status === "draft" ||
-                            inv.status === "scheduled") &&
+                            inv.status === "scheduled" ||
+                            inv.status === "sent" ||
+                            inv.status === "viewed" ||
+                            inv.status === "overdue") &&
                             !inv.stripe_payment_intent_id &&
                             !inv.active_payment_plan &&
                             !inv.annual_prepay_term_id && (
                               <button
                                 onClick={() => onEdit?.(inv)}
                                 style={sBtn(D.card, D.text, isMobile)}
-                                title="Edit line items, notes, and due date before sending"
+                                title={
+                                  inv.status === "draft" ||
+                                  inv.status === "scheduled"
+                                    ? "Edit line items, notes, and due date before sending"
+                                    : "Edit line items, notes, and due date — resend after saving so the customer sees the new version"
+                                }
                               >
                                 Edit
                               </button>
@@ -4145,6 +4188,11 @@ function PaymentPlanModal({
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const editMode = !!editInvoice;
+  // Editing an invoice the customer already received: the copy in their inbox
+  // is stale until Adam resends, so the form shows a reminder and the save
+  // path prompts the resend modal.
+  const editingDelivered =
+    editMode && ["sent", "viewed", "overdue"].includes(editInvoice.status);
   // One-tap AI summary (pulls context from the linked visit + source toggles).
   // Off by default; the base "Write with AI" still works from typed input + lines.
   const aiSummaryEnabled = useFeatureFlag("ff_invoice_ai_summary");
@@ -4266,7 +4314,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     }
     const svc = invoiceDateOnly(editInvoice.service_date);
     if (svc) setServiceDate(svc);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on the edited invoice only (react-hooks/
+    // exhaustive-deps isn't configured in the errors-only lint config — a
+    // disable directive for it is itself an unknown-rule error).
   }, [editMode, editInvoice]);
 
   // Customer search
@@ -4827,10 +4877,16 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         method: "PUT",
         body: JSON.stringify(body),
       });
+      // A delivered invoice's emailed copy is now stale — hand the parent the
+      // id so the list view opens the resend modal for it.
       showToast(
-        `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
+        editingDelivered
+          ? `Invoice updated: ${editInvoice.invoice_number} — resend it so the customer sees the new version`
+          : `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
       );
-      onCreated();
+      onCreated(
+        editingDelivered ? { promptResendId: editInvoice.id } : undefined,
+      );
     } catch (e) {
       showToast(`Error: ${e.message}`);
     }
@@ -4969,6 +5025,12 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                   ? `Edit Invoice ${editInvoice.invoice_number || ""}`.trim()
                   : "Invoice Builder"}
               </div>{" "}
+              {editingDelivered && (
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
+                  Already sent to the customer — resend after saving so they
+                  see the updated version
+                </div>
+              )}{" "}
             </div>{" "}
           </div>{" "}
         </div>{" "}
