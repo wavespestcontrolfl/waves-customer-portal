@@ -248,12 +248,12 @@ describe('runRemediationForPr', () => {
     expect(db._tables.codex_remediation_state[0].status).toBe('parked');
   });
 
-  test('same-head "moved past" park → contradiction re-arm and run the round (PR #383 wedge)', async () => {
+  test('same-head "moved past" park + ref agrees → contradiction re-arm and run the round (PR #383 wedge)', async () => {
     // The park claimed another push superseded ours, but the live head IS the
-    // push we parked against — the claim was a stale read. Must re-arm, not
-    // sit parked forever.
+    // push we parked against AND the branch ref confirms it — the claim was a
+    // stale read. Must re-arm, not sit parked forever.
     const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'pr head moved past the remediation push (abc1234 → 9999999); sync withheld' }] });
-    const gh = makeGh({ reviewComments: [], issueComments: [] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], gh: { getBranchSha: async () => HEAD } });
     const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     // Re-armed with no findings for this head → posts the review request the
     // withheld round never sent.
@@ -265,6 +265,28 @@ describe('runRemediationForPr', () => {
     expect(row.status).toBe('active');
     expect(row.park_reason).toBeNull();
     expect(row.parked_head_sha).toBeNull();
+  });
+
+  test('same-head "moved past" park but ref shows a THIRD sha → stays parked (stale getPr of a real parallel push)', async () => {
+    // Park recorded our push B; a real parallel C landed; this tick's getPr
+    // stalely reports B. The ref disagreeing with the observed head means the
+    // observation is untrustworthy — hold the park; the next tick sees C and
+    // the ordinary head-advance re-arm carries it.
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'pr head moved past the remediation push (abc1234 → 9999999); sync withheld' }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], gh: { getBranchSha: async () => 'parallel777push' } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
+  });
+
+  test('same-head "moved past" park + getBranchSha failure → stays parked (fail closed)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'pr head moved past the remediation push (abc1234 → 9999999); sync withheld' }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], gh: { getBranchSha: async () => { throw new Error('gh 500'); } } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
   });
 
   test('park persists reason + the head the verdict applied to', async () => {
@@ -324,6 +346,28 @@ describe('runRemediationForPr', () => {
     const row = db._tables.codex_remediation_state[0];
     expect(row.status).toBe('parked');
     expect(row.parked_head_sha).toBe('newcommit999aaa'); // our push → head-advance re-arm fires next tick
+  });
+
+  test('ref confirms our push but the PR closed behind it → terminal stamp, sync + comment skipped', async () => {
+    // The stale snapshot that misreported the head may misreport state too:
+    // the post-push getPr says {open, head A} (stale), the ref proves our
+    // push B is the tip, and the mandatory state re-read shows the PR closed.
+    const db = makeDb();
+    let getPrCalls = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => {
+        getPrCalls += 1;
+        if (getPrCalls <= 2) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+        return { state: 'closed', head: { sha: 'newcommit999aaa', ref: 'content/blog-x' } };
+      },
+    } });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toContain('post-push check');
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber).status).toBe('closed');
   });
 
   test('stale getPr head + getBranchSha failure → park (fail closed; contradiction re-arm recovers)', async () => {

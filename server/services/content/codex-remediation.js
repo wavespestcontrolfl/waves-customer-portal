@@ -871,8 +871,19 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // equals the real head). The premise is contradicted by the observation
     // in hand, so re-arm on it. Other same-head parks (sync failures, gate
     // failures) keep holding for a human as designed.
-    const staleMovedPastPark = Boolean(parkedHead) && parkedHead === currentHead
+    let staleMovedPastPark = Boolean(parkedHead) && parkedHead === currentHead
       && /^pr head moved past the remediation push/.test(String(state.park_reason || ''));
+    if (staleMovedPastPark) {
+      // The same-head observation could ITSELF be a stale getPr read of a
+      // genuine parallel push (park correctly recorded our push B, a real C
+      // landed, and getPr still serves B). Only the branch ref agreeing that
+      // the parked push IS the tip proves the park's premise false. Ref
+      // disagrees (or is unreadable) → stay parked; the next tick observes
+      // the true head and the ordinary head-advance re-arm carries it.
+      let refHead = null;
+      try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+      if (refHead !== currentHead) staleMovedPastPark = false;
+    }
     if (!currentHead || (parkedHead && parkedHead === currentHead && !staleMovedPastPark)) {
       return { skipped: true, reason: 'parked' };
     }
@@ -1093,7 +1104,19 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
         // newer content with fresh rounds instead of going silent.
         return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(refHead || fresh.head.sha)}); sync withheld`, onPark, newHead);
       }
-      // The ref confirms our push IS the branch head — proceed with the round.
+      // The ref confirms our push IS the branch head — but the snapshot that
+      // misreported the head may misreport PR state too (a close landing
+      // right behind the push). Re-fetch and re-run the terminal-state check
+      // on the fresher read before any post-commit sync; a throw here lands
+      // in the outer catch (park, sync withheld — fail closed).
+      const recheck = await gh.getPr(prNumber);
+      if (!recheck || recheck.merged || recheck.merged_at || recheck.state !== 'open') {
+        const terminal = recheck && (recheck.merged || recheck.merged_at) ? 'merged' : 'closed';
+        await markPrTerminal(prNumber, terminal, db);
+        logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} not in main)`);
+        return { skipped: true, reason: 'pr left the open state during remediation (post-push check)' };
+      }
+      // Open on the re-read → proceed with the round.
     }
   } catch (e) {
     // Fail CLOSED: proceeding could mirror a fix into portal state that
