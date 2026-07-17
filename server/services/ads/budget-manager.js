@@ -8,6 +8,13 @@ const { isEnabled } = require('../../config/feature-gates');
 let _googleAds;
 function getGoogleAds() { return _googleAds || (_googleAds = require('./google-ads')); }
 
+// ad_campaigns.daily_budget_base / daily_budget_current are decimal(10,2), so
+// the largest storable value is 99,999,999.99. A budget above that (a typo like
+// 100000000) could be accepted by Google BEFORE the local write, then fail the
+// DB update — leaving the live campaign changed but the DB out of sync. Reject
+// it up front, before any push. (Google itself enforces its own maxima too.)
+const MAX_DAILY_BUDGET = 99999999.99;
+
 class BudgetManager {
   /**
    * Core budget adjustment — runs every 2 hours via cron.
@@ -407,6 +414,11 @@ class BudgetManager {
     if (!Number.isFinite(base) || base <= 0) {
       throw new Error(`Invalid budget "${newBaseBudget}" — must be a number > 0`);
     }
+    // Cap at the storable maximum BEFORE the Google push, so an over-large value
+    // can't change the live campaign and then fail the decimal(10,2) DB write.
+    if (base > MAX_DAILY_BUDGET) {
+      throw new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
+    }
 
     const campaign = await db('ad_campaigns').where({ id: campaignId }).first();
     if (!campaign) throw new Error('Campaign not found');
@@ -465,3 +477,4 @@ class BudgetManager {
 }
 
 module.exports = new BudgetManager();
+module.exports.MAX_DAILY_BUDGET = MAX_DAILY_BUDGET;

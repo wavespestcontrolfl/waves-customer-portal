@@ -159,6 +159,12 @@ describe('write-body validation (admin role)', () => {
     expect((await call('post', '/api/admin/ads/campaigns/c-1/budget', { budget: '50junk' })).status).toBe(400);
   });
 
+  test('POST /campaigns/:id/budget rejects an amount above the storable maximum', async () => {
+    const res = await call('post', '/api/admin/ads/campaigns/c-1/budget', { budget: 100000000 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/≤|maximum/);
+  });
+
   test('PUT /targets rejects an out-of-range capacity threshold', async () => {
     const res = await call('put', '/api/admin/ads/targets', { capacity_green_max: 200 });
     expect(res.status).toBe(400);

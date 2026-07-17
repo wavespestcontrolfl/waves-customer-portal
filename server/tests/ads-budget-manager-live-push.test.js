@@ -419,6 +419,19 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockUpdateBudget).not.toHaveBeenCalled();
     });
 
+    test('over-max budget rejected before any push (decimal(10,2) storable cap)', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+
+      // 100000000 exceeds decimal(10,2)'s 99999999.99 — must be rejected BEFORE
+      // the Google push, so the live campaign can't change and then fail the DB write.
+      await expect(BudgetManager.setBudget('c-1', 100000000, 'test')).rejects.toThrow(/exceeds the maximum/);
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockLogInsert).not.toHaveBeenCalled();
+    });
+
     test('unconfigured API: base + current advance (intent tracking), no push', async () => {
       campaignFirstRow = baseCampaign();
       mockIsConfigured.mockReturnValue(false);

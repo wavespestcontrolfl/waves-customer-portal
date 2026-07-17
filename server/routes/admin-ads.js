@@ -222,6 +222,9 @@ router.post('/campaigns/:id/budget', requireAdmin, async (req, res, next) => {
     if (!(budget > 0)) {
       return res.status(400).json({ error: 'budget must be a number > 0' });
     }
+    if (budget > getBudgetManager().MAX_DAILY_BUDGET) {
+      return res.status(400).json({ error: `budget must be ≤ ${getBudgetManager().MAX_DAILY_BUDGET}` });
+    }
     // Only Google campaigns have remote control here — refuse Meta (read-only,
     // managed in Ads Manager) BEFORE mutating local budget, so the local row
     // can't drift from the real campaign.
