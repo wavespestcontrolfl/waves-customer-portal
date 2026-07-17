@@ -48,14 +48,42 @@ describe('PropertyTab pending-edit flush', () => {
     const input = await screen.findByLabelText('Side Gate / Backyard Access');
     fireEvent.change(input, { target: { value: 'Lift latch, no code' } });
 
-    // Unmount inside the 1s debounce window — the save must leave NOW, with
-    // this property's token, not fire later from a stale timeout.
+    // Unmount inside the 1s debounce window — the save must leave NOW (one
+    // microtask, before any property switch can swap the token), not fire
+    // later from a stale timeout.
     expect(api.updatePropertyPreferences).not.toHaveBeenCalled();
     unmount();
 
-    expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1));
     expect(api.updatePropertyPreferences).toHaveBeenCalledWith(
       expect.objectContaining({ sideGateAccess: 'Lift latch, no code' }),
+    );
+  });
+
+  it('serializes overlapping saves so an older PUT cannot overwrite a newer edit', async () => {
+    let resolveFirst;
+    api.updatePropertyPreferences
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValue({ preferences: {} });
+
+    render(<PropertyTab customer={customer} />);
+    const input = await screen.findByLabelText('Side Gate / Backyard Access');
+
+    fireEvent.change(input, { target: { value: 'first value' } });
+    fireEvent(window, new CustomEvent('waves:property-switching', { detail: { waiters: [] } }));
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1));
+
+    // Second edit + flush while the first PUT is still in flight — it must
+    // queue behind the first, not race it to the server.
+    fireEvent.change(input, { target: { value: 'second value' } });
+    fireEvent(window, new CustomEvent('waves:property-switching', { detail: { waiters: [] } }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1);
+
+    resolveFirst({ preferences: {} });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(2));
+    expect(api.updatePropertyPreferences).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sideGateAccess: 'second value' }),
     );
   });
 

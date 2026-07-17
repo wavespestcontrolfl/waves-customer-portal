@@ -5400,6 +5400,7 @@ function PropertyTab({ customer }) {
   const debounceRef = useRef(null);
   const pendingRef = useRef({});
   const lastSavedRef = useRef(null);
+  const saveQueueRef = useRef(Promise.resolve());
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -5420,22 +5421,31 @@ function PropertyTab({ customer }) {
   // A rejected save re-queues the fields so nothing is silently dropped.
   // Every PUT this starts is tracked in inFlightPropertyPrefSaves until it
   // settles, so switch/logout can await saves whose component is gone.
+  // Saves chain through saveQueueRef so overlapping flushes reach the server
+  // in edit order — a slow older PUT can't land after (and overwrite) a newer
+  // value, and lastSavedRef only ever advances. The payload is read at
+  // execution time, not enqueue time, so fields re-queued by a failed save
+  // merge UNDER any newer edits instead of resurrecting stale values.
   const flushAllPendingSaves = useCallback(() => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
-    const toSave = { ...pendingRef.current };
-    if (!Object.keys(toSave).length) return Promise.resolve();
-    pendingRef.current = {};
-    const save = api.updatePropertyPreferences(toSave)
-      .then((result) => {
-        if (result && result.preferences) lastSavedRef.current = result.preferences;
-      })
-      .catch((err) => {
-        pendingRef.current = { ...toSave, ...pendingRef.current };
-        throw err;
+    const save = saveQueueRef.current
+      .catch(() => {}) // a failed earlier save must not block later ones
+      .then(async () => {
+        const toSave = { ...pendingRef.current };
+        if (!Object.keys(toSave).length) return;
+        pendingRef.current = {};
+        try {
+          const result = await api.updatePropertyPreferences(toSave);
+          if (result && result.preferences) lastSavedRef.current = result.preferences;
+        } catch (err) {
+          pendingRef.current = { ...toSave, ...pendingRef.current };
+          throw err;
+        }
       });
+    saveQueueRef.current = save;
     inFlightPropertyPrefSaves.add(save);
     const untrack = () => inFlightPropertyPrefSaves.delete(save);
     save.then(untrack, untrack);
