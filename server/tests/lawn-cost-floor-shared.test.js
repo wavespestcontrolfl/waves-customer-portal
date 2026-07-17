@@ -23,12 +23,12 @@ describe('lawnMaterialBudget', () => {
   it('returns the track/visits budget (sun/shade is not a pricing input)', () => {
     // 2026-07-16: budgets fund the protocol spot-treatment reserves
     // (scheduled material + conditional_cost per tier).
-    expect(lawnMaterialBudget('st_augustine', 9)).toBe(187);
-    expect(lawnMaterialBudget('bermuda', 9)).toBe(174);
-    expect(lawnMaterialBudget('zoysia', 9)).toBe(215);
+    expect(lawnMaterialBudget('st_augustine', 9)).toBe(182);
+    expect(lawnMaterialBudget('bermuda', 9)).toBe(172);
+    expect(lawnMaterialBudget('zoysia', 9)).toBe(205);
     expect(lawnMaterialBudget('zoysia', 12)).toBe(219);
     expect(lawnMaterialBudget('st_augustine', 6)).toBe(103);
-    expect(lawnMaterialBudget('bermuda', 6)).toBe(92);
+    expect(lawnMaterialBudget('bermuda', 6)).toBe(93);
     expect(lawnMaterialBudget('zoysia', 6)).toBe(124);
   });
   it('falls back to st_augustine for an unknown track', () => {

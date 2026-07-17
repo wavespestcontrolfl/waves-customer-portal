@@ -52,7 +52,15 @@ function protocolAnnualMaterialAtSize(track, tier, turfSqft) {
       + Number(visit.conditional_cost || 0) * (10000 / RESERVE_REFERENCE_SQFT),
     0,
   );
-  return totalAtTenK * (turfSqft / 10000);
+  // Tier flags cover more calendar slots than the sold cadence delivers
+  // (silver flags 8 slots, sold standard = 6 visits). Normalize the same
+  // way the budgets and lawn-cost-floor-shared's
+  // protocolMaterialBudgetAtReferenceSqft do: average the flagged slots,
+  // multiply by the SOLD visit count — the customer only receives (and
+  // the price only funds) the sold visits.
+  const soldVisits = VISITS_BY_TIER[tier];
+  const normalizedAtTenK = (totalAtTenK / visits.length) * soldVisits;
+  return normalizedAtTenK * (turfSqft / 10000);
 }
 
 function independentNonMaterialAnnualCost(tier, turfSqft) {
