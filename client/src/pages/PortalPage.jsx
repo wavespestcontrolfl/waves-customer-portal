@@ -3888,8 +3888,21 @@ function BillingTab({ customer }) {
   const loadBilling = useCallback(() => {
     setLoading(true);
     setLoadError('');
+    // /api/billing pages at ≤100 rows — follow the cursor to the end so the
+    // year filters and paid totals below see the customer's full history.
+    const loadAllPayments = async () => {
+      const payments = [];
+      let cursor = 0;
+      for (let page = 0; page < 50; page += 1) {
+        const d = await api.getPayments(100, cursor);
+        payments.push(...(d.payments || []));
+        if (!d.hasMore || d.nextCursor == null) break;
+        cursor = d.nextCursor;
+      }
+      return { payments };
+    };
     Promise.all([
-      api.getPayments(),
+      loadAllPayments(),
       api.getBalance(),
       api.getCards(),
       api.getNotificationPrefs().catch(() => null),
@@ -5423,6 +5436,40 @@ function PropertyTab({ customer }) {
       }
     }, 1000);
   }, []);
+
+  // Save any pending debounced edits NOW, with the current property's token.
+  // A rejected save re-queues the fields so nothing is silently dropped.
+  const flushAllPendingSaves = useCallback(async () => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    const toSave = { ...pendingRef.current };
+    if (!Object.keys(toSave).length) return;
+    pendingRef.current = {};
+    try {
+      const result = await api.updatePropertyPreferences(toSave);
+      if (result && result.preferences) lastSavedRef.current = result.preferences;
+    } catch (err) {
+      pendingRef.current = { ...toSave, ...pendingRef.current };
+      throw err;
+    }
+  }, []);
+
+  // The 1s debounce above survives this tab's unmount, but switching
+  // properties swaps the access token first — a delayed PUT would then write
+  // THIS property's gate/pet details into the newly selected account. The
+  // shell dispatches this event before switching so edits flush while the
+  // token still belongs to the property they describe.
+  useEffect(() => {
+    const flushBeforeSwitch = (event) => {
+      const pendingSave = flushAllPendingSaves();
+      if (Array.isArray(event?.detail?.waiters)) event.detail.waiters.push(pendingSave);
+      else pendingSave.catch(() => {});
+    };
+    window.addEventListener('waves:property-switching', flushBeforeSwitch);
+    return () => window.removeEventListener('waves:property-switching', flushBeforeSwitch);
+  }, [flushAllPendingSaves]);
 
   const card = {
     background: B.white,
@@ -12393,15 +12440,12 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
     if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
     setReportState(prev => ({ ...prev, [idx]: 'sending' }));
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/ai/chat/report`, {
+      // api.request, not raw fetch: access tokens expire after 15 minutes and
+      // only the api client can rotate the refresh session on a 401.
+      await api.request('/ai/chat/report', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('waves_token')}`,
-        },
         body: JSON.stringify({ sessionId: sessionId.current, messageContent: content }),
       });
-      if (!res.ok) throw new Error('report failed');
       setReportState(prev => ({ ...prev, [idx]: 'done' }));
     } catch {
       setReportState(prev => ({ ...prev, [idx]: 'error' }));
@@ -12445,15 +12489,12 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
     setSending(true);
 
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/ai/chat`, {
+      // api.request, not raw fetch: access tokens expire after 15 minutes and
+      // only the api client can rotate the refresh session on a 401.
+      const data = await api.request('/ai/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('waves_token')}`,
-        },
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
       });
-      const data = await res.json();
       // Only model-generated replies are reportable — the greeting and the
       // hardcoded fallback/error strings are not AI output.
       setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.", reportable: !!data.reply && data.canReport !== false }]);
@@ -12765,6 +12806,17 @@ export default function PortalPage() {
   const selectProperty = async (propertyId) => {
     if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
     setSwitchingPropertyId(propertyId);
+    // Flush PropertyTab's debounced edits BEFORE switchProperty replaces the
+    // access token — a delayed save after the swap would write the previous
+    // property's gate/pet details into the newly selected account.
+    const waiters = [];
+    window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
+    const saves = await Promise.allSettled(waiters);
+    if (saves.some(result => result.status === 'rejected')) {
+      setSwitchingPropertyId(null);
+      showCustomerAlert('Your latest property edits could not be saved, so we kept this property open. Try saving again before switching.');
+      return;
+    }
     const switched = await switchProperty(propertyId);
     setSwitchingPropertyId(null);
     if (switched) {

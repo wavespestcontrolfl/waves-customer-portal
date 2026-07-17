@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
+import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -32,11 +33,21 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     'Content-Type': 'application/json',
   });
 
+  // Customer requests go through the shared api client: customer access
+  // tokens expire after 15 minutes and only the client can rotate the
+  // refresh session on a 401 (and it rejects on error responses, so a 401
+  // body is never mistaken for an empty notification list). The admin bell
+  // keeps its separate raw-fetch flow — admin auth is a different token.
+  const requestJson = (path, options = {}) => {
+    if (type !== 'admin') return api.request(path, options);
+    return fetch(`${API_BASE}${path}`, { ...options, headers: getHeaders() })
+      .then(r => r.json());
+  };
+
   // Poll unread count every 30 seconds
   useEffect(() => {
     const fetchCount = () => {
-      fetch(`${API_BASE}${basePath}/unread-count`, { headers: getHeaders() })
-        .then(r => r.json())
+      requestJson(`${basePath}/unread-count`)
         .then(d => setUnreadCount(d.count || 0))
         .catch(() => {});
     };
@@ -125,8 +136,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const loadNotifications = async () => {
     setLoading(true);
     try {
-      const r = await fetch(`${API_BASE}${basePath}?limit=30`, { headers: getHeaders() });
-      const d = await r.json();
+      const d = await requestJson(`${basePath}?limit=30`);
       setNotifications(d.notifications || []);
     } catch {}
     setLoading(false);
@@ -138,13 +148,19 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   };
 
   const markRead = async (id) => {
-    await fetch(`${API_BASE}${basePath}/${id}/read`, { method: 'PUT', headers: getHeaders() }).catch(() => {});
+    // Only reflect the read state the server actually accepted — a rejected
+    // write (expired token the refresh couldn't save) must not clear badges.
+    try {
+      await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
+    } catch { return; }
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
     setUnreadCount(prev => Math.max(0, prev - 1));
   };
 
   const markAllRead = async () => {
-    await fetch(`${API_BASE}${basePath}/read-all`, { method: 'PUT', headers: getHeaders() }).catch(() => {});
+    try {
+      await requestJson(`${basePath}/read-all`, { method: 'PUT' });
+    } catch { return; }
     setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
     setUnreadCount(0);
   };
