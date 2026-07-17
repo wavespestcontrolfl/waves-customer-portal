@@ -859,7 +859,6 @@ function CustomerProjectReportPreview({
   sentLink,
 }) {
   const typeLabel = typeCfg?.label || TYPE_LABELS[project.project_type] || "Inspection";
-  const reportTitle = String(title || "").trim() || typeLabel;
   // Same suppression rules as the customer-facing report page — the preview
   // staff approve must match what the customer actually sees: internal keys
   // filtered, and the raw findings hidden when the AI-drafted sectioned
@@ -879,6 +878,9 @@ function CustomerProjectReportPreview({
   const customerRecommendations = recommendations
     ? feeRedact(String(recommendations))
     : recommendations;
+  // Title and photo captions are free text on the same customer surface —
+  // same scrub, or staff approve a headline/label the customer never sees.
+  const reportTitle = feeRedact(String(title || "").trim()) || typeLabel;
   const aiNarrativeSections = customerRecommendations
     ? parseSections(String(customerRecommendations))
     : null;
@@ -896,7 +898,7 @@ function CustomerProjectReportPreview({
       .map(([key, label]) => [label, findings?.[key]])
       .filter(([, v]) => hasMeaningfulValue(formatProjectPreviewValue(v)))
     : [];
-  const visiblePhotos = (photos || []).slice(0, 4);
+  const visiblePhotos = (photos || []).slice(0, 4).map((p) => ({ ...p, caption: feeRedact(p.caption) }));
   const address = customerAddressLine(project);
   const metaRows = [
     projectDate ? `Inspection date: ${fmtDate(projectDate)}` : null,

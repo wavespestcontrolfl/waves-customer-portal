@@ -1560,12 +1560,15 @@ router.post('/', async (req, res, next) => {
         customer_id,
         project_type,
         project_date: projectDate,
-        title: title || null,
+        // title is customer-facing headline text — same write-time fee scrub
+        // as recommendations (codex #2817)
+        title: title ? redactInspectionFeeCuesForType(title, project_type) : null,
         findings: findings || null,
-        // inspection fee must never be customer-facing — sanitize on WRITE so
-        // it's durable, not dependent on the one-time backfill (codex #2817).
-        // Type-gated: only WDO carries the internal fee field; on other types
-        // "inspection fee" prose is a legitimate customer disclosure.
+        // inspection fee must never be customer-facing — sanitized on WRITE
+        // (durable for new rows; migration 20260717000001 cleaned legacy rows
+        // at rest, codex #2817). Type-gated: only WDO carries the internal
+        // fee field; on other types "inspection fee" prose is a legitimate
+        // customer disclosure.
         recommendations: recommendations ? redactInspectionFeeCuesForType(recommendations, project_type) : null,
         service_record_id: service_record_id || null,
         // Persist the DERIVED link too (record-only callers): the linked-only
@@ -1950,10 +1953,11 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
-    // Durable inspection-fee guard: an admin-saved narrative can't persist the
-    // internal fee, regardless of the one-time backfill (codex #2817).
-    // Type-gated — see the create path.
+    // Durable inspection-fee guard: an admin-saved narrative/title can't
+    // persist the internal fee (legacy rows cleaned at rest by migration
+    // 20260717000001, codex #2817). Type-gated — see the create path.
     if (updates.recommendations != null) updates.recommendations = redactInspectionFeeCuesForType(updates.recommendations, project.project_type);
+    if (updates.title != null) updates.title = redactInspectionFeeCuesForType(updates.title, project.project_type);
     dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
@@ -2334,8 +2338,16 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
     signer_name: signature?.signerName || null,
     signed_at: signature?.signedAt || null,
     content_hash: wdoContentHash(project),
+    // The archived binary was rendered through the customer-safe scrub
+    // (buildWdoReportPDFBuffer applies customerSafeFindings) — the public
+    // /fdacs-pdf gate uses this to distinguish a clean modern archive from a
+    // legacy binary that may print a raw fee (codex #2817). Bump the tag if
+    // the redaction contract ever changes incompatibly.
+    pdf_renderer: 'fee-scrub-v1',
     // As-sent snapshot — the public token viewer serves these for WDO so the
     // web report can never silently diverge from the emailed signed PDF.
+    // Stored RAW deliberately: /data scrubs at egress, and the raw snapshot
+    // is what content_hash-adjacent tooling and admin views expect.
     findings: parseFindings(project),
     project_date: normalizeDateOnly(project.project_date),
   };

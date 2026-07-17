@@ -150,6 +150,18 @@ const FEE_CUE_RE = new RegExp(
   'gi',
 );
 
+// Amount BEFORE the cue — "The $250 inspection fee was collected", "a $175
+// WDO inspection fee applies". The amount must sit within two words of the
+// cue, so "$1,250 repair completed near the inspection fee area" (three
+// words away, different subject) is never touched. Currency-marked amounts
+// only: a bare number before the cue ("250 inspection fee"?) has no natural
+// reading worth the corruption risk.
+const PRE_CUE_RE = new RegExp(
+  '(\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?)'
+  + '(\\s+(?:[\\w\\-]+\\s+){0,2}?inspection\\s+fee)\\b',
+  'gi',
+);
+
 function redactInspectionFeeCues(text) {
   const str = String(text || '');
   if (!str) return str;
@@ -157,6 +169,7 @@ function redactInspectionFeeCues(text) {
     // mid can be empty when the amount form consumed its own introducer
     // ("inspection fee: 250") — keep a space so the marker doesn't fuse.
     .replace(FEE_CUE_RE, (m, cue, mid) => `${cue}${mid || ' '}[fee removed]`)
+    .replace(PRE_CUE_RE, (m, amount, rest) => `[fee removed]${rest}`)
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/[ \t]+\n/g, '\n')
     .trim();
@@ -164,13 +177,14 @@ function redactInspectionFeeCues(text) {
 
 // Detection-only variant for gating decisions (e.g. whether a legacy
 // archived FDACS filing's snapshot carries a fee disclosure) — true when the
-// redactor WOULD remove something. Fresh non-global regex so .test() carries
-// no lastIndex state.
+// redactor WOULD remove something. Fresh non-global regexes so .test()
+// carries no lastIndex state.
 const FEE_CUE_TEST_RE = new RegExp(FEE_CUE_RE.source, 'i');
+const PRE_CUE_TEST_RE = new RegExp(PRE_CUE_RE.source, 'i');
 function containsInspectionFeeCue(text) {
   const str = String(text || '');
   if (!str) return false;
-  return FEE_CUE_TEST_RE.test(str);
+  return FEE_CUE_TEST_RE.test(str) || PRE_CUE_TEST_RE.test(str);
 }
 
 module.exports = {

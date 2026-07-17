@@ -168,6 +168,14 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee has a cost of $250.'))
       .toBe('Inspection fee has a cost of [fee removed].');
   });
+  test('an amount BEFORE the cue redacts; a distant amount does not', () => {
+    expect(redactInspectionFeeCues('The $250 inspection fee was collected at closing.'))
+      .toBe('The [fee removed] inspection fee was collected at closing.');
+    expect(redactInspectionFeeCues('A $175 WDO inspection fee applies.'))
+      .toBe('A [fee removed] WDO inspection fee applies.');
+    expect(redactInspectionFeeCues('$1,250 repair completed near the inspection fee area.'))
+      .toBe('$1,250 repair completed near the inspection fee area.');
+  });
   test('a determined amount belongs to something else — home/escrow prose survives', () => {
     expect(redactInspectionFeeCues('Inspection fee covered by seller for the $400,000 home.'))
       .toBe('Inspection fee covered by seller for the $400,000 home.');

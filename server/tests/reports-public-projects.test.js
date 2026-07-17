@@ -76,7 +76,7 @@ describe('public project reports', () => {
       report_viewed_at: 'earlier',
       project_type: 'wdo_inspection',
       status: 'sent',
-      title: 'WDO inspection',
+      title: 'WDO inspection — inspection fee $250',
       first_name: 'Van',
       last_name: 'Lee',
       city: 'Bradenton',
@@ -109,10 +109,54 @@ describe('public project reports', () => {
       expect(res.status).toBe(200);
       // photo caption is technician free text — scrubbed at the egress
       expect(body.photos[0].caption).toBe('Inspection fee [fee removed] noted at panel');
+      // the customer-facing headline gets the same scrub
+      expect(body.title).toBe('WDO inspection — inspection fee [fee removed]');
       // the archived binary carries the raw fee — never advertised...
       expect(body.fdacsPdfAvailable).toBe(false);
       // ...while the page's snapshot findings render scrubbed
       expect(body.findings.comments).toBe('Inspection fee [fee removed] collected on site.');
+    });
+  });
+
+  test('WDO: a filing archived through the sanitized renderer keeps its PDF available', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-3',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        report_viewed_at: 'earlier',
+        project_type: 'wdo_inspection',
+        status: 'sent',
+        title: 'WDO inspection',
+        first_name: 'Van',
+        last_name: 'Lee',
+        city: 'Bradenton',
+        state: 'FL',
+        findings: { wdo_finding: 'No visible signs of WDO observed' },
+        // raw snapshot carries the cue, but the binary was rendered through
+        // the customer-safe scrub — must NOT be gated (codex #2817 P1).
+        wdo_sent_filings: JSON.stringify([{
+          s3_key: 'wdo/filing.pdf',
+          pdf_renderer: 'fee-scrub-v1',
+          findings: { comments: 'Inspection fee $250 collected on site.' },
+        }]),
+      }),
+    });
+    const photosRead = chain({ orderBy: jest.fn().mockResolvedValue([]) });
+    const projectQueries = [projectRead];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return photosRead;
+      if (table === 'service_records') return chain();
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.fdacsPdfAvailable).toBe(true);
     });
   });
 

@@ -35,6 +35,17 @@ function filingFindingsContainFeeCue(rawFindings) {
   };
   return walk(parsed);
 }
+
+// Only a LEGACY binary can print a raw fee — filings archived with the
+// pdf_renderer marker were rendered through the customer-safe scrub, so a
+// fee cue in their (deliberately raw) snapshot is fine: the PDF itself is
+// clean and must keep serving (codex #2817 — gating those locked customers
+// out of their own signed filing).
+function filingBinaryMayDiscloseFee(filing) {
+  if (!filing) return false;
+  if (filing.pdf_renderer) return false;
+  return filingFindingsContainFeeCue(filing.findings);
+}
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
@@ -596,9 +607,9 @@ router.get('/project/:token/data', async (req, res, next) => {
         if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
       }
       fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket)
-        // legacy filing archived with a raw fee disclosure — gated, see
-        // filingFindingsContainFeeCue
-        && !filingFindingsContainFeeCue(lastFiling?.findings);
+        // legacy binary archived with a raw fee disclosure — gated, see
+        // filingBinaryMayDiscloseFee
+        && !filingBinaryMayDiscloseFee(lastFiling);
     }
 
     // Internal/office-only finding keys must never ride the public JSON — the
@@ -614,7 +625,9 @@ router.get('/project/:token/data', async (req, res, next) => {
       projectType: project.project_type,
       fdacsPdfAvailable,
       status: project.status,
-      title: project.title,
+      // The title is the report's customer-facing headline — free text with
+      // the same fee scrub as every other free-text field (codex #2817).
+      title: project.title ? redactInspectionFeeCuesForType(project.title, project.project_type) : project.title,
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
       // Customer email/phone for the hero contact lines — the report hero
       // mirrors the customer estimate, which prints the recipient's own
@@ -743,10 +756,10 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     if (!lastFiling?.s3_key || !config.s3?.bucket) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    // Same generic 404 as a missing archive: a legacy filing whose snapshot
+    // Same generic 404 as a missing archive: a LEGACY binary whose snapshot
     // carries a raw fee disclosure is never served (the /data payload also
-    // stops advertising it — see filingFindingsContainFeeCue).
-    if (filingFindingsContainFeeCue(lastFiling.findings)) {
+    // stops advertising it — see filingBinaryMayDiscloseFee).
+    if (filingBinaryMayDiscloseFee(lastFiling)) {
       return res.status(404).json({ error: 'Report not found' });
     }
     const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
