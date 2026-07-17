@@ -1741,3 +1741,63 @@ describe('closed-tombstone reopen re-arm', () => {
     expect(row.status).toBe('remediating');
   });
 });
+
+describe('p2OnlyMergeEligible (P2-only merge bar)', () => {
+  const prevP2 = process.env.AUTONOMOUS_CODEX_P2_MERGE;
+  afterEach(() => {
+    if (prevP2 === undefined) delete process.env.AUTONOMOUS_CODEX_P2_MERGE;
+    else process.env.AUTONOMOUS_CODEX_P2_MERGE = prevP2;
+  });
+
+  const p2Body = (title) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${title}**\n\ndetail`;
+  const p1Body = (title) => `**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  ${title}**\n\ndetail`;
+
+  test('all-P2 findings for the head + >=1 round spent → eligible', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') }), finding({ body: p2Body('b') })] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(true);
+    expect(r.p2Count).toBe(2);
+    expect(r.rounds).toBe(1);
+  });
+
+  test('any P1 among the findings blocks', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 2, status: 'remediating' }] });
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') }), finding({ body: p1Body('b') })] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/blocking findings/);
+  });
+
+  test('an unbadged finding fails CLOSED as P1', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({ reviewComments: [finding({ body: 'Fix this broken link please.' })] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+  });
+
+  test('no remediation round spent yet → not eligible (P2s get one fix pass first)', async () => {
+    const db = makeDb();
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/no remediation round/);
+  });
+
+  test('no findings tied to the current head → not eligible (pending/clean is the normal path)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('stale'), commit_id: 'oldhead000' })] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/no findings/);
+  });
+
+  test('AUTONOMOUS_CODEX_P2_MERGE=false disables the bar', async () => {
+    process.env.AUTONOMOUS_CODEX_P2_MERGE = 'false';
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/disabled/);
+  });
+});

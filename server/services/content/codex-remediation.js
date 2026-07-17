@@ -104,6 +104,54 @@ function parseCodexFindings(reviewComments = [], headSha = null) {
     .filter((f) => f.body);
 }
 
+// ── P2-only merge bar (autonomous blog lane) ───────────────────────────────
+// A fresh Codex review can ALWAYS surface new P2s on a long post (observed
+// on astro #383 and the 07-04 backlog: every re-review goes deeper), so a
+// "completely clean" merge bar generates unbounded fix rounds and the lane
+// never converges without a human. Owner directive 2026-07-16 ("no gates on
+// the auto blog"): P0/P1 findings always block; once remediation has spent
+// at least one round improving the PR, a review that leaves ONLY P2 findings
+// for the current head stops blocking the merge. The P2s are logged on the
+// run for the admin UI. Kill switch: AUTONOMOUS_CODEX_P2_MERGE=false.
+function p2MergeEnabled() {
+  return String(process.env.AUTONOMOUS_CODEX_P2_MERGE || '').trim().toLowerCase() !== 'false';
+}
+
+const SEVERITY_BADGE_RE = /!\[P([012])\s+Badge\]/i;
+
+function findingSeverity(body) {
+  const m = String(body || '').match(SEVERITY_BADGE_RE);
+  // Unbadged findings fail CLOSED as P1 — an unparseable severity must never
+  // downgrade into a mergeable P2.
+  return m ? `P${m[1]}` : 'P1';
+}
+
+/**
+ * p2OnlyMergeEligible(prNumber, headSha) → { eligible, p2Count?, rounds?, reason? }
+ * eligible=true means: Codex HAS reviewed this exact head (findings tied to
+ * it exist), every finding is a P2, and codex_remediation_state shows >= 1
+ * remediation round already spent on this PR. Callers still run their own
+ * merge guards (deploy-green, hub-only, sha-pinned merge, queue re-checks).
+ */
+async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
+  if (!p2MergeEnabled()) return { eligible: false, reason: 'disabled (AUTONOMOUS_CODEX_P2_MERGE=false)' };
+  if (!prNumber || !headSha) return { eligible: false, reason: 'missing pr/head' };
+  const db = deps.db || dbDefault;
+  const gh = deps.gh || ghDefault;
+  const state = await getState(db, prNumber);
+  if ((state.rounds || 0) < 1) return { eligible: false, reason: 'no remediation round spent yet' };
+  const reviewComments = await gh.listPrReviewComments(prNumber);
+  const findings = parseCodexFindings(reviewComments, headSha);
+  // No findings tied to this head = either review still pending or truly
+  // clean — both are the normal path's business, never this bar's.
+  if (findings.length === 0) return { eligible: false, reason: 'no findings for current head' };
+  const severities = findings.map((f) => findingSeverity(f.body));
+  if (severities.some((s) => s === 'P0' || s === 'P1')) {
+    return { eligible: false, reason: `blocking findings present (${severities.join(', ')})` };
+  }
+  return { eligible: true, p2Count: findings.length, rounds: state.rounds };
+}
+
 /**
  * The blog markdown file the findings target. Autonomous posts are `.mdx`,
  * hand-authored ones `.md` — accept both. Prefer a finding whose path is a blog
@@ -1382,5 +1430,8 @@ module.exports = {
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,
+  p2MergeEnabled,
+  p2OnlyMergeEligible,
+  findingSeverity,
   MAX_ROUNDS,
 };
