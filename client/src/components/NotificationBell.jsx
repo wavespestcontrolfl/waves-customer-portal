@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
+import { isNativeApp, nativePushPermissionState, requestNativePushPermission } from '../native/nativePush.js';
 import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -41,7 +42,14 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const requestJson = (path, options = {}) => {
     if (type !== 'admin') return api.request(path, options);
     return fetch(`${API_BASE}${path}`, { ...options, headers: getHeaders() })
-      .then(r => r.json());
+      .then((r) => {
+        if (!r.ok) {
+          const err = new Error(`Request failed (${r.status})`);
+          err.status = r.status;
+          throw err;
+        }
+        return r.json();
+      });
   };
 
   // Poll unread count every 30 seconds
@@ -101,21 +109,41 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
   // Probe Web Push state when the panel opens (admin only). Re-runs on
   // each open so a user who enabled push elsewhere doesn't see a stale
-  // "Enable push" strip. Customer bell skips this — only admins get
-  // operational push.
+  // "Enable push" strip. Admins get operational Web Push. In the native
+  // customer app this strip is the ONLY push opt-in surface — startup never
+  // prompts for permission (nativePush.js delegates that explicit gesture
+  // here), so without it a fresh install could never grant APNs permission.
+  // Customer web stays strip-free.
+  const showPushStrip = (type === 'admin' || isNativeApp()) && !pushOn;
   useEffect(() => {
-    if (!open || type !== 'admin') return;
-    isPushEnabled({
-      apiBase: API_BASE,
-      token: localStorage.getItem(tokenKey),
-      verifyServer: true,
-    }).then(setPushOn).catch(() => setPushOn(false));
+    if (!open) return;
+    if (type === 'admin') {
+      isPushEnabled({
+        apiBase: API_BASE,
+        token: localStorage.getItem(tokenKey),
+        verifyServer: true,
+      }).then(setPushOn).catch(() => setPushOn(false));
+      return;
+    }
+    if (isNativeApp()) {
+      nativePushPermissionState()
+        .then((state) => setPushOn(state === 'granted'))
+        .catch(() => setPushOn(false));
+    }
   }, [open, type]);
 
   const handleEnablePush = async () => {
     setPushEnabling(true);
     setPushError(null);
     try {
+      if (type === 'customer' && isNativeApp()) {
+        const result = await requestNativePushPermission();
+        if (result !== 'granted') {
+          throw new Error('Notifications are off. Enable them for Waves in your device Settings, then try again.');
+        }
+        setPushOn(true);
+        return;
+      }
       // Pass apiBase so push enrollment hits the same backend the rest
       // of the bell talks to. Without this, ensurePushSubscription
       // defaults to '/api' and breaks in any deployment where the
@@ -302,7 +330,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             {/* Enable Push strip — admin only, shown when not yet
                 subscribed on this device. iOS reminder is folded into
                 the error message that ensurePushSubscription throws. */}
-            {type === 'admin' && !pushOn && (
+            {showPushStrip && (
               <PushEnableStrip
                 enabling={pushEnabling}
                 error={pushError}
@@ -403,7 +431,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
             {/* Enable Push strip — admin only, shown when not yet
                 subscribed on this device. */}
-            {type === 'admin' && !pushOn && (
+            {showPushStrip && (
               <PushEnableStrip
                 enabling={pushEnabling}
                 error={pushError}

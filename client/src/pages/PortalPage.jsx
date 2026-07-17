@@ -46,10 +46,12 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
 // auth) — same path DocumentsTab's handleDownload uses.
 async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
-  const token = localStorage.getItem('waves_token');
   let abs = url;
   try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
-  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  // api.fetchRaw, not raw fetch: it attaches the Bearer token and rotates the
+  // refresh session on 401, so downloads still work after the 15-minute
+  // access-token lifetime in an idle-open portal.
+  const r = await api.fetchRaw(abs);
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   const blob = await r.blob();
   // In the Capacitor shell the programmatic <a download> click below is a
@@ -68,10 +70,10 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
 // Authenticated fetch → PDF blob, with the JSON "not ready yet" body turned
 // into a readable error. Shared by the Documents + Visits report flows.
 async function fetchAuthedPdfBlob(url) {
-  const token = localStorage.getItem('waves_token');
   let abs = url;
   try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
-  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  // api.fetchRaw, not raw fetch — see downloadAuthedPdf above.
+  const r = await api.fetchRaw(abs);
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   const contentType = r.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
@@ -13171,7 +13173,17 @@ export default function PortalPage() {
                   })}
                   <button
                     type="button"
-                    onClick={() => { logout(); setShowMenu(false); }}
+                    onClick={async () => {
+                      // Flush any debounced property edits while the token is
+                      // still valid — logout revokes the refresh session, so a
+                      // delayed PUT would be silently lost (or, after a fast
+                      // re-login, could fire under the next account's token).
+                      const waiters = [];
+                      window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
+                      await Promise.allSettled(waiters);
+                      logout();
+                      setShowMenu(false);
+                    }}
                     style={{
                       width: '100%',
                       marginTop: 6,
