@@ -462,6 +462,53 @@ function distanceBetweenSpans(leftStart, leftLength, rightStart, rightLength) {
   return 0;
 }
 
+function globalPattern(pattern) {
+  return new RegExp(pattern.source, `${pattern.flags.replace(/g/g, '')}g`);
+}
+
+function quotePhraseAt(text, index, valueLength) {
+  const source = String(text || '');
+  const separators = [...source.matchAll(/(?:;|\n+|[.!?](?:\s+|$)|,\s*|\b(?:but|however|while|whereas|although)\b)/gi)];
+  let start = 0;
+  let end = source.length;
+  for (const separator of separators) {
+    const separatorStart = Number(separator.index);
+    const separatorEnd = separatorStart + separator[0].length;
+    if (separatorEnd <= index) start = separatorEnd;
+    else if (separatorStart >= index + valueLength) {
+      end = separatorStart;
+      break;
+    }
+  }
+  return { text: source.slice(start, end), start };
+}
+
+function quoteMatchIsNegated(text, index, valueLength) {
+  const phrase = quotePhraseAt(text, index, valueLength);
+  const relativeStart = index - phrase.start;
+  const before = phrase.text.slice(0, relativeStart);
+  const after = phrase.text.slice(relativeStart + valueLength);
+  return /(?:\bno|\bnot|\bwithout|\bnever)\s+(?:(?:a|an|the|any)\s+)?(?:[a-z'-]+\s+){0,2}$/i.test(before)
+    || /(?:doesn['’]?t|does\s+not|do\s+not|hasn['’]?t|has\s+not)\s+(?:have|include)\s+(?:(?:a|an|the|any)\s+)?$/i.test(before)
+    || /^\s*(?::|=|-)?\s*(?:is\s+)?(?:no|not|false|absent|none)\b/i.test(after);
+}
+
+function quoteCategoricalMatchesFact(text, value, semanticPattern) {
+  const tokens = String(value || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^a-z0-9]+/i)
+    .filter(Boolean);
+  if (!tokens.length) return false;
+  const escaped = tokens.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const valuePattern = new RegExp(`\\b${escaped.join('[\\s_-]+')}\\b`, 'gi');
+  return [...String(text || '').matchAll(valuePattern)].some((match) => {
+    const phrase = quotePhraseAt(text, Number(match.index), match[0].length);
+    const semantic = new RegExp(semanticPattern.source, semanticPattern.flags.replace(/g/g, ''));
+    return semantic.test(phrase.text)
+      && !quoteMatchIsNegated(text, Number(match.index), match[0].length);
+  });
+}
+
 // Bind a quoted number to the closest dimension label, not merely any label
 // in the same sentence. This handles constructions such as "the home is
 // 2,000 square feet with an 8,000 square foot lot" without letting the lot
@@ -469,20 +516,38 @@ function distanceBetweenSpans(leftStart, leftLength, rightStart, rightLength) {
 function quoteNumberMatchesFact(text, match, key, semanticPattern) {
   const numberStart = Number(match.index);
   const numberLength = match[0].length;
+  const numberMatches = [...String(text || '').matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
+  const labelBelongsToNumber = (label) => {
+    const currentDistance = distanceBetweenSpans(
+      numberStart,
+      numberLength,
+      Number(label.index),
+      label[0].length,
+    );
+    const nearestDistance = numberMatches.reduce((nearest, candidate) => Math.min(
+      nearest,
+      distanceBetweenSpans(
+        Number(candidate.index),
+        candidate[0].length,
+        Number(label.index),
+        label[0].length,
+      ),
+    ), Number.POSITIVE_INFINITY);
+    return currentDistance === nearestDistance ? currentDistance : null;
+  };
   const requestedFamily = factFamily(key);
   if (!requestedFamily) {
-    const localStart = Math.max(0, numberStart - 60);
-    const localEnd = Math.min(text.length, numberStart + numberLength + 60);
-    return semanticPattern.test(text.slice(localStart, localEnd));
+    return [...String(text || '').matchAll(globalPattern(semanticPattern))].some((label) => {
+      const distance = labelBelongsToNumber(label);
+      return distance != null && distance <= 60;
+    });
   }
   const distances = [];
   for (const [family, pattern] of Object.entries(FACT_FAMILY_PATTERNS)) {
     pattern.lastIndex = 0;
     for (const label of String(text || '').matchAll(pattern)) {
-      distances.push({
-        family,
-        distance: distanceBetweenSpans(numberStart, numberLength, Number(label.index), label[0].length),
-      });
+      const distance = labelBelongsToNumber(label);
+      if (distance != null) distances.push({ family, distance });
     }
   }
   const requestedDistance = distances
@@ -1647,7 +1712,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       year_built: /year.{0,12}built|built.{0,12}(?:in|year)|construction.{0,12}year/i,
       impervious: /impervious|hardscape|non[-\s]?turf/i,
       pool_cage: /pool.{0,12}(?:cage|enclosure)|(?:cage|enclosure).{0,12}pool/i,
-      pool: /\bpool\b/i,
+      pool: /\bpool\b(?!\s*(?:cage|enclosure))/i,
     };
     const family = factFamily(key);
     if (familyPatterns[family]) return familyPatterns[family];
@@ -1670,13 +1735,14 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       const quote = String(row?.quote || '');
       let groundedValue = false;
       if (typeof fact.value === 'boolean') {
-        const flags = `${semanticPattern.flags.replace(/g/g, '')}g`;
-        const semanticMatches = [...quote.matchAll(new RegExp(semanticPattern.source, flags))];
-        groundedValue = semanticMatches.some((semanticMatch) => {
-          const local = quote.slice(Math.max(0, semanticMatch.index - 24), semanticMatch.index + semanticMatch[0].length + 12);
-          const negated = /\b(?:no|not|without|doesn['’]?t\s+have|has\s+no)\b/i.test(local);
-          return fact.value ? !negated : negated;
-        });
+        const semanticMatches = [...quote.matchAll(globalPattern(semanticPattern))];
+        groundedValue = semanticMatches.some((semanticMatch) => (
+          fact.value !== quoteMatchIsNegated(
+            quote,
+            Number(semanticMatch.index),
+            semanticMatch[0].length,
+          )
+        ));
       } else if (Number.isFinite(Number(fact.value))) {
         const quoteValues = [...quote.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
         groundedValue = quoteValues.some((match) => (
@@ -1684,9 +1750,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
           && quoteNumberMatchesFact(quote, match, key, semanticPattern)
         ));
       } else {
-        groundedValue = semanticPattern.test(quote)
-          && normalizeEvidenceText(quote).includes(normalizeEvidenceText(fact.value));
-        semanticPattern.lastIndex = 0;
+        groundedValue = quoteCategoricalMatchesFact(quote, fact.value, semanticPattern);
       }
       if (!groundedValue) return false;
       return verifyAgentEvidenceQuotes([row], evidenceContext).verified === 1;

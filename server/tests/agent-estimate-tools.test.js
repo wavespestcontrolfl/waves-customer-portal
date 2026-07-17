@@ -863,6 +863,101 @@ describe('Agent Estimate property lookup safety', () => {
     );
   });
 
+  test('associates story and structure labels with their own neighboring numbers', async () => {
+    const quote = 'The property is a 2-story, 2,000-square-foot home';
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: {
+        id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+      calls: [], sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 2000, stories: 2, services: { pest: { frequency: 'quarterly' } } },
+      evidence: [{ source: 'quote_form', quote, decision: 'home size and stories' }],
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+        stories: { value: 2, source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.lane).toBe('green');
+  });
+
+  test('does not apply pool-cage negation to a separate positive pool phrase', async () => {
+    const quote = 'The home is 2,000 square feet. No pool cage, but there is a pool.';
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: {
+        id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+      calls: [], sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 2000, pool: false, services: { pest: { frequency: 'quarterly' } } },
+      evidence: [{ source: 'quote_form', quote, decision: 'home size and pool' }],
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+        pool: { value: false, source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'pool presence was used for pricing without a matching verified property fact',
+      expect.stringMatching(/pool lacks a server-verified/i),
+    ]));
+  });
+
+  test('does not authenticate a negated categorical price driver', async () => {
+    const quote = 'The building is 2,000 square feet. This is not commercial; it is residential.';
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: {
+        id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+      calls: [], sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        buildingSqFt: 2000,
+        propertyType: 'commercial',
+        services: { pest: { frequency: 'quarterly' } },
+      },
+      evidence: [{ source: 'quote_form', quote, decision: 'building size and property type' }],
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        buildingSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+        propertyType: { value: 'commercial', source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'property type was used for pricing without a matching verified property fact',
+      expect.stringMatching(/propertyType lacks a server-verified/i),
+    ]));
+  });
+
   test('does not let a low-confidence call extraction masquerade as operator confirmation', async () => {
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       lead: {
