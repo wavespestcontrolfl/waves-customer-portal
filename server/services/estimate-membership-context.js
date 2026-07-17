@@ -33,6 +33,7 @@ const logger = require('./logger');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
 const {
   toQualifyingKey,
+  toQualifyingKeys,
   loadActiveRecurringServiceRows,
   loadExistingRecurringQualifyingRows,
 } = require('./waveguard-existing-services');
@@ -448,9 +449,7 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
       // membership and cross-sell purposes. A scalar toQualifyingKey call
       // keeps only the first match (for example pest from "Pest + Lawn"),
       // which makes the frozen snapshot disagree with Agent pricing.
-      const componentKeys = accountServiceKeys(row.service_type)
-        .map((component) => toQualifyingKey(component))
-        .filter(Boolean);
+      const componentKeys = toQualifyingKeys(row.service_type);
       for (const key of componentKeys) {
         if (!existingByKey.has(key)) existingByKey.set(key, []);
         existingByKey.get(key).push(row);

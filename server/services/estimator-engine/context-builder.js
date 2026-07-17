@@ -12,38 +12,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const TWILIO_NUMBERS = require('../../config/twilio-numbers');
-
-function last10(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  return digits.length >= 10 ? digits.slice(-10) : null;
-}
-
-// Blocked/anonymous caller-ID sentinels: Twilio substitutes digit sentinels
-// for suppressed caller IDs (+266696687 = ANONYMOUS, +7378742833 =
-// RESTRICTED) and carriers pass literal words through — keying context on
-// one would merge strangers onto a phantom record (same set the processor's
-// resolver rejects).
-const PHONE_SENTINELS = new Set(['266696687', '7378742833', '86282452253']);
-const PHONE_SENTINEL_WORDS = /^(anonymous|restricted|unavailable|unknown|blocked)$/i;
-function isSentinelPhone(value) {
-  const v = String(value || '').trim();
-  if (PHONE_SENTINEL_WORDS.test(v)) return true;
-  const digits = v.replace(/\D/g, '');
-  return PHONE_SENTINELS.has(digits) || PHONE_SENTINELS.has(digits.replace(/^1/, ''));
-}
-
-// First candidate that is a real EXTERNAL number. Forwarded inbound calls can
-// carry a Waves/DNI tracking line in from_phone — keying context loads on it
-// would feed another customer's SMS thread into the composer (mirrors
-// firstExternalPhone in the call processor).
-function firstExternalPhone(...candidates) {
-  for (const candidate of candidates) {
-    const v = candidate && String(candidate).trim();
-    if (v && last10(v) && !TWILIO_NUMBERS.isInternalNumber(v) && !isSentinelPhone(v)) return v;
-  }
-  return null;
-}
+const { firstExternalPhone, last10 } = require('../external-phone');
 
 function parseMaybeJson(value) {
   if (!value) return null;

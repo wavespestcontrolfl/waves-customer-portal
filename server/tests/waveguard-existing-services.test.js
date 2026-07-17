@@ -10,6 +10,8 @@ const {
   isMembershipCustomerRow,
   isActivePlanCustomer,
   loadExistingRecurringQualifyingRows,
+  loadExistingQualifyingServiceKeys,
+  toQualifyingKeys,
 } = require('../services/waveguard-existing-services');
 
 function fakeDb({ customer, scheduledRows = [] } = {}) {
@@ -69,5 +71,18 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
     const db = fakeDb({ customer: { id: 'c1', waveguard_tier: null }, scheduledRows: [pestRow] });
     const rows = await loadExistingRecurringQualifyingRows(db, 'c1');
     expect(rows).toEqual([]);
+  });
+
+  test('authoritative qualifying keys expand combined plan components', async () => {
+    const db = fakeDb({
+      customer: { id: 'c1', waveguard_tier: 'Silver' },
+      scheduledRows: [
+        { id: 'combo', service_type: 'Quarterly Pest + Lawn' },
+        { id: 'non-tier', service_type: 'Rodent Bait Stations' },
+      ],
+    });
+
+    expect(toQualifyingKeys('Quarterly Pest + Lawn')).toEqual(['pest_control', 'lawn_care']);
+    expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual(['pest_control', 'lawn_care']);
   });
 });

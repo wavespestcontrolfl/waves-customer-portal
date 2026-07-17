@@ -19,6 +19,7 @@ const {
 } = require('../pricing-engine');
 const { deriveTotals } = require('../estimator-engine/draft-builder');
 const { sameStreetAddress } = require('../estimator-engine/address-compare');
+const { firstExternalPhone } = require('../external-phone');
 const { normalizeGrassType, grassTypeLabel } = require('../lawn-grass-context');
 const { shortenOrPassthrough } = require('../short-url');
 const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
@@ -31,6 +32,9 @@ const { performPropertyLookup } = require('../../routes/property-lookup-v2');
 const { buildAgentEstimateContext } = require('../agent-estimate-context');
 const { toQualifyingKey } = require('../waveguard-existing-services');
 const { computeMembershipContext, loadCurrentServiceSpendContext } = require('../estimate-membership-context');
+
+const PROPERTY_FACT_TOKEN_TTL_MS = 15 * 60 * 1000;
+const PROPERTY_FACT_FALLBACK_SECRET = crypto.randomBytes(32);
 
 const ESTIMATE_TOOLS = [
   {
@@ -238,6 +242,7 @@ Use for: the final step on the Agent Estimate page, after lookup_property, proto
           },
         },
         propertyFacts: { type: 'object', description: 'Per-field selected values, sources, confidence, and conflicts. Lawn drafts must include the verified treatable-turf fact; commercial drafts must include the verified treated building/unit area.' },
+        propertyFactVerificationToken: { type: 'string', description: 'Opaque token returned by lookup_property. Pass it unchanged when propertyFacts use lookup-derived measurements; caller/operator facts instead require an exact quote from loaded lead evidence.' },
         protocolReview: {
           type: 'array',
           description: 'One row per selected service after reading the complete protocol.',
@@ -323,6 +328,110 @@ async function executeEstimateTool(toolName, input, actionContext = {}) {
 
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 
+function normalizeFactName(value) {
+  return String(value || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-z0-9]+/gi, '')
+    .toLowerCase();
+}
+
+function factFamily(value) {
+  const key = normalizeFactName(value);
+  if (/buildingslab/.test(key)) return 'building_slab';
+  if (/bed.*area|treatablebed/.test(key)) return 'bed_area';
+  if (/attic/.test(key)) return 'attic';
+  if (/footprint/.test(key)) return 'footprint';
+  if (/slab/.test(key)) return 'slab';
+  if (/lawn|turf/.test(key)) return 'turf';
+  if (/lot|outdoor/.test(key)) return 'lot';
+  if (/home|building|squarefootage/.test(key)) return 'structure';
+  if (/stor|floorcount/.test(key)) return 'stories';
+  if (/bedroom/.test(key)) return 'bedrooms';
+  if (/unit|apartment/.test(key)) return 'units';
+  if (/palm/.test(key)) return 'palms';
+  if (/perimeter|linear/.test(key)) return 'perimeter';
+  return null;
+}
+
+function factNamesCompatible(left, right) {
+  const a = normalizeFactName(String(left || '').split('.').pop());
+  const b = normalizeFactName(String(right || '').split('.').pop());
+  if (!a || !b) return false;
+  if (a === b || (a.length >= 5 && b.includes(a)) || (b.length >= 5 && a.includes(b))) return true;
+  const aFamily = factFamily(left);
+  return !!aFamily && aFamily === factFamily(right);
+}
+
+function collectNumericFacts(value, path = [], out = []) {
+  if (!value || typeof value !== 'object') return out;
+  for (const [name, nested] of Object.entries(value)) {
+    const nextPath = [...path, name];
+    if (nested && typeof nested === 'object') collectNumericFacts(nested, nextPath, out);
+    else if (Number.isFinite(Number(nested))) out.push({ key: nextPath.join('.'), value: Number(nested) });
+  }
+  return out;
+}
+
+function isMeasurementFactName(value) {
+  return /sqft|squarefoot|area|size|count|bedroom|units?|linear|perimeter|stor(y|ies)|floor|palm/i
+    .test(normalizeFactName(value));
+}
+
+function propertyLookupCredentialFacts(property, enriched) {
+  const facts = [];
+  const add = (key, value) => {
+    if (Number.isFinite(Number(value))) facts.push({ key, value: Number(value) });
+  };
+  add('homeSqFt', property?.home_sqft);
+  add('buildingSqFt', property?.home_sqft);
+  add('lotSqFt', property?.lot_sqft);
+  add('bedrooms', property?.bedrooms);
+  add('stories', property?.stories);
+  add('yearBuilt', property?.year_built);
+  const enrichedFacts = collectNumericFacts(enriched)
+    .filter((fact) => isMeasurementFactName(fact.key));
+  facts.push(...enrichedFacts);
+  const turfFact = enrichedFacts.find((fact) => /lawn|turf/i.test(fact.key));
+  if (turfFact) {
+    add('measuredTurfSf', turfFact.value);
+    add('estimatedTurfSf', turfFact.value);
+    add('lawnSqFt', turfFact.value);
+  }
+  return facts;
+}
+
+function propertyFactSecret() {
+  return process.env.JWT_SECRET || PROPERTY_FACT_FALLBACK_SECRET;
+}
+
+function signPropertyFactCredential(address, property, enriched) {
+  const payload = Buffer.from(JSON.stringify({
+    version: 1,
+    expiresAt: Date.now() + PROPERTY_FACT_TOKEN_TTL_MS,
+    address: property?.formatted_address || address,
+    facts: propertyLookupCredentialFacts(property, enriched),
+  })).toString('base64url');
+  const signature = crypto.createHmac('sha256', propertyFactSecret()).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function verifyPropertyFactCredential(token, quoteAddress) {
+  try {
+    const [payload, suppliedSignature] = String(token || '').split('.');
+    if (!payload || !suppliedSignature) return null;
+    const expectedSignature = crypto.createHmac('sha256', propertyFactSecret()).update(payload).digest('base64url');
+    const supplied = Buffer.from(suppliedSignature);
+    const expected = Buffer.from(expectedSignature);
+    if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return null;
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (decoded.version !== 1 || Number(decoded.expiresAt) < Date.now()) return null;
+    if (quoteAddress && decoded.address && !sameStreetAddress(decoded.address, quoteAddress)) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
 async function lookupProperty({ address }) {
   if (!address) return { error: 'address required' };
 
@@ -352,7 +461,14 @@ async function lookupProperty({ address }) {
     if (satellite && satellite.inServiceArea === false) {
       return { error: 'Address is outside Waves service area (SW Florida).', property, satellite: null };
     }
-    return { property, satellite, enriched: lookup.enriched || null, errors: lookup.errors || [] };
+    const enriched = lookup.enriched || null;
+    return {
+      property,
+      satellite,
+      enriched,
+      property_fact_verification_token: signPropertyFactCredential(address, property, enriched),
+      errors: lookup.errors || [],
+    };
   } catch (e) {
     logger.error('[estimate-tools] AI property lookup failed', {
       errorName: e?.name || 'Error',
@@ -588,6 +704,7 @@ function accountPricingFromContext(context = {}) {
     priorQualifyingServices,
     activeServices,
     customerAccount: account,
+    evidenceContext: context,
   };
 }
 
@@ -1293,12 +1410,86 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   // and an affirmative confidence — an empty `{ address: {} }` placeholder
   // must not satisfy the key-presence checks below and green a draft whose
   // price-driving measurements were never verified.
-  const isVerifiedFact = (fact) => {
+  const evidenceContext = accountPricing.evidenceContext || {};
+  const propertyCredential = verifyPropertyFactCredential(
+    input.propertyFactVerificationToken,
+    input.address,
+  );
+  const numericValuesMatch = (left, right) => Number.isFinite(Number(left))
+    && Number.isFinite(Number(right))
+    && Math.abs(Number(left) - Number(right)) <= Math.max(1, Math.abs(Number(right)) * 0.01);
+  const credentialGroundsFact = (key, fact) => {
+    if (!propertyCredential) return false;
+    if (/address/i.test(key)) return sameStreetAddress(String(fact.value), propertyCredential.address);
+    if (!Number.isFinite(Number(fact.value))) return false;
+    return (propertyCredential.facts || []).some((candidate) => (
+      factNamesCompatible(key, candidate.key) && numericValuesMatch(fact.value, candidate.value)
+    ));
+  };
+  const structuredFacts = [
+    ...collectNumericFacts(evidenceContext?.quote_form?.extracted_data, ['quote_form']),
+    ...(evidenceContext?.calls || []).flatMap((call) => collectNumericFacts(call?.extraction, ['call_extraction'])),
+  ].filter((fact) => isMeasurementFactName(fact.key));
+  if (sameStreetAddress(evidenceContext?.customer_profile?.address, input.address)) {
+    structuredFacts.push(...collectNumericFacts(evidenceContext.customer_profile, ['customer_profile'])
+      .filter((fact) => isMeasurementFactName(fact.key)));
+  }
+  const structuredEvidenceGroundsFact = (key, fact) => Number.isFinite(Number(fact.value))
+    && structuredFacts.some((candidate) => factNamesCompatible(key, candidate.key)
+      && numericValuesMatch(fact.value, candidate.value));
+  const semanticPatternForFact = (key) => {
+    const familyPatterns = {
+      building_slab: /building.{0,20}slab|slab.{0,20}building/i,
+      bed_area: /bed.{0,20}(area|square|sq\s*ft|sqft)|treatable.{0,20}bed/i,
+      attic: /attic/i,
+      footprint: /footprint/i,
+      slab: /slab/i,
+      turf: /lawn|turf/i,
+      lot: /lot|outdoor/i,
+      structure: /home|house|building|square\s*foot|sq\s*ft|sqft/i,
+      stories: /stor(y|ies)|floor/i,
+      bedrooms: /bedroom/i,
+      units: /unit|apartment/i,
+      palms: /palm/i,
+      perimeter: /perimeter|linear/i,
+    };
+    const family = factFamily(key);
+    if (familyPatterns[family]) return familyPatterns[family];
+    const meaningfulToken = String(key || '')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .split(/[^a-z0-9]+/i)
+      .find((token) => token.length >= 4 && !/^(count|area|size|feet|sqft)$/i.test(token));
+    return meaningfulToken ? new RegExp(meaningfulToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
+  };
+  const verifiedQuoteGroundsFact = (key, fact) => {
+    const observed = Number(fact.value);
+    if (!Number.isFinite(observed)) return false;
+    const semanticPattern = semanticPatternForFact(key);
+    if (!semanticPattern) return false;
+    return (Array.isArray(input.evidence) ? input.evidence : []).some((row) => {
+      const quote = String(row?.quote || '');
+      if (!semanticPattern.test(quote)) return false;
+      const quoteValues = quote.match(/-?\d[\d,]*(?:\.\d+)?/g) || [];
+      if (!quoteValues.some((value) => numericValuesMatch(value.replace(/,/g, ''), observed))) return false;
+      return verifyAgentEvidenceQuotes([row], evidenceContext).verified === 1;
+    });
+  };
+  const serverEvidenceGroundsFact = (key, fact) => {
+    if (credentialGroundsFact(key, fact)) return true;
+    if (/address/i.test(key)) {
+      const addresses = [evidenceContext?.lead?.address, evidenceContext?.customer_profile?.address]
+        .filter(Boolean);
+      return addresses.some((address) => sameStreetAddress(String(fact.value), address));
+    }
+    return structuredEvidenceGroundsFact(key, fact) || verifiedQuoteGroundsFact(key, fact);
+  };
+  const isVerifiedFact = (key, fact) => {
     if (!fact || typeof fact !== 'object') return false;
     const hasValue = fact.value !== undefined && fact.value !== null && String(fact.value).trim() !== '';
     const confidence = String(fact.confidence || '').trim().toLowerCase();
     return hasValue && !!fact.source && !!confidence
-      && !['low', 'weak', 'unknown', 'unverified'].includes(confidence);
+      && !['low', 'weak', 'unknown', 'unverified'].includes(confidence)
+      && serverEvidenceGroundsFact(key, fact);
   };
   const getPath = (object, path) => path.split('.').reduce((value, part) => value?.[part], object);
   const normalizedMeasurementName = (value) => String(value || '')
@@ -1320,7 +1511,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   };
   collectNumericEngineMeasurements(input.engineInputs);
   const factMatchesPricingInput = (key, fact) => {
-    if (!isVerifiedFact(fact)) return false;
+    if (!isVerifiedFact(key, fact)) return false;
     if (/address/i.test(key)) return sameStreetAddress(String(fact.value), input.address);
     let candidateKeys = [];
     if (/building.*slab|slab.*building/i.test(key)) candidateKeys = ['buildingSlabSqFt'];
@@ -1369,7 +1560,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     const hasMatch = expected === undefined
       ? hasVerifiedMatchingFact(pattern)
       : propertyFactEntries.some(([key, fact]) => pattern.test(key)
-        && isVerifiedFact(fact) && valuesMatch(fact.value, expected));
+        && isVerifiedFact(key, fact) && valuesMatch(fact.value, expected));
     if (active && !hasMatch) {
       laneReasons.push(`${label} was used for pricing without a matching verified property fact`);
     }
@@ -1415,8 +1606,8 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     laneReasons.push('draft service address differs from the selected lead address');
   }
   for (const [key, fact] of propertyFactEntries) {
-    if (!isVerifiedFact(fact)) {
-      laneReasons.push(`${key} lacks a verified value, source, or confidence`);
+    if (!isVerifiedFact(key, fact)) {
+      laneReasons.push(`${key} lacks a server-verified value, source, confidence, or evidence binding`);
     } else if (!factMatchesPricingInput(key, fact)) {
       laneReasons.push(`${key} does not match the price-driving estimate input`);
     }
@@ -1627,8 +1818,11 @@ function addressIdentity(value) {
 }
 
 function anchorAgentEstimateContact(input, lead) {
-  const leadPhone = String(lead.phone || '').trim();
-  const inputPhone = String(input.customerPhone || '').trim();
+  // Suppressed caller-ID sentinels and Waves-owned tracking/forwarding lines
+  // are context-routing values, never customer recipients. Apply the same
+  // shared external-number filter used by estimator context assembly.
+  const leadPhone = firstExternalPhone(lead.phone);
+  const inputPhone = firstExternalPhone(input.customerPhone);
   if (leadPhone && inputPhone && normalizeContactPhone(leadPhone) !== normalizeContactPhone(inputPhone)) {
     return { error: 'Draft phone does not match the selected lead. Refresh the lead evidence before drafting.' };
   }

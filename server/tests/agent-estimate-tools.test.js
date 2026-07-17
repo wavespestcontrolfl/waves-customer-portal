@@ -47,6 +47,7 @@ jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async 
 
 const { executeEstimateTool, _private } = require('../services/intelligence-bar/estimate-tools');
 const { performPropertyLookup } = require('../routes/property-lookup-v2');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 const ENGINE_RESULT = {
   summary: {
@@ -227,6 +228,27 @@ describe('Agent Estimate draft tool', () => {
 
     expect(result.lane).toBe('yellow');
     expect(result.lane_reasons).toContain('1 evidence quote(s) could not be verified against the selected lead');
+  });
+
+  test('rejects model-only pricing facts even when source and confidence look authoritative', async () => {
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 10000, services: { pest: { frequency: 'quarterly' } } },
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 10000, source: 'county', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'home/building square footage was used for pricing without a matching verified property fact',
+      expect.stringMatching(/homeSqFt lacks a server-verified/i),
+    ]));
   });
 
   test('verifies structured form and call extraction quotes only against those sources', () => {
@@ -590,7 +612,105 @@ describe('Agent Estimate property lookup safety', () => {
 
     expect(result.satellite).toEqual(expect.objectContaining({ imageAvailable: true, inServiceArea: true }));
     expect(result.enriched).toEqual({ treatableLawnSqFt: 4200 });
+    expect(result.property_fact_verification_token).toEqual(expect.any(String));
     expect(JSON.stringify(result)).not.toMatch(/secret-key|staticmap|imageUrl|microCloseUrl/);
+  });
+
+  test('signed lookup facts can satisfy the server evidence binding', async () => {
+    performPropertyLookup.mockResolvedValue({
+      propertyRecord: {
+        formattedAddress: '1 Test St, Bradenton FL 34208',
+        squareFootage: 2000,
+        _source: 'county',
+      },
+      satellite: { inServiceArea: true },
+    });
+    const lookup = await executeEstimateTool('lookup_property', { address: INPUT.address });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' } } },
+      propertyFactVerificationToken: lookup.property_fact_verification_token,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.lane).toBe('green');
+  });
+
+  test('tampering with a lookup credential leaves its model facts unverified', async () => {
+    performPropertyLookup.mockResolvedValue({
+      propertyRecord: { formattedAddress: INPUT.address, squareFootage: 2000, _source: 'county' },
+      satellite: { inServiceArea: true },
+    });
+    const lookup = await executeEstimateTool('lookup_property', { address: INPUT.address });
+    const token = lookup.property_fact_verification_token;
+    const tampered = `${token.slice(0, -1)}${token.endsWith('a') ? 'b' : 'a'}`;
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' } } },
+      propertyFactVerificationToken: tampered,
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain(
+      'home/building square footage was used for pricing without a matching verified property fact',
+    );
+  });
+
+  test('an exact server-loaded operator quote can ground a pricing measurement', async () => {
+    const quote = 'Operator confirmed the home is 2000 square feet';
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: { id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone },
+      quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+      calls: [], sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' } } },
+      evidence: [{ source: 'quote_form', quote, decision: 'home square footage' }],
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.lane).toBe('green');
+  });
+});
+
+describe('Agent Estimate recipient phone safety', () => {
+  test.each([
+    'RESTRICTED',
+    '7378742833',
+    TWILIO_NUMBERS.mainLine.number,
+  ])('does not anchor non-customer phone %s as a draft recipient', (phone) => {
+    const result = _private.anchorAgentEstimateContact(
+      { ...INPUT, customerPhone: phone },
+      { id: 'lead-1', phone, email: INPUT.customerEmail },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.input.customerPhone).toBeNull();
+  });
+
+  test('keeps a real external lead phone as the draft recipient', () => {
+    const result = _private.anchorAgentEstimateContact(INPUT, {
+      id: 'lead-1', phone: INPUT.customerPhone, email: INPUT.customerEmail,
+    });
+    expect(result.input.customerPhone).toBe(INPUT.customerPhone);
   });
 });
 

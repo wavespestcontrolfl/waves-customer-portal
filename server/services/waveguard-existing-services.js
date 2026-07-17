@@ -60,21 +60,25 @@ async function isActivePlanCustomer(database, customerId) {
 // line label) to a WaveGuard qualifying service key. Scoped to the five
 // qualifiers — palm_injection and rodent_bait are explicitly NOT qualifiers,
 // and one-time treatments (one_time_pest etc.) never count toward the tier.
-function toQualifyingKey(raw) {
+function toQualifyingKeys(raw) {
   const s = String(raw || '').toLowerCase();
-  if (!s) return null;
-  if (s.includes('rodent') || s.includes('palm')) return null;
-  if (/one[\s_-]?time|onetime/.test(s)) return null;
+  if (!s) return [];
+  if (/one[\s_-]?time|onetime/.test(s)) return [];
   // Commercial auto-priced plans are FLAT and never count toward a WaveGuard
   // tier — otherwise an accepted "Commercial Turf Treatment Program" would feed
   // priorQualifyingServices and unlock WaveGuard discounts on future estimates.
-  if (s.includes('commercial')) return null;
-  if (s.includes('pest')) return 'pest_control';
-  if (s.includes('lawn') || s.includes('turf')) return 'lawn_care';
-  if (s.includes('tree') || s.includes('shrub') || s.includes('ornamental')) return 'tree_shrub';
-  if (s.includes('mosquito')) return 'mosquito';
-  if (s.includes('termite') && s.includes('bait')) return 'termite_bait';
-  return null;
+  if (s.includes('commercial')) return [];
+  const keys = new Set();
+  if (s.includes('pest')) keys.add('pest_control');
+  if (s.includes('lawn') || s.includes('turf')) keys.add('lawn_care');
+  if (s.includes('tree') || s.includes('shrub') || s.includes('ornamental')) keys.add('tree_shrub');
+  if (s.includes('mosquito')) keys.add('mosquito');
+  if (s.includes('termite') && s.includes('bait')) keys.add('termite_bait');
+  return [...keys];
+}
+
+function toQualifyingKey(raw) {
+  return toQualifyingKeys(raw)[0] || null;
 }
 
 // Load every active recurring service row for account recognition/spend. This
@@ -124,15 +128,14 @@ async function loadActiveRecurringServiceRows(database, customerId) {
 async function loadExistingRecurringQualifyingRows(database, customerId) {
   if (!(await isActivePlanCustomer(database, customerId))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
-  return rows.filter((r) => toQualifyingKey(r.service_type) !== null);
+  return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
 }
 
 // Distinct qualifying service keys from a set of rows.
 function qualifyingKeysFromRows(rows = []) {
   const keys = new Set();
   for (const r of rows) {
-    const key = toQualifyingKey(r.service_type);
-    if (key) keys.add(key);
+    toQualifyingKeys(r.service_type).forEach((key) => keys.add(key));
   }
   return [...keys];
 }
@@ -146,6 +149,7 @@ async function loadExistingQualifyingServiceKeys(database, customerId) {
 module.exports = {
   TERMINAL_STATUSES,
   toQualifyingKey,
+  toQualifyingKeys,
   loadActiveRecurringServiceRows,
   loadExistingRecurringQualifyingRows,
   qualifyingKeysFromRows,
