@@ -915,3 +915,25 @@ describe('prevention-promise guard — round-3 hardening (Codex findings)', () =
     expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
   });
 });
+
+describe('prevention/product guards — round-4 hardening (Codex findings)', () => {
+  test('a disclaimer cannot shield a coordinated promise in the SAME sentence', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant, but our service eliminates ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('the claim directly governed by the negated promise stays exempt', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant — Florida does not work that way.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('non-product tool/inventory statements pass', () => {
+    const r = guardrails.evaluate({ body: 'Our team uses inspection notes to tailor each visit, and our technicians use moisture meters to find leaks.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('product-context inventory statements still block', () => {
+    const r = guardrails.evaluate({ body: 'Our techs carry more than one bait on every ant call.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+});

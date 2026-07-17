@@ -231,15 +231,23 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         let pendingAutonomous = [];
         try {
           pendingAutonomous = await db('autonomous_runs')
-            .where({ outcome: 'completed_pending_review' })
+            .where({ 'autonomous_runs.outcome': 'completed_pending_review' })
+            // The run's outcome alone goes stale: an operator dismiss/requeue
+            // moves the opportunity_queue row, not the old run — such drafts
+            // will never publish and must not suppress a replacement angle or
+            // get linked. Only runs whose queue row is STILL parked at the
+            // PR-pending review state are live duplicate candidates.
+            .join('opportunity_queue as oq', 'oq.id', 'autonomous_runs.opportunity_id')
+            .where('oq.status', 'pending_review')
+            .where('oq.skip_reason', 'astro_pr_pending_merge')
             .where((qb) => {
               qb.whereRaw("LOWER(draft_payload->'frontmatter'->>'title') LIKE ?", [`%${keyword.toLowerCase()}%`])
                 .orWhereRaw("LOWER(draft_payload->'frontmatter'->>'primary_keyword') LIKE ?", [`%${keyword.toLowerCase()}%`]);
             })
             .select(
-              'id',
-              'action_type',
-              'astro_pr_url',
+              'autonomous_runs.id',
+              'autonomous_runs.action_type',
+              'autonomous_runs.astro_pr_url',
               db.raw("draft_payload->'frontmatter'->>'title' AS title"),
               db.raw("draft_payload->'frontmatter'->>'primary_keyword' AS keyword"),
               // The draft's future route — the writer is instructed to LINK a

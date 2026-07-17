@@ -608,9 +608,14 @@ const ACTIVE_INGREDIENT_TERMS = [
   'chlorantraniliprole',
 ];
 const INVENTORY_CLAIM_RES = [
-  // "our techs carry / use / apply / lean on / rely on / prefer …"
-  /\b(?:our|waves(?:'s?)?)\s+(?:techs?|technicians?|team|pros?|crews?)\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\s+on|rely|relies|prefer|prefers|spray|sprays|trust|trusts)\b/i,
-  // "what our technicians carry", "which is what our techs use"
+  // "our techs carry/use/rely on … <some product/formulation>" — the verb
+  // alone is NOT a violation ("our technicians use moisture meters", "our
+  // team uses inspection notes"); it must be about a pesticide product.
+  // Named brands/ingredients after these verbs are caught by the brand and
+  // ingredient branches regardless.
+  new RegExp(`\\b(?:our|waves(?:'s?)?)\\s+(?:techs?|technicians?|team|pros?|crews?)\\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\\s+on|rely|relies|prefer|prefers|spray|sprays|trust|trusts)\\b[^.!?\\n]{0,80}\\b(?:${PRODUCT_NOUN_SRC}|baits?|gels?|products?|formulations?|chemicals?|materials?)\\b`, 'i'),
+  // Anaphoric inventory claims — "what our techs carry", "which is what our
+  // techs use" — always refer back to a just-named product; keep unconditional.
   /\bwhat\s+(?:our|the)\s+(?:techs?|technicians?|team|pros?)\s+(?:carry|carries|use|uses)\b/i,
   /\bwhich\s+is\s+what\s+(?:our\s+(?:techs?|technicians?|team)|we)\s+(?:carry|carries|use|uses)\b/i,
 ];
@@ -727,16 +732,23 @@ function preventionPromiseFinding(text) {
     const re = new RegExp(src, 'gi');
     let m;
     while ((m = re.exec(s)) !== null) {
-      // The negation must live in the SAME sentence as the promise — a
-      // disclaimer in one sentence must not shield an unrelated marketing
-      // claim in the next ("No honest company can promise permanent
-      // prevention. Our treatment eliminates ants." → second sentence flags).
+      // The negation must GOVERN the matched claim: same sentence AND no
+      // clause boundary between the negated "promise/guarantee" verb and the
+      // match. A disclaimer must shield neither the next sentence ("… can
+      // promise permanent prevention. Our treatment eliminates ants.") nor a
+      // coordinated clause in the same sentence ("… you'll never see another
+      // ant, but our service eliminates ants.").
       const before = s.slice(Math.max(0, m.index - 80), m.index);
       const sentenceBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n'));
       const sameSentence = sentenceBreak >= 0 ? before.slice(sentenceBreak + 1) : before;
-      if (NEGATED_PROMISE_CONTEXT_RE.test(sameSentence)) {
-        if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
-        continue;
+      const negation = NEGATED_PROMISE_CONTEXT_RE.exec(sameSentence);
+      if (negation) {
+        const between = sameSentence.slice(negation.index + negation[0].length);
+        const clauseBreak = /[;:—–]|,\s*(?:but|and|yet|so|however|while)\b|\b(?:but|however)\b/i.test(between);
+        if (!clauseBreak) {
+          if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
+          continue;
+        }
       }
       return finding('P1', 'PREVENTION_PROMISE', `Prevention/elimination promise "${m[0].trim()}" — the facts bank prohibits guaranteed-outcome claims. Describe reduced recurrence and the free re-treatment (callback) guarantee instead.`);
     }
