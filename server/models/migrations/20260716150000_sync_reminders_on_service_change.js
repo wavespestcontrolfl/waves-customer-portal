@@ -43,16 +43,24 @@
  * anything itself.
  */
 
-const ACTIVE_SERVICE = `('pending','confirmed','rescheduled')`;
-const SENDABLE_SERVICE = `('pending','confirmed')`;
+// MOVABLE: statuses whose date/window edits must sync the reminder row —
+// everything the schedule tools can move, including in-progress visits
+// (IB schedule tools move en_route/on_site rows while preserving status).
+// SENDABLE: statuses the cron will actually deliver for (everything except
+// REMINDER_BLOCKING_STATUSES = terminals + 'rescheduled') — only these can
+// own a shared slot or be promoted into ownership.
+const MOVABLE_SERVICE = `('pending','confirmed','rescheduled','en_route','on_site')`;
+const SENDABLE_SERVICE = `('pending','confirmed','en_route','on_site')`;
 const TERMINAL_SERVICE = `('cancelled','skipped','no_show','completed')`;
 
 // Serialization key — MUST match registerAppointment/registerVisitReminderInTx:
 // `appointment-reminder:${customerId}:${apptTime.toISOString()}`
-const LOCK_SQL = (timeExpr) => `
-    PERFORM pg_advisory_xact_lock(hashtext(
-      'appointment-reminder:' || NEW.customer_id || ':' ||
-      to_char(${timeExpr} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')));
+const LOCK_KEY_SQL = `
+CREATE OR REPLACE FUNCTION reminder_slot_lock_key(p_customer_id uuid, p_time timestamptz)
+RETURNS integer AS $$
+  SELECT hashtext('appointment-reminder:' || p_customer_id || ':' ||
+                  to_char(p_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'));
+$$ LANGUAGE sql IMMUTABLE;
 `;
 
 const PROMOTE_SQL = `
@@ -67,14 +75,15 @@ BEGIN
   -- delivered its reminders is never re-armed.
   UPDATE appointment_reminders arp
      SET suppressed_by_sibling = false,
-         reminder_72h_sent = (arp.appointment_time > NOW()
-                              AND arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes'),
+         -- Past-or-due times close the window (a flag left false on a past
+         -- appointment keeps the row in every cron scan forever); only a
+         -- genuinely future 24h window re-arms.
+         reminder_72h_sent = (arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes'),
          reminder_72h_sent_at = CASE
-           WHEN arp.appointment_time > NOW()
-                AND arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
+           WHEN arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
            ELSE NULL END,
-         reminder_24h_sent = false,
-         reminder_24h_sent_at = NULL,
+         reminder_24h_sent = (arp.appointment_time <= NOW()),
+         reminder_24h_sent_at = CASE WHEN arp.appointment_time <= NOW() THEN NOW() ELSE NULL END,
          updated_at = NOW()
    WHERE arp.id = (
            SELECT ar2.id
@@ -113,12 +122,21 @@ DECLARE
   owner_exists boolean;
   became_terminal boolean;
   became_active boolean;
+  became_sendable boolean;
   time_changed boolean;
+  l_new integer;
+  l_old integer;
 BEGIN
   became_terminal := NEW.status IN ${TERMINAL_SERVICE}
                      AND OLD.status NOT IN ${TERMINAL_SERVICE};
   became_active   := OLD.status IN ${TERMINAL_SERVICE}
-                     AND NEW.status IN ${ACTIVE_SERVICE};
+                     AND NEW.status IN ${MOVABLE_SERVICE};
+  -- A 'rescheduled' pending-rebook marker can't own a slot, so while it sat
+  -- in that status another row may have become the owner. When it turns
+  -- sendable again (e.g. the customer confirms in place) its ownership must
+  -- be re-decided or two armed rows share the slot.
+  became_sendable := OLD.status = 'rescheduled'
+                     AND NEW.status IN ${SENDABLE_SERVICE};
   time_changed    := (NEW.scheduled_date IS DISTINCT FROM OLD.scheduled_date)
                      OR (NEW.window_start IS DISTINCT FROM OLD.window_start);
 
@@ -129,6 +147,10 @@ BEGIN
     UPDATE appointment_reminders
        SET cancelled = true, updated_at = NOW()
      WHERE scheduled_service_id = NEW.id AND cancelled = false;
+    -- Serialize with registration on the vacated slot: an in-flight
+    -- registration may have observed this owner and be inserting a
+    -- suppressed sibling this promotion can't see yet.
+    PERFORM pg_advisory_xact_lock(reminder_slot_lock_key(NEW.customer_id, old_appt_time));
     PERFORM promote_suppressed_reminder_sibling(NEW.customer_id, NEW.id, old_appt_time,
                                                 OLD.scheduled_date, OLD.window_start);
     RETURN NEW;
@@ -136,17 +158,27 @@ BEGIN
 
   -- Time edits on a service that is (and stays) terminal must not resurrect
   -- its cancelled reminder.
-  IF NEW.status NOT IN ${ACTIVE_SERVICE} THEN
+  IF NEW.status NOT IN ${MOVABLE_SERVICE} THEN
     RETURN NEW;
   END IF;
 
-  IF time_changed OR became_active THEN
+  IF time_changed OR became_active OR became_sendable THEN
     new_appt_time := ((NEW.scheduled_date + COALESCE(NEW.window_start, TIME '08:00'))::timestamp
                       AT TIME ZONE 'America/New_York');
 
-    -- Serialize with concurrent arrivals AND the app registration path so
-    -- two simultaneous moves onto an empty slot can't both become owner.
-    ${LOCK_SQL('new_appt_time')}
+    -- Serialize with concurrent arrivals/departures AND the app registration
+    -- path. Both slot keys are taken in canonical order so two opposite
+    -- simultaneous swaps (A: S->T, B: T->S) cannot deadlock.
+    l_new := reminder_slot_lock_key(NEW.customer_id, new_appt_time);
+    IF time_changed THEN
+      l_old := reminder_slot_lock_key(NEW.customer_id, old_appt_time);
+      PERFORM pg_advisory_xact_lock(LEAST(l_new, l_old));
+      IF l_new <> l_old THEN
+        PERFORM pg_advisory_xact_lock(GREATEST(l_new, l_old));
+      END IF;
+    ELSE
+      PERFORM pg_advisory_xact_lock(l_new);
+    END IF;
 
     -- Arrival: does an active owner already hold the destination slot?
     -- Only a non-suppressed row whose live service is sendable counts —
@@ -167,16 +199,18 @@ BEGIN
        SET appointment_time = new_appt_time,
            cancelled = false,
            suppressed_by_sibling = owner_exists,
+           -- Past-or-due times close the window (an armed flag on a past
+           -- appointment keeps the row in every cron scan forever).
            reminder_72h_sent = owner_exists
-                               OR (new_appt_time > NOW()
-                                   AND new_appt_time <= NOW() + INTERVAL '72 hours 15 minutes'),
+                               OR new_appt_time <= NOW() + INTERVAL '72 hours 15 minutes',
            reminder_72h_sent_at = CASE
              WHEN owner_exists
-                  OR (new_appt_time > NOW()
-                      AND new_appt_time <= NOW() + INTERVAL '72 hours 15 minutes') THEN NOW()
+                  OR new_appt_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
              ELSE NULL END,
-           reminder_24h_sent = owner_exists,
-           reminder_24h_sent_at = CASE WHEN owner_exists THEN NOW() ELSE NULL END,
+           reminder_24h_sent = owner_exists OR new_appt_time <= NOW(),
+           reminder_24h_sent_at = CASE
+             WHEN owner_exists OR new_appt_time <= NOW() THEN NOW()
+             ELSE NULL END,
            updated_at = NOW()
      WHERE scheduled_service_id = NEW.id;
 
@@ -225,6 +259,7 @@ exports.up = async function up(knex) {
                 AND sib.id <> ar.id)
   `);
 
+  await knex.raw(LOCK_KEY_SQL);
   await knex.raw(PROMOTE_SQL);
   await knex.raw(FUNCTION_SQL);
   await knex.raw('DROP TRIGGER IF EXISTS scheduled_services_sync_reminder ON scheduled_services');
@@ -241,21 +276,21 @@ exports.up = async function up(knex) {
     UPDATE appointment_reminders ar
        SET appointment_time = sync.correct_time,
            suppressed_by_sibling = false,
-           reminder_72h_sent = (sync.correct_time > NOW()
-                                AND sync.correct_time <= NOW() + INTERVAL '72 hours 15 minutes'),
+           -- Past-or-due times close the window (an armed flag on a past
+           -- appointment keeps the row in every cron scan forever).
+           reminder_72h_sent = (sync.correct_time <= NOW() + INTERVAL '72 hours 15 minutes'),
            reminder_72h_sent_at = CASE
-             WHEN sync.correct_time > NOW()
-                  AND sync.correct_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
+             WHEN sync.correct_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
              ELSE NULL END,
-           reminder_24h_sent = false,
-           reminder_24h_sent_at = NULL,
+           reminder_24h_sent = (sync.correct_time <= NOW()),
+           reminder_24h_sent_at = CASE WHEN sync.correct_time <= NOW() THEN NOW() ELSE NULL END,
            updated_at = NOW()
       FROM (
         SELECT ss.id AS service_id,
                ((ss.scheduled_date + COALESCE(ss.window_start, TIME '08:00'))::timestamp
                 AT TIME ZONE 'America/New_York') AS correct_time
           FROM scheduled_services ss
-         WHERE ss.status IN ${ACTIVE_SERVICE}
+         WHERE ss.status IN ${MOVABLE_SERVICE}
            AND ss.scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date
       ) sync
      WHERE sync.service_id = ar.scheduled_service_id
@@ -289,7 +324,6 @@ exports.up = async function up(knex) {
                 AND keep.id <> dup.id
                 AND keep.cancelled = false
                 AND keep.suppressed_by_sibling = false
-                AND NOT (keep.reminder_72h_sent AND keep.reminder_24h_sent)
                 AND ssk.status IN ${SENDABLE_SERVICE}
                 AND ssk.scheduled_date = ssd.scheduled_date
                 AND COALESCE(ssk.window_start, TIME '08:00') = COALESCE(ssd.window_start, TIME '08:00')
@@ -304,14 +338,12 @@ exports.up = async function up(knex) {
   await knex.raw(`
     UPDATE appointment_reminders p
        SET suppressed_by_sibling = false,
-           reminder_72h_sent = (p.appointment_time > NOW()
-                                AND p.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes'),
+           reminder_72h_sent = (p.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes'),
            reminder_72h_sent_at = CASE
-             WHEN p.appointment_time > NOW()
-                  AND p.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
+             WHEN p.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
              ELSE NULL END,
-           reminder_24h_sent = false,
-           reminder_24h_sent_at = NULL,
+           reminder_24h_sent = (p.appointment_time <= NOW()),
+           reminder_24h_sent_at = CASE WHEN p.appointment_time <= NOW() THEN NOW() ELSE NULL END,
            updated_at = NOW()
       FROM scheduled_services ssp
      WHERE ssp.id = p.scheduled_service_id
@@ -351,6 +383,7 @@ exports.down = async function down(knex) {
   }
   await knex.raw('DROP FUNCTION IF EXISTS sync_appointment_reminder_on_service_change()');
   await knex.raw('DROP FUNCTION IF EXISTS promote_suppressed_reminder_sibling(uuid, uuid, timestamptz, date, time)');
+  await knex.raw('DROP FUNCTION IF EXISTS reminder_slot_lock_key(uuid, timestamptz)');
   const hasReminders = await knex.schema.hasTable('appointment_reminders');
   if (hasReminders) {
     const hasCol = await knex.schema.hasColumn('appointment_reminders', 'suppressed_by_sibling');
