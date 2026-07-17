@@ -1014,28 +1014,68 @@ const PROJECT_TYPE_KEYS = Object.keys(PROJECT_TYPES);
 // client/src/lib/wdoReportFields.js.
 const INTERNAL_FINDING_KEYS = ['inspection_fee'];
 
+// Finding VALUES need the fee scrub too, not just the dedicated internal key
+// — an inspection fee typed into a free-text field (most plausibly the WDO
+// "Comments / financial disclosure notes") would otherwise ride the public
+// payload and the narrative prompt verbatim (codex #2817). Walks arrays and
+// nested objects so a structured value can't smuggle the string through.
+function redactFindingValue(value) {
+  if (typeof value === 'string') return redactInspectionFeeCues(value);
+  if (Array.isArray(value)) return value.map(redactFindingValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, redactFindingValue(nested)]),
+    );
+  }
+  return value;
+}
+
 function stripInternalFindingKeys(findings) {
   let parsed = findings;
   if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return {}; } }
   if (!parsed || typeof parsed !== 'object') return parsed;
   return Object.fromEntries(
-    Object.entries(parsed).filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key)),
+    Object.entries(parsed)
+      .filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key))
+      .map(([key, value]) => [key, redactFindingValue(value)]),
   );
 }
 
 // Remove ONLY the literal "inspection fee" phrase + a dollar amount from free
-// text — "inspection fee $250", "the inspection fee is $250". Deliberately
-// does NOT match a bare "fee" or a generic price/cost/charge, so a legitimate
-// customer-facing estimate — "Repair cost $1,250", "repair fee $1,250",
-// "permit fee $125", "treatment fee $90" — is never touched (codex #2817 P1).
+// text — "inspection fee $250", "the inspection fee is $250", "the inspection
+// fee is due at time of service: $250". Deliberately does NOT match a bare
+// "fee" or a generic price/cost/charge, so a legitimate customer-facing
+// estimate — "Repair cost $1,250", "repair fee $1,250", "permit fee $125",
+// "treatment fee $90" — is never touched (codex #2817 P1).
+// The cue's reach is one clause, not a fixed character window: it ends at
+// sentence/clause punctuation, and it aborts on a waiver word ("inspection
+// fee waived; repair $1,250" — a waived fee HAS no amount, so whatever
+// follows is something else) or on a word that starts a NEW money subject
+// ("inspection fee noted, treatment estimate $900"). That pairing resolves
+// the two failure modes codex found: a long bridging clause no longer hides
+// the fee, and an unrelated amount after the cue is never redacted.
 // Targets the fee PHRASE, not a specific value, so a stale draft fee no
 // structured snapshot still names is caught too. Enforced at every
-// customer-facing boundary: on write (project create + PUT), at the public
-// /data egress, in the report assistant, and on the AI-write prompt input.
+// customer-facing boundary: on write (project create + PUT + the
+// project-completion notes copy), at the public /data egress
+// (recommendations + free-text finding values), in the report assistant,
+// and on the AI-write prompt input.
+const FEE_REACH_BREAKERS = [
+  // the fee was waived/comped — any amount that follows is not the fee
+  'waiv\\w*', 'comped', 'complimentary', 'free', 'included', 'covered', 'no charge',
+  // a new money subject — its amount is legitimate customer-facing text
+  'repairs?', 're-?treatments?', 'treatments?', 'permits?', 'damages?',
+  'estimates?', 'quotes?', 'deductibles?', 'discounts?', 'credits?', 'balance',
+].join('|');
 function redactInspectionFeeCues(text) {
   const str = String(text || '');
   if (!str) return str;
-  const re = /\b(inspection\s+fee)\b([^.\n]{0,24}?)\$\s?\d[\d,]*(?:\.\d{1,2})?/gi;
+  // Gap chars: anything inside the cue's clause ([.;!?\n] end its reach;
+  // colon and comma stay legal — "due at time of service: $250" is still the
+  // fee) that does not begin a breaker word. The 160 cap only bounds
+  // backtracking; the clause punctuation is the real limit.
+  const gap = `(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)[^.;!?\\n]){0,160}?`;
+  const re = new RegExp(`\\b(inspection\\s+fee)\\b(${gap})\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?`, 'gi');
   return str
     .replace(re, (m, cue, mid) => `${cue}${mid}[fee removed]`)
     .replace(/[ \t]{2,}/g, ' ')

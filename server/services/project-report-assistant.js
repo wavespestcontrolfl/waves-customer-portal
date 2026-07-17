@@ -23,7 +23,9 @@ function cleanFindings(project) {
   const entries = {};
   for (const [key, value] of Object.entries(findings)) {
     if (INTERNAL_FINDING_KEY_SET.has(key)) continue;
-    const text = String(value ?? '').trim();
+    // A fee typed into a free-text finding (WDO comments) must not surface
+    // in an answer either — same guard as the /data payload (codex #2817).
+    const text = redactInspectionFeeCues(String(value ?? '')).trim();
     if (text) entries[key] = text;
   }
   return entries;

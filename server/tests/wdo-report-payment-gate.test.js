@@ -644,6 +644,11 @@ describe('public report routes while held', () => {
       // No report content leaks on the 402 payload.
       expect(body.findings).toBeUndefined();
       expect(body.photos).toBeUndefined();
+      // The held payload carries the invoice number and a bearer pay URL —
+      // it gets the same privacy headers as the report itself (codex #2817).
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     });
   });
 

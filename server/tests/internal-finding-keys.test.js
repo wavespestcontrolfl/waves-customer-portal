@@ -29,6 +29,26 @@ describe('stripInternalFindingKeys', () => {
     expect(stripInternalFindingKeys(undefined)).toBeUndefined();
     expect(stripInternalFindingKeys('not json')).toEqual({});
   });
+
+  test('redacts fee cues inside free-text finding VALUES (WDO comments path)', () => {
+    expect(stripInternalFindingKeys({
+      comments: 'Buyer to pay at closing. Inspection fee $250 collected on site.',
+      wdo_finding: 'No visible signs of WDO observed',
+    })).toEqual({
+      comments: 'Buyer to pay at closing. Inspection fee [fee removed] collected on site.',
+      wdo_finding: 'No visible signs of WDO observed',
+    });
+  });
+
+  test('walks nested values so structure cannot smuggle the fee through', () => {
+    expect(stripInternalFindingKeys({
+      areas: ['Attic clear', 'Inspection fee $95 noted'],
+      details: { note: 'inspection fee due: $250' },
+    })).toEqual({
+      areas: ['Attic clear', 'Inspection fee [fee removed] noted'],
+      details: { note: 'inspection fee due: [fee removed]' },
+    });
+  });
 });
 
 describe('redactInspectionFeeCues', () => {
@@ -46,6 +66,24 @@ describe('redactInspectionFeeCues', () => {
   });
   test('catches a stale fee via language, regardless of the current value', () => {
     expect(redactInspectionFeeCues('Inspection fee $250 quoted earlier.')).toContain('[fee removed]');
+  });
+  test('reaches across a long bridging clause — no fixed character window', () => {
+    expect(redactInspectionFeeCues('The inspection fee is due at time of service: $250'))
+      .toBe('The inspection fee is due at time of service: [fee removed]');
+  });
+  test('a waived/paid fee never swallows a later unrelated amount', () => {
+    expect(redactInspectionFeeCues('Inspection fee waived; repair $1,250.'))
+      .toBe('Inspection fee waived; repair $1,250.');
+    expect(redactInspectionFeeCues('Inspection fee waived, repair estimate $1,250.'))
+      .toBe('Inspection fee waived, repair estimate $1,250.');
+    expect(redactInspectionFeeCues('Inspection fee paid, balance $400 due at close.'))
+      .toBe('Inspection fee paid, balance $400 due at close.');
+  });
+  test('a new money subject ends the cue reach', () => {
+    expect(redactInspectionFeeCues('Inspection fee noted, treatment estimate $900.'))
+      .toBe('Inspection fee noted, treatment estimate $900.');
+    expect(redactInspectionFeeCues('Inspection fee applies; permit $125 billed separately.'))
+      .toBe('Inspection fee applies; permit $125 billed separately.');
   });
   test('leaves fee-free prose and preserves line breaks', () => {
     expect(redactInspectionFeeCues('Monitor bait stations quarterly.')).toBe('Monitor bait stations quarterly.');

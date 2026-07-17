@@ -455,6 +455,13 @@ async function heldReportPaymentContext(project) {
 
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
+  // Same privacy headers as the sibling /fdacs-pdf route, set before ANY
+  // response leaves — the payment-held 402 carries the invoice number and a
+  // bearer pay URL, so it needs the no-store/noindex/no-referrer protection
+  // just as much as the successful report payload (codex #2817).
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.setHeader('Referrer-Policy', 'no-referrer');
   if (!extractProjectReportTokenLookup(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
@@ -566,12 +573,6 @@ router.get('/project/:token/data', async (req, res, next) => {
     // `recommendations` below.
     viewerFindings = stripInternalFindingKeys(viewerFindings);
 
-    // Same privacy headers as the sibling /fdacs-pdf route: the JSON carries
-    // the customer's name/contact/address on a shareable token — shared-device
-    // browsers and intermediaries must not cache it, and it must never index.
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
-    res.setHeader('Referrer-Policy', 'no-referrer');
     res.json({
       projectType: project.project_type,
       fdacsPdfAvailable,
@@ -606,7 +607,9 @@ router.get('/project/:token/data', async (req, res, next) => {
       // written by an old instance during the deploy window (codex #2817).
       recommendations: redactInspectionFeeCues(project.recommendations),
       followupDate: project.followup_date,
-      followupFindings: project.followup_findings,
+      // Follow-up findings are findings-shaped jsonb rendered key→value on
+      // the page — same internal-key strip + fee scrub as the main findings.
+      followupFindings: stripInternalFindingKeys(project.followup_findings),
       followupCompletedAt: project.followup_completed_at,
       upcomingAppointment: upcomingAppointment ? {
         serviceType: upcomingAppointment.service_type,
