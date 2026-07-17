@@ -1023,6 +1023,67 @@ function stripInternalFindingKeys(findings) {
   );
 }
 
+function feeAmountFromValue(feeRawValue) {
+  const feeStr = String(feeRawValue == null ? '' : feeRawValue);
+  // Prefer a $-marked amount ("Tier 2 — $250" → 250), dropping grouping commas
+  // ("$1,250" → 1250) and any cents. Else the longest digit run AFTER
+  // normalizing grouping commas, so "1,250" reads as one number, not 1 + 250.
+  const dollarMatch = feeStr.match(/\$\s?([\d,]+(?:\.\d{1,2})?)/);
+  if (dollarMatch) return dollarMatch[1].replace(/,/g, '').replace(/\.\d{1,2}$/, '');
+  const normalized = feeStr.replace(/(\d),(?=\d{3}(?:\D|$))/g, '$1');
+  const runs = normalized.match(/\d+/g) || [];
+  return (runs.sort((a, b) => b.length - a.length)[0] || '');
+}
+
+// Narratives drafted BEFORE the prompt-side strip landed may already have the
+// inspection fee baked into project.recommendations, which is served verbatim
+// on the public payload. Redact the fee amount(s) from free text at egress so
+// existing tokens stop leaking it (codex P2 #2807). Accepts one or more raw
+// fee values (live + archived can differ). Surgical: only currency-shaped or
+// fee-cued occurrences of an EXACT amount are removed — digit-bounded so 250
+// never matches 2500, and horizontal whitespace only is collapsed so sectioned
+// narratives keep their line breaks.
+function redactFeeFromText(text, feeRawValues) {
+  const str = String(text || '');
+  if (!str) return str;
+  const values = Array.isArray(feeRawValues) ? feeRawValues : [feeRawValues];
+  const amounts = [...new Set(values.map(feeAmountFromValue).filter(Boolean))];
+  if (!amounts.length) return str;
+  let out = str;
+  for (const raw of amounts) {
+    const amount = raw.replace(/^0+(?=\d)/, '');
+    const grouped = amount.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    const numAlt = `(?:${amount}|${grouped})`;
+    // digit-bounded core: a trailing digit (2500 for a 250 fee) blocks the match
+    const core = `(?<![\\d.,])${numAlt}(?:\\.\\d{1,2})?(?![\\d,])`;
+    const currency = new RegExp(`\\$\\s?${core}`, 'g');
+    const cued = new RegExp(`\\b(fee|price|cost|charge|charged|total)\\b([^.\\n]{0,20}?)\\$?\\s?${core}`, 'gi');
+    out = out
+      .replace(cued, (m, cue, mid) => `${cue}${mid}[fee removed]`)
+      .replace(currency, '[fee removed]');
+  }
+  // collapse only HORIZONTAL runs — newlines separate narrative sections and
+  // the client parser needs them (codex P2 #2807)
+  return out.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+\n/g, '\n').trim();
+}
+
+// Value-INDEPENDENT fee-cued currency scrub. Unlike redactFeeFromText (which
+// targets known amounts), removes ANY fee/price/cost/charge-cued dollar
+// amount. Used ONLY by the backfill migration, and only on projects that DO
+// carry an inspection_fee, to catch a STALE draft fee that no current/archived
+// snapshot still names (codex #2807) — never on the request path or on
+// fee-less projects, where a legitimate cued estimate must survive.
+function redactFeeCues(text) {
+  const str = String(text || '');
+  if (!str) return str;
+  const re = /\b(fee|price|cost|charge|charged)\b([^.\n]{0,20}?)\$\s?\d[\d,]*(?:\.\d{1,2})?/gi;
+  return str
+    .replace(re, (m, cue, mid) => `${cue}${mid}[fee removed]`)
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
 function getProjectType(key) {
   return PROJECT_TYPES[key] || null;
 }
@@ -1042,4 +1103,7 @@ module.exports = {
   isValidProjectType,
   INTERNAL_FINDING_KEYS,
   stripInternalFindingKeys,
+  redactFeeFromText,
+  feeAmountFromValue,
+  redactFeeCues,
 };
