@@ -344,6 +344,48 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(result.payment_intents[0].created_before_window).toBe(true);
   });
 
+  test('an in-window reused intent re-ranks by its fresh retry event, not its creation time', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const now = Math.floor(Date.now() / 1000);
+    const pi = (id, createdAt) => ({
+      id, status: 'requires_payment_method', amount: 3333, currency: 'usd',
+      created: createdAt, payment_method_types: ['card'],
+    });
+    global.fetch
+      // Both intents created in-window; pi_reused is OLDER by creation...
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [pi('pi_newer_creation', now - 30 * 60), pi('pi_reused', now - 50 * 3600)],
+      }))
+      // ...but was retried 5 minutes ago
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [{
+          id: 'evt_fail_6',
+          type: 'payment_intent.payment_failed',
+          created: now - 300,
+          data: {
+            object: {
+              id: 'pi_reused', object: 'payment_intent', status: 'requires_payment_method',
+              last_payment_error: { code: 'card_declined', decline_code: 'do_not_honor', message: 'Declined.', payment_method: { type: 'card' } },
+            },
+          },
+        }],
+      }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete', limit: 1 });
+    expect(result.error).toBeUndefined();
+    // Activity recency wins: the 5-minute-old retry outranks the 30-minute-old creation
+    expect(result.payment_intents.map(p => p.id)).toEqual(['pi_reused']);
+    expect(result.payment_intents[0].qualifying_event_at).toBe(new Date((now - 300) * 1000).toISOString());
+    expect(result.payment_intents[0].qualifying_event_error).toEqual({
+      code: 'card_declined', decline_code: 'do_not_honor', message: 'Declined.', payment_method_type: 'card',
+    });
+    expect(result.total_matched).toBe(2);
+    // No live lookup — the intent was already scanned
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
   test('retry sweep runs for status:succeeded too — an older intent can fail in-window then succeed', async () => {
     process.env.STRIPE_SECRET_KEY = 'sk_test_1';
     const now = Math.floor(Date.now() / 1000);
@@ -356,10 +398,16 @@ describe('intelligence bar Stripe ops tools', () => {
           id: 'evt_fail_3',
           type: 'payment_intent.payment_failed',
           created: now - 600,
-          data: { object: { id: 'pi_recovered', object: 'payment_intent', status: 'requires_payment_method' } },
+          data: {
+            object: {
+              id: 'pi_recovered', object: 'payment_intent', status: 'requires_payment_method',
+              last_payment_error: { code: 'insufficient_funds', message: 'Not enough funds.', payment_method: { type: 'card', card: { last4: '4242' } } },
+            },
+          },
         }],
       }))
-      // Live state: the retried intent has since SUCCEEDED
+      // Live state: the retried intent has since SUCCEEDED (and carries no
+      // last_payment_error anymore)
       .mockResolvedValueOnce(jsonResponse({
         id: 'pi_recovered', status: 'succeeded', amount: 3333, currency: 'usd',
         created: oldCreated, payment_method_types: ['card'],
@@ -369,6 +417,12 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(result.error).toBeUndefined();
     expect(result.payment_intents.map(p => p.id)).toEqual(['pi_recovered']);
     expect(result.payment_intents[0].created_before_window).toBe(true);
+    // "Why did the attempt fail?" survives the successful retry via the
+    // whitelisted snapshot error — codes only, never the card object.
+    expect(result.payment_intents[0].qualifying_event_error).toEqual({
+      code: 'insufficient_funds', decline_code: null, message: 'Not enough funds.', payment_method_type: 'card',
+    });
+    expect(JSON.stringify(result)).not.toContain('4242');
   });
 
   test('a failed retry lookup clears scan_exhaustive and is counted, never thrown', async () => {

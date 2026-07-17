@@ -217,6 +217,20 @@ function paymentIntentMatchesStatus(pi, filter) {
   return pi.status === filter;
 }
 
+// Whitelisted view of a payment error — codes, message, and the method TYPE
+// the attempt used (payment_method_types on the intent is only the
+// allowlist). Never the card/payment-method object. Shared by the live
+// mapper and the event-snapshot capture in the retry sweep.
+function mapPaymentError(err) {
+  if (!err) return null;
+  return {
+    code: err.code || null,
+    decline_code: err.decline_code || null,
+    message: err.message || null,
+    payment_method_type: (err.payment_method && err.payment_method.type) || null,
+  };
+}
+
 // Only identifiers, money state, and failure codes leave this mapper — never
 // receipt emails, shipping/billing details, or raw charge/payment-method
 // objects. `description` is app-written and can embed a customer name, which
@@ -236,16 +250,8 @@ function mapPaymentIntent(pi) {
     // from truly abandoned drafts.
     next_action_type: (pi.next_action && pi.next_action.type) || null,
   };
-  if (pi.last_payment_error) {
-    out.last_payment_error = {
-      code: pi.last_payment_error.code || null,
-      decline_code: pi.last_payment_error.decline_code || null,
-      message: pi.last_payment_error.message || null,
-      // payment_method_types is only the ALLOWLIST — this is the method the
-      // failed attempt actually used (type only, never the card object).
-      payment_method_type: (pi.last_payment_error.payment_method && pi.last_payment_error.payment_method.type) || null,
-    };
-  }
+  const lastError = mapPaymentError(pi.last_payment_error);
+  if (lastError) out.last_payment_error = lastError;
   if (pi.status === 'canceled') {
     out.canceled_at = pi.canceled_at ? new Date(pi.canceled_at * 1000).toISOString() : null;
     out.cancellation_reason = pi.cancellation_reason || null;
@@ -267,6 +273,7 @@ async function getStripePaymentIntents(input) {
   // applied only after a global recency sort, so a retry that happened today
   // can never be starved out by older in-window creations.
   const matches = [];
+  const matchesById = new Map();
   const scannedIds = new Set();
   let scanned = 0;
   const considerIntent = (pi, extra, rankTime) => {
@@ -274,7 +281,9 @@ async function getStripePaymentIntents(input) {
     scanned += 1;
     if (!paymentIntentMatchesStatus(pi, statusFilter)) return;
     if (amountCents !== null && pi.amount !== amountCents) return;
-    matches.push({ entry: { ...mapPaymentIntent(pi), ...extra }, rankTime });
+    const match = { entry: { ...mapPaymentIntent(pi), ...extra }, rankTime };
+    matches.push(match);
+    matchesById.set(pi.id, match);
   };
   let startingAfter = null;
   let pagesFetched = 0;
@@ -318,8 +327,31 @@ async function getStripePaymentIntents(input) {
       for (const event of data) {
         const snapshot = event.data && event.data.object;
         if (!snapshot || !snapshot.id) continue;
-        if (scannedIds.has(snapshot.id) || retryCandidates.has(snapshot.id)) continue;
-        retryCandidates.set(snapshot.id, { eventAt: event.created, eventType: event.type });
+        if (scannedIds.has(snapshot.id)) {
+          // The creation scan already covered this intent, but its fresh
+          // in-window event still drives ranking and metadata — an intent
+          // retried minutes ago must rank by that retry, not by its older
+          // creation time. Events arrive newest-first, so only the first
+          // (newest) event per id is applied.
+          const match = matchesById.get(snapshot.id);
+          if (match && !match.entry.qualifying_event_at) {
+            match.rankTime = Math.max(match.rankTime, event.created);
+            match.entry.qualifying_event_at = new Date(event.created * 1000).toISOString();
+            match.entry.qualifying_event_type = event.type;
+            const eventError = mapPaymentError(snapshot.last_payment_error);
+            if (eventError) match.entry.qualifying_event_error = eventError;
+          }
+          continue;
+        }
+        if (retryCandidates.has(snapshot.id)) continue;
+        retryCandidates.set(snapshot.id, {
+          eventAt: event.created,
+          eventType: event.type,
+          // The live re-fetch can't answer "why did the attempt fail?" once
+          // the intent has been retried successfully — keep the qualifying
+          // event's whitelisted error alongside the live state.
+          eventError: mapPaymentError(snapshot.last_payment_error),
+        });
       }
       moreEvents = Boolean(json.has_more) && data.length > 0;
       eventsAfter = data.length ? data[data.length - 1].id : null;
@@ -343,7 +375,7 @@ async function getStripePaymentIntents(input) {
         continue;
       }
       const pi = lookup.value;
-      const { eventAt, eventType } = candidateEntries[i][1];
+      const { eventAt, eventType, eventError } = candidateEntries[i][1];
       // Only present because a failed/stalled attempt happened inside the
       // window. The timestamp is honestly labeled as that QUALIFYING event —
       // the live intent may have been retried successfully since, and
@@ -353,6 +385,7 @@ async function getStripePaymentIntents(input) {
       considerIntent(pi, {
         qualifying_event_at: new Date(eventAt * 1000).toISOString(),
         qualifying_event_type: eventType,
+        ...(eventError ? { qualifying_event_error: eventError } : {}),
         ...(pi.created < createdGte ? { created_before_window: true } : {}),
       }, eventAt);
     }
@@ -376,7 +409,7 @@ async function getStripePaymentIntents(input) {
     // the most recent.
     scan_exhaustive: !morePages && retrySweepExhaustive
       && retryLookupsDropped === 0 && retryLookupFailures === 0,
-    note: 'Live Stripe data; amounts are dollars. payment_intents holds the most recent matches up to the limit; total_matched counts every match in the window. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft. created_before_window marks an older intent surfaced by an in-window failed/stalled attempt; qualifying_event_at/_type describe that event (the intent may have been retried since — this is not necessarily the last attempt).',
+    note: 'Live Stripe data; amounts are dollars. payment_intents holds the most recent matches up to the limit; total_matched counts every match in the window. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft. created_before_window marks an older intent surfaced by an in-window failed/stalled attempt; qualifying_event_at/_type describe that event and qualifying_event_error preserves its failure codes even if the intent has since been retried (so this is not necessarily the last attempt).',
   };
 }
 
