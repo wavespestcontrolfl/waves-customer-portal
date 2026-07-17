@@ -1473,6 +1473,13 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const [pendingSatisfactionStatus, setPendingSatisfactionStatus] = useState('loading');
   const [referralStats, setReferralStats] = useState(null);
   const [referralStatsStatus, setReferralStatsStatus] = useState('loading');
+  // Authoritative billing mode from the autopay response — /auth/me still
+  // supplies monthlyRate for per-application customers, and labeling that
+  // "Monthly rate" contradicts both My Plan and the billing contract.
+  const [billingMode, setBillingMode] = useState(null);
+  useEffect(() => {
+    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
+  }, []);
   const [satRating, setSatRating] = useState(0);
   const [satHover, setSatHover] = useState(0);
   const [satPhase, setSatPhase] = useState('rate');
@@ -1554,14 +1561,16 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     api.getReferrals().then(d => {
       if (d?.stats) setReferralStats({
         ...d.stats,
-        // Server-authoritative figures so the dashboard never disagrees with the Refer tab.
+        // Server-authoritative figures so the dashboard never disagrees with
+        // the Refer tab. No $25 fallback: a missing or zero reward means the
+        // program currently grants nothing we can promise.
         totalEarned: d.totalEarned != null ? Number(d.totalEarned) / 100 : 0, // dollars
-        rewardPerReferral: Number(d.rewardPerReferral) || 25,
+        rewardPerReferral: Number(d.rewardPerReferral) || 0,
       });
       setReferralStatsStatus('ready');
     }).catch(err => {
-      // Decorative here (the $ figure on the Refer quick action) — fall back
-      // to the standard $25 below rather than hiding the action.
+      // Decorative here (the $ figure on the Refer quick action) — the
+      // action stays visible with neutral copy rather than a made-up figure.
       console.error(err);
       setReferralStatsStatus('error');
     });
@@ -1709,14 +1718,17 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
     customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
   ].filter(Boolean).join(' · ');
+  // Only advertise a reward the server confirms — while loading, on error,
+  // or when the program reports zero, a hardcoded $25 would promise money
+  // the current offer may not provide.
   const referralReward = referralStatsStatus === 'ready'
-    ? (Number(referralStats?.rewardPerReferral) || 25)
-    : 25; // loading/error: standard reward until the server figure lands
+    ? Number(referralStats?.rewardPerReferral) || 0
+    : 0;
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
-    { icon: 'gift', label: 'Refer', sub: `$${referralReward} credit`, action: () => onSwitchTab?.('refer') },
+    { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${referralReward} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1986,7 +1998,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                     value: annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid',
                     sub: annualPrepayLine || tierDiscountSub,
                   }
-                : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
+                : billingMode === 'per_application'
+                  ? { label: 'Billing', value: 'Per application', sub: tierDiscountSub }
+                  : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
               {
                 label: 'Services YTD',
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
@@ -3220,13 +3234,6 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     .slice(0, 2);
   const upcomingOnly = enriched.filter(s => s.diffHrs > -24 && s.status !== 'completed');
 
-  // Empty state season info
-  const currentMonth = now.getMonth();
-  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-  const nextQuarterIdx = [3, 3, 3, 6, 6, 6, 9, 9, 9, 0, 0, 0][currentMonth];
-  const nextQuarterName = monthNames[nextQuarterIdx > currentMonth ? nextQuarterIdx : (currentMonth + 3) % 12];
-  const mosquitoResumes = (currentMonth >= 3 && currentMonth <= 9) ? null : 'April';
-
   // Pulsing dot animation
   const pulsingDotCss = `@keyframes schedPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
 @media (prefers-reduced-motion: reduce) {
@@ -3441,13 +3448,15 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </div>
       </section>
 
-      {/* Empty state */}
+      {/* Empty state — the schedule API is the only source of truth; never
+          invent a next-treatment month or mosquito restart the customer's
+          plan may not include (tranche-1 truth fix) */}
       {upcomingOnly.length === 0 && (
         <PortalStatePanel
           icon="leaf"
           eyebrow="Upcoming Visits"
           title="No upcoming services scheduled"
-          message={`Your next quarterly pest treatment will be in ${nextQuarterName}.${mosquitoResumes ? ` Mosquito service resumes in ${mosquitoResumes}.` : ''}`}
+          message="Nothing is on your calendar yet. Request a visit and we'll get you scheduled."
           actionLabel="Request a Visit"
           onAction={onRequestVisit}
           actionStyle={primaryButton}
@@ -8738,17 +8747,17 @@ function MyPlanTab({ customer, focusService }) {
             </section>
           )}
 
-          {tier && (
+          {tier && tierIdx >= 2 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
               <div style={sectionTitle}>Loyalty</div>
               <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
                 {[
                   // Renewal-credit bullet removed: it promised a tenure-
                   // prorated dollar figure no server system grants (F-015).
-                  tierIdx < TIER_ORDER.length - 1 && {
-                    text: `${money(tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25)} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
-                    icon: 'upgrade',
-                  },
+                  // Upgrade-credit bullet removed for the same reason — the
+                  // $25/$50/$100 amounts existed only in this expression,
+                  // with no credit field or grant path behind them. The
+                  // section now renders only when a real perk remains.
                   tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },
                 ].filter(Boolean).map((item) => (
                   <div key={item.text} style={{ display: 'flex', gap: 9, color: B.grayDark, fontSize: 14, lineHeight: 1.45 }}>
@@ -8803,7 +8812,9 @@ function MyPlanTab({ customer, focusService }) {
               <div style={{ marginTop: 14 }}>
                 <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Pause My Plan</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
-                  We will hold services and billing while your spot stays reserved.
+                  {/* This only files an office request — the copy must not
+                      promise a hold the office hasn't confirmed. */}
+                  Send us a pause request and we&apos;ll confirm the dates and any billing changes with you before your plan is held.
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                   {['1', '2'].map(d => (
@@ -9207,6 +9218,9 @@ function ServiceTracker() {
   const distMi = tracker.techPosition?.eta?.distanceMiles;
   const status = (() => {
     if (tracker.state === 'no_show') return { label: 'Missed visit', color: B.orange };
+    // The API maps track_state='cancelled' to step 7 with state:'cancelled' —
+    // it must not fall into the completion branch below.
+    if (tracker.state === 'cancelled') return { label: 'Visit cancelled', color: B.orange };
     if (step === 7) return { label: 'Service complete', color: B.glassNavy };
     if (step >= 4) {
       if (step === 6) return { label: 'Finishing up', color: B.glassNavy };
@@ -9379,8 +9393,24 @@ function ServiceTracker() {
           </>
         )}
 
+        {/* Step 7: CANCELLED — no service happened, so no thank-you or
+            completion time (which would read cancelled_at as a finish). */}
+        {step === 7 && tracker.state === 'cancelled' && (
+          <>
+            <div style={{
+              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              lineHeight: 1.25, color: B.glassNavy,
+            }}>
+              This visit was cancelled.
+            </div>
+            <div style={{ fontSize: 16, color: B.textBody, marginTop: 8 }}>
+              No service was performed. Reschedule any time and we&apos;ll get you back on the calendar.
+            </div>
+          </>
+        )}
+
         {/* Step 7: COMPLETE */}
-        {step === 7 && tracker.state !== 'no_show' && (
+        {step === 7 && tracker.state !== 'no_show' && tracker.state !== 'cancelled' && (
           <>
             <div style={{
               fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
@@ -9566,8 +9596,9 @@ function ServiceTracker() {
         </div>
       </div>
 
-      {/* Completion summary at step 7 */}
-      {step === 7 && summary && (
+      {/* Completion summary at step 7 — never for a cancelled visit, where
+          any summary data would describe work that didn't happen */}
+      {step === 7 && tracker.state !== 'cancelled' && summary && (
         <div style={{ ...subCardBase, background: `${B.green}14`, borderColor: `${B.green}33` }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, letterSpacing: 0, marginBottom: 8, textTransform: 'uppercase' }}>Service summary</div>
           {summary.productsApplied?.length > 0 && (
@@ -9793,7 +9824,9 @@ function ReferTab({ customer, onSwitchTab }) {
   const converted = Number(stats.converted ?? stats.totalConverted ?? 0);
   const pending = Number(stats.pending ?? referrals.filter(r => PENDING_REFERRAL_STATUSES.includes(r.status)).length);
   const clicks = Number(stats.totalClicks || 0);
-  const rewardPerReferral = Number(data?.rewardPerReferral || 25);
+  // Server-authoritative only — 0 (paused/changed promotion) must not be
+  // papered over with a default figure the program won't pay.
+  const rewardPerReferral = Number(data?.rewardPerReferral) || 0;
   const lifetimeEarned = data?.totalEarned != null
     ? Number(data.totalEarned || 0) / 100
     : Number(stats.totalEarned || 0);
@@ -9819,10 +9852,13 @@ function ReferTab({ customer, onSwitchTab }) {
     champion: { label: 'Champion', next: null },
   };
   const currentMilestone = data?.milestoneLevel || (converted >= 10 ? 'champion' : converted >= 5 ? 'ambassador' : converted >= 3 ? 'advocate' : 'none');
+  // The fallback keeps the level ladder for progress display but never
+  // invents bonus dollars — a "Bonus $X" line renders only when the server's
+  // nextMilestone actually carries one.
   const fallbackMilestone = [
-    { level: 'advocate', threshold: 3, bonus: 2500 },
-    { level: 'ambassador', threshold: 5, bonus: 5000 },
-    { level: 'champion', threshold: 10, bonus: 10000 },
+    { level: 'advocate', threshold: 3 },
+    { level: 'ambassador', threshold: 5 },
+    { level: 'champion', threshold: 10 },
   ].find(m => converted < m.threshold);
   const nextMilestone = data?.nextMilestone || fallbackMilestone;
   const milestoneThreshold = Number(nextMilestone?.threshold || 0);
@@ -9903,10 +9939,12 @@ function ReferTab({ customer, onSwitchTab }) {
               lineHeight: 1.1,
               letterSpacing: 0,
             }}>
-              Refer and Earn
+              {rewardPerReferral > 0 ? 'Refer and Earn' : 'Refer a Neighbor'}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              Share your Waves link with neighbors. You earn {money(rewardPerReferral)} account credit when a referral starts service.
+              {rewardPerReferral > 0
+                ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
+                : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.'}
             </div>
           </div>
           <div style={{
@@ -10189,7 +10227,9 @@ function ReferTab({ customer, onSwitchTab }) {
               {referrals.length ? `${referrals.length} referral${referrals.length === 1 ? '' : 's'}` : 'No referrals yet'}
             </div>
           </div>
-          <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{money(rewardPerReferral)} per signup</div>
+          {rewardPerReferral > 0 && (
+            <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{money(rewardPerReferral)} per signup</div>
+          )}
         </div>
 
         {referrals.length === 0 ? (
@@ -10270,12 +10310,12 @@ function ReferTab({ customer, onSwitchTab }) {
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}>How It Works</div>
-        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, 1fr)', gap: 10 }}>
+        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${rewardPerReferral > 0 ? 3 : 2}, 1fr)`, gap: 10 }}>
           {[
             { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
             { icon: 'checkCircle', title: 'They start', text: 'We track the referral when they become a Waves customer.' },
-            { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
-          ].map(item => (
+            rewardPerReferral > 0 && { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
+          ].filter(Boolean).map(item => (
             <div key={item.title} style={{
               padding: 14,
               background: subtle,
@@ -12179,7 +12219,9 @@ const TAB_TITLES = {
   plan: 'My Plan',
   visits: 'Visits',
   billing: 'Billing',
-  refer: 'Refer and Earn',
+  // Neutral: this static title can't see the server's reward figure, so it
+  // must not claim earnings the program may not currently pay.
+  refer: 'Refer a Neighbor',
   documents: 'Documents',
   property: 'My Property',
   learn: 'Learn and Stay Informed',
@@ -13395,4 +13437,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker };
