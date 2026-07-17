@@ -34,7 +34,11 @@ jest.mock('../utils/date-only', () => ({ formatDateOnly: jest.fn() }));
 // after send, 10 AM NY) is the contract under test.
 
 const db = require('../models/db');
-const { rescheduleForInvoiceEdit } = require('../services/invoice-followups');
+const {
+  rescheduleForInvoiceEdit,
+  resumeSequence,
+  releaseFromAutopayHold,
+} = require('../services/invoice-followups');
 
 function setupDb({ seq, invoice }) {
   const seqUpdate = jest.fn(async () => 1);
@@ -144,5 +148,47 @@ describe('rescheduleForInvoiceEdit shifts the whole cadence by the due-date delt
       newDueDate: '2026-08-14',
     });
     expect(seqUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('release paths re-arm from the shifted anchor when one exists', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('resumeSequence schedules the current step from anchor_at, not the due date', async () => {
+    // Sent Jul 1, due date extended +30 → anchor Jul 31. Resuming step 0
+    // (d3) must land Aug 3 — not Aug 17 (due_date Aug 14 + 3), which would
+    // fork the timeline fireStep progression continues on.
+    const { seqUpdate } = setupDb({
+      seq: { id: 'seq-1', status: 'paused', step_index: 0, anchor_at: new Date('2026-07-31T15:00:00Z') },
+      invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-07-01T15:00:00Z', due_date: '2026-08-14', created_at: '2026-07-01T15:00:00Z' },
+    });
+    await resumeSequence('inv-1');
+    const patch = seqUpdate.mock.calls[0][0];
+    expect(patch.status).toBe('active');
+    expect(patch.next_touch_at.toISOString()).toBe('2026-08-03T14:00:00.000Z');
+  });
+
+  it('resumeSequence keeps the due-date re-arm when no anchor was ever shifted', async () => {
+    const { seqUpdate } = setupDb({
+      seq: { id: 'seq-1', status: 'paused', step_index: 0, anchor_at: null },
+      invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-07-01T15:00:00Z', due_date: '2026-07-15', created_at: '2026-07-01T15:00:00Z' },
+    });
+    await resumeSequence('inv-1');
+    const patch = seqUpdate.mock.calls[0][0];
+    // Pre-existing release formula: date-only due_date parses as UTC
+    // midnight, which is the PRIOR evening in NY — so '2026-07-15' anchors
+    // the NY calendar day Jul 14, and d3 lands Jul 17, 10 AM EDT.
+    expect(patch.next_touch_at.toISOString()).toBe('2026-07-17T14:00:00.000Z');
+  });
+
+  it('releaseFromAutopayHold schedules from anchor_at the same way', async () => {
+    const { seqUpdate } = setupDb({
+      seq: { id: 'seq-1', status: 'autopay_hold', step_index: 0, anchor_at: new Date('2026-07-31T15:00:00Z') },
+      invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-07-01T15:00:00Z', due_date: '2026-08-14', created_at: '2026-07-01T15:00:00Z' },
+    });
+    await releaseFromAutopayHold('inv-1');
+    const patch = seqUpdate.mock.calls[0][0];
+    expect(patch.status).toBe('active');
+    expect(patch.next_touch_at.toISOString()).toBe('2026-08-03T14:00:00.000Z');
   });
 });

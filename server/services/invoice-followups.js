@@ -350,14 +350,19 @@ async function runPending() {
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
 async function fireStep(row) {
+  // The cleanup is predicated on OUR stamp: if this send outlives the TTL
+  // and another worker replaces the stale claim, an unconditional clear
+  // here would release the successor's live claim and let an edit race its
+  // in-flight reminder.
+  const claimStamp = new Date();
   const claimed = await db('invoice_followup_sequences')
     .where({ id: row.id })
     .where(function () {
       this.whereNull('touch_claimed_at').orWhere(
-        'touch_claimed_at', '<', new Date(Date.now() - TOUCH_CLAIM_TTL_MS),
+        'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
       );
     })
-    .update({ touch_claimed_at: new Date() });
+    .update({ touch_claimed_at: claimStamp });
   if (!claimed) {
     logger.warn(`[invoice-followups] touch already in flight for invoice ${row.invoice_id}; skipping`);
     return;
@@ -366,7 +371,7 @@ async function fireStep(row) {
     await fireTouch(row);
   } finally {
     await db('invoice_followup_sequences')
-      .where({ id: row.id })
+      .where({ id: row.id, touch_claimed_at: claimStamp })
       .update({ touch_claimed_at: null })
       .catch((err) => logger.warn(
         `[invoice-followups] could not clear touch claim for ${row.invoice_id}: ${err.message}`,
@@ -652,7 +657,9 @@ async function releaseFromAutopayHold(invoiceId) {
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
     status: 'active',
     is_autopay_held: false,
-    next_touch_at: computeNextTouchAt(invoice.due_date || invoice.created_at, seq.step_index),
+    // A shifted anchor (delivered-invoice due-date edit while held) wins so
+    // the re-armed step lands on the same timeline fireStep progression uses.
+    next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index),
   });
 }
 
@@ -701,7 +708,9 @@ async function resumeSequence(invoiceId) {
     paused_reason: null,
     paused_until: null,
     paused_by_admin_id: null,
-    next_touch_at: computeNextTouchAt(invoice.due_date || invoice.created_at, seq.step_index),
+    // A shifted anchor (delivered-invoice due-date edit while paused) wins so
+    // the re-armed step lands on the same timeline fireStep progression uses.
+    next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index),
   });
 }
 
