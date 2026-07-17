@@ -514,6 +514,16 @@ describe('review fixes', () => {
       '123 Palm Ave, Bradenton FL 34209',
       '123 Palm Ave Apt A, Bradenton FL 34209',
     )).toBe(true);
+    expect(idxPriv.sameStreetAddress(
+      '123 Palm Ave, Bradenton FL 34209',
+      '123 Palm Ave Apt A, Bradenton FL 34209',
+      { requireExactUnit: true },
+    )).toBe(false);
+    expect(idxPriv.sameStreetAddress(
+      '123 Palm Ave Apt A, Bradenton FL 34209',
+      '123 Palm Ave Apt A, Bradenton FL 34209',
+      { requireExactUnit: true },
+    )).toBe(true);
   });
 
   test('composer adding locality to a bare street triggers a re-gather', () => {

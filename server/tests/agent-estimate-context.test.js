@@ -116,6 +116,28 @@ describe('Agent Estimate context helpers', () => {
     expect(compact.truncated).toBe(true);
     expect(compact.raw_excerpt.length).toBe(100);
   });
+
+  test('an unavailable authoritatively linked customer fails closed', async () => {
+    mockContextLead = {
+      id: 'lead-linked', customer_id: 'customer-missing', estimate_id: null,
+      first_name: 'Linked', last_name: 'Customer', phone: '9415550100',
+      email: null, address: '1 St', city: 'Bradenton', zip: '34208',
+      twilio_call_sid: null, transcript_summary: null, extracted_data: null,
+      status: 'new',
+    };
+    mockContextCallRows = [];
+    mockContextOtherLeads = [];
+
+    const context = await buildAgentEstimateContext('lead-linked');
+
+    expect(context.customer_profile).toBeNull();
+    expect(context.customer_account).toEqual(expect.objectContaining({
+      recognized: true,
+      customer_id: 'customer-missing',
+      match_method: 'linked_customer_id_unavailable',
+      service_context_unavailable: true,
+    }));
+  });
 });
 
 describe('ambiguous customer phone suppression', () => {

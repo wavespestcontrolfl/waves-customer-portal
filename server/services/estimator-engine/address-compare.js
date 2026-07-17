@@ -33,7 +33,7 @@ function addressAddsLocality(candidate, baseline) {
 // suffix/directional normalization, then city/ZIP agreement: "123 Palm St" ≠
 // "123 Palm Ave", and the same street in a different city/ZIP is a different
 // parcel (SWFL street names repeat across cities).
-function sameStreetAddress(a, b) {
+function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   const normSegment = (s) => String(s || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -53,6 +53,12 @@ function sameStreetAddress(a, b) {
   const [aa, bb] = [streetAndUnit(a), streetAndUnit(b)];
   const [na, nb] = [aa.street, bb.street];
   if (!na || !nb || na !== nb) return false;
+  // Property credentials are scoped to the exact priced unit: a building-
+  // level lookup cannot authenticate an apartment/suite measurement, and a
+  // credential for Apt A cannot authenticate Apt B. Duplicate detection uses
+  // the default conservative mode below because one missing unit is not proof
+  // that two active-service records are different properties.
+  if (requireExactUnit && aa.unit !== bb.unit) return false;
   // A known-vs-unknown unit remains a possible duplicate and therefore
   // compares equal conservatively. Only two explicit, different unit IDs are
   // proven separate service addresses.

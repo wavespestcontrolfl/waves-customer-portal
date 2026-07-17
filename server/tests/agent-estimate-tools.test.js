@@ -116,9 +116,18 @@ const INPUT = {
   propertyFacts: {
     address: { value: '1 Test St, Bradenton FL 34208', source: 'lead', confidence: 'high' },
     homeSqFt: { value: 2000, source: 'county', confidence: 'high' },
+    'services.pest.frequency': { value: 'quarterly', source: 'operator_confirmation', confidence: 'high' },
   },
   protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
-  inventoryReview: [{ serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 8 }],
+  inventoryReview: [
+    { serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Alpine WSG', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Advion Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Gentrol IGR', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Advion Ant Gel', status: 'in_stock', onHand: 8 },
+    { serviceKey: 'pest', productName: 'Contrac Blox', status: 'in_stock', onHand: 8 },
+  ],
 };
 
 function thenable(value) {
@@ -277,6 +286,19 @@ describe('Agent Estimate draft tool', () => {
     ], context)).toMatchObject({ quoted: 2, verified: 2, unverified: 0 });
     expect(_private.verifyAgentEvidenceQuotes([
       { source: 'call_transcript', quote: '12 stations' },
+    ], context)).toMatchObject({ quoted: 1, verified: 0, unverified: 1 });
+  });
+
+  test('does not verify a fabricated quote assembled across separate source records', () => {
+    const context = {
+      quote_form: { message_fields: [], extracted_data: {} },
+      calls: [],
+      sms_thread: [{ body: 'The home is' }, { body: '8,000 square feet' }],
+      activities: [],
+    };
+
+    expect(_private.verifyAgentEvidenceQuotes([
+      { source: 'sms', quote: 'The home is 8,000 square feet' },
     ], context)).toMatchObject({ quoted: 1, verified: 0, unverified: 1 });
   });
 
@@ -633,6 +655,24 @@ describe('Agent Estimate draft tool', () => {
     }));
   });
 
+  test('requires inventory coverage for every structured protocol treatment group', async () => {
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      inventoryReview: [{
+        serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 8,
+      }],
+    });
+
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'inventory review for pest is missing protocol product: Alpine WSG',
+      'inventory review for pest is missing protocol product: Advion WDG Granular',
+    ]));
+  });
+
   test('requires evidence for every numeric nested service price driver including rooms', async () => {
     mockGenerateEstimate.mockReturnValue({
       summary: {
@@ -665,6 +705,9 @@ describe('Agent Estimate draft tool', () => {
     expect(result.lane).toBe('yellow');
     expect(result.lane_reasons).toContain(
       'services.bedBug.rooms was used for pricing without a matching verified property fact',
+    );
+    expect(result.lane_reasons).toContain(
+      'services.bedBug.method was used for pricing without a matching verified property fact',
     );
   });
 
@@ -753,6 +796,44 @@ describe('Agent Estimate property lookup safety', () => {
     expect(result.lane).toBe('green');
   });
 
+  test('a building-level lookup credential cannot authenticate an explicit unit', async () => {
+    performPropertyLookup.mockResolvedValue({
+      propertyRecord: {
+        formattedAddress: '1 Test St, Bradenton FL 34208',
+        squareFootage: 8000,
+        _source: 'county',
+      },
+      satellite: { inServiceArea: true },
+    });
+    const unitAddress = '1 Test St Apt A, Bradenton FL 34208';
+    const lookup = await executeEstimateTool('lookup_property', { address: unitAddress });
+    const { database } = makeDatabase({
+      lead: {
+        id: 'lead-1', customer_id: null, estimate_id: null,
+        phone: '9415550100', email: 'road@example.com', address: unitAddress,
+      },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      address: unitAddress,
+      engineInputs: { homeSqFt: 8000, services: { pest: { frequency: 'quarterly' } } },
+      propertyFactVerificationToken: lookup.property_fact_verification_token,
+      propertyFacts: {
+        address: { value: unitAddress, source: 'lead', confidence: 'high' },
+        homeSqFt: { value: 8000, source: 'property_lookup', confidence: 'high' },
+        'services.pest.frequency': INPUT.propertyFacts['services.pest.frequency'],
+      },
+    });
+
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'home/building square footage was used for pricing without a matching verified property fact',
+      expect.stringMatching(/homeSqFt lacks a server-verified/i),
+    ]));
+  });
+
   test('tampering with a lookup credential leaves its model facts unverified', async () => {
     performPropertyLookup.mockResolvedValue({
       propertyRecord: { formattedAddress: INPUT.address, squareFootage: 2000, _source: 'county' },
@@ -778,7 +859,7 @@ describe('Agent Estimate property lookup safety', () => {
   });
 
   test('an exact server-loaded operator quote can ground a pricing measurement', async () => {
-    const quote = 'Operator confirmed the home is 2000 square feet';
+    const quote = 'Operator confirmed the home is 2000 square feet and wants quarterly pest service';
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       lead: { id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone },
       quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
@@ -796,6 +877,7 @@ describe('Agent Estimate property lookup safety', () => {
       propertyFacts: {
         address: INPUT.propertyFacts.address,
         homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+        'services.pest.frequency': INPUT.propertyFacts['services.pest.frequency'],
       },
     });
 
@@ -865,7 +947,7 @@ describe('Agent Estimate property lookup safety', () => {
   });
 
   test('associates story and structure labels with their own neighboring numbers', async () => {
-    const quote = 'The home has 2 stories and 2,000 square feet';
+    const quote = 'The home has 2 stories and 2,000 square feet and needs quarterly pest service';
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       lead: {
         id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
@@ -886,6 +968,7 @@ describe('Agent Estimate property lookup safety', () => {
         address: INPUT.propertyFacts.address,
         homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
         stories: { value: 2, source: 'operator_confirmation', confidence: 'high' },
+        'services.pest.frequency': INPUT.propertyFacts['services.pest.frequency'],
       },
     });
 
@@ -2341,19 +2424,26 @@ describe('Agent Estimate round-7 hardening', () => {
     mockDb.mockImplementation(database);
     mockTransactionDb = database;
 
+    mockGenerateEstimate.mockReturnValue({
+      ...ENGINE_RESULT,
+      lineItems: [{
+        ...ENGINE_RESULT.lineItems[0],
+        tiers: [
+          { tier: 'standard', annual: 650, monthly: 54.17 },
+          { tier: 'premium', annual: 900, monthly: 75 },
+        ],
+      }],
+    });
     const approvedPreview = await executeEstimateTool('create_agent_estimate_draft', INPUT);
     const approvedPreviewFingerprint = agentEstimatePreviewFingerprint(approvedPreview);
     mockGenerateEstimate.mockReturnValue({
       ...ENGINE_RESULT,
-      summary: {
-        ...ENGINE_RESULT.summary,
-        recurringMonthlyAfterDiscount: 60,
-        recurringAnnualAfterDiscount: 720,
-      },
       lineItems: [{
         ...ENGINE_RESULT.lineItems[0],
-        annualAfterDiscount: 720,
-        monthlyAfterDiscount: 60,
+        tiers: [
+          { tier: 'standard', annual: 650, monthly: 54.17 },
+          { tier: 'premium', annual: 960, monthly: 80 },
+        ],
       }],
     });
 

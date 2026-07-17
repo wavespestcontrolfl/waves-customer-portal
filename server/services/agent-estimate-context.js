@@ -173,18 +173,27 @@ async function resolveCustomer(lead, extraction, phoneKey) {
         .first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city',
           'state', 'zip', 'pipeline_stage', 'waveguard_tier', 'lawn_type', 'property_sqft',
           'lot_sqft', 'property_type', 'company_name');
-      return { customer: linked || null, ambiguous: false };
+      return {
+        customer: linked || null,
+        ambiguous: false,
+        unavailable: !linked,
+      };
     } catch (err) {
       logger.warn(`[agent-estimate] linked customer load failed: ${err.message}`);
+      return { customer: null, ambiguous: false, unavailable: true };
     }
   }
-  if (!phoneKey) return { customer: null, ambiguous: false };
+  if (!phoneKey) return { customer: null, ambiguous: false, unavailable: false };
   // A phone matching multiple customer rows is ambiguous even when no other
   // LEAD shares the number (phoneIsShared checks leads only) — the caller
   // must treat this exactly like a shared line and suppress phone-scoped
   // history, or one customer's SMS/estimates leak into another lead's session.
   const match = await loadCustomerByPhone(phoneKey, extraction);
-  return { customer: match.ambiguous ? null : match.customer, ambiguous: match.ambiguous === true };
+  return {
+    customer: match.ambiguous ? null : match.customer,
+    ambiguous: match.ambiguous === true,
+    unavailable: false,
+  };
 }
 
 function suggestedPrompt(lead, currentEstimate, customerAccount = null) {
@@ -224,7 +233,11 @@ async function buildAgentEstimateContext(leadId) {
   const leadCall = lead.twilio_call_sid
     ? rawCalls.find((call) => call.call_sid === lead.twilio_call_sid)
     : null;
-  const { customer, ambiguous: customerAmbiguous } = await resolveCustomer(lead, leadCall?.extraction || null, phoneKey);
+  const {
+    customer,
+    ambiguous: customerAmbiguous,
+    unavailable: linkedCustomerUnavailable,
+  } = await resolveCustomer(lead, leadCall?.extraction || null, phoneKey);
   // Phone-scoped history fails closed on BOTH suppression signals: another
   // lead on the number (sharedPhone) or multiple customer rows on the number
   // (customerAmbiguous). Either way the thread/estimates may belong to a
@@ -282,6 +295,17 @@ async function buildAgentEstimateContext(leadId) {
     current_services: customerSpend.currentServices,
     current_spend_per_visit_total: customerSpend.currentSpendPerVisitTotal,
     service_context_unavailable: serviceContextUnavailable,
+  } : linkedCustomerUnavailable ? {
+    recognized: true,
+    customer_id: lead.customer_id,
+    match_method: 'linked_customer_id_unavailable',
+    active_plan: false,
+    current_tier: null,
+    current_discount_pct: 0,
+    existing_service_keys: [],
+    current_services: [],
+    current_spend_per_visit_total: 0,
+    service_context_unavailable: true,
   } : {
     recognized: false,
     customer_id: null,

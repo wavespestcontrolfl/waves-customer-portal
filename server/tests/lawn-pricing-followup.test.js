@@ -910,6 +910,26 @@ describe('lawn pricing production follow-up', () => {
     expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
   });
 
+  test('manual lawn discounts are capped at the collected-margin floor before persistence', () => {
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 5012,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+      manualDiscount: { type: 'PERCENT', value: 50 },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThan(600);
+    expect(estimate.summary.recurringAnnualAfterDiscount)
+      .toBeGreaterThanOrEqual(lawn.minimumCollectedAnnualPrice - 0.01);
+    expect(estimate.summary.manualDiscount).toEqual(expect.objectContaining({
+      capped: true,
+      capReason: 'lawn_margin_floor',
+    }));
+    expect(estimate.marginWarnings.find((warning) => (
+      warning.service === 'lawn_care' && warning.type === 'manual_discount_below_margin_floor'
+    ))).toBeUndefined();
+  });
+
   test('a manual discount on a lawn-only estimate is capped at the program minimum (recurring slice)', () => {
     // Lawn-only, standard/6x at 4,500 sqft: the $38/mo bracket cell floors to
     // $50/mo ($600/yr). The whole recurring base is floor-protected, so a 10%

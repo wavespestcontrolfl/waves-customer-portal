@@ -248,7 +248,7 @@ Use for: the final step on the Agent Estimate page, after lookup_property, proto
             },
           },
         },
-        propertyFacts: { type: 'object', description: 'Per-field selected values, sources, confidence, and conflicts. Lawn drafts must include the verified treatable-turf fact; commercial drafts must include the verified treated building/unit area.' },
+        propertyFacts: { type: 'object', description: 'Per-field selected values, sources, confidence, and conflicts, including categorical service price drivers such as lawn track, treatment method/severity, cadence, urgency, and access. Lawn drafts must include the verified treatable-turf area; commercial drafts must include the verified treated building/unit area.' },
         propertyFactVerificationToken: { type: 'string', description: 'Opaque token returned by lookup_property. Pass it unchanged when propertyFacts use lookup-derived measurements; caller/operator facts instead require an exact quote from loaded lead evidence.' },
         protocolReview: {
           type: 'array',
@@ -266,7 +266,7 @@ Use for: the final step on the Agent Estimate page, after lookup_property, proto
         },
         inventoryReview: {
           type: 'array',
-          description: 'Products named by the selected protocols. A null count must be reported as untracked, never in stock.',
+          description: 'Live stock review covering at least one catalog product from every required treatment group named by each selected protocol. A null count must be reported as untracked, never in stock.',
           items: {
             type: 'object',
             properties: {
@@ -611,6 +611,58 @@ function protocolContainsProduct(serviceKey, lawnTrack, productName) {
   return aliases.some((alias) => alias.length >= 5 && protocolText.includes(alias));
 }
 
+// Structured protocol treatment metadata names catalog alternatives for each
+// required application step. Inventory review must cover at least one product
+// in EVERY step; one valid row for the service is not a complete protocol
+// review. Identical groups recur across visits, so dedupe them annually.
+function protocolProductGroups(serviceKey, lawnTrack) {
+  const protocol = getProtocol({ service_type: serviceKey, lawn_track: lawnTrack })?.protocol;
+  if (!protocol) return [];
+  const groups = [];
+  const addGroup = (products) => {
+    const names = [...new Set((Array.isArray(products) ? products : [])
+      .map((name) => String(name || '').trim())
+      .filter(Boolean))];
+    if (names.length) groups.push(names);
+  };
+  addGroup(protocol.requiredProducts);
+  for (const visit of Array.isArray(protocol.visits) ? protocol.visits : []) {
+    for (const treatment of Object.values(visit?.lineMeta || {})) {
+      if (treatment?.treatmentApplied === false) continue;
+      addGroup(treatment?.catalogProductHints);
+    }
+  }
+  const seen = new Set();
+  return groups.filter((group) => {
+    const key = group.map(canonicalProductName).sort().join('|');
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function inventoryProtocolCoverageReasons(protocolReview = [], validatedRows = [], authoritativeLawnTrack = null) {
+  const reasons = [];
+  for (const review of protocolReview) {
+    const serviceKey = String(review?.serviceKey || '').trim();
+    if (!serviceKey) continue;
+    const lawnTrack = normalizeProtocolKey(serviceKey) === 'lawn'
+      ? authoritativeLawnTrack
+      : review?.lawnTrack;
+    const reviewedNames = validatedRows
+      .filter((row) => normalizeProtocolKey(row?.serviceKey) === normalizeProtocolKey(serviceKey)
+        && row?.protocolMatched === true)
+      .map((row) => canonicalProductName(row.productName));
+    for (const group of protocolProductGroups(serviceKey, lawnTrack)) {
+      const covered = group.some((name) => reviewedNames.includes(canonicalProductName(name)));
+      if (!covered) {
+        reasons.push(`inventory review for ${serviceKey} is missing protocol product: ${group.join(' or ')}`);
+      }
+    }
+  }
+  return reasons;
+}
+
 async function validateInventoryReviewRows(rows = [], protocolReview = [], authoritativeLawnTrack = null) {
   const validatedRows = [];
   const reasons = [];
@@ -691,7 +743,8 @@ function verifyPropertyFactCredential(token, quoteAddress) {
     if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return null;
     const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (decoded.version !== 1 || Number(decoded.expiresAt) < Date.now()) return null;
-    if (quoteAddress && decoded.address && !sameStreetAddress(decoded.address, quoteAddress)) return null;
+    if (quoteAddress && decoded.address
+      && !sameStreetAddress(decoded.address, quoteAddress, { requireExactUnit: true })) return null;
     return decoded;
   } catch {
     return null;
@@ -1119,26 +1172,33 @@ function verifyAgentEvidenceQuotes(evidence, context) {
       return '';
     }
   };
-  const sourceHaystacks = {
-    quote_form: normalizeEvidenceText([
+  // Keep every source record separate. Concatenating adjacent SMS/calls lets a
+  // model fabricate a "verbatim" quote across record boundaries and then use
+  // it as high-confidence grounding for a price-driving fact.
+  const sourceRecords = {
+    quote_form: [
       ...(context?.quote_form?.message_fields || []).map((row) => row.text).filter(Boolean),
       structuredText(context?.quote_form?.extracted_data),
-    ].join(' ')),
-    quote_form_extraction: normalizeEvidenceText(structuredText(context?.quote_form?.extracted_data)),
-    call_transcript: normalizeEvidenceText((context?.calls || []).map((call) => call.transcript).filter(Boolean).join(' ')),
-    transcript_summary: normalizeEvidenceText((context?.calls || []).map((call) => call.transcript_summary).filter(Boolean).join(' ')),
-    call_extraction: normalizeEvidenceText((context?.calls || []).map((call) => structuredText(call.extraction)).join(' ')),
-    sms: normalizeEvidenceText((context?.sms_thread || []).map((message) => message.body).filter(Boolean).join(' ')),
-    activity: normalizeEvidenceText((context?.activities || []).map((activity) => activity.description).filter(Boolean).join(' ')),
+    ],
+    quote_form_extraction: [structuredText(context?.quote_form?.extracted_data)],
+    call_transcript: (context?.calls || []).map((call) => call.transcript).filter(Boolean),
+    transcript_summary: (context?.calls || []).map((call) => call.transcript_summary).filter(Boolean),
+    call_extraction: (context?.calls || []).map((call) => structuredText(call.extraction)).filter(Boolean),
+    sms: (context?.sms_thread || []).map((message) => message.body).filter(Boolean),
+    activity: (context?.activities || []).map((activity) => activity.description).filter(Boolean),
   };
+  const sourceHaystacks = Object.fromEntries(Object.entries(sourceRecords).map(([key, records]) => [
+    key,
+    records.map(normalizeEvidenceText).filter(Boolean),
+  ]));
   const quotedRows = (Array.isArray(evidence) ? evidence : [])
     .map((row, index) => ({ index, quote: row?.quote, source: row?.source }))
     .filter((row) => String(row.quote || '').trim());
   const unverifiedIndexes = quotedRows.filter(({ quote, source }) => {
     const needle = normalizeEvidenceText(quote);
     const sourceKey = evidenceSourceKey(source);
-    const haystack = sourceKey ? sourceHaystacks[sourceKey] : '';
-    return needle.length < 8 || !haystack.includes(needle);
+    const haystacks = sourceKey ? sourceHaystacks[sourceKey] : [];
+    return needle.length < 8 || !haystacks.some((haystack) => haystack.includes(needle));
   }).map(({ index }) => index);
   return {
     quoted: quotedRows.length,
@@ -1690,6 +1750,11 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const inventoryValidation = inventoryReview.length
     ? await validateInventoryReviewRows(inventoryReview, protocolReview, authoritativeLawnTrack)
     : { rows: [], reasons: [] };
+  inventoryValidation.reasons.push(...inventoryProtocolCoverageReasons(
+    protocolReview,
+    inventoryValidation.rows,
+    authoritativeLawnTrack,
+  ));
 
   if (accountPricing.recognized) {
     laneReasons.push('existing-customer expansion: verify current services, spend, and added-service scope before sending');
@@ -1776,10 +1841,26 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     if (/pool/i.test(key)) return familyPatterns.pool;
     if (/commercial.*(?:subtype|risk)|(?:subtype|risk).*commercial/i.test(key)) return /commercial|property|risk|occupancy|business/i;
     if (/property.*type|iscommercial/i.test(key)) return /property|commercial|residential|home|business/i;
-    const meaningfulToken = String(key || '')
+    const optionName = String(key || '').split('.').pop().replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+    if (/track|grass type|turf type/i.test(optionName)) return /lawn|turf|grass|track/i;
+    if (/method/i.test(optionName)) return /method|treatment|bed\s*bugs?|heat|chemical/i;
+    if (/severity/i.test(optionName)) return /severity|infestation|activity|pressure|bed\s*bugs?|roach/i;
+    if (/urgency/i.test(optionName)) return /urgency|urgent|emergency|routine|soon|service/i;
+    if (/height/i.test(optionName)) return /height|ground|eave|roof|ladder|nest/i;
+    if (/frequency|cadence|lawn freq/i.test(optionName)) return /frequency|cadence|visits?|applications?|monthly|quarterly|bimonthly/i;
+    if (/tier|program/i.test(optionName)) return /tier|program|plan|service|lawn|mosquito/i;
+    if (/after hours/i.test(optionName)) return /after\s*hours|evening|weekend|emergency/i;
+    if (/roach type/i.test(optionName)) return /roach|cockroach|german/i;
+    if (/species/i.test(optionName)) return /species|wasp|bee|hornet|yellow\s*jacket/i;
+    if (/access/i.test(optionName)) return /access|accessible|difficult|easy/i;
+    if (/removal|aggressive|confined/i.test(optionName)) return /removal|aggressive|confined|void|nest/i;
+    if (/product|chemical/i.test(optionName)) return /product|chemical|termiticide|termidor|treatment/i;
+    if (/roof type/i.test(optionName)) return /roof/i;
+    if (/construction type/i.test(optionName)) return /construction|building|structure/i;
+    const meaningfulToken = optionName
       .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
       .split(/[^a-z0-9]+/i)
-      .find((token) => token.length >= 4 && !/^(count|area|size|feet|sqft)$/i.test(token));
+      .find((token) => token.length >= 4 && !/^(count|area|size|feet|sqft|services)$/i.test(token));
     return meaningfulToken ? new RegExp(meaningfulToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
   };
   const verifiedQuoteGrounding = (key, fact) => {
@@ -1973,13 +2054,16 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   requirePricingFact(!!String(input.engineInputs.commercialSubtype || '').trim(), /commercial.*subtype|property.*type/i, 'commercial subtype', input.engineInputs.commercialSubtype);
   requirePricingFact(!!String(input.engineInputs.commercialRiskType || '').trim(), /commercial.*risk|risk.*type|occupancy.*risk/i, 'commercial risk type', input.engineInputs.commercialRiskType);
   const nestedMeasurements = [];
+  const nestedCategories = [];
   const collectMeasurements = (value, path = []) => {
     if (!value || typeof value !== 'object') return;
     for (const [name, nested] of Object.entries(value)) {
       const nextPath = [...path, name];
       if (nested && typeof nested === 'object') collectMeasurements(nested, nextPath);
-      else if (Number.isFinite(Number(nested))) {
+      else if (typeof nested !== 'boolean' && Number.isFinite(Number(nested))) {
         nestedMeasurements.push({ path: nextPath.join('.'), name, value: Number(nested) });
+      } else if ((typeof nested === 'string' && nested.trim()) || typeof nested === 'boolean') {
+        nestedCategories.push({ path: nextPath.join('.'), name, value: nested });
       }
     }
   };
@@ -1988,6 +2072,11 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     const tokens = measurement.name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[^a-z0-9]+/gi, ' ').trim();
     const pattern = new RegExp(tokens.split(/\s+/).filter(Boolean).map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i');
     requirePricingFact(true, pattern, measurement.path, measurement.value);
+  }
+  for (const category of nestedCategories) {
+    const tokens = category.name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[^a-z0-9]+/gi, ' ').trim();
+    const pattern = new RegExp(tokens.split(/\s+/).filter(Boolean).map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i');
+    requirePricingFact(true, pattern, category.path, category.value);
   }
   if (!propertyFactEntries.length) {
     laneReasons.push('property facts were not verified');
@@ -2013,7 +2102,9 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     }
   }
   const hasLawnService = serviceKeys.some((key) => /lawn|turf/i.test(key));
-  if (hasLawnService && !verifiedFactKeys.some((key) => /lawn|turf|treatable/i.test(key))) {
+  if (hasLawnService && !verifiedFactKeys.some((key) => (
+    /(?:lawn|turf|treatable).*(?:sq|sf|area|size)|(?:sq|sf|area|size).*(?:lawn|turf|treatable)/i.test(key)
+  ))) {
     laneReasons.push('treatable lawn area was not recorded as a verified property fact');
   }
   const isCommercial = input.engineInputs.isCommercial === true

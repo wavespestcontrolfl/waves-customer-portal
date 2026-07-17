@@ -1587,7 +1587,7 @@ function generateEstimate(input) {
   let manualDiscountAmount = 0;          // recurring slice (margin logic + recurringAnnualAfter use this)
   let manualDiscountOneTimeAmount = 0;   // one-time slice
   let manualDiscountSpecialtyAmount = 0; // specialty slice
-  let manualDiscountLawnFloorCapped = false; // recurring slice capped at the lawn program minimum
+  let manualDiscountLawnCapReason = null; // recurring slice capped at lawn program/margin floor
   let manualDiscountInfo = null;
   const manualEligibleItems = recurringItems.filter(isManualRecurringDiscountEligible);
   const manualExcludedItems = recurringItems.filter(i => !isManualRecurringDiscountEligible(i));
@@ -1625,18 +1625,31 @@ function generateEstimate(input) {
         manualDiscountSpecialtyAmount = roundMoney(applied - manualDiscountAmount - manualDiscountOneTimeAmount);
       }
     }
-    // Lawn program minimum (owner directive 2026-07-09): unlike the warn-only
-    // margin stance below, the lawn floor is a HARD post-discount minimum —
-    // the recurring slice may spend all non-lawn room plus lawn's above-floor
-    // headroom, but never the floor itself. min(line, floor) protects legacy
-    // below-floor lines in full (they cannot be manually discounted lower)
-    // without ever raising them.
+    // Lawn program and collected-margin floors are HARD post-discount
+    // minimums. Enforce them here, before summary totals are persisted or
+    // emailed; the public ladder re-clamps only as defense in depth. The
+    // recurring slice may spend all non-lawn room plus lawn's above-floor
+    // headroom, but never either protected floor. min(line, floor) protects
+    // legacy below-floor lines in full without raising them.
     const lawnProgramMinimumMonthlyValue = Number(LAWN_PRICING_V2.programMinimumMonthly);
-    if (Number.isFinite(lawnProgramMinimumMonthlyValue) && lawnProgramMinimumMonthlyValue > 0) {
-      const lawnFloorAnnual = roundMoney(lawnProgramMinimumMonthlyValue * 12);
-      const lawnFloorProtectedAnnual = roundMoney(manualEligibleItems
-        .filter((i) => i.service === 'lawn_care')
-        .reduce((sum, i) => sum + Math.min(i.annualAfterDiscount || i.annual || 0, lawnFloorAnnual), 0));
+    const manualLawnItems = manualEligibleItems.filter((i) => i.service === 'lawn_care');
+    if (manualLawnItems.length) {
+      const lawnFloorAnnual = Number.isFinite(lawnProgramMinimumMonthlyValue)
+        && lawnProgramMinimumMonthlyValue > 0
+        ? roundMoney(lawnProgramMinimumMonthlyValue * 12)
+        : 0;
+      let lawnMarginFloorBinding = false;
+      const lawnFloorProtectedAnnual = roundMoney(manualLawnItems
+        .reduce((sum, i) => {
+          const lineAnnual = Number(i.annualAfterDiscount || i.annual || 0);
+          const rawMarginFloor = Number(i.minimumCollectedAnnualPrice ?? i.costFloorAnnual);
+          const marginFloorAnnual = Number.isFinite(rawMarginFloor) && rawMarginFloor > 0
+            ? rawMarginFloor
+            : 0;
+          if (marginFloorAnnual > lawnFloorAnnual) lawnMarginFloorBinding = true;
+          const protectedAnnual = Math.max(lawnFloorAnnual, marginFloorAnnual);
+          return sum + Math.min(lineAnnual, protectedAnnual);
+        }, 0));
       const recurringManualHeadroom = Math.max(0, roundMoney(manualDiscountableRecurringAnnual - lawnFloorProtectedAnnual));
       if (manualDiscountAmount > recurringManualHeadroom) {
         const blockedRecurring = roundMoney(manualDiscountAmount - recurringManualHeadroom);
@@ -1660,7 +1673,11 @@ function generateEstimate(input) {
             stillBlocked = roundMoney(stillBlocked - toSpecialty);
           }
         }
-        if (stillBlocked > 0) manualDiscountLawnFloorCapped = true;
+        if (stillBlocked > 0) {
+          manualDiscountLawnCapReason = lawnMarginFloorBinding
+            ? 'lawn_margin_floor'
+            : 'lawn_program_minimum';
+        }
       }
     }
     const appliedTotal = roundMoney(
@@ -1688,10 +1705,9 @@ function generateEstimate(input) {
       discountableBase: manualDiscountableTotal,
       recurringDiscountableBase: manualDiscountableRecurringAnnual,
       oneTimeDiscountableBase: roundMoney(manualDiscountableOneTime + manualDiscountableSpecialty),
-      capped: requestedAmount > appliedTotal || manualDiscountLawnFloorCapped,
-      capReason: manualDiscountLawnFloorCapped
-        ? 'lawn_program_minimum'
-        : (requestedAmount > appliedTotal ? 'discountable_base' : null),
+      capped: requestedAmount > appliedTotal || !!manualDiscountLawnCapReason,
+      capReason: manualDiscountLawnCapReason
+        || (requestedAmount > appliedTotal ? 'discountable_base' : null),
       scope: nonRecurringAmount > 0 ? 'recurring_and_one_time_after_waveguard' : 'recurring_annual_after_waveguard',
       stackingOrder: 'after_waveguard',
       eligibleServices: [
@@ -1704,12 +1720,10 @@ function generateEstimate(input) {
     };
   }
 
-  // Warn-only margin check on the manual discount stack. Manual owner discounts
-  // are intentionally NOT capped (loss-leader / goodwill pricing is allowed),
-  // but we surface a hard warning + per-line audit when a manual discount drops
-  // a guarded service below the margin floor. The manual discount is a single
-  // pooled amount, so each line's share is distributed proportionally to its
-  // post-WaveGuard annual.
+  // Warn-only margin check on the manual discount stack for services other
+  // than lawn. Lawn's collected-margin floor is enforced above so stored/email
+  // totals agree with the public ladder; other owner-entered loss-leader or
+  // goodwill discounts remain allowed with a hard warning + per-line audit.
   const manualMarginWarnings = [];
   if (manualDiscountAmount > 0 && manualDiscountableRecurringAnnual > 0) {
     for (const item of manualEligibleItems) {

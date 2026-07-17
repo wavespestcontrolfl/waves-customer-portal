@@ -7,6 +7,10 @@ function agentEstimatePreviewFingerprint(preview = {}) {
     lane: preview.lane || null,
     laneReasons: preview.lane_reasons || [],
     lines: preview.lines || [],
+    // The full engine result is persisted and may expose alternate lawn or
+    // mosquito cadence/tier prices even when the selected-line aggregates do
+    // not change. Bind every customer-selectable price to the confirmation.
+    engineResult: preview.engineResult || null,
     presentation: preview.presentation || null,
     customerId: preview.customer_account?.customer_id || null,
     customerRecognized: preview.customer_account?.recognized === true,
