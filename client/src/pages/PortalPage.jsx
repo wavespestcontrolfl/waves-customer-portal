@@ -5383,6 +5383,13 @@ function ServicePrefsSection() {
   );
 }
 
+// In-flight property-preference PUTs. Property switch and logout await these
+// alongside the waves:property-switching waiters, so a save started by the
+// tab-away unmount flush below — after the tab's event listener is gone —
+// still settles under the token of the property it describes before any
+// token swap.
+const inFlightPropertyPrefSaves = new Set();
+
 function PropertyTab({ customer }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -5409,6 +5416,32 @@ function PropertyTab({ customer }) {
     loadPropertyPreferences();
   }, [loadPropertyPreferences]);
 
+  // Save any pending debounced edits NOW, with the current property's token.
+  // A rejected save re-queues the fields so nothing is silently dropped.
+  // Every PUT this starts is tracked in inFlightPropertyPrefSaves until it
+  // settles, so switch/logout can await saves whose component is gone.
+  const flushAllPendingSaves = useCallback(() => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    const toSave = { ...pendingRef.current };
+    if (!Object.keys(toSave).length) return Promise.resolve();
+    pendingRef.current = {};
+    const save = api.updatePropertyPreferences(toSave)
+      .then((result) => {
+        if (result && result.preferences) lastSavedRef.current = result.preferences;
+      })
+      .catch((err) => {
+        pendingRef.current = { ...toSave, ...pendingRef.current };
+        throw err;
+      });
+    inFlightPropertyPrefSaves.add(save);
+    const untrack = () => inFlightPropertyPrefSaves.delete(save);
+    save.then(untrack, untrack);
+    return save;
+  }, []);
+
   const updateField = useCallback((field, value) => {
     setPrefs(prev => ({ ...prev, [field]: value }));
     // Merge into pending so earlier-edited fields aren't lost when the
@@ -5416,53 +5449,33 @@ function PropertyTab({ customer }) {
     pendingRef.current = { ...pendingRef.current, [field]: value };
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(async () => {
-      const toSave = { ...pendingRef.current };
-      pendingRef.current = {};
+    debounceRef.current = setTimeout(() => {
       setSaveStatus('saving');
-      try {
-        const result = await api.updatePropertyPreferences(toSave);
-        if (result && result.preferences) {
-          lastSavedRef.current = result.preferences;
-        }
-        setSaveStatus('saved');
-        setTimeout(() => setSaveStatus(prev => (prev === 'saved' ? null : prev)), 2000);
-      } catch (err) {
-        console.error('[PropertyTab] save failed', err);
-        // Revert optimistic UI to last confirmed server state so the user
-        // isn't misled into thinking gate codes / pet info persisted.
-        if (lastSavedRef.current) {
-          setPrefs(lastSavedRef.current);
-        }
-        setSaveStatus('error');
-      }
+      flushAllPendingSaves()
+        .then(() => {
+          setSaveStatus('saved');
+          setTimeout(() => setSaveStatus(prev => (prev === 'saved' ? null : prev)), 2000);
+        })
+        .catch((err) => {
+          console.error('[PropertyTab] save failed', err);
+          // Revert optimistic UI to last confirmed server state so the user
+          // isn't misled into thinking gate codes / pet info persisted.
+          if (lastSavedRef.current) {
+            setPrefs(lastSavedRef.current);
+          }
+          setSaveStatus('error');
+        });
     }, 1000);
-  }, []);
-
-  // Save any pending debounced edits NOW, with the current property's token.
-  // A rejected save re-queues the fields so nothing is silently dropped.
-  const flushAllPendingSaves = useCallback(async () => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
-    const toSave = { ...pendingRef.current };
-    if (!Object.keys(toSave).length) return;
-    pendingRef.current = {};
-    try {
-      const result = await api.updatePropertyPreferences(toSave);
-      if (result && result.preferences) lastSavedRef.current = result.preferences;
-    } catch (err) {
-      pendingRef.current = { ...toSave, ...pendingRef.current };
-      throw err;
-    }
-  }, []);
+  }, [flushAllPendingSaves]);
 
   // The 1s debounce above survives this tab's unmount, but switching
   // properties swaps the access token first — a delayed PUT would then write
   // THIS property's gate/pet details into the newly selected account. The
   // shell dispatches this event before switching so edits flush while the
-  // token still belongs to the property they describe.
+  // token still belongs to the property they describe. Tab navigation
+  // unmounts this tab and removes the listener while the debounce may still
+  // be pending — the cleanup flushes too, so the PUT leaves immediately with
+  // this property's token and stays awaitable via inFlightPropertyPrefSaves.
   useEffect(() => {
     const flushBeforeSwitch = (event) => {
       const pendingSave = flushAllPendingSaves();
@@ -5470,7 +5483,10 @@ function PropertyTab({ customer }) {
       else pendingSave.catch(() => {});
     };
     window.addEventListener('waves:property-switching', flushBeforeSwitch);
-    return () => window.removeEventListener('waves:property-switching', flushBeforeSwitch);
+    return () => {
+      window.removeEventListener('waves:property-switching', flushBeforeSwitch);
+      flushAllPendingSaves().catch(() => {});
+    };
   }, [flushAllPendingSaves]);
 
   const card = {
@@ -11123,6 +11139,11 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
               const isInsurance = doc.documentType === 'insurance_cert';
               const isServiceReport = doc.documentType === 'service_report';
               const canOpen = !!(doc.viewUrl || doc.isProjectReport);
+              // Stored documents without a file: the server returns
+              // downloadUrl: null / shareable: false and rejects /share with
+              // 409 — don't offer actions that can only fail.
+              const canShare = doc.shareable !== false;
+              const canDownload = !!(canOpen || doc.downloadUrl || (doc.isAutoGenerated && doc.linkedServiceRecordId));
               const meta = [
                 formatDate(doc),
                 relativeTime(doc),
@@ -11209,39 +11230,49 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                       )}
                     </div>
 
-                    <div style={{
-                      display: 'flex',
-                      gap: 6,
-                      flexShrink: 0,
-                      flexDirection: compact ? 'column' : 'row',
-                      alignItems: 'stretch',
-                    }}>
-                      <button
-                        type="button"
-                        onClick={() => onShare(doc)}
-                        disabled={share === 'copying'}
-                        style={{
-                          ...actionButton,
-                          background: share === 'copied' ? '#F0FDF4' : '#fff',
-                          color: share === 'copied' ? B.green : B.glassNavy,
-                          opacity: share === 'copying' ? 0.65 : 1,
-                          cursor: share === 'copying' ? 'wait' : 'pointer',
-                        }}
-                        aria-label={`Share ${doc.title || 'document'}`}
-                      >
-                        <Icon name={share === 'copied' ? 'check' : 'share'} size={14} strokeWidth={2} style={{ marginRight: compact ? 0 : 5 }} />
-                        {!compact && (share === 'copied' ? 'Copied' : share === 'copying' ? 'Copying' : 'Share')}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onDownload(doc)}
-                        style={actionButton}
-                        aria-label={`${canOpen ? 'Open' : 'Download'} ${doc.title || 'document'}`}
-                      >
-                        <Icon name={canOpen ? 'arrowRight' : 'document'} size={14} strokeWidth={2} style={{ marginRight: compact ? 0 : 5 }} />
-                        {!compact && (canOpen ? 'Open' : 'Download')}
-                      </button>
-                    </div>
+                    {(canShare || canDownload) ? (
+                      <div style={{
+                        display: 'flex',
+                        gap: 6,
+                        flexShrink: 0,
+                        flexDirection: compact ? 'column' : 'row',
+                        alignItems: 'stretch',
+                      }}>
+                        {canShare && (
+                          <button
+                            type="button"
+                            onClick={() => onShare(doc)}
+                            disabled={share === 'copying'}
+                            style={{
+                              ...actionButton,
+                              background: share === 'copied' ? '#F0FDF4' : '#fff',
+                              color: share === 'copied' ? B.green : B.glassNavy,
+                              opacity: share === 'copying' ? 0.65 : 1,
+                              cursor: share === 'copying' ? 'wait' : 'pointer',
+                            }}
+                            aria-label={`Share ${doc.title || 'document'}`}
+                          >
+                            <Icon name={share === 'copied' ? 'check' : 'share'} size={14} strokeWidth={2} style={{ marginRight: compact ? 0 : 5 }} />
+                            {!compact && (share === 'copied' ? 'Copied' : share === 'copying' ? 'Copying' : 'Share')}
+                          </button>
+                        )}
+                        {canDownload && (
+                          <button
+                            type="button"
+                            onClick={() => onDownload(doc)}
+                            style={actionButton}
+                            aria-label={`${canOpen ? 'Open' : 'Download'} ${doc.title || 'document'}`}
+                          >
+                            <Icon name={canOpen ? 'arrowRight' : 'document'} size={14} strokeWidth={2} style={{ marginRight: compact ? 0 : 5 }} />
+                            {!compact && (canOpen ? 'Open' : 'Download')}
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: 12, color: muted, fontWeight: 700, flexShrink: 0, alignSelf: 'center' }}>
+                        Not available online
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -12813,7 +12844,9 @@ export default function PortalPage() {
     // property's gate/pet details into the newly selected account.
     const waiters = [];
     window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
-    const saves = await Promise.allSettled(waiters);
+    // Also await saves already in flight — e.g. one started by PropertyTab's
+    // unmount flush after tab navigation removed its event listener.
+    const saves = await Promise.allSettled([...waiters, ...inFlightPropertyPrefSaves]);
     if (saves.some(result => result.status === 'rejected')) {
       setSwitchingPropertyId(null);
       showCustomerAlert('Your latest property edits could not be saved, so we kept this property open. Try saving again before switching.');
@@ -13180,7 +13213,7 @@ export default function PortalPage() {
                       // re-login, could fire under the next account's token).
                       const waiters = [];
                       window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
-                      await Promise.allSettled(waiters);
+                      await Promise.allSettled([...waiters, ...inFlightPropertyPrefSaves]);
                       logout();
                       setShowMenu(false);
                     }}
@@ -13340,4 +13373,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection };
