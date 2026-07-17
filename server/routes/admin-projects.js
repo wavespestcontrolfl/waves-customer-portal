@@ -3210,6 +3210,68 @@ function reportHoldColumnsPresent(projectCols) {
   return Boolean(projectCols.report_hold_status && projectCols.report_hold_attempts);
 }
 
+function reportHoldReleaseSmsKey(projectId, invoiceId) {
+  return `project_report_hold_release:${safeIdempotencySegment(projectId)}:${safeIdempotencySegment(invoiceId)}`;
+}
+
+async function acceptedProviderSmsForClaim(claimId) {
+  return db('sms_log')
+    .where({ direction: 'outbound' })
+    .whereIn('status', ['queued', 'sent', 'delivered'])
+    .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(claimId)])
+    .first('id');
+}
+
+// Persist a claim before calling Twilio. Its id is forwarded through the
+// messaging adapter and written onto Twilio's provider-side sms_log row. If
+// the process crashes after Twilio accepts but before the project release is
+// stamped, the next hold retry sees that sibling row and does not text twice.
+async function claimReportHoldReleaseSms({ projectId, invoiceId, customerId, toPhone, messageBody }) {
+  const releaseKey = reportHoldReleaseSmsKey(projectId, invoiceId);
+  let claim = await db('sms_log')
+    .whereRaw("metadata->>'report_hold_release_key' = ?", [releaseKey])
+    .first();
+
+  if (claim) {
+    const providerRow = await acceptedProviderSmsForClaim(claim.id);
+    if (providerRow || claim.status === 'sent') {
+      if (claim.status !== 'sent') {
+        await db('sms_log').where({ id: claim.id }).update({ status: 'sent', updated_at: db.fn.now() });
+      }
+      return { id: claim.id, alreadySent: true };
+    }
+    await db('sms_log').where({ id: claim.id }).update({
+      status: 'sending',
+      message_body: messageBody,
+      to_phone: toPhone,
+      updated_at: db.fn.now(),
+    });
+    return { id: claim.id, alreadySent: false };
+  }
+
+  claim = { id: crypto.randomUUID() };
+  await db('sms_log').insert({
+    id: claim.id,
+    customer_id: customerId || null,
+    direction: 'outbound',
+    from_phone: config.twilio?.phoneNumber || 'system',
+    to_phone: toPhone,
+    message_body: messageBody,
+    status: 'sending',
+    message_type: 'project_report_release',
+    metadata: JSON.stringify({ report_hold_release_key: releaseKey }),
+  });
+  return { id: claim.id, alreadySent: false };
+}
+
+async function finishReportHoldReleaseSmsClaim(claimId, sent) {
+  if (!claimId) return;
+  await db('sms_log').where({ id: claimId }).update({
+    status: sent ? 'sent' : 'failed',
+    updated_at: db.fn.now(),
+  });
+}
+
 /**
  * Deliver a payment-held project report. Called by the release sweep (and
  * payment-event nudges) once the linked invoice settles — this is the /send
@@ -3410,24 +3472,37 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
           entity_type: 'project',
           entity_id: refreshed.id,
         });
-        const result = await sendCustomerMessage({
-          to: normalizedPhone,
-          body: smsBody,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'support_resolution',
+        const smsClaim = await claimReportHoldReleaseSms({
+          projectId: refreshed.id,
+          invoiceId: invoice.id,
           customerId: customer.id,
-          identityTrustLevel: 'phone_matches_customer',
-          entryPoint: 'project_report_hold_release',
-          metadata: {
-            original_message_type: 'project_report',
-            project_id: refreshed.id,
-            invoice_id: invoice.id,
-          },
+          toPhone: normalizedPhone,
+          messageBody: smsBody,
         });
-        channels.sms = result.sent
-          ? { ok: true }
-          : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+        if (smsClaim.alreadySent) {
+          channels.sms = { ok: true, deduplicated: true };
+        } else {
+          const result = await sendCustomerMessage({
+            to: normalizedPhone,
+            body: smsBody,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'support_resolution',
+            customerId: customer.id,
+            identityTrustLevel: 'phone_matches_customer',
+            entryPoint: 'project_report_hold_release',
+            metadata: {
+              original_message_type: 'project_report',
+              project_id: refreshed.id,
+              invoice_id: invoice.id,
+              scheduled_sms_log_id: smsClaim.id,
+            },
+          });
+          await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
+          channels.sms = result.sent
+            ? { ok: true }
+            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+        }
       } catch (err) {
         channels.sms = { ok: false, error: err.message };
       }
@@ -3476,10 +3551,10 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
       refreshed,
       'project_report_released_after_payment',
       `Paid report released: ${typeLabel} (invoice ${invoice.invoice_number || invoice.id} settled)`,
-      { report_token: token, invoice_id: invoice.id, channels, source },
+      { invoice_id: invoice.id, channels, source },
     ).catch(() => {});
 
-    logger.info(`[projects] hold release delivered ${projectId} token=${token} source=${source} email=${channels.email?.ok} sms=${channels.sms?.ok}`);
+    logger.info(`[projects] hold release delivered ${projectId} source=${source} email=${channels.email?.ok} sms=${channels.sms?.ok}`);
     return { released: true, channels, reportUrl };
   } catch (err) {
     logger.error(`[projects] hold release failed for ${projectId}: ${err.message}`);

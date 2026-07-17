@@ -49,6 +49,7 @@ const PROJECT_TYPES = {
     defaultTitle: 'WDO Inspection Service',
     requiresFollowup: false,
     photoCategories: [
+      'other',
       'wdo_evidence',
       'wdo_damage',
       'previous_treatment',
@@ -59,7 +60,6 @@ const PROJECT_TYPES = {
       'interior',
       'attic',
       'crawlspace',
-      'other',
     ],
     // `section` groups the form into scannable blocks (rendered as inline
     // headers by CreateProjectModal, same pattern as the typed completion's

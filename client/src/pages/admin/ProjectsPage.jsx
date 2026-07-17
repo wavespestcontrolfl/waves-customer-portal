@@ -3004,7 +3004,7 @@ export function ProjectDetail({
             Prep guide
           </button>
         )}
-        {canAdminActions && !isOfficialTermiteDocument && project.status !== "closed" && (
+        {canAdminActions && project.status !== "closed" && (
           <button
             type="button"
             onClick={handleClose}

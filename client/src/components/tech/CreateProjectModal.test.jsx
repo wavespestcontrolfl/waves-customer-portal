@@ -105,9 +105,9 @@ const dateInput = () => document.querySelector('input[type="date"]');
 describe('CreateProjectModal WDO inspection date', () => {
   it('exposes a named Complete Service dialog', async () => {
     renderWdoSheet();
-    expect(
-      await screen.findByRole('dialog', { name: 'Complete Service Report' }),
-    ).toBeTruthy();
+    const dialog = await screen.findByRole('dialog', { name: 'Complete Service Report' });
+    expect(dialog).toBeTruthy();
+    expect(Array.from(dialog.children).find((child) => child.tagName === 'DIV').style.boxSizing).toBe('border-box');
   });
 
   it('shows the visit date passed as YYYY-MM-DD', async () => {
@@ -143,6 +143,36 @@ describe('CreateProjectModal WDO Property & scope prefill', () => {
     expect(camera.getAttribute('capture')).toBe('environment');
     expect(library).toBeTruthy();
     expect(library.hasAttribute('capture')).toBe(false);
+    const photoCategory = Array.from(document.querySelectorAll('select'))
+      .find((select) => Array.from(select.options).some((option) => option.value === 'wdo_evidence'));
+    expect(photoCategory.value).toBe('other');
+  });
+
+  it('keeps a technician-edited photo caption when AI extraction finishes later', async () => {
+    let resolveExtraction;
+    const extraction = new Promise((resolve) => { resolveExtraction = resolve; });
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (String(url).includes('/admin/projects/wdo-treatment-photo')) return extraction;
+      return baseFetch(url, opts);
+    }));
+    renderWdoSheet();
+    await waitFor(() => expect(field('previous_treatment_notes')).toBeTruthy());
+    const file = new File(['photo'], 'sticker.jpg', { type: 'image/jpeg' });
+    fireEvent.change(document.querySelector('input[data-wdo-prior-treatment-source="library"]'), {
+      target: { files: [file] },
+    });
+    const caption = await screen.findByLabelText('Photo description for sticker.jpg');
+    fireEvent.change(caption, { target: { value: 'Technician verified sticker at garage entry' } });
+    resolveExtraction({
+      ok: true,
+      json: () => Promise.resolve({
+        suggestedFindings: { previous_treatment_evidence: 'Yes', previous_treatment_notes: 'Treated in 2022' },
+      }),
+    });
+    await screen.findByText(/Extracted from photo/);
+    expect(screen.getByLabelText('Photo description for sticker.jpg').value)
+      .toBe('Technician verified sticker at garage entry');
   });
 
   it('maps a manufactured/mobile property_type onto the construction select', async () => {
@@ -207,6 +237,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     detailPayload = {
       wdo_applicator: { name: 'Adam Benetti', idCardNo: 'JE362022' },
       wdo_signature: null,
+      report_payment_hold_available: true,
     };
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
       const u = String(url);
@@ -230,6 +261,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
       if (u.includes('/admin/projects/p-1/close')) {
         return jsonResponse({ project: { id: 'p-1', project_type: 'wdo_inspection', status: 'closed' } });
       }
+      if (u.endsWith('/admin/projects/p-1/send')) return jsonResponse({ sent: true });
       if (u.includes('/admin/projects/p-1')) return jsonResponse({ project: detailPayload });
       return jsonResponse({});
     }));
@@ -368,6 +400,71 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(invoiceCalls).toHaveLength(2); // one preview + one real send, no retry send
   });
 
+  it('falls back to combined invoice + report delivery when the hold gate is unavailable', async () => {
+    detailPayload.report_payment_hold_available = false;
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (String(url).includes('/admin/projects/p-1/send-with-invoice')) {
+        const body = JSON.parse(opts.body || '{}');
+        if (body.dry_run) return jsonResponse({ invoice: { id: 'inv-1', total: 250 } });
+        return jsonResponse({ sent: true, report_held: false, invoice: { id: 'inv-1', invoice_number: 'INV-1001' } });
+      }
+      return baseFetch(url, opts);
+    }));
+    const onCreated = vi.fn();
+    await saveIntoSignStep({ onCreated });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & report' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'closed' }),
+      expect.objectContaining({ completed: true }),
+    ));
+    const invoiceBodies = fetch.mock.calls
+      .filter(([url]) => String(url).includes('/send-with-invoice'))
+      .map(([, opts]) => JSON.parse(opts.body || '{}'));
+    expect(invoiceBodies.every((body) => body.hold_report_until_paid !== true)).toBe(true);
+  });
+
+  it('accepts immediate report delivery when account credit fully covers the invoice', async () => {
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (String(url).includes('/admin/projects/p-1/send-with-invoice')) {
+        const body = JSON.parse(opts.body || '{}');
+        if (body.dry_run) return jsonResponse({ invoice: { id: 'inv-1', total: 250 } });
+        return jsonResponse({ sent: true, report_held: false, invoice: { id: 'inv-1', invoice_number: 'INV-1001' } });
+      }
+      return baseFetch(url, opts);
+    }));
+    const onCreated = vi.fn();
+    await saveIntoSignStep({ onCreated });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & hold report' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'closed' }),
+      expect.objectContaining({ completed: true }),
+    ));
+    expect(screen.queryByText(/not placed on hold/i)).toBeNull();
+  });
+
+  it('sends a no-charge WDO report without creating or sending an invoice', async () => {
+    const onCreated = vi.fn();
+    renderWdoSheet({ defaultInspectionFee: 0, onCreated });
+    await waitFor(() => expect(field('inspection_fee')?.value).toBe('0'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    await screen.findByText('✓ Report draft saved');
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send report & finish service' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'closed' }),
+      expect.objectContaining({ completed: true }),
+    ));
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'))).toHaveLength(0);
+    expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/admin/projects/p-1/send'))).toHaveLength(1);
+  });
+
   it('closing from the sign step still reports the created project', async () => {
     const onCreated = vi.fn();
     const onClose = vi.fn();
@@ -478,6 +575,12 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
           project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate', status: 'closed' },
         });
       }
+      if (u.endsWith('/admin/projects/cert-1')) {
+        return jsonResponse({
+          project: { report_payment_hold_available: true },
+          closeoutPreview: { billing: { required: true, resolved: false, reason: 'invoice_required' } },
+        });
+      }
       return jsonResponse({});
     }));
   });
@@ -516,6 +619,46 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     const sendCalls = fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'));
     expect(sendCalls).toHaveLength(2);
     expect(sendCalls.every(([, opts]) => JSON.parse(opts.body).hold_report_until_paid === true)).toBe(true);
+  });
+
+  it('delivers a prepaid certificate and closes without sending another invoice', async () => {
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.endsWith('/admin/projects/cert-1')) {
+        return jsonResponse({
+          project: { report_payment_hold_available: true },
+          closeoutPreview: { billing: { required: true, resolved: true, reason: 'prepaid_covered' } },
+        });
+      }
+      if (u.endsWith('/admin/projects/cert-1/send')) return jsonResponse({ sent: true });
+      return baseFetch(url, opts);
+    }));
+    const onCreated = vi.fn();
+    renderCertificateSheet({ onCreated });
+    fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send certificate & finish service' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'closed' }),
+      expect.objectContaining({ completed: true }),
+    ));
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'))).toHaveLength(0);
+  });
+
+  it('does not treat a saved bank account alias as a chargeable card', async () => {
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (String(url).includes('/admin/customers/9/cards')) {
+        return jsonResponse({ cards: [{ id: 'pm-bank', method_type: 'us_bank_account', last_four: '6789' }] });
+      }
+      return baseFetch(url, opts);
+    }));
+    renderCertificateSheet();
+    fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
+
+    expect(await screen.findByRole('button', { name: 'Send invoice & hold certificate' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Charge .*6789/ })).toBeNull();
   });
 
   it('offers a saved-card path that charges once, delivers the certificate, and closes', async () => {
@@ -580,6 +723,9 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
       if (u.includes('/admin/projects/scheduled-service/55/application-prefill')) return jsonResponse({ applications: [] });
       if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
         return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
+      }
+      if (u.endsWith('/admin/projects/cert-1')) {
+        return jsonResponse({ project: { report_payment_hold_available: true } });
       }
       return jsonResponse({});
     }));

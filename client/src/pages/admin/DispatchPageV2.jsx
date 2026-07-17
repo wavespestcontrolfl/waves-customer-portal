@@ -2532,7 +2532,7 @@ export default function DispatchPageV2({
               ? [projectService.completionProfile.projectType]
               : null
           }
-          allowInvoiceCompletion
+          allowInvoiceCompletion={getAdminUser()?.role === "admin"}
           onViewDetails={
             isMobile
               ? () => {

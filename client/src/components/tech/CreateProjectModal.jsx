@@ -24,6 +24,7 @@ const ESTIMATE_BUTTON_BG = '#09090B';
 const WDO_PROJECT_TYPE = 'wdo_inspection';
 const PRE_TREATMENT_CERTIFICATE_TYPE = 'pre_treatment_termite_certificate';
 const OFFICIAL_DOCUMENT_TYPES = new Set([WDO_PROJECT_TYPE, PRE_TREATMENT_CERTIFICATE_TYPE]);
+const BANK_PAYMENT_METHOD_TYPES = new Set(['ach', 'us_bank_account', 'bank', 'bank_account']);
 const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 
 /**
@@ -223,6 +224,11 @@ export function wdoFeeSeedFromVisit(service) {
   return service?.estimatedPrice ?? '';
 }
 
+function wdoFeeIsExplicitZero(value) {
+  const match = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
+  return match != null && Number(match[1]) === 0;
+}
+
 // Populate the WDO contact/address fields from the selected customer. With
 // overwrite=false (on selection) only blank fields are filled so typed values
 // are preserved; the explicit "Fill from customer" button passes overwrite=true.
@@ -369,7 +375,9 @@ export default function CreateProjectModal({
   const { cards: customerCards } = useCustomerCards(customerId);
   const savedCardCandidate = chargeableCardOnFile(
     Array.isArray(customerCards)
-      ? customerCards.filter((method) => method?.method_type !== 'ach')
+      ? customerCards.filter((method) => !BANK_PAYMENT_METHOD_TYPES.has(
+        String(method?.method_type || '').toLowerCase(),
+      ))
       : customerCards,
   );
   // chargeableCardOnFile deliberately returns an expired fallback so read-only
@@ -430,10 +438,15 @@ export default function CreateProjectModal({
   // stays open for the remaining delivery action instead of detouring to the
   // legacy project editor. WDO adds its canvas signature here; pre-treatment
   // already carries its typed applicator attestation in the saved certificate.
-  // Shape: { project, requiresSignature, applicator, signature }.
+  // Shape: { project, requiresSignature, applicator, signature,
+  //          reportHoldAvailable, billingReason, noCharge }.
   // onCreated/onClose are DEFERRED to finishSignStep so parents (which
   // unmount the modal from onCreated) don't tear the step down.
   const [signStep, setSignStep] = useState(null);
+  const reportOnlyCompletion = Boolean(
+    signStep?.noCharge
+    || ['prepaid_covered', 'not_billable'].includes(signStep?.billingReason),
+  );
   // True while the pad's signature POST/DELETE is in flight — every sign-step
   // exit holds until it settles, or the modal could unmount mid-mutation and
   // hand the parent stale signed/unsigned state (Codex P2).
@@ -1315,9 +1328,16 @@ export default function CreateProjectModal({
       // reviewed extraction into its caption so the PDF does not show a bare
       // "Photo N -" line or force the tech to type the same details twice.
       if (notes) {
+        const generatedCaption = `Previous treatment evidence: ${notes}`;
         setPhotoQueue(prev => prev.map(item => (
           item.id === started.photoId
-            ? { ...item, caption: `Previous treatment evidence: ${notes}` }
+            ? {
+              ...item,
+              caption: !item.caption || item.caption === item.generatedCaption
+                ? generatedCaption
+                : item.caption,
+              generatedCaption,
+            }
             : item
         )));
       }
@@ -1441,19 +1461,23 @@ export default function CreateProjectModal({
         // page uses (findings applicator → creating tech's name + FDACS
         // license) plus the stripped signature metadata. Prefill-only: if
         // the fetch fails, the pad still works with blank fields.
-        let detail = null;
-        if (projectType === WDO_PROJECT_TYPE) {
+        let detailPayload = null;
+        if (projectType === WDO_PROJECT_TYPE || allowInvoiceCompletion) {
           try {
             const dr = await adminFetch(`/admin/projects/${data.project.id}`);
             const dd = await dr.json().catch(() => null);
-            if (dr.ok) detail = dd?.project || null;
+            if (dr.ok) detailPayload = dd || null;
           } catch { /* prefill only */ }
         }
+        const detail = detailPayload?.project || null;
         setSignStep({
           project: data.project,
           requiresSignature: projectType === WDO_PROJECT_TYPE,
           applicator: detail?.wdo_applicator || { name: '', idCardNo: '' },
           signature: detail?.wdo_signature || null,
+          reportHoldAvailable: detail?.report_payment_hold_available === true,
+          billingReason: detailPayload?.closeoutPreview?.billing?.reason || null,
+          noCharge: projectType === WDO_PROJECT_TYPE && wdoFeeIsExplicitZero(findings.inspection_fee),
         });
         return;
       }
@@ -1492,6 +1516,7 @@ export default function CreateProjectModal({
       || (requiresSignature && !signStep.signature?.signed && !signStep.invoiceDelivery)) return;
     const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
     const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
+    const holdRequested = signStep.reportHoldAvailable === true;
     setCompletionBusy(true);
     setCompletionAction('invoice');
     setError(null);
@@ -1502,7 +1527,7 @@ export default function CreateProjectModal({
           `/admin/projects/${signStep.project.id}/send-with-invoice`,
           {
             method: 'POST',
-            body: { dry_run: true, hold_report_until_paid: true },
+            body: { dry_run: true, ...(holdRequested ? { hold_report_until_paid: true } : {}) },
           },
         );
         const preview = await readProjectAction(previewResponse, `Could not prepare the ${documentLabel} invoice`);
@@ -1510,10 +1535,10 @@ export default function CreateProjectModal({
           style: 'currency',
           currency: 'USD',
         });
-        if (!confirm(
-          `Send the ${amount} invoice now and finish this service?\n\n` +
-          `The customer receives the invoice and payment link now. Their ${documentLabel} stays locked until payment, then emails and unlocks automatically.`,
-        )) return;
+        const deliveryExplanation = holdRequested
+          ? `The customer receives the invoice and payment link now. Their ${documentLabel} stays locked until payment, then emails and unlocks automatically.`
+          : `The customer receives the invoice, payment link, and ${documentLabel} now.`;
+        if (!confirm(`Send the ${amount} invoice now and finish this service?\n\n${deliveryExplanation}`)) return;
 
         const sendResponse = await adminFetch(
           `/admin/projects/${signStep.project.id}/send-with-invoice`,
@@ -1521,13 +1546,13 @@ export default function CreateProjectModal({
             method: 'POST',
             body: {
               ...(preview?.invoice?.id ? { invoice_id: preview.invoice.id } : {}),
-              hold_report_until_paid: true,
+              ...(holdRequested ? { hold_report_until_paid: true } : {}),
             },
           },
         );
         const sent = await readProjectAction(sendResponse, `Could not send the ${documentLabel} invoice`);
-        if (!sent.sent || !sent.report_held) {
-          throw new Error('The invoice was not delivered, so the report was not placed on hold. Please retry.');
+        if (!sent.sent) {
+          throw new Error(`The invoice and ${documentLabel} were not delivered. Please retry.`);
         }
         invoiceDelivery = sent;
         // Persist this boundary in local UI state before attempting close. If
@@ -1543,7 +1568,7 @@ export default function CreateProjectModal({
       const closed = await readProjectAction(
         closeResponse,
         invoiceDelivery
-          ? 'The invoice was sent and the report is locked, but the service could not be closed. Tap Finish service to retry.'
+          ? `The invoice was sent and the ${documentLabel} was ${invoiceDelivery.report_held ? 'held' : 'delivered'}, but the service could not be closed. Tap Finish service to retry.`
           : `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`,
       );
       finishSignStep({
@@ -1553,6 +1578,46 @@ export default function CreateProjectModal({
       });
     } catch (e) {
       setError(e.message || `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`);
+    } finally {
+      setCompletionBusy(false);
+      setCompletionAction(null);
+    }
+  }
+
+  async function sendReportAndFinish() {
+    const requiresSignature = signStep?.requiresSignature !== false;
+    if (!allowInvoiceCompletion
+      || !signStep?.project?.id
+      || (requiresSignature && !signStep.signature?.signed && !signStep.reportOnlyDelivery)) return;
+    const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
+    const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
+    setCompletionBusy(true);
+    setCompletionAction('report');
+    setError(null);
+    let reportOnlyDelivery = signStep.reportOnlyDelivery || null;
+    try {
+      if (!reportOnlyDelivery) {
+        const sendResponse = await adminFetch(`/admin/projects/${signStep.project.id}/send`, {
+          method: 'POST',
+          body: {},
+        });
+        const sent = await readProjectAction(sendResponse, `Could not send the ${documentLabel}`);
+        if (!sent.sent) throw new Error(`The ${documentLabel} was not delivered. Please retry.`);
+        reportOnlyDelivery = sent;
+        setSignStep(prev => (prev ? { ...prev, reportOnlyDelivery: sent } : prev));
+      }
+
+      const closeResponse = await adminFetch(`/admin/projects/${signStep.project.id}/close`, {
+        method: 'POST',
+        body: {},
+      });
+      const closed = await readProjectAction(
+        closeResponse,
+        `The ${documentLabel} was delivered, but the service could not be closed. Tap Finish service to retry.`,
+      );
+      finishSignStep({ project: closed.project || signStep.project, completed: true });
+    } catch (e) {
+      setError(e.message || `Could not deliver the ${documentLabel} and finish the service`);
     } finally {
       setCompletionBusy(false);
       setCompletionAction(null);
@@ -1734,6 +1799,7 @@ export default function CreateProjectModal({
         display: 'flex', flexDirection: 'column',
         overflow: 'hidden',
         paddingTop: 'env(safe-area-inset-top, 0px)',
+        boxSizing: 'border-box',
       } : {
         width: '100%', maxWidth: isEstimateStyle ? 720 : 520, margin: '0 12px',
         background: isEstimateStyle ? P.bg : P.card,
@@ -1833,22 +1899,36 @@ export default function CreateProjectModal({
             </div>
             <div style={{ fontSize: 13, color: P.muted, lineHeight: 1.45, fontFamily: P.bodyFont }}>
               {signStep.invoiceDelivery
-                ? `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} sent. The customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} is locked until payment; finish the service without sending anything again.`
+                ? signStep.invoiceDelivery.report_held
+                  ? `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} sent. The customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} is locked until payment; finish the service without sending anything again.`
+                  : `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} and the customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} were delivered; finish the service without sending anything again.`
+                : signStep.reportOnlyDelivery
+                  ? `The customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} was delivered; finish the service without sending anything again.`
                 : signStep.cardCompletion?.charged
                   ? signStep.cardCompletion.reportSent
                     ? `Card payment received and the customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} delivered. Finish the service without charging or sending again.`
                     : `Card payment received. Deliver the customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} and finish—this retry will not charge the card again.`
+                : reportOnlyCompletion
+                  ? `This visit is already paid or has no invoice balance. Send the ${signStep.requiresSignature === false ? 'certificate' : 'report'} and finish the service.`
                 : signStep.requiresSignature === false
                   ? allowInvoiceCompletion
                     ? savedCard
-                      ? `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and keep the certificate locked until payment.`
-                      : 'Applicator attestation saved — send the invoice now. The customer’s certificate stays locked until payment, then emails and unlocks automatically.'
+                      ? signStep.reportHoldAvailable
+                        ? `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and keep the certificate locked until payment.`
+                        : `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and certificate together.`
+                      : signStep.reportHoldAvailable
+                        ? 'Applicator attestation saved — send the invoice now. The customer’s certificate stays locked until payment, then emails and unlocks automatically.'
+                        : 'Applicator attestation saved — send the invoice and certificate now.'
                     : 'Applicator attestation saved — ready for office invoice delivery.'
                   : signStep.signature?.signed
                     ? allowInvoiceCompletion
                       ? savedCard
-                        ? `Signed — charge ${savedCardLabel} now, or send the invoice and keep the report locked until payment.`
-                        : 'Signed — send the invoice now. The customer’s report stays locked until payment, then emails and unlocks automatically.'
+                        ? signStep.reportHoldAvailable
+                          ? `Signed — charge ${savedCardLabel} now, or send the invoice and keep the report locked until payment.`
+                          : `Signed — charge ${savedCardLabel} now, or send the invoice and report together.`
+                        : signStep.reportHoldAvailable
+                          ? 'Signed — send the invoice now. The customer’s report stays locked until payment, then emails and unlocks automatically.'
+                          : 'Signed — send the invoice and report now.'
                       : 'Signed — saved for office review and invoice delivery.'
                     : 'Sign now to finish in one step — the FDACS-13645 report can’t be sent until the licensee signs. You can also sign later from the saved report.'}
             </div>
@@ -1865,7 +1945,7 @@ export default function CreateProjectModal({
                 {error}
               </div>
             )}
-            {signStep.requiresSignature !== false && !signStep.invoiceDelivery && !signStep.cardCompletion?.charged && (
+            {signStep.requiresSignature !== false && !signStep.invoiceDelivery && !signStep.reportOnlyDelivery && !signStep.cardCompletion?.charged && (
               <WdoSignaturePad
                 projectId={signStep.project.id}
                 signature={signStep.signature}
@@ -1889,6 +1969,33 @@ export default function CreateProjectModal({
               </span>
             )}
             {allowInvoiceCompletion
+              && reportOnlyCompletion
+              && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.reportOnlyDelivery) && (
+              <button
+                type="button"
+                onClick={sendReportAndFinish}
+                disabled={signBusy || completionBusy}
+                style={{
+                  minHeight: 52,
+                  width: '100%',
+                  padding: '0 18px',
+                  borderRadius: 10,
+                  fontSize: 14,
+                  fontWeight: wStrong,
+                  background: P.accent,
+                  color: P.accentText,
+                  border: 'none',
+                  cursor: signBusy || completionBusy ? 'default' : 'pointer',
+                  opacity: signBusy || completionBusy ? 0.6 : 1,
+                }}
+              >
+                {completionBusy && completionAction === 'report'
+                  ? signStep.reportOnlyDelivery ? 'Finishing service…' : `Sending ${signStep.requiresSignature === false ? 'certificate' : 'report'}…`
+                  : signStep.reportOnlyDelivery ? 'Finish service' : `Send ${signStep.requiresSignature === false ? 'certificate' : 'report'} & finish service`}
+              </button>
+            )}
+            {allowInvoiceCompletion
+              && !reportOnlyCompletion
               && (savedCard || signStep.cardCompletion)
               && !signStep.invoiceDelivery
               && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.cardCompletion) && (
@@ -1922,6 +2029,7 @@ export default function CreateProjectModal({
               </button>
             )}
             {allowInvoiceCompletion
+              && !reportOnlyCompletion
               && !signStep.cardCompletion?.charged
               && !signStep.cardCompletion?.blocked
               && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.invoiceDelivery) && (
@@ -1945,7 +2053,11 @@ export default function CreateProjectModal({
               >
                 {completionBusy && completionAction === 'invoice'
                   ? signStep.invoiceDelivery ? 'Finishing service…' : 'Sending invoice…'
-                  : signStep.invoiceDelivery ? 'Finish service' : `Send invoice & hold ${signStep.requiresSignature === false ? 'certificate' : 'report'}`}
+                  : signStep.invoiceDelivery
+                    ? 'Finish service'
+                    : signStep.reportHoldAvailable
+                      ? `Send invoice & hold ${signStep.requiresSignature === false ? 'certificate' : 'report'}`
+                      : `Send invoice & ${signStep.requiresSignature === false ? 'certificate' : 'report'}`}
               </button>
             )}
             <button
@@ -2580,7 +2692,9 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
   }
 
   function updateCaption(id, caption) {
-    setQueue(q => q.map(item => (item.id === id ? { ...item, caption } : item)));
+    setQueue(q => q.map(item => (
+      item.id === id ? { ...item, caption, generatedCaption: undefined } : item
+    )));
   }
 
   const addButtonStyle = {

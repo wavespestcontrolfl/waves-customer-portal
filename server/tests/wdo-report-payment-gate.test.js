@@ -155,6 +155,7 @@ const InvoiceService = require('../services/invoice');
 const PayerService = require('../services/payer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
+const logger = require('../services/logger');
 const projectsRouter = require('../routes/admin-projects');
 const reportsRouter = require('../routes/reports-public');
 const { releaseHeldProjectReport } = projectsRouter;
@@ -331,7 +332,9 @@ function mockTables({
   invoiceFirstResults = null,
   updates = {},
   projectUpdateResult = null,
+  smsRows = [],
 } = {}) {
+  const activityRows = [];
   const recordUpdate = (table) => jest.fn(async (payload) => {
     (updates[table] = updates[table] || []).push(payload);
     if (table === 'projects' && projectUpdateResult) return projectUpdateResult(payload);
@@ -356,14 +359,46 @@ function mockTables({
     }
     if (table === 'customers') return chain({ first: jest.fn(async () => CUSTOMER) });
     if (table === 'notification_prefs') return chain({ first: jest.fn(async () => null) });
+    if (table === 'sms_log') {
+      const filters = { where: [], raw: [] };
+      const c = chain();
+      c.where = jest.fn((value) => { filters.where.push(value); return c; });
+      c.whereRaw = jest.fn((sql, bindings) => { filters.raw.push({ sql, bindings }); return c; });
+      c.first = jest.fn(async () => {
+        const releaseKey = filters.raw.find((r) => r.sql.includes('report_hold_release_key'))?.bindings?.[0];
+        if (releaseKey) {
+          return smsRows.find((row) => {
+            const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+            return meta.report_hold_release_key === releaseKey;
+          }) || null;
+        }
+        const scheduledId = filters.raw.find((r) => r.sql.includes('scheduled_sms_log_id'))?.bindings?.[0];
+        if (scheduledId) {
+          return smsRows.find((row) => {
+            const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+            return String(meta.scheduled_sms_log_id || '') === String(scheduledId)
+              && ['queued', 'sent', 'delivered'].includes(row.status);
+          }) || null;
+        }
+        return null;
+      });
+      c.insert = jest.fn(async (row) => { smsRows.push({ ...row }); return [1]; });
+      c.update = jest.fn(async (payload) => {
+        const id = filters.where.find((value) => value?.id)?.id;
+        const row = smsRows.find((candidate) => candidate.id === id);
+        if (row) Object.assign(row, payload);
+        return row ? 1 : 0;
+      });
+      return c;
+    }
     if (table === 'project_photos') return chain({ resolvesTo: [] });
     if (table === 'technicians') return chain({ first: jest.fn(async () => null) });
-    if (table === 'activity_log') return chain();
+    if (table === 'activity_log') return chain({ insert: jest.fn(async (row) => { activityRows.push(row); return [1]; }) });
     if (table === 'service_records') return chain();
     throw new Error(`Unexpected table query: ${table}`);
   });
   db.transaction.mockImplementation(async (cb) => cb(db));
-  return { updates };
+  return { updates, smsRows, activityRows };
 }
 
 beforeEach(() => {
@@ -652,7 +687,7 @@ describe('send-with-invoice hold_report_until_paid', () => {
 describe('releaseHeldProjectReport', () => {
   test('delivers the held report once the invoice is paid', async () => {
     const project = wdoProject({ report_hold_status: 'held' });
-    const { updates } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
+    const { updates, activityRows } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
 
     const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
 
@@ -675,6 +710,35 @@ describe('releaseHeldProjectReport', () => {
     expect(releaseEmail.attachments).toHaveLength(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].body).toContain('/report/project/');
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.scheduled_sms_log_id).toBeTruthy();
+    const releaseActivity = activityRows.find((row) => row.action === 'project_report_released_after_payment');
+    expect(releaseActivity.metadata.report_token).toBeUndefined();
+    const releaseLog = logger.info.mock.calls.find(([message]) => String(message).includes('hold release delivered'))?.[0];
+    expect(releaseLog).not.toContain(project.report_token);
+  });
+
+  test('does not send the release SMS twice when the project stamp retries', async () => {
+    const project = wdoProject({ report_hold_status: 'held' });
+    let releaseStampFailures = 1;
+    mockTables({
+      project,
+      invoice: invoiceRow({ status: 'paid' }),
+      projectUpdateResult: (payload) => {
+        if (payload.report_hold_status === 'released' && releaseStampFailures > 0) {
+          releaseStampFailures -= 1;
+          throw new Error('release stamp unavailable');
+        }
+        return 1;
+      },
+    });
+
+    const first = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+    const second = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+
+    expect(first.released).toBe(false);
+    expect(second.released).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(second.channels.sms).toEqual({ ok: true, deduplicated: true });
   });
 
   test('releases a paid pre-treatment certificate by report link without a WDO PDF', async () => {
