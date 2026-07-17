@@ -42,6 +42,9 @@ const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../ser
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
+const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
+const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -67,6 +70,8 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
 const MAX_TOOL_ROUNDS = 8;
 const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
+const AGENT_ESTIMATE_FEATURE_KEY = 'agent_estimate';
+const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
 
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
@@ -107,6 +112,31 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // Communications/Email pages.
 const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS];
 
+function toolsNamed(tools, names) {
+  const allowed = new Set(names);
+  return tools.filter((tool) => allowed.has(tool.name));
+}
+
+// The Agent Estimate page gets a deliberately narrow tool cabinet. Property
+// truth, pricing, protocols, and inventory are readable; its one write can
+// only create/revise a draft through the UI-confirmation path. It cannot send,
+// schedule, update a lead, or reach any other business-data write.
+const AGENT_ESTIMATE_TOOLS = [
+  ...toolsNamed(ESTIMATE_TOOLS, [
+    'lookup_property',
+    'compute_estimate',
+    'read_pricing_config',
+    'recent_pricing_changes',
+    'find_similar_estimates',
+    'match_existing_customer',
+    'get_waveguard_tiers',
+    'get_neighborhood_grass_profile',
+    AGENT_ESTIMATE_WRITE_TOOL,
+  ]),
+  ...toolsNamed(TECH_TOOLS, ['get_protocol', 'get_product_info', 'search_knowledge_base']),
+  ...toolsNamed(PROCUREMENT_TOOLS, ['query_products', 'analyze_margins', 'query_stock']),
+];
+
 // Tools whose REST equivalents guard with requireAdmin — technician tokens
 // must not reach them through the intelligence bar either. The email surface
 // (/api/admin/email) is requireAdmin, so every email tool is admin-only:
@@ -134,6 +164,14 @@ const PII_TOOL_NAMES = new Set([
   'send_sms',
   'draft_sms_reply',
   'draft_sms',
+  'lookup_property',
+  'find_similar_estimates',
+  'match_existing_customer',
+  'create_pending_estimate',
+  // compute_estimate carries the full service address + selected lead id —
+  // same PII class as lookup_property and the draft writer.
+  'compute_estimate',
+  AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
   'get_inbox_summary',
@@ -294,6 +332,10 @@ function uiConfirmEnabled() {
   return process.env.GATE_IB_UI_CONFIRM === 'true';
 }
 
+async function agentEstimateEnabled(req) {
+  return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
+}
+
 function summarizeProposal(toolName, params) {
   // One level of plain-object params flattens into the summary — without it
   // an update_customer card reads "customer_id: X" and hides WHAT is being
@@ -325,6 +367,25 @@ function summarizeProposal(toolName, params) {
   return summary + ripple;
 }
 
+function confirmationDisplayParams(toolName, params, preview) {
+  if (toolName !== AGENT_ESTIMATE_WRITE_TOOL) return params;
+  return {
+    action: preview?.action || (params?.estimateId ? 'revise draft' : 'create draft'),
+    customer: params?.customerName || null,
+    address: params?.address || null,
+    services: Object.keys(params?.engineInputs?.services || {}).join(', ') || null,
+    monthly: preview?.totals?.monthly ?? null,
+    annual: preview?.totals?.annual ?? null,
+    one_time: preview?.totals?.oneTime ?? null,
+    lane: preview?.lane || null,
+    review_flags: (preview?.lane_reasons || []).join('; ') || 'none',
+    reasoning: params?.reasoning || null,
+    assumptions: (params?.assumptions || []).join('; ') || 'none',
+    open_questions: (params?.uncertainty || []).join('; ') || 'none',
+    leadId: params?.leadId || null,
+  };
+}
+
 /**
  * Propose a gated write as a pending action instead of executing it.
  *
@@ -334,10 +395,16 @@ function summarizeProposal(toolName, params) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
+  if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL && selectedLeadId) {
+    if (params.leadId && String(params.leadId) !== String(selectedLeadId)) {
+      return { failed: true, modelResult: { error: 'Draft lead does not match the Agent Estimate lead currently open.' } };
+    }
+    params.leadId = selectedLeadId;
+  }
 
   let preview;
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
@@ -350,6 +417,9 @@ async function proposePendingWrite({ toolUse, req, context }) {
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };
+  }
+  if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
+    params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
   }
 
   const row = await PendingActions.createPendingAction({
@@ -370,7 +440,11 @@ async function proposePendingWrite({ toolUse, req, context }) {
       id: row.id,
       tool: toolUse.name,
       summary: row.summary,
-      params,
+      // Display-only summary. The full immutable payload stays server-side
+      // behind the pending-action id/hash; do not make a road user scroll
+      // through raw engine JSON, evidence quotes, and property ledgers just
+      // to find the dollars and review flags they are approving.
+      params: confirmationDisplayParams(toolUse.name, params, preview),
       expiresAt: row.expires_at,
     },
   };
@@ -390,6 +464,31 @@ function getConfirmedActionIdempotencyKey(req, params) {
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
+  agent_estimate: `
+AGENT ESTIMATE CONTEXT:
+You are the manual, mobile-first estimate copilot for one selected lead or existing-customer expansion request. The current page data contains the lead's quote-form submission, call recordings/transcripts, SMS up to this session, recognized customer account, active services/current spend, profile facts, prior estimates, current draft, and approved learning. Read all supplied evidence before recommending scope.
+
+WORKFLOW:
+1. Build a per-field fact ledger for service address, home/building sqft, lot sqft, treatable lawn sqft, stories, property type, and commercial unit/count measurements. Cite which supplied source supports each selected value and surface conflicts.
+   Evidence order: operator-confirmed measurement or record > verbatim transcript/SMS/quote text > structured extraction > AI-generated lead summary > neighborhood prior. Never quote a summary as if it were verbatim.
+2. Use lookup_property to verify property facts when an address exists, and pass its property_fact_verification_token unchanged into create_agent_estimate_draft. Caller/operator measurements must cite an exact quote from the loaded lead evidence instead. A lookup, satellite image, model observation, neighborhood aggregate, transcript, or quote form can be wrong. Keep source and confidence per field; never turn one overall confidence score into confidence for every field.
+3. For lawn, price treatable turf—not the whole parcel. A neighborhood grass profile is only a weak/moderate prior; confirm the actual grass from a close photo, a verified profile, or the operator. If asked to count palms or inspect an image, report a count/range and visibility limits; never silently convert that observation into pricing.
+4. Read the complete relevant protocol and check catalog/stock for protocol-named products. Missing on-hand quantity means UNTRACKED, not available. Protocols and inventory can change scope or force review, but NEVER set a dollar amount.
+5. Call compute_estimate for every price and after every pricing-input change. On this page always pass the selected leadId. The server recognizes the linked or unambiguous customer, loads current qualifying services, and applies the combined WaveGuard tier. The engine uses the DB-authoritative configuration. Use the returned per-line margin check with the $35/hour loaded labor rate and 35% collected-margin target. Do not use rough procurement margin averages to override a client-specific engine result.
+6. Clearly separate verified facts, assumptions, unresolved questions, evidence, protocol review, inventory review, and the final engine inputs. Commercial bed bug/cockroach/rodent work without measured unit/count evidence stays review-required.
+7. For a recognized customer, list what they currently buy and spend per application, then put ONLY requested additions in engineInputs.services. Never reprice, discount, or duplicate an active service: its key establishes the starting tier, but its existing paid price stays unchanged. Apply the combined tier only to the newly quoted services.
+8. Use the specific engine service for the requested program: oneTimePest/oneTimeLawn/oneTimeMosquito for one-time work, germanRoach for the multi-visit German roach cleanout, pestInitialRoach for standalone cockroach treatment, and the named specialty key for flea, bed bug, stinging insect, rodent, termite, or other work. Never flatten these into generic pest. The server maps priced line items to approved estimate_v2 React sections; single-service, one-time, cockroach, and multi-service bundle presentations are already supported. You do not create or edit React code.
+9. When ready, call create_agent_estimate_draft exactly once. It only proposes a confirmation card. Never claim the draft exists until the operator taps Confirm. To revise, use the current Agent Estimate estimateId and new engineInputs; the same draft/token is updated.
+
+HARD BOUNDARIES:
+- Existing customers are supported only as expansion drafts. Customer identity, current services/spend, membership inputs, and discounts are server-authoritative; ambiguous matches do not receive account pricing.
+- generateEstimate owns every dollar. Never invent, round, or manually alter a price.
+- estimates.notes is customer-visible. Internal reasoning belongs only in the tool's structured internal fields.
+- You cannot send an estimate. The operator previews and explicitly sends by SMS/email from the page.
+- Corrections in this conversation affect the current session immediately. Do not call them permanent learning. Permanent learning requires an operator-submitted candidate and admin approval.
+
+ROAD RESPONSE STYLE:
+Lead with the recommendation and price result, then give compact cards/lists for Facts, Margin, Review flags, and Next tap. Keep routine answers concise and make unresolved safety/measurement issues unmistakable.`,
   schedule: `
 SCHEDULE CONTEXT:
 You are currently on the Schedule & Dispatch page. The operator is managing today's or a specific day's schedule.
@@ -860,6 +959,9 @@ function getToolsForContext(context, isAdmin = false) {
   // offer them to technician tokens. ADMIN_ONLY_TOOL_NAMES blocks execution
   // regardless; this keeps them out of the model's tool list too.
   const base = isAdmin ? BASE_TOOLS : BASE_TOOLS.filter(t => !EMAIL_TOOL_NAMES.has(t.name));
+  if (context === 'agent_estimate') {
+    return AGENT_ESTIMATE_TOOLS;
+  }
   // Infra reads (Railway/Sentry/Cloudflare/Twilio/Stripe/GitHub/stores/
   // GrowthBook) are context-independent — deploys break and webhooks fail no
   // matter which page the operator is on. Admin-only: the /query loop and
@@ -903,7 +1005,12 @@ function getToolsForContext(context, isAdmin = false) {
     return [...base, ...BANKING_QUERY_TOOLS, ...infra];
   }
   if (context === 'estimates') {
-    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS, ...infra];
+    // create_agent_estimate_draft's trust boundary (feature gate + forced UI
+    // confirmation) is only active in the agent_estimate context. Offered
+    // from the ordinary estimates bar it would either never surface its
+    // Confirm card (UI-confirm gate off) or surface one that /confirm-action
+    // rejects (user flag off) — so it is not offered here at all.
+    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS.filter((tool) => tool.name !== AGENT_ESTIMATE_WRITE_TOOL), ...infra];
   }
   return [...base, ...infra];
 }
@@ -932,7 +1039,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeBankingTool(toolName, input);
   }
   if (ESTIMATE_TOOL_NAMES.has(toolName)) {
-    return executeEstimateTool(toolName, input);
+    return executeEstimateTool(toolName, input, actionContext);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -1040,6 +1147,9 @@ router.post('/query', async (req, res, next) => {
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
     }
+    if (context === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+    }
     if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
       return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
     }
@@ -1062,16 +1172,22 @@ router.post('/query', async (req, res, next) => {
       systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
     }
     // Infra tools load on every admin context (getToolsForContext), so their
-    // guidance rides along for every admin request. Non-admin requests never
-    // get the tools, so their prompt must not describe them — the branch also
-    // keeps the admin and non-admin prefixes separately cacheable.
-    if (context !== 'tech' && req.techRole === 'admin') {
+    // guidance rides along for every admin request. The tech and
+    // agent_estimate contexts don't load them (isolated toolsets) and
+    // non-admin requests never get the tools, so those prompts must not
+    // describe them — the branch also keeps the admin and non-admin prefixes
+    // separately cacheable.
+    if (context !== 'tech' && context !== 'agent_estimate' && req.techRole === 'admin') {
       systemPrompt += '\n\n' + INFRA_PROMPT;
     }
+    if (context === 'agent_estimate') {
+      systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
+    }
+    const uiConfirmActive = uiConfirmEnabled() || context === 'agent_estimate';
     // Write-confirmation guidance must match the active mechanism (#1568) —
     // the gate is read per-request, so the prompt is appended per-request.
     if (context !== 'tech') {
-      systemPrompt += uiConfirmEnabled()
+      systemPrompt += uiConfirmActive
         ? `\n\nWRITE CONFIRMATION (UI mode):
 Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT execute when you call them. Your call returns a preview, and the action appears as a confirmation card in the portal UI next to your response.
 - NEVER call the same write tool again after a pending_confirmation result — that creates a duplicate card. One call per intended action.
@@ -1172,11 +1288,16 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           result = { error: 'Explicit confirmation is required for this action. Use the confirmed action endpoint.' };
           failed = true;
           errorMessage = result.error;
-        } else if (uiConfirmEnabled() && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
+        } else if (uiConfirmActive && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
           // Issue #1568: gated writes are proposed, never executed, from the
           // model loop. The confirmation id goes to the client only.
           try {
-            const proposed = await proposePendingWrite({ toolUse, req, context });
+            const proposed = await proposePendingWrite({
+              toolUse,
+              req,
+              context,
+              selectedLeadId: pageData?.agent_estimate_context?.lead?.id || null,
+            });
             result = proposed.modelResult;
             if (proposed.failed) {
               failed = true;
@@ -1258,10 +1379,12 @@ For create_customer, the route-optimization writes, and the inventory stock writ
     // tool call at all.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
     const piiTainted = usedPiiTool || piiTaintedHistory;
-    const redactPii = piiTainted || imageTainted;
-    const redactNote = piiTainted
-      ? '[redacted — PII-bearing tools used]'
-      : '[redacted — image attachment may contain PII]';
+    const redactPii = piiTainted || imageTainted || context === 'agent_estimate';
+    const redactNote = context === 'agent_estimate'
+      ? '[redacted — Agent Estimate lead context]'
+      : piiTainted
+        ? '[redacted — PII-bearing tools used]'
+        : '[redacted — image attachment may contain PII]';
     try {
       await db('intelligence_bar_queries').insert({
         prompt: redactPii ? redactNote : prompt,
@@ -1281,7 +1404,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       // Pending write proposals for the client confirmation card. This is the
       // ONLY channel the confirmation ids travel on — the client must keep
       // them in component state, never in conversationHistory.
-      ...(uiConfirmEnabled() ? { pendingActions: pendingProposals } : {}),
+      ...(uiConfirmActive ? { pendingActions: pendingProposals } : {}),
       // Return conversation history for multi-turn. Attached images are not
       // round-tripped (a text marker stands in) — keeps follow-up payloads
       // small and image bytes out of the stored history. Image and PII taint
@@ -1330,6 +1453,9 @@ router.post('/execute', async (req, res, next) => {
     if (!action) {
       return res.status(400).json({ error: 'Action is required' });
     }
+    if (action === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+    }
     if ((DASHBOARD_TOOL_NAMES.has(action) || INFRA_TOOL_NAMES.has(action)) && isNonAdminDashboardRequest(req)) {
       return res.status(403).json({ error: 'Admin access required for dashboard actions' });
     }
@@ -1339,7 +1465,7 @@ router.post('/execute', async (req, res, next) => {
     if (ADMIN_ONLY_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for this action' });
     }
-    if (uiConfirmEnabled() && UI_GATED_WRITE_TOOL_NAMES.has(action)) {
+    if ((uiConfirmEnabled() || action === AGENT_ESTIMATE_WRITE_TOOL) && UI_GATED_WRITE_TOOL_NAMES.has(action)) {
       // With the UI-confirm gate on, gated writes commit exclusively through
       // /confirm-action — /execute would skip the claim, payload hash, and
       // single-use replay protection.
@@ -1411,11 +1537,37 @@ router.post('/confirm-action', async (req, res, next) => {
     }
     const action = claim.action;
 
+    if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
+      await PendingActions.recordResult(action.id, { error: 'Agent Estimate is not enabled' });
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+    }
+
     if (ADMIN_ONLY_TOOL_NAMES.has(action.tool_name) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for this action' });
     }
 
     const execParams = { ...action.params };
+    let approvedAgentEstimateFingerprint = null;
+    if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL) {
+      const approvedFingerprint = execParams._approvedPreviewFingerprint;
+      approvedAgentEstimateFingerprint = approvedFingerprint;
+      delete execParams._approvedPreviewFingerprint;
+      const livePreview = await executeToolByName(action.tool_name, execParams, null, {
+        isAdmin: req.techRole === 'admin',
+        technicianId: req.technicianId || req.technician?.id || null,
+        confirmed: false,
+      });
+      if (isToolFailure(livePreview)
+        || !approvedFingerprint
+        || approvedFingerprint !== agentEstimatePreviewFingerprint(livePreview)) {
+        const result = {
+          error: 'Agent Estimate pricing or customer context changed after preview. Build a new confirmation card before saving.',
+          preview_changed: true,
+        };
+        await PendingActions.recordResult(action.id, result);
+        return res.status(409).json(result);
+      }
+    }
     if (WRITE_TWO_STEP_TOOL_NAMES.has(action.tool_name)) {
       // Server-derived confirmation: the operator clicked Confirm. This is
       // the only place a confirmed flag is ever attached.
@@ -1426,6 +1578,9 @@ router.post('/confirm-action', async (req, res, next) => {
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: true,
+      ...(approvedAgentEstimateFingerprint
+        ? { approvedPreviewFingerprint: approvedAgentEstimateFingerprint }
+        : {}),
     });
     await PendingActions.recordResult(action.id, result);
 
@@ -1433,7 +1588,8 @@ router.post('/confirm-action', async (req, res, next) => {
       success: !result?.error,
     });
 
-    res.json({ success: !result?.error, tool: action.tool_name, result });
+    res.status(result?.preview_changed ? 409 : 200)
+      .json({ success: !result?.error, tool: action.tool_name, result });
   } catch (err) {
     logger.error('[intelligence-bar] confirm-action failed:', err);
     next(err);
@@ -1459,8 +1615,19 @@ router.post('/cancel-action', async (req, res, next) => {
 
 // ─── QUICK ACTIONS (pre-built prompts for common tasks) ─────────
 
-router.get('/quick-actions', async (req, res) => {
+router.get('/quick-actions', async (req, res, next) => {
   const { context } = req.query;
+  // The flag lookup is this handler's only awaited call; Express 4 does not
+  // forward a rejected handler promise, so an uncaught DB error here would
+  // become an unhandled rejection instead of a 500.
+  try {
+    if (context === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+    }
+  } catch (err) {
+    logger.error('[intelligence-bar] quick-actions flag lookup failed:', err);
+    return next(err);
+  }
   if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
     return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
   }
@@ -1518,7 +1685,16 @@ router.get('/quick-actions', async (req, res) => {
     { id: 'content_pipe', group: 'Plan', label: 'Content Pipeline', prompt: "What's in the content pipeline? How many posts need generation?" },
   ];
 
-  if (context === 'schedule' || context === 'dispatch') {
+  if (context === 'agent_estimate') {
+    res.json({ actions: [
+      { id: 'build', group: 'Build', label: 'Build Estimate', prompt: 'Build the estimate from all available evidence. Verify property facts, protocols, inventory, and per-line margin, then propose the draft for my confirmation.' },
+      { id: 'property', group: 'Verify', label: 'Verify Property', prompt: 'Double-check the home/building sqft, lot sqft, stories, and treatable lawn area. Show sources and conflicts per field.' },
+      { id: 'margin', group: 'Verify', label: 'Check Margin', prompt: 'Re-run the current engine inputs and confirm each service line protects the 35% collected margin using $35/hour loaded labor.' },
+      { id: 'protocol', group: 'Verify', label: 'Protocol + Stock', prompt: 'Read the complete protocols for the proposed services and check the named products in inventory. Treat missing counts as untracked.' },
+      { id: 'grass', group: 'Property', label: 'Grass Type', prompt: 'What grass is typical in this ZIP, and what evidence do we still need to verify this actual lawn?' },
+      { id: 'palms', group: 'Photo', label: 'Count Palms', prompt: 'Count the palm trees visible in the attached property image. Give a count or range, note occlusions, and do not change pricing until I confirm.' },
+    ] });
+  } else if (context === 'schedule' || context === 'dispatch') {
     res.json({ actions: scheduleActions });
   } else if (context === 'dashboard') {
     res.json({ actions: dashboardActions });
@@ -1637,3 +1813,4 @@ module.exports = router;
 // Exposed for the write-gate contract test — keeps the test's
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
+module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));

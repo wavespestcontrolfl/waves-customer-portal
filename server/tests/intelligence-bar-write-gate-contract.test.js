@@ -90,6 +90,7 @@ function discoverAllTools() {
 // attaches confirmed server-side; the boolean is NOT in any model-facing
 // schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
+  'create_agent_estimate_draft',
   'create_customer',
   'update_property_access',
   'optimize_all_routes',
@@ -209,6 +210,7 @@ const READ_ONLY = [
   'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts',
   'lookup_property', 'compute_estimate', 'read_pricing_config', 'recent_pricing_changes',
   'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
+  'get_neighborhood_grass_profile',
   'get_railway_status', 'get_railway_deployments', 'get_railway_logs', 'get_railway_variable_names',
   'get_sentry_top_issues', 'get_sentry_new_issues', 'get_sentry_issue_detail',
   'get_cloudflare_zones', 'get_cloudflare_pages_builds', 'get_cloudflare_edge_errors',
@@ -342,6 +344,7 @@ function makeRecordingDb(seed = {}) {
 
   const db = (table) => makeBuilder(table);
   db.raw = (...args) => ({ __raw: args });
+  db.schema = { hasTable: async () => false };
   db.transaction = async (cb) => cb((table) => makeBuilder(table));
   return { db, mutations };
 }
@@ -385,6 +388,17 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   // Everything the schedule writes look up is present, so each executor
   // reaches its `confirmed !== true` branch with real work to do.
   const SEED = {
+    leads: [{
+      id: 'lead-1',
+      first_name: 'Road',
+      last_name: 'Tester',
+      phone: '9415550100',
+      email: 'road@example.com',
+      address: '1 Test St, Bradenton FL 34208',
+      customer_id: null,
+      estimate_id: null,
+      status: 'new',
+    }],
     technicians: TECHS,
     scheduled_services: STOPS,
     products_catalog: PRODUCTS,
@@ -393,6 +407,18 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
 
   // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
   const UNCONFIRMED_CALLS = [
+    ['estimate-tools', 'executeEstimateTool', 'create_agent_estimate_draft', {
+      leadId: 'lead-1',
+      customerName: 'Road Tester',
+      customerPhone: '9415550100',
+      address: '1 Test St, Bradenton FL 34208',
+      engineInputs: {
+        homeSqFt: 2000,
+        lotSqFt: 8000,
+        services: { pest: { frequency: 'quarterly' } },
+      },
+      reasoning: 'Behavioral contract preview.',
+    }],
     ['tools', 'executeTool', 'create_customer', { first_name: 'Contract', phone: '9415550100' }],
     ['tools', 'executeTool', 'update_property_access', { customer_id: 'cust-1', pets_secured_plan: 'Keep screen doors closed' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
@@ -420,6 +446,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     dbMock.mockImplementation(db);
     dbMock.raw.mockImplementation(db.raw);
     dbMock.transaction.mockImplementation(db.transaction);
+    dbMock.schema = db.schema;
 
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     const result = await executor(toolName, input);

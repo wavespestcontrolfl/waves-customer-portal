@@ -4774,21 +4774,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       autopay_payment_method_id: svc.cust_autopay_payment_method_id,
       ach_status: svc.cust_ach_status,
     });
-    // Never let the homeowner's autopay cover a payer-billed WaveGuard visit —
-    // the AP invoice must still be cut and sent to the payer.
-    // autopayCoversVisit is the MONTHLY-MEMBERSHIP suppression ("the 8AM cron
-    // collects the dues, the visit itself is free") — it must never suppress a
-    // per-application customer's visit bill: their autopay card is HOW the
-    // per-visit charge collects, not a reason to skip it.
-    const autopayCoversVisit = !visitIsPayerBilled
-      && !perApplicationBilling
-      // The 8AM cron never bills annual_prepay (GUARD 3b) — "dues cover the
-      // visit" would be a fiction; real coverage is the prepaid stamps.
-      && !annualPrepayBilling
-      && customerAutopayActive
-      && !hasVisitPrice
-      && !!svc.cust_waveguard_tier
-      && Number(svc.cust_monthly_rate || 0) > 0;
+    const autopayCoversVisit = membershipDuesCoverVisit({
+      visitIsPayerBilled,
+      perApplicationBilling,
+      annualPrepayBilling,
+      customerAutopayActive,
+      hasVisitPrice,
+      isRecurring: svc.is_recurring,
+      waveguardTier: svc.cust_waveguard_tier,
+      monthlyRate: svc.cust_monthly_rate,
+    });
+    // A priced recurring visit suppressed by membership coverage is logged +
+    // parked for office review AFTER the invoice checks below — see the
+    // shouldInvoice block (an already-paid / pre-minted / existing invoice
+    // must not produce a "no invoice was cut" alert — Codex r2).
     // Skip invoice creation if a paid invoice already exists for this service record
     // (covers the "customer paid prior to service report" case)
     let invoiceCreated = false;
@@ -4917,6 +4916,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (annualPrepayBilling && !shouldInvoice && !recapReviewOnly && !prepaidCovered && !alreadyPaid
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       logger.warn(`[dispatch] annual-prepay visit ${svc.id} (customer ${svc.customer_id}) completed WITHOUT prepay coverage — term expired/refunded? Renewal or manual invoice needed`);
+    }
+    // Membership dues suppressed a PRICED recurring visit: log + park a
+    // one-bell-per-series review alert. Emitted only here — after the
+    // invoice checks — so an already-paid / pre-minted / existing invoice
+    // (Charge Now / Tap-to-Pay) can neither trigger a false "no invoice was
+    // cut → bill manually" instruction (duplicate-charge vector) nor burn
+    // the series' dedupe key (Codex r2). With those states excluded,
+    // membership coverage IS the deciding reason invoicing was skipped.
+    // Cadence children inherit the booking modal's create_invoice_on_complete
+    // via createInvoiceEffective (admin-schedule.js), so neither the stamped
+    // price nor the flag is per-visit operator intent — but a genuinely
+    // billable recurring add-on must not vanish silently; the alert copy
+    // tells the office to KEEP the series' price (clearing it would make
+    // future occurrences complete silently with no alert — Codex r2).
+    if (!shouldInvoice && autopayCoversVisit && hasVisitPrice && !recapReviewOnly
+      && !alreadyPaid && !prepaidCovered && !preMintedInvoice && !existingCompletionInvoice) {
+      logger.info(`[dispatch] visit ${svc.id}: monthly membership dues cover this recurring visit — stamped estimated_price $${Number(svc.estimated_price).toFixed(2)} NOT invoiced`);
+      try {
+        const dedupeKey = `dues_covered_priced_series:${svc.recurring_parent_id || svc.id}`;
+        await db.transaction(async (trx) => {
+          // Transaction-scoped advisory lock serializes concurrent
+          // completions of the same series so the check-then-insert can't
+          // double-bell (Codex r3).
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
+          const already = await trx('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first();
+          if (already) return;
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Visit covered by membership dues — stamped price not billed',
+            `A completed recurring visit for a monthly-membership customer carried a $${Number(svc.estimated_price).toFixed(2)} per-visit price${svc.create_invoice_on_complete ? " and the series' create-invoice default" : ''}. Membership dues cover plan visits, so NO invoice was cut. If this series is actually a separately billable add-on, bill this visit manually and KEEP its per-visit price — every visit in the series will complete uninvoiced the same way, so bill each manually or roll the add-on into the customer's monthly rate.`,
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
+          );
+        });
+      } catch (e) { logger.warn(`[dispatch] dues-covered review alert failed: ${e.message}`); }
     }
     // Customer-facing SMS URL must be the canonical portal domain, not
     // the raw Railway URL (CLIENT_URL was set to the Railway hostname on
@@ -8270,6 +8306,37 @@ function completionInvoiceAmount({
   return monthlyRate && Number(monthlyRate) > 0 ? Number(monthlyRate) : 0;
 }
 
+// The MONTHLY-MEMBERSHIP suppression ("the 8AM cron collects the dues, the
+// visit itself is free"). Never for a payer-billed visit — the AP invoice must
+// still be cut and sent to the payer. Never for a per-application customer:
+// their autopay card is HOW the per-visit charge collects, not a reason to
+// skip it. Never for annual_prepay — the 8AM cron never bills them (GUARD 3b),
+// so "dues cover the visit" would be a fiction; real coverage is the prepaid
+// stamps. Dues cover a RECURRING plan visit even when the booking flow stamped
+// a per-visit estimated_price on the row — cadence generators stamp display
+// prices routinely, and honoring the stamp here double-billed membership
+// customers (dues + a phantom per-visit invoice at completion). A priced
+// ONE-OFF visit (isRecurring=false: add-on treatment, WDO, special) still
+// bills its price; callback pricing stays with completionInvoiceAmount.
+function membershipDuesCoverVisit({
+  visitIsPayerBilled,
+  perApplicationBilling,
+  annualPrepayBilling,
+  customerAutopayActive,
+  hasVisitPrice,
+  isRecurring,
+  waveguardTier,
+  monthlyRate,
+}) {
+  return !visitIsPayerBilled
+    && !perApplicationBilling
+    && !annualPrepayBilling
+    && !!customerAutopayActive
+    && (!hasVisitPrice || !!isRecurring)
+    && !!waveguardTier
+    && Number(monthlyRate || 0) > 0;
+}
+
 function shouldAutoInvoiceCompletion({
   recapReviewOnly,
   alreadyPaid,
@@ -8483,6 +8550,7 @@ module.exports._test = {
   internalOnlyProductsBlockPayload,
   completionOwnershipError,
   serviceReportEmailEligible,
+  membershipDuesCoverVisit,
   shouldAutoInvoiceCompletion,
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,

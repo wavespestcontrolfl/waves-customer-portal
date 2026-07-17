@@ -25,6 +25,10 @@ jest.mock('../services/property-lookup/lookup-cache', () => ({
 }));
 jest.mock('../services/estimate-membership-context', () => ({
   buildEstimateMembershipContext: jest.fn().mockResolvedValue(null),
+  // Identity stub: this suite's membership is always null, and the real
+  // projection maps null → null; the whitelist itself is covered by
+  // estimate-public-existing-customer.test.js.
+  publicMembershipView: jest.fn((snapshot) => snapshot ?? null),
 }));
 jest.mock('../services/estimate-deposits', () => ({
   ensureDepositSatisfied: jest.fn(),
@@ -188,7 +192,7 @@ function appServer() {
   const app = express();
   app.use(express.json());
   app.use('/estimates', estimatePublicRouter);
-  // eslint-disable-next-line no-unused-vars
+   
   app.use((err, _req, res, _next) => {
     res.status(err.status || 500).json({ error: err.message });
   });
