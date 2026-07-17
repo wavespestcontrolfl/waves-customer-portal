@@ -6,7 +6,7 @@
  * from data already rendered on the page — no LLM, nothing new can leak.
  */
 
-const { getProjectType, INTERNAL_FINDING_KEYS } = require('./project-types');
+const { getProjectType, INTERNAL_FINDING_KEYS, redactInspectionFeeCues } = require('./project-types');
 
 // Internal/office-only finding keys — never in an answer. Shared with the
 // payload + narrative egress points via project-types (codex #2807).
@@ -85,7 +85,8 @@ function answerNextVisit({ project, payload }) {
 }
 
 function answerRecommendations({ project }) {
-  const rec = String(project.recommendations || '').trim();
+  // same inspection-fee guard as the /data egress (codex #2817)
+  const rec = redactInspectionFeeCues(String(project.recommendations || '')).trim();
   if (rec) {
     // Narrative drafts use WHAT WE RECOMMEND sections — answer with that
     // section when present, else the first two sentences.

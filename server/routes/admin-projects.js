@@ -1541,7 +1541,9 @@ router.post('/', async (req, res, next) => {
         project_date: projectDate,
         title: title || null,
         findings: findings || null,
-        recommendations: recommendations || null,
+        // inspection fee must never be customer-facing — sanitize on WRITE so
+        // it's durable, not dependent on the one-time backfill (codex #2817).
+        recommendations: recommendations ? redactInspectionFeeCues(recommendations) : null,
         service_record_id: service_record_id || null,
         // Persist the DERIVED link too (record-only callers): the linked-only
         // gate accepted this create because the record resolved to a scheduled
@@ -1925,6 +1927,9 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
+    // Durable inspection-fee guard: an admin-saved narrative can't persist the
+    // internal fee, regardless of the one-time backfill (codex #2817).
+    if (updates.recommendations != null) updates.recommendations = redactInspectionFeeCues(updates.recommendations);
     dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 

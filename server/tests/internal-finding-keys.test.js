@@ -36,10 +36,13 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee $250. Repair cost $1,250 for the sill plate.'))
       .toBe('Inspection fee [fee removed]. Repair cost $1,250 for the sill plate.');
   });
-  test('matches "the fee is $250" but never a generic cost/price/charge', () => {
-    expect(redactInspectionFeeCues('The fee is $250 today.')).toBe('The fee is [fee removed] today.');
+  test('requires the literal "inspection fee" phrase — never a bare or generic fee', () => {
+    expect(redactInspectionFeeCues('The inspection fee is $250 today.')).toBe('The inspection fee is [fee removed] today.');
+    expect(redactInspectionFeeCues('The fee is $250 today.')).toBe('The fee is $250 today.');
+    expect(redactInspectionFeeCues('Repair fee $1,250.')).toBe('Repair fee $1,250.');
+    expect(redactInspectionFeeCues('Permit fee is $125.')).toBe('Permit fee is $125.');
+    expect(redactInspectionFeeCues('Treatment fee for the follow-up is $90.')).toBe('Treatment fee for the follow-up is $90.');
     expect(redactInspectionFeeCues('Repair cost $1,250.')).toBe('Repair cost $1,250.');
-    expect(redactInspectionFeeCues('Estimated charge $900.')).toBe('Estimated charge $900.');
   });
   test('catches a stale fee via language, regardless of the current value', () => {
     expect(redactInspectionFeeCues('Inspection fee $250 quoted earlier.')).toContain('[fee removed]');

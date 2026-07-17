@@ -1023,17 +1023,19 @@ function stripInternalFindingKeys(findings) {
   );
 }
 
-// Remove ONLY inspection-fee language + a dollar amount from free text —
-// "inspection fee $250", "the fee is $250", "fee: $250". Deliberately does
-// NOT match generic price/cost/charge, so a legitimate customer-facing
-// repair/treatment estimate ("Repair cost $1,250") is never touched (codex
-// #2817 P1). Value-INDEPENDENT: it targets fee LANGUAGE, so a stale draft fee
-// no snapshot still names is caught too. Used by the backfill migration and
-// to sanitize the AI-write prompt input — never as a request-time egress scrub.
+// Remove ONLY the literal "inspection fee" phrase + a dollar amount from free
+// text — "inspection fee $250", "the inspection fee is $250". Deliberately
+// does NOT match a bare "fee" or a generic price/cost/charge, so a legitimate
+// customer-facing estimate — "Repair cost $1,250", "repair fee $1,250",
+// "permit fee $125", "treatment fee $90" — is never touched (codex #2817 P1).
+// Targets the fee PHRASE, not a specific value, so a stale draft fee no
+// structured snapshot still names is caught too. Enforced at every
+// customer-facing boundary: on write (project create + PUT), at the public
+// /data egress, in the report assistant, and on the AI-write prompt input.
 function redactInspectionFeeCues(text) {
   const str = String(text || '');
   if (!str) return str;
-  const re = /\b((?:inspection\s+)?fee)\b([^.\n]{0,24}?)\$\s?\d[\d,]*(?:\.\d{1,2})?/gi;
+  const re = /\b(inspection\s+fee)\b([^.\n]{0,24}?)\$\s?\d[\d,]*(?:\.\d{1,2})?/gi;
   return str
     .replace(re, (m, cue, mid) => `${cue}${mid}[fee removed]`)
     .replace(/[ \t]{2,}/g, ' ')

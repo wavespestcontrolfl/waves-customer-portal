@@ -244,7 +244,7 @@ describe('public project reports', () => {
           wdo_finding: 'No visible signs of WDO observed',
           inspection_fee: '$250',
         }),
-        recommendations: 'Keep mulch pulled back from the foundation and stay on the annual schedule.',
+        recommendations: 'Inspection fee $250. Keep mulch pulled back from the foundation. Repair cost $1,250 for the sill plate.',
       }),
     });
     db.mockImplementation((table) => {
@@ -276,9 +276,12 @@ describe('public project reports', () => {
       expect(body.findings.wdo_finding).toBe('No visible signs of WDO observed');
       expect(body.findings.inspection_fee).toBeUndefined();
       expect(JSON.stringify(body)).not.toContain('$250');
-      // recommendations served verbatim — legacy fee-bearing narratives are
-      // scrubbed once by migration 20260716150000, not on the hot path
+      // the inspection fee is scrubbed at egress; the rest of the narrative —
+      // including a legitimate repair estimate — survives intact
+      expect(body.recommendations).toContain('Inspection fee [fee removed].');
       expect(body.recommendations).toContain('Keep mulch pulled back');
+      expect(body.recommendations).toContain('Repair cost $1,250');
+      expect(body.recommendations).not.toContain('$250');
       // appointment surfaced, window_start present, window_end stripped
       expect(body.upcomingAppointment).toBeTruthy();
       expect(body.upcomingAppointment.windowStart).toBe('08:00:00');

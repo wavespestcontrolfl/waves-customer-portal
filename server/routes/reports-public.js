@@ -9,7 +9,7 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { answerProjectReportQuestion } = require('../services/project-report-assistant');
-const { stripInternalFindingKeys } = require('../services/project-types');
+const { stripInternalFindingKeys, redactInspectionFeeCues } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
@@ -561,10 +561,9 @@ router.get('/project/:token/data', async (req, res, next) => {
     // Internal/office-only finding keys must never ride the public JSON — the
     // client registry hides them visually, but any token holder can read the
     // raw payload, so the strip is enforced at the egress point too (audit
-    // 2026-07-16). The narrative (project.recommendations) needs no
-    // request-time scrub: NEW narratives never contain the fee (it is stripped
-    // from the model prompt), and LEGACY fee-bearing narratives were scrubbed
-    // once by migration 20260716150000 — so no fragile hot-path text surgery.
+    // 2026-07-16). The narrative fee (an inspection fee an old draft may have
+    // baked into prose) is handled by the redactInspectionFeeCues guard on
+    // `recommendations` below.
     viewerFindings = stripInternalFindingKeys(viewerFindings);
 
     // Same privacy headers as the sibling /fdacs-pdf route: the JSON carries
@@ -603,7 +602,9 @@ router.get('/project/:token/data', async (req, res, next) => {
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
       findings: viewerFindings,
-      recommendations: project.recommendations,
+      // Serve-time inspection-fee guard: covers legacy narratives and any
+      // written by an old instance during the deploy window (codex #2817).
+      recommendations: redactInspectionFeeCues(project.recommendations),
       followupDate: project.followup_date,
       followupFindings: project.followup_findings,
       followupCompletedAt: project.followup_completed_at,
