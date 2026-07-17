@@ -393,6 +393,12 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
   const q = knex('pest_pressure_scores')
     .where('customer_id', customerId)
     .orderBy('service_date', 'desc')
+    // Deterministic same-day chronology: service_date alone leaves tied rows
+    // in arbitrary order, and the same-day trim below slices at the current
+    // row's position — an undetermined order could leave a later sibling
+    // BEFORE the current row and leak it (codex P2 #2824).
+    .orderBy('calculated_at', 'desc')
+    .orderBy('id', 'desc')
     // Over-fetch when a same-day trim is requested so the trim can't starve
     // the window below `limit`.
     .limit(currentServiceRecordId ? limit + 8 : limit);
