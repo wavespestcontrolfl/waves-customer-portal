@@ -1352,8 +1352,8 @@ function AdvisorTab() {
                                 Est. impact: {rec.estimated_impact}
                               </div>
                             )}
-                            {rec.apply_action &&
-                              (canAutoApply(rec) ? (
+                            {(rec.apply_action || rec.manual_action) &&
+                              (rec.apply_action && canAutoApply(rec) ? (
                                 (() => {
                                   const st = applied[globalIdx];
                                   const done = st?.status === "applied";
@@ -1400,7 +1400,7 @@ function AdvisorTab() {
                                 })()
                               ) : (
                                 <div style={{ fontSize: 11, color: D.muted }}>
-                                  Manual action: {rec.apply_action.replace(/_/g, " ")}
+                                  Manual action: {(rec.apply_action || rec.manual_action).replace(/_/g, " ")}
                                 </div>
                               ))}
                           </div>

@@ -220,6 +220,7 @@ describe('Google Ads campaign sync', () => {
         id: '22594274874',
         campaign_budget: 'customers/3393936713/campaignBudgets/987654321',
       },
+      campaign_budget: { amount_micros: '4000000' },
     }]);
     mockMutateResources.mockResolvedValue({});
 
@@ -229,6 +230,9 @@ describe('Google Ads campaign sync', () => {
       success: true,
       platformCampaignId: '22594274874',
       dailyBudget: 5,
+      // The pre-mutation live amount, observed by the same query that
+      // resolves the budget resource — rollback restore target.
+      previousDailyBudget: 4,
     });
     expect(mockMutateResources).toHaveBeenCalledWith([{
       entity: 'campaign_budget',

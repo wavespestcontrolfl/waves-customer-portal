@@ -271,7 +271,10 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     }
     for (const rec of advice.recommendations) {
       if (!rec || !AUTO.has(rec.apply_action)) continue;
-      const strip = () => { delete rec.apply_action; delete rec.apply_value; delete rec.campaign_id; };
+      // Keep the intended action as a marker when stripping automation, so
+      // the client can still render its "Manual action" hint — otherwise the
+      // rec silently loses the indicator the advisor promised.
+      const strip = () => { rec.manual_action = rec.apply_action; delete rec.apply_action; delete rec.apply_value; delete rec.campaign_id; };
       // The card shows the NAME and the confirm dialog repeats it — a rec
       // with only a hidden id would let the admin approve a spend change
       // without seeing which campaign it targets.

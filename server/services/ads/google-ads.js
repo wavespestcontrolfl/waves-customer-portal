@@ -84,6 +84,11 @@ async function syncCampaigns() {
     // Google snapshot — the upsert skips those rows instead of landing a
     // stale pre-write observation over them (they bump updated_at inside
     // their own row-locked transactions). Tomorrow's sync mirrors fresh.
+    // CLOCK CONTRACT: writers stamp updated_at with a JS wall-clock Date at
+    // the moment of the write statement (post-push) — NOT trx.fn.now(), whose
+    // transaction-START semantics would let a slow writer commit with a stamp
+    // older than this fence and get silently overwritten. Both sides of the
+    // comparison use this process's clock, so there is no cross-clock skew.
     const fetchStartedAt = new Date();
 
     const campaigns = await customer.query(`
@@ -457,9 +462,13 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
   try {
     logger.info(`[google-ads] Updating budget for campaign ${platformCampaignId} to $${dailyBudgetDollars}/day`);
 
-    // First, get the campaign's budget resource name
+    // First, get the campaign's budget resource name — and the amount it is
+    // running RIGHT NOW: callers' compensating rollbacks restore this observed
+    // pre-mutation amount, not the locally recorded current (which can be
+    // stale after an Ads Manager edit or a prior failed push's committed
+    // intent).
     const [campaignData] = await customer.query(`
-      SELECT campaign.id, campaign.campaign_budget, campaign_budget.explicitly_shared
+      SELECT campaign.id, campaign.campaign_budget, campaign_budget.explicitly_shared, campaign_budget.amount_micros
       FROM campaign
       WHERE campaign.id = ${platformCampaignId}
     `);
@@ -495,7 +504,15 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
     ]);
 
     logger.info(`[google-ads] Budget updated for campaign ${platformCampaignId}: $${dailyBudgetDollars}/day`);
-    return { success: true, platformCampaignId, dailyBudget: dailyBudgetDollars };
+    const previousMicros = campaignData.campaign_budget?.amount_micros;
+    return {
+      success: true,
+      platformCampaignId,
+      dailyBudget: dailyBudgetDollars,
+      // Live amount observed immediately before this mutation (null if the
+      // API omitted it) — the rollback's restore target.
+      previousDailyBudget: previousMicros != null ? Number(previousMicros) / 1_000_000 : null,
+    };
   } catch (err) {
     logger.error(`[google-ads] updateBudget failed: ${err.message}`);
     return null;

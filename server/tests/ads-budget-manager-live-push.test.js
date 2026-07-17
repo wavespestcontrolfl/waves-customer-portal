@@ -64,6 +64,9 @@ const mockDb = jest.fn((table) => {
       whereNull: jest.fn(() => b),
       orWhereNot: jest.fn(() => b),
       first: jest.fn(() => Promise.resolve(ownOpLookup ? mockOwnOpRow : mockNewerAuditRow)),
+      // The supersession check selects ALL newer audit rows and inspects
+      // google_ads_updated per row in JS.
+      select: jest.fn(() => Promise.resolve(mockNewerAuditRow ? [mockNewerAuditRow] : [])),
     };
     return b;
   }
@@ -122,7 +125,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         budget_mode: 'stop',
         daily_budget_current: 0.4,
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
       expect(mockLogInsert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -156,7 +159,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         budget_mode: 'stop',
         daily_budget_current: 0.4,
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
       expect(mockLogInsert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -199,7 +202,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         budget_mode: 'stop',
         daily_budget_current: 0.2,
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
     });
   });
@@ -218,7 +221,7 @@ describe('BudgetManager live Google Ads push', () => {
       await BudgetManager.adjustBudgets();
 
       expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.4);
-      expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 0.4, updated_at: 'NOW()' });
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 0.4, updated_at: expect.any(Date) });
       expect(mockLogInsert).toHaveBeenCalledWith(
         expect.objectContaining({
           previous_mode: 'stop',
@@ -280,7 +283,7 @@ describe('BudgetManager live Google Ads push', () => {
       await BudgetManager.adjustBudgets();
 
       expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
-      expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40, updated_at: 'NOW()' });
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40, updated_at: expect.any(Date) });
     });
 
     test('half-cent stop budget does not thrash: cents-rounded on both sides', async () => {
@@ -349,7 +352,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         budget_mode: 'stop',
         daily_budget_current: 0.4,
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
       expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.4);
       expect(result.googleAdsUpdated).toBe(true);
@@ -412,7 +415,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         daily_budget_base: 50,
         daily_budget_current: 50,
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
       expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 50);
       expect(result).toMatchObject({ newBudget: 50, effectiveBudget: 50, googleAdsUpdated: true });
@@ -431,7 +434,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         daily_budget_base: 50,
         daily_budget_current: 0.5,
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
       expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.5);
       expect(result.effectiveBudget).toBe(0.5);
@@ -475,7 +478,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         daily_budget_base: 50,
         daily_budget_current: 50,
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
       expect(mockUpdateBudget).not.toHaveBeenCalled();
       expect(result.googleAdsUpdated).toBe(false);
@@ -492,7 +495,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         daily_budget_base: 50,
         daily_budget_current: '40',
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
       expect(result.googleAdsUpdated).toBe(false);
     });
@@ -632,7 +635,7 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalledWith({
         daily_budget_base: 50.01,
         daily_budget_current: 50.01,
-        updated_at: 'NOW()',
+        updated_at: expect.any(Date),
       });
       expect(result.newBudget).toBe(50.01);
     });
@@ -778,7 +781,7 @@ describe('rollbackAfterLivePush r9', () => {
     expect(err.code).toBe('live_push_rolled_back');
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
     // The mirrored current is corrected back too.
-    expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40, updated_at: 'NOW()' });
+    expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40, updated_at: expect.any(Date) });
   });
 
   test('ambiguous outcome with the live-push gate OFF says it will not self-heal', async () => {
@@ -837,9 +840,10 @@ describe('rollbackAfterLivePush r9', () => {
     mockDb.transaction = realTransaction;
   });
 
-  test('a newer audit row since the op started forces superseded — even when the row looks like a mirror', async () => {
+  test('a newer PROVEN audit row since the lock forces superseded — even when the row looks like a mirror', async () => {
     campaignFirstRow = { ...baseCampaign(), daily_budget_current: '0.4' }; // mirror signature
-    mockNewerAuditRow = { id: 'log-1' }; // a REAL writer committed meanwhile
+    // A REAL writer committed meanwhile WITH proof it changed Google.
+    mockNewerAuditRow = { id: 'log-1', google_ads_updated: true };
     mockIsConfigured.mockReturnValue(true);
 
     const err = await BudgetManager.rollbackAfterLivePush(baseCampaign(), new Error('db down'), 0.4, new Date('2026-07-17T01:00:00Z'));
@@ -847,6 +851,42 @@ describe('rollbackAfterLivePush r9', () => {
     expect(err.code).toBe('live_push_rolled_back');
     expect(err.message).toMatch(/newer budget change/);
     expect(mockUpdateBudget).not.toHaveBeenCalled();
+  });
+
+  test('a newer LOCAL-ONLY writer (no Google proof) does NOT suppress the restore', async () => {
+    // Our advisor push ($40 → $0.40) succeeded on Google but failed to
+    // persist; a queued manual setMode then committed a local-only change
+    // (its own push was refused — google_ads_updated:false). Google still
+    // runs OUR failed amount, so the compensating restore must fire; the
+    // newer local intent is left for the reconcile to converge onto.
+    campaignFirstRow = { ...baseCampaign(), budget_mode: 'spent' }; // local state moved on
+    mockNewerAuditRow = { id: 'log-2', google_ads_updated: false };
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+
+    const err = await BudgetManager.rollbackAfterLivePush(baseCampaign(), new Error('db down'), 0.4, new Date('2026-07-17T01:00:00Z'));
+
+    expect(err.code).toBe('live_push_rolled_back');
+    expect(err.message).toMatch(/rolled back|nothing was changed/);
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
+    // Only updated_at is bumped — the newer writer's local intent is preserved.
+    expect(mockCampaignUpdate).toHaveBeenCalledWith({ updated_at: expect.any(Date) });
+  });
+
+  test('restore targets the amount Google actually ran pre-push, not a stale local current', async () => {
+    // updateBudget observed $50 live immediately before the failed push
+    // (local current said $40 — stale after an Ads Manager edit). The
+    // compensating restore must put back $50 and record it as current.
+    campaignFirstRow = baseCampaign(); // row unchanged since snapshot
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+
+    const err = await BudgetManager.rollbackAfterLivePush(
+      baseCampaign(), new Error('db down'), 0.4, new Date('2026-07-17T01:00:00Z'), 'op-x', 50);
+
+    expect(err.code).toBe('live_push_rolled_back');
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 50);
+    expect(mockCampaignUpdate).toHaveBeenCalledWith({ updated_at: expect.any(Date), daily_budget_current: 50 });
   });
 
   test('null-base snapshot: a sync mirror that wrote BOTH base and current is restored, base cleared back', async () => {
@@ -862,7 +902,7 @@ describe('rollbackAfterLivePush r9', () => {
     expect(err.code).toBe('live_push_rolled_back');
     expect(err.message).toMatch(/rolled back/);
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
-    expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40, updated_at: 'NOW()', daily_budget_base: null });
+    expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40, updated_at: expect.any(Date), daily_budget_base: null });
   });
 
   test('manual (legacy) setBudget: commit failure after an accepted push takes the compensating rollback', async () => {
@@ -914,6 +954,26 @@ describe('rollbackAfterLivePush r9', () => {
     expect(result.googleAdsUpdated).toBe(true);
     // Exactly one push — the original. No compensating restore fired.
     expect(mockUpdateBudget).toHaveBeenCalledTimes(1);
+    mockDb.transaction = realTransaction;
+  });
+
+  test('lost COMMIT acknowledgement WITHOUT a live push (unlinked): durable own audit row -> SUCCESS, not an error', async () => {
+    campaignFirstRow = { ...baseCampaign(), platform_campaign_id: null }; // unlinked → no push runs
+    mockIsConfigured.mockReturnValue(true);
+    mockOwnOpRow = { id: 'own-log-row' }; // the "failed" trx actually committed
+    const realTransaction = mockDb.transaction;
+    let firstTrx = true;
+    mockDb.transaction = async (cb) => {
+      const r = await cb(mockDb);
+      if (firstTrx) { firstTrx = false; throw new Error('commit ack lost'); }
+      return r;
+    };
+
+    const result = await BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true });
+
+    expect(result.newMode).toBe('stop');
+    expect(result.googleAdsUpdated).toBe(false);
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
     mockDb.transaction = realTransaction;
   });
 });
