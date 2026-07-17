@@ -357,9 +357,31 @@ function factNamesCompatible(left, right) {
   const a = normalizeFactName(String(left || '').split('.').pop());
   const b = normalizeFactName(String(right || '').split('.').pop());
   if (!a || !b) return false;
-  if (a === b || (a.length >= 5 && b.includes(a)) || (b.length >= 5 && a.includes(b))) return true;
+  if (a === b) return true;
   const aFamily = factFamily(left);
+  // Estimated turf must never authenticate one of the engine's confirmed-
+  // measurement inputs. Those paths deliberately carry different confidence
+  // and field-verification behavior in property-calculator.
+  if (aFamily === 'turf' && factFamily(right) === 'turf') {
+    const turfProvenance = (value) => {
+      const normalized = normalizeFactName(value);
+      if (/estimated/.test(normalized)) return 'estimated';
+      if (/measured|lawnsqft/.test(normalized)) return 'confirmed';
+      return null;
+    };
+    const aProvenance = turfProvenance(left);
+    const bProvenance = turfProvenance(right);
+    return !!aProvenance && aProvenance === bProvenance;
+  }
+  if ((a.length >= 5 && b.includes(a)) || (b.length >= 5 && a.includes(b))) return true;
   return !!aFamily && aFamily === factFamily(right);
+}
+
+function finiteNumericFactValue(value) {
+  if (value == null || typeof value === 'boolean') return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function collectNumericFacts(value, path = [], out = []) {
@@ -367,20 +389,24 @@ function collectNumericFacts(value, path = [], out = []) {
   for (const [name, nested] of Object.entries(value)) {
     const nextPath = [...path, name];
     if (nested && typeof nested === 'object') collectNumericFacts(nested, nextPath, out);
-    else if (Number.isFinite(Number(nested))) out.push({ key: nextPath.join('.'), value: Number(nested) });
+    else {
+      const numeric = finiteNumericFactValue(nested);
+      if (numeric !== null) out.push({ key: nextPath.join('.'), value: numeric });
+    }
   }
   return out;
 }
 
 function isMeasurementFactName(value) {
-  return /sqft|squarefoot|area|size|count|bedroom|units?|linear|perimeter|stor(y|ies)|floor|palm/i
+  return /sqft|squarefoot|sf$|area|size|count|bedroom|units?|linear|perimeter|stor(y|ies)|floor|palm/i
     .test(normalizeFactName(value));
 }
 
 function propertyLookupCredentialFacts(property, enriched) {
   const facts = [];
   const add = (key, value) => {
-    if (Number.isFinite(Number(value))) facts.push({ key, value: Number(value) });
+    const numeric = finiteNumericFactValue(value);
+    if (numeric !== null) facts.push({ key, value: numeric });
   };
   add('homeSqFt', property?.home_sqft);
   add('buildingSqFt', property?.home_sqft);
@@ -391,12 +417,6 @@ function propertyLookupCredentialFacts(property, enriched) {
   const enrichedFacts = collectNumericFacts(enriched)
     .filter((fact) => isMeasurementFactName(fact.key));
   facts.push(...enrichedFacts);
-  const turfFact = enrichedFacts.find((fact) => /lawn|turf/i.test(fact.key));
-  if (turfFact) {
-    add('measuredTurfSf', turfFact.value);
-    add('estimatedTurfSf', turfFact.value);
-    add('lawnSqFt', turfFact.value);
-  }
   return facts;
 }
 
@@ -1446,7 +1466,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       slab: /slab/i,
       turf: /lawn|turf/i,
       lot: /lot|outdoor/i,
-      structure: /home|house|building|square\s*foot|sq\s*ft|sqft/i,
+      structure: /\b(?:home|house|building|residence)\b|living\s+area/i,
       stories: /stor(y|ies)|floor/i,
       bedrooms: /bedroom/i,
       units: /unit|apartment/i,
@@ -1468,9 +1488,14 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     if (!semanticPattern) return false;
     return (Array.isArray(input.evidence) ? input.evidence : []).some((row) => {
       const quote = String(row?.quote || '');
-      if (!semanticPattern.test(quote)) return false;
-      const quoteValues = quote.match(/-?\d[\d,]*(?:\.\d+)?/g) || [];
-      if (!quoteValues.some((value) => numericValuesMatch(value.replace(/,/g, ''), observed))) return false;
+      const quoteValues = [...quote.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
+      const groundedValue = quoteValues.some((match) => {
+        if (!numericValuesMatch(match[0].replace(/,/g, ''), observed)) return false;
+        const start = Math.max(0, Number(match.index) - 80);
+        const end = Math.min(quote.length, Number(match.index) + match[0].length + 80);
+        return semanticPattern.test(quote.slice(start, end));
+      });
+      if (!groundedValue) return false;
       return verifyAgentEvidenceQuotes([row], evidenceContext).verified === 1;
     });
   };
@@ -1523,7 +1548,12 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     else if (/palm/i.test(key)) candidateKeys = ['palmCount', 'services.palm.palmCount', 'services.palm.count'];
     else if (/bedroom/i.test(key)) candidateKeys = ['bedrooms', 'services.bedBug.bedrooms', 'services.bed_bug.bedrooms'];
     else if (/unit|apartment/i.test(key)) candidateKeys = ['unitCount', 'commercialUnitCount', 'services.pest.unitCount', 'services.lawn.unitCount'];
-    else if (/lawn|turf|treatable/i.test(key)) candidateKeys = ['measuredTurfSf', 'lawnSqFt', 'estimatedTurfSf'];
+    else if (/lawn|turf|treatable/i.test(key)) {
+      if (/estimated/i.test(key)) candidateKeys = ['estimatedTurfSf'];
+      else if (/measured/i.test(key)) candidateKeys = ['measuredTurfSf'];
+      else if (normalizeFactName(key) === 'lawnsqft') candidateKeys = ['lawnSqFt'];
+      else candidateKeys = ['measuredTurfSf', 'lawnSqFt', 'estimatedTurfSf'];
+    }
     else if (/building|home/i.test(key)) candidateKeys = ['buildingSqFt', 'homeSqFt'];
     else if (/lot|outdoor/i.test(key)) candidateKeys = ['lotSqFt'];
     else if (/perimeter|linear/i.test(key)) candidateKeys = ['perimeterLF'];

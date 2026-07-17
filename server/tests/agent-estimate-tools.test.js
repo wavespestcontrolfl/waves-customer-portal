@@ -589,6 +589,12 @@ describe('Agent Estimate draft tool', () => {
 });
 
 describe('Agent Estimate property lookup safety', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGenerateEstimate.mockReturnValue(ENGINE_RESULT);
+    mockDuplicateBlock.mockResolvedValue(null);
+  });
+
   test('returns analyzed satellite availability without exposing signed provider image URLs', async () => {
     performPropertyLookup.mockResolvedValue({
       propertyRecord: {
@@ -688,6 +694,135 @@ describe('Agent Estimate property lookup safety', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.lane).toBe('green');
+  });
+
+  test('a lot square-foot quote cannot authenticate home square footage', async () => {
+    const quote = 'The lot is 8,000 square feet';
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: {
+        id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+      calls: [], sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 8000, services: { pest: { frequency: 'quarterly' } } },
+      evidence: [{ source: 'quote_form', quote, decision: 'home square footage' }],
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 8000, source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'home/building square footage was used for pricing without a matching verified property fact',
+      expect.stringMatching(/homeSqFt lacks a server-verified/i),
+    ]));
+  });
+
+  test('does not promote an estimated turf lookup into a measured turf credential', async () => {
+    performPropertyLookup.mockResolvedValue({
+      propertyRecord: { formattedAddress: INPUT.address, squareFootage: 2000, _source: 'county' },
+      satellite: { inServiceArea: true },
+      enriched: { estimatedTurfSf: 4200 },
+    });
+    const lookup = await executeEstimateTool('lookup_property', { address: INPUT.address });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        homeSqFt: 2000,
+        measuredTurfSf: 4200,
+        services: { pest: { frequency: 'quarterly' } },
+      },
+      propertyFactVerificationToken: lookup.property_fact_verification_token,
+      propertyFacts: {
+        ...INPUT.propertyFacts,
+        measuredTurfSf: { value: 4200, source: 'property_lookup', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain(
+      'measuredTurfSf lacks a server-verified value, source, confidence, or evidence binding',
+    );
+  });
+
+  test('keeps an estimated turf lookup groundable only as estimated turf', async () => {
+    performPropertyLookup.mockResolvedValue({
+      propertyRecord: { formattedAddress: INPUT.address, squareFootage: 2000, _source: 'county' },
+      satellite: { inServiceArea: true },
+      enriched: { estimatedTurfSf: 4200 },
+    });
+    const lookup = await executeEstimateTool('lookup_property', { address: INPUT.address });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        homeSqFt: 2000,
+        estimatedTurfSf: 4200,
+        services: { pest: { frequency: 'quarterly' } },
+      },
+      propertyFactVerificationToken: lookup.property_fact_verification_token,
+      propertyFacts: {
+        ...INPUT.propertyFacts,
+        estimatedTurfSf: { value: 4200, source: 'property_lookup', confidence: 'high' },
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.lane_reasons).not.toContain(
+      'estimatedTurfSf lacks a server-verified value, source, confidence, or evidence binding',
+    );
+  });
+
+  test('does not sign missing lookup measurements as zero', async () => {
+    performPropertyLookup.mockResolvedValue({
+      propertyRecord: {
+        formattedAddress: INPUT.address,
+        squareFootage: 2000,
+        stories: null,
+        _source: 'county',
+      },
+      satellite: { inServiceArea: true },
+    });
+    const lookup = await executeEstimateTool('lookup_property', { address: INPUT.address });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        homeSqFt: 2000,
+        stories: 1,
+        services: { pest: { frequency: 'quarterly' } },
+      },
+      propertyFactVerificationToken: lookup.property_fact_verification_token,
+      propertyFacts: {
+        ...INPUT.propertyFacts,
+        stories: { value: 1, source: 'property_lookup', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'story count was used for pricing without a matching verified property fact',
+      expect.stringMatching(/stories lacks a server-verified/i),
+    ]));
   });
 });
 
