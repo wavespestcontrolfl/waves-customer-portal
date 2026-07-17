@@ -140,6 +140,128 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(String(global.fetch.mock.calls[1][0])).toContain('starting_after=evt_fresh_49');
   });
 
+  test('get_stripe_payment_intents maps money state and failure codes, never receipt/charge data', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const created = Math.floor(Date.now() / 1000) - 3600;
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      has_more: false,
+      data: [{
+        id: 'pi_draft',
+        amount: 3333,
+        currency: 'usd',
+        status: 'requires_payment_method',
+        created,
+        customer: 'cus_123',
+        description: 'Invoice WPC-2026-0999',
+        payment_method_types: ['card'],
+        receipt_email: 'private@example.com',
+        shipping: { name: 'Jane Customer' },
+        last_payment_error: {
+          code: 'card_declined',
+          decline_code: 'insufficient_funds',
+          message: 'Your card has insufficient funds.',
+          payment_method: { card: { last4: '4242' } },
+        },
+      }],
+    }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', {});
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents).toEqual([{
+      id: 'pi_draft',
+      amount: 33.33,
+      currency: 'usd',
+      status: 'requires_payment_method',
+      created: new Date(created * 1000).toISOString(),
+      customer: 'cus_123',
+      description: 'Invoice WPC-2026-0999',
+      payment_method_types: ['card'],
+      last_payment_error: {
+        code: 'card_declined',
+        decline_code: 'insufficient_funds',
+        message: 'Your card has insufficient funds.',
+      },
+    }]);
+    expect(JSON.stringify(result)).not.toContain('private@example.com');
+    expect(JSON.stringify(result)).not.toContain('Jane Customer');
+    expect(JSON.stringify(result)).not.toContain('4242');
+
+    const calledUrl = String(global.fetch.mock.calls[0][0]);
+    expect(calledUrl).toContain('/v1/payment_intents');
+    expect(calledUrl).toContain('created%5Bgte%5D=');
+  });
+
+  test('get_stripe_payment_intents "incomplete" filter matches drafts but excludes card holds and amounts filter exactly', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const created = Math.floor(Date.now() / 1000) - 3600;
+    const pi = (id, status, amount) => ({
+      id, status, amount, currency: 'usd', created, customer: null, description: null, payment_method_types: ['card'],
+    });
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      has_more: false,
+      data: [
+        pi('pi_draft_match', 'requires_payment_method', 3333),
+        pi('pi_draft_action', 'requires_action', 3333),
+        pi('pi_draft_other_amount', 'requires_payment_method', 5000),
+        // A card hold awaiting capture is NOT an abandoned draft (the
+        // one-time card-hold flow parks legitimate auths here).
+        pi('pi_hold', 'requires_capture', 3333),
+        pi('pi_paid', 'succeeded', 3333),
+      ],
+    }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete', amount: 33.33 });
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents.map(p => p.id)).toEqual(['pi_draft_match', 'pi_draft_action']);
+    expect(result.total_scanned).toBe(5);
+    expect(result.scan_exhaustive).toBe(true);
+    expect(result.status_filter).toBe('incomplete');
+    expect(result.amount_filter).toBe(33.33);
+  });
+
+  test('get_stripe_payment_intents pages past non-matching intents via starting_after', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const created = Math.floor(Date.now() / 1000) - 3600;
+    const page1 = Array.from({ length: 50 }, (_, i) => ({
+      id: `pi_paid_${i}`, status: 'succeeded', amount: 100, currency: 'usd', created, payment_method_types: ['card'],
+    }));
+    const page2 = [{
+      id: 'pi_draft_deep', status: 'requires_confirmation', amount: 3333, currency: 'usd', created, payment_method_types: ['card'],
+    }];
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ has_more: true, data: page1 }))
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: page2 }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete' });
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents.map(p => p.id)).toEqual(['pi_draft_deep']);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(String(global.fetch.mock.calls[1][0])).toContain('starting_after=pi_paid_49');
+  });
+
+  test('get_stripe_payment_intents reports canceled state and unconfigured stays benign', async () => {
+    const dark = await executeStripeOpsTool('get_stripe_payment_intents', {});
+    expect(dark.error).toBeUndefined();
+    expect(dark.configured).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    jest.resetModules();
+    ({ executeStripeOpsTool } = require('../services/intelligence-bar/stripe-ops-tools'));
+    const created = Math.floor(Date.now() / 1000) - 3600;
+    const canceledAt = created + 600;
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      has_more: false,
+      data: [{
+        id: 'pi_cancelled', status: 'canceled', amount: 3333, currency: 'usd', created,
+        canceled_at: canceledAt, cancellation_reason: 'abandoned', payment_method_types: ['card'],
+      }],
+    }));
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'canceled' });
+    expect(result.payment_intents[0].canceled_at).toBe(new Date(canceledAt * 1000).toISOString());
+    expect(result.payment_intents[0].cancellation_reason).toBe('abandoned');
+  });
+
   test('auth rejection surfaces as { error }, never a throw', async () => {
     process.env.STRIPE_SECRET_KEY = 'sk_bad';
     global.fetch.mockResolvedValueOnce(jsonResponse({}, 401));

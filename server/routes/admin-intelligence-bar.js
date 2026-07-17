@@ -90,8 +90,9 @@ const STRIPE_OPS_TOOL_NAMES = new Set(STRIPE_OPS_TOOLS.map(t => t.name));
 const GITHUB_OPS_TOOL_NAMES = new Set(GITHUB_OPS_TOOLS.map(t => t.name));
 const STORE_OPS_TOOL_NAMES = new Set(STORE_OPS_TOOLS.map(t => t.name));
 const GROWTHBOOK_TOOL_NAMES = new Set(GROWTHBOOK_TOOLS.map(t => t.name));
-// Every infra module loads with the dashboard context and shares the
-// admin-only guard that OPS_TOOLS established.
+// Every infra module loads with EVERY admin context (any admin page can ask
+// about deploys, errors, or webhook health) and shares the admin-only guard
+// that OPS_TOOLS established — technician tokens never see or execute them.
 const INFRA_TOOLS = [
   ...OPS_TOOLS, ...SENTRY_OPS_TOOLS, ...CLOUDFLARE_OPS_TOOLS,
   ...TWILIO_OPS_TOOLS, ...STRIPE_OPS_TOOLS, ...GITHUB_OPS_TOOLS,
@@ -154,6 +155,9 @@ const PII_TOOL_NAMES = new Set([
   // them) — redact like the comms tools.
   'get_twilio_alerts',
   'get_twilio_failed_messages',
+  // PaymentIntent descriptions are app-written and can embed customer names
+  // or invoice references — redact like the other billing-adjacent tools.
+  'get_stripe_payment_intents',
   // GrowthBook feature rules expose raw targeting `condition` predicates,
   // which are arbitrary attribute strings that can embed customer emails or
   // user identifiers — keep them out of query telemetry.
@@ -429,22 +433,7 @@ ANALYSIS STYLE:
 - Flag anything that's significantly better or worse than expected
 - Be opinionated: "This is strong" or "This needs attention" — the operator wants your read, not just data
 - When showing revenue, always include both the dollar amount and the trend direction
-- Round to whole dollars for readability ($1,234 not $1,234.56)
-
-INFRASTRUCTURE (all READ-ONLY):
-The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; code lives on GitHub.
-- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
-- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
-- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
-- Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
-- Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed). Business revenue questions use the revenue tools, not these.
-- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
-- App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
-- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
-- Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) = healthy.
-- Combine infra with business data when useful ("did we miss calls while the server was erroring?")
-- If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
-- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`,
+- Round to whole dollars for readability ($1,234 not $1,234.56)`,
 
   seo: `
 SEO & CONTENT ENGINE CONTEXT:
@@ -829,53 +818,80 @@ RESPONSE STYLE:
 - For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute payouts from the query flow.`,
 };
 
+// Guidance for the infra tool modules. These tools load on EVERY admin
+// context (getToolsForContext), so this block is appended for every admin
+// request rather than living inside one context prompt. Tech and non-admin
+// requests never load the tools, so their prompts must not describe them.
+const INFRA_PROMPT = `INFRASTRUCTURE (all READ-ONLY):
+The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; code lives on GitHub.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
+- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
+- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
+- Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
+- Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed), get_stripe_payment_intents (live payment attempts — the ONLY view of incomplete/abandoned drafts, which never reach the local database; requires_capture = card hold awaiting capture, not a draft). COMPLETED revenue questions use the revenue tools, not these.
+- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
+- App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
+- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
+- Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) = healthy.
+- Combine infra with business data when useful ("did we miss calls while the server was erroring?")
+- If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
+- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
+
 function getToolsForContext(context, isAdmin = false) {
+  // Tech portal stays isolated — no base, no infra, tech-tools only.
+  if (context === 'tech') {
+    return TECH_TOOLS;
+  }
   // Email tools mirror the requireAdmin /api/admin/email surface — never
   // offer them to technician tokens. ADMIN_ONLY_TOOL_NAMES blocks execution
   // regardless; this keeps them out of the model's tool list too.
   const base = isAdmin ? BASE_TOOLS : BASE_TOOLS.filter(t => !EMAIL_TOOL_NAMES.has(t.name));
+  // Infra reads (Railway/Sentry/Cloudflare/Twilio/Stripe/GitHub/stores/
+  // GrowthBook) are context-independent — deploys break and webhooks fail no
+  // matter which page the operator is on. Admin-only: the /query loop and
+  // /execute both refuse them for technician tokens, so non-admin lists must
+  // not offer them either. Appended LAST so each context's own tools stay a
+  // stable prompt-cache prefix.
+  const infra = isAdmin ? INFRA_TOOLS : [];
   if (context === 'schedule' || context === 'dispatch') {
-    return [...base, ...SCHEDULE_TOOLS];
+    return [...base, ...SCHEDULE_TOOLS, ...infra];
   }
   if (context === 'dashboard') {
-    return [...base, ...DASHBOARD_TOOLS, ...INFRA_TOOLS];
+    return [...base, ...DASHBOARD_TOOLS, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...base, ...SEO_QUERY_TOOLS];
+    return [...base, ...SEO_QUERY_TOOLS, ...infra];
   }
   if (context === 'procurement' || context === 'inventory') {
-    return [...base, ...PROCUREMENT_TOOLS];
+    return [...base, ...PROCUREMENT_TOOLS, ...infra];
   }
   if (context === 'revenue') {
-    return [...base, ...REVENUE_TOOLS];
+    return [...base, ...REVENUE_TOOLS, ...infra];
   }
   if (context === 'reviews') {
-    return [...base, ...REVIEW_TOOLS];
+    return [...base, ...REVIEW_TOOLS, ...infra];
   }
   if (context === 'comms') {
     // Full comms set already includes the read tools — don't double-load
-    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : [])];
+    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : []), ...infra];
   }
   if (context === 'tax') {
-    return [...base, ...TAX_TOOLS];
+    return [...base, ...TAX_TOOLS, ...infra];
   }
   if (context === 'leads') {
-    return [...base, ...LEADS_TOOLS];
+    return [...base, ...LEADS_TOOLS, ...infra];
   }
   if (context === 'email') {
     // Full email set already includes the shared subset — don't double-load
-    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS] : base;
+    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
-    return [...base, ...BANKING_QUERY_TOOLS];
+    return [...base, ...BANKING_QUERY_TOOLS, ...infra];
   }
   if (context === 'estimates') {
-    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
+    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS, ...infra];
   }
-  if (context === 'tech') {
-    return TECH_TOOLS;
-  }
-  return base;
+  return [...base, ...infra];
 }
 
 // techContext is only set for tech portal calls
@@ -1029,6 +1045,13 @@ router.post('/query', async (req, res, next) => {
     let systemPrompt = SYSTEM_PROMPT;
     if (context && CONTEXT_PROMPTS[context]) {
       systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
+    }
+    // Infra tools load on every admin context (getToolsForContext), so their
+    // guidance rides along for every admin request. Non-admin requests never
+    // get the tools, so their prompt must not describe them — the branch also
+    // keeps the admin and non-admin prefixes separately cacheable.
+    if (context !== 'tech' && req.techRole === 'admin') {
+      systemPrompt += '\n\n' + INFRA_PROMPT;
     }
     // Write-confirmation guidance must match the active mechanism (#1568) —
     // the gate is read per-request, so the prompt is appended per-request.

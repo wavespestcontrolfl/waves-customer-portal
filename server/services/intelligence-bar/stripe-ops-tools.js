@@ -2,11 +2,13 @@
  * Intelligence Bar — Stripe Webhook-Health Ops Tools
  * server/services/intelligence-bar/stripe-ops-tools.js
  *
- * Read-only visibility into Stripe webhook delivery — the one billing
- * failure mode that is invisible to the app by definition (if the webhook
- * never lands, nothing local records it). Money/business data itself lives
- * in the local database and is served by the revenue/banking tools — these
- * tools deliberately do NOT duplicate that.
+ * Read-only visibility into Stripe state the app cannot see locally:
+ * webhook delivery (if the webhook never lands, nothing local records it)
+ * and payment attempts that never completed (an abandoned/incomplete
+ * PaymentIntent fires no completion webhook, so it never reaches the
+ * database). Money/business data that DID land lives in the local database
+ * and is served by the revenue/banking tools — these tools deliberately do
+ * NOT duplicate that.
  *
  * Auth: reuses the STRIPE_SECRET_KEY already configured for payments. Every
  * call here is a GET; event payloads (which contain customer data) are never
@@ -31,6 +33,18 @@ const MAX_ENABLED_EVENTS_SHOWN = 25;
 const RECENT_PENDING_MINUTES = 10;
 const EVENTS_PAGE_SIZE = 50;
 const MAX_EVENT_PAGES = 5;
+// Abandoned drafts surface days after the attempt, so the intent window is
+// wider than the webhook window.
+const PI_DEFAULT_HOURS = 72;
+const PI_MAX_HOURS = 24 * 30;
+// Mirrors the Stripe dashboard's Incomplete bucket. Deliberately excludes
+// requires_capture — the one-time card-hold flow parks legitimate
+// authorizations there awaiting capture; a hold is not an abandoned draft.
+const PI_INCOMPLETE_STATUSES = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action']);
+const PI_STATUSES = [
+  'incomplete', 'requires_payment_method', 'requires_confirmation', 'requires_action',
+  'processing', 'requires_capture', 'canceled', 'succeeded',
+];
 
 const STRIPE_OPS_TOOLS = [
   {
@@ -51,6 +65,24 @@ Use for: "did we miss any Stripe events?", "webhook delivery failures today?"`,
       properties: {
         hours: { type: 'number', description: `Look-back window in hours (default ${DEFAULT_HOURS}, max ${MAX_HOURS})` },
         limit: { type: 'number', description: `Max events to return (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
+      },
+    },
+  },
+  {
+    name: 'get_stripe_payment_intents',
+    description: `List recent Stripe PaymentIntents (live processor data), filterable by status and exact amount. This is the ONLY view of payment attempts that never completed — an incomplete "draft" fires no completion webhook, so it never reaches the local database and the revenue/banking tools cannot see it. Completed revenue questions still belong to the revenue tools.
+Use for: "any incomplete card payments?", "find the $33.33 drafts in Stripe", "did that payment attempt fail, and why?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        hours: { type: 'number', description: `Look-back window in hours (default ${PI_DEFAULT_HOURS}, max ${PI_MAX_HOURS})` },
+        status: {
+          type: 'string',
+          enum: PI_STATUSES,
+          description: `Filter to one status. "incomplete" matches the dashboard's Incomplete bucket (requires_payment_method / requires_confirmation / requires_action). Note: requires_capture is a legitimate card hold awaiting capture, NOT an abandoned draft.`,
+        },
+        amount: { type: 'number', description: 'Match an exact amount in dollars (e.g. 33.33)' },
+        limit: { type: 'number', description: `Max intents to return (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
       },
     },
   },
@@ -157,6 +189,83 @@ async function getStripeWebhookFailures(input) {
   };
 }
 
+function paymentIntentMatchesStatus(status, filter) {
+  if (!filter) return true;
+  if (filter === 'incomplete') return PI_INCOMPLETE_STATUSES.has(status);
+  return status === filter;
+}
+
+// Only identifiers, money state, and failure codes leave this mapper — never
+// receipt emails, shipping/billing details, or raw charge/payment-method
+// objects. `description` is app-written and can embed a customer name, which
+// is why the tool is in the route's PII redaction set.
+function mapPaymentIntent(pi) {
+  const out = {
+    id: pi.id,
+    amount: Number((pi.amount / 100).toFixed(2)),
+    currency: pi.currency,
+    status: pi.status,
+    created: new Date(pi.created * 1000).toISOString(),
+    customer: pi.customer || null,
+    description: pi.description || null,
+    payment_method_types: pi.payment_method_types || [],
+  };
+  if (pi.last_payment_error) {
+    out.last_payment_error = {
+      code: pi.last_payment_error.code || null,
+      decline_code: pi.last_payment_error.decline_code || null,
+      message: pi.last_payment_error.message || null,
+    };
+  }
+  if (pi.status === 'canceled') {
+    out.canceled_at = pi.canceled_at ? new Date(pi.canceled_at * 1000).toISOString() : null;
+    out.cancellation_reason = pi.cancellation_reason || null;
+  }
+  return out;
+}
+
+async function getStripePaymentIntents(input) {
+  const hours = Math.min(Math.max(Number(input.hours) || PI_DEFAULT_HOURS, 1), PI_MAX_HOURS);
+  const limit = Math.min(Math.max(Number(input.limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
+  const statusFilter = typeof input.status === 'string' ? input.status.trim().toLowerCase() : null;
+  const amountNumber = Number(input.amount);
+  const amountCents = Number.isFinite(amountNumber) && amountNumber > 0 ? Math.round(amountNumber * 100) : null;
+  const createdGte = Math.floor((Date.now() - hours * 60 * 60 * 1000) / 1000);
+
+  // The list API has no status/amount filters — page newest-first and filter
+  // here, same shape as the webhook-failures scan.
+  const matched = [];
+  let scanned = 0;
+  let startingAfter = null;
+  let pagesFetched = 0;
+  let morePages = true;
+  while (morePages && pagesFetched < MAX_EVENT_PAGES && matched.length < limit) {
+    const params = { 'created[gte]': createdGte, limit: EVENTS_PAGE_SIZE };
+    if (startingAfter) params.starting_after = startingAfter;
+    const json = await stripeGet('/v1/payment_intents', params);
+    pagesFetched += 1;
+    const data = json.data || [];
+    for (const pi of data) {
+      scanned += 1;
+      if (!paymentIntentMatchesStatus(pi.status, statusFilter)) continue;
+      if (amountCents !== null && pi.amount !== amountCents) continue;
+      if (matched.length < limit) matched.push(mapPaymentIntent(pi));
+    }
+    morePages = Boolean(json.has_more) && data.length > 0;
+    startingAfter = data.length ? data[data.length - 1].id : null;
+  }
+  return {
+    window_hours: hours,
+    status_filter: statusFilter,
+    amount_filter: amountCents !== null ? Number((amountCents / 100).toFixed(2)) : null,
+    payment_intents: matched,
+    total_matched: matched.length,
+    total_scanned: scanned,
+    scan_exhaustive: !morePages,
+    note: 'Live Stripe data; amounts are dollars. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, not abandoned drafts.',
+  };
+}
+
 async function executeStripeOpsTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state, not a failure — an
   // { error } result would count against the shared admin circuit breaker
@@ -168,6 +277,7 @@ async function executeStripeOpsTool(toolName, input = {}) {
     switch (toolName) {
       case 'get_stripe_webhook_endpoints': return await getStripeWebhookEndpoints();
       case 'get_stripe_webhook_failures': return await getStripeWebhookFailures(input);
+      case 'get_stripe_payment_intents': return await getStripePaymentIntents(input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
