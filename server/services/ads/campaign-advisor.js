@@ -108,6 +108,7 @@ class CampaignAdvisor {
         name: c.campaign_name,
         platform: c.platform,
         status: c.status,
+        linked: Boolean(c.platform_campaign_id),
         type: c.campaign_type,
         area: c.target_area,
         serviceLine: c.service_line,
@@ -257,15 +258,22 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     for (const rec of advice.recommendations) {
       if (!rec || !AUTO.has(rec.apply_action)) continue;
       const strip = () => { delete rec.apply_action; delete rec.apply_value; delete rec.campaign_id; };
+      // The card shows the NAME and the confirm dialog repeats it — a rec
+      // with only a hidden id would let the admin approve a spend change
+      // without seeing which campaign it targets.
+      if (!String(rec.campaign || '').trim()) { strip(); continue; }
       const campaign = byId.get(String(rec.campaign_id || ''))
         || byName.get(String(rec.campaign || '').toLowerCase())
         || null;
       if (!campaign || campaign.platform !== 'google_ads' || campaign.status !== 'active') { strip(); continue; }
-      // The card shows the NAME — an id resolving to a different campaign is
+      // An id resolving to a different campaign than the displayed name is
       // exactly the mislabel the route rejects.
-      if (rec.campaign && String(campaign.campaign_name).toLowerCase() !== String(rec.campaign).toLowerCase()) { strip(); continue; }
+      if (String(campaign.campaign_name).toLowerCase() !== String(rec.campaign).toLowerCase()) { strip(); continue; }
       if (rec.apply_action === 'change_mode') {
         if (!['base', 'spent', 'stop'].includes(rec.apply_value) || rec.apply_value === campaign.budget_mode) { strip(); continue; }
+        // A LINKED campaign with no base budget can't take a live mode push
+        // (setMode throws live_push_unavailable) — advisory only.
+        if (campaign.platform_campaign_id && campaign.daily_budget_base == null) { strip(); continue; }
       } else {
         const amount = Number(rec.apply_value);
         const baseBudget = Number(campaign.daily_budget_base);
@@ -302,6 +310,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
           action: `Set to STOP mode — 7-day ROAS ${c.last7d.roas}x is less than half of ${minRoas}x target`,
           reasoning: 'Underperforming campaign burning budget',
           ...(controllable && c.budgetMode !== 'stop'
+            && !(c.linked && c.dailyBudgetBase == null) // linked + no base can't push live
             ? { campaign_id: c.id, apply_action: 'change_mode', apply_value: 'stop' }
             : {}),
         });

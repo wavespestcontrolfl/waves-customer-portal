@@ -37,7 +37,7 @@ const mockDb = jest.fn((table) => {
     const builder = {
       where: jest.fn(() => builder),
       forUpdate: jest.fn(() => builder),
-      first: jest.fn(() => Promise.resolve(campaignFirstRow)),
+      first: jest.fn(() => Promise.resolve(campaignFirstRow ?? campaignRows[0] ?? null)),
       update: mockCampaignUpdate,
       then: (resolve, reject) => Promise.resolve(campaignRows).then(resolve, reject),
     };
@@ -576,5 +576,84 @@ describe('BudgetManager live Google Ads push', () => {
 
       expect(mockLogInsert).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'advisor' }));
     });
+  });
+});
+
+// r7: in-lock rechecks + cron serialization
+describe('in-lock rechecks (requireLivePush)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    campaignRows = [];
+    campaignFirstRow = null;
+  });
+
+  test('setMode: applying the already-current mode throws mode_noop before any push', async () => {
+    campaignFirstRow = { ...baseCampaign(), budget_mode: 'stop' };
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true }))
+      .rejects.toMatchObject({ code: 'mode_noop' });
+
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+  });
+
+  test('setBudget requireBoundFactor: out-of-bounds against the LOCKED base throws before any push', async () => {
+    campaignFirstRow = baseCampaign(); // base 40
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setBudget('c-1', 3000, 'test', { requireLivePush: true, requireBoundFactor: 3 }))
+      .rejects.toMatchObject({ code: 'budget_out_of_bounds' });
+
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+  });
+
+  test('setBudget requireBoundFactor: target == locked base == current throws budget_noop', async () => {
+    campaignFirstRow = baseCampaign(); // base 40, current 40 (strings parse to 40)
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setBudget('c-1', 40, 'test', { requireLivePush: true, requireBoundFactor: 3 }))
+      .rejects.toMatchObject({ code: 'budget_noop' });
+
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+  });
+
+  test('setBudget requireBoundFactor: no recorded budget at all throws budget_unbounded', async () => {
+    campaignFirstRow = { ...baseCampaign(), daily_budget_base: null, daily_budget_current: null };
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setBudget('c-1', 30, 'test', { requireLivePush: true, requireBoundFactor: 3 }))
+      .rejects.toMatchObject({ code: 'budget_unbounded' });
+  });
+
+  test('commit failure after a successful push still takes the compensating rollback', async () => {
+    campaignFirstRow = baseCampaign();
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true }); // push + rollback accepted
+    // Statements succeed; the transaction promise itself rejects (COMMIT failed).
+    const realTransaction = mockDb.transaction;
+    mockDb.transaction = async (cb) => { await cb(mockDb); throw new Error('commit failed'); };
+
+    await expect(BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true }))
+      .rejects.toMatchObject({ code: 'live_push_rolled_back' });
+
+    mockDb.transaction = realTransaction;
+  });
+
+  test('cron adjustBudgets re-reads the row under the lock and skips a just-paused campaign', async () => {
+    // List read returns an active row; the locked re-read sees it paused.
+    campaignRows = [baseCampaign()];
+    campaignFirstRow = { ...baseCampaign(), status: 'paused' };
+    mockIsEnabled.mockReturnValue(true);
+    mockIsConfigured.mockReturnValue(true);
+    jest.spyOn(BudgetManager, 'getCapacityForArea')
+      .mockResolvedValue({ utilizationPct: 99, booked: 8, slots: 8, techs: 1 });
+
+    await BudgetManager.adjustBudgets();
+
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
   });
 });

@@ -548,7 +548,7 @@ async function applyLive(fn, res) {
       res.status(409).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
-    if (err.code === 'campaign_inactive') {
+    if (['campaign_inactive', 'mode_noop', 'budget_noop', 'budget_out_of_bounds', 'budget_unbounded'].includes(err.code)) {
       res.status(422).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
@@ -566,6 +566,13 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       return res.json({ applied: false, manual: true, note: 'This recommendation needs a manual change (no automated action for it yet).' });
     }
 
+    // The Apply confirm shows campaignName — an id-only request would let a
+    // spend change go through without the admin ever seeing which campaign
+    // it targets (the advisor normalizer strips such recs; this is the
+    // server-side backstop).
+    if (!String(campaignName || '').trim()) {
+      return res.status(422).json({ applied: false, error: 'This recommendation carries no campaign name — apply it manually from the campaign editor.' });
+    }
     // Prefer the stable id the advisor now carries; a bare name is a fallback
     // for older stored reports. campaign_name is NOT unique (Google vs Meta
     // rows, duplicated experiments), so a name matching more than one row is
@@ -646,7 +653,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, trigger: 'advisor' }), res);
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {

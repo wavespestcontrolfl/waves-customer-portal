@@ -56,9 +56,9 @@ class BudgetManager {
       orange: parseFloat(targets?.capacity_orange_max || 95),
     };
 
-    for (const campaign of campaigns) {
+    for (const listed of campaigns) {
       try {
-        const area = campaign.target_area || 'general';
+        const area = listed.target_area || 'general';
         const capacity = await this.getCapacityForArea(area, checkDate);
         const pct = capacity.utilizationPct;
 
@@ -72,6 +72,17 @@ class BudgetManager {
         } else {
           newMode = 'stop'; // 1% budget (never pause — kills QS)
         }
+
+        // The guard→push→persist below runs against a FOR UPDATE re-read of
+        // the row, inside one transaction — the same lock the advisor apply
+        // holds. Without it, this cron could push a stale mode's budget from
+        // its unlocked list read, block on the advisor's lock, then commit
+        // its stale amount OVER the advisor's newer one (DB saying stopped
+        // while Google runs the advisor budget until the next reconcile).
+         
+        await db.transaction(async (trx) => {
+          const campaign = await trx('ad_campaigns').where({ id: listed.id }).forUpdate().first();
+          if (!campaign || campaign.status !== 'active') return;
 
         if (newMode !== campaign.budget_mode) {
           const newBudget = this.calculateBudget(campaign, newMode);
@@ -90,17 +101,17 @@ class BudgetManager {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} NOT applied — Google Ads push failed; will retry next run`);
-              continue;
+              return;
             }
             pushedLive = true;
           }
 
-          await db('ad_campaigns').where({ id: campaign.id }).update({
+          await trx('ad_campaigns').where({ id: campaign.id }).update({
             budget_mode: newMode,
             daily_budget_current: newBudget,
           });
 
-          await db('ad_budget_log').insert({
+          await trx('ad_budget_log').insert({
             campaign_id: campaign.id,
             campaign_name: campaign.campaign_name,
             previous_mode: campaign.budget_mode,
@@ -136,14 +147,14 @@ class BudgetManager {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
-              continue;
+              return;
             }
 
-            await db('ad_campaigns').where({ id: campaign.id }).update({
+            await trx('ad_campaigns').where({ id: campaign.id }).update({
               daily_budget_current: expectedBudget,
             });
 
-            await db('ad_budget_log').insert({
+            await trx('ad_budget_log').insert({
               campaign_id: campaign.id,
               campaign_name: campaign.campaign_name,
               previous_mode: campaign.budget_mode,
@@ -159,8 +170,9 @@ class BudgetManager {
             logger.info(`Budget: ${campaign.campaign_name} reconciled ${campaign.budget_mode} budget to ${expectedBudget} (pushed to Google Ads)`);
           }
         }
+        });
       } catch (err) {
-        logger.error(`Budget adjust failed for ${campaign.campaign_name}: ${err.message}`);
+        logger.error(`Budget adjust failed for ${listed.campaign_name}: ${err.message}`);
       }
     }
   }
@@ -373,7 +385,6 @@ class BudgetManager {
       // guard→push→persist sequence actually atomic. Scale here is one admin
       // and a slow cron — contention is not a concern.
       let pushedCampaign = null;
-      let persistFailure = null;
       try {
         return await db.transaction(async (trx) => {
           const campaign = await trx('ad_campaigns').where({ id: campaignId }).forUpdate().first();
@@ -384,6 +395,14 @@ class BudgetManager {
           if (requireActive && campaign.status !== 'active') {
             const err = new Error(`"${campaign.campaign_name}" is ${campaign.status || 'not active'} — advisor changes only apply to active campaigns.`);
             err.code = 'campaign_inactive';
+            throw err;
+          }
+          // Under the lock: two concurrent applies of the same rec both pass
+          // the route's unlocked no-op check; the loser must not re-push the
+          // already-current mode and count a second "applied" change.
+          if (mode === campaign.budget_mode) {
+            const err = new Error(`"${campaign.campaign_name}" is already in ${mode} mode — nothing to apply.`);
+            err.code = 'mode_noop';
             throw err;
           }
 
@@ -407,35 +426,30 @@ class BudgetManager {
             pushedCampaign = campaign;
           }
 
-          try {
-            await trx('ad_campaigns').where({ id: campaignId }).update({
-              budget_mode: mode,
-              daily_budget_current: newBudget,
-            });
-            await trx('ad_budget_log').insert({
-              campaign_id: campaignId,
-              campaign_name: campaign.campaign_name,
-              previous_mode: campaign.budget_mode,
-              new_mode: mode,
-              previous_budget: campaign.daily_budget_current,
-              new_budget: newBudget,
-              reason,
-              trigger,
-            });
-          } catch (err) {
-            // Tagged so the outer catch can distinguish "persist failed after
-            // Google accepted" (needs the compensating rollback) from the
-            // pre-push guard throws above. The rethrow rolls the transaction
-            // back, so campaign write and audit row can never split.
-            persistFailure = err;
-            throw err;
-          }
+          await trx('ad_campaigns').where({ id: campaignId }).update({
+            budget_mode: mode,
+            daily_budget_current: newBudget,
+          });
+          await trx('ad_budget_log').insert({
+            campaign_id: campaignId,
+            campaign_name: campaign.campaign_name,
+            previous_mode: campaign.budget_mode,
+            new_mode: mode,
+            previous_budget: campaign.daily_budget_current,
+            new_budget: newBudget,
+            reason,
+            trigger,
+          });
 
           return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated, livePushAttempted: linked };
         });
       } catch (err) {
-        if (persistFailure && pushedCampaign) {
-          throw await this.rollbackAfterLivePush(pushedCampaign, persistFailure);
+        // Every guard throws BEFORE pushedCampaign is set, so any rejection
+        // after it — the persist statements OR the transaction's own COMMIT —
+        // is a local failure after Google accepted the change, and it gets
+        // the compensating rollback instead of reading as an ordinary error.
+        if (pushedCampaign) {
+          throw await this.rollbackAfterLivePush(pushedCampaign, err);
         }
         throw err;
       }
@@ -523,9 +537,14 @@ class BudgetManager {
    * concurrent mode change can't slip between the guard and the push.
    * opts.requireActive: reject ('campaign_inactive') unless status='active',
    * checked under the same lock.
+   * opts.requireBoundFactor: reject ('budget_out_of_bounds' /
+   * 'budget_unbounded' / 'budget_noop') unless the amount is within this
+   * factor of the LOCKED row's base (falling back to current) and actually
+   * changes something — the caller's unlocked pre-checks can be raced by a
+   * concurrent base edit or a duplicate apply.
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual').
    */
-  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, trigger = 'manual' } = {}) {
+  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, trigger = 'manual' } = {}) {
     // Validate the amount up front — a non-positive / NaN / non-finite base would
     // be written locally and pushed to Google as garbage micros (or, at 0,
     // collapse to the $20 fallback), and the 2-hourly reconcile would keep
@@ -546,7 +565,6 @@ class BudgetManager {
       // row together — a failed insert rolls both back before the
       // compensating Google rollback runs.
       let pushedCampaign = null;
-      let persistFailure = null;
       try {
         return await db.transaction(async (trx) => {
           const campaign = await trx('ad_campaigns').where({ id: campaignId }).forUpdate().first();
@@ -566,6 +584,29 @@ class BudgetManager {
             const err = new Error(`"${campaign.campaign_name}" switched to "${campaign.budget_mode}" mode — the new daily budget wouldn't take effect, so nothing was changed.`);
             err.code = 'mode_conflict';
             throw err;
+          }
+          // Bound + no-op re-checked against the LOCKED row: the caller's
+          // pre-checks read an unlocked snapshot, so a concurrent base edit
+          // could turn an in-bounds amount into a wild jump, and a duplicate
+          // apply from a second tab could re-push an already-current budget.
+          if (requireBoundFactor) {
+            const lockedBase = Number(campaign.daily_budget_base);
+            const boundRef = Number.isFinite(lockedBase) && lockedBase > 0 ? lockedBase : Number(campaign.daily_budget_current);
+            if (!(boundRef > 0)) {
+              const err = new Error(`"${campaign.campaign_name}" has no recorded daily budget to sanity-check the amount against — set the budget manually in the campaign editor.`);
+              err.code = 'budget_unbounded';
+              throw err;
+            }
+            if (base > boundRef * requireBoundFactor || base < boundRef / requireBoundFactor) {
+              const err = new Error(`Refusing a budget change from $${boundRef}/day to $${base}/day (more than a ${requireBoundFactor}× move) — if that's really intended, set it in the campaign's budget editor.`);
+              err.code = 'budget_out_of_bounds';
+              throw err;
+            }
+            if (base === lockedBase && base === Number(campaign.daily_budget_current)) {
+              const err = new Error(`"${campaign.campaign_name}" is already at $${base}/day — nothing to apply.`);
+              err.code = 'budget_noop';
+              throw err;
+            }
           }
 
           const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
@@ -587,25 +628,20 @@ class BudgetManager {
             pushedCampaign = campaign;
           }
 
-          try {
-            await trx('ad_campaigns').where({ id: campaignId }).update({
-              daily_budget_base: base,
-              daily_budget_current: effectiveBudget,
-            });
-            await trx('ad_budget_log').insert({
-              campaign_id: campaignId,
-              campaign_name: campaign.campaign_name,
-              previous_mode: campaign.budget_mode,
-              new_mode: campaign.budget_mode,
-              previous_budget: campaign.daily_budget_base,
-              new_budget: base,
-              reason,
-              trigger,
-            });
-          } catch (err) {
-            persistFailure = err;
-            throw err;
-          }
+          await trx('ad_campaigns').where({ id: campaignId }).update({
+            daily_budget_base: base,
+            daily_budget_current: effectiveBudget,
+          });
+          await trx('ad_budget_log').insert({
+            campaign_id: campaignId,
+            campaign_name: campaign.campaign_name,
+            previous_mode: campaign.budget_mode,
+            new_mode: campaign.budget_mode,
+            previous_budget: campaign.daily_budget_base,
+            new_budget: base,
+            reason,
+            trigger,
+          });
 
           return {
             campaign: campaign.campaign_name,
@@ -617,8 +653,11 @@ class BudgetManager {
           };
         });
       } catch (err) {
-        if (persistFailure && pushedCampaign) {
-          throw await this.rollbackAfterLivePush(pushedCampaign, persistFailure);
+        // Guards all throw before pushedCampaign is set — any later rejection
+        // (persist statements or the COMMIT itself) is a post-push local
+        // failure and takes the compensating rollback.
+        if (pushedCampaign) {
+          throw await this.rollbackAfterLivePush(pushedCampaign, err);
         }
         throw err;
       }
