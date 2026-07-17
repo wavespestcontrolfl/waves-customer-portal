@@ -82,7 +82,7 @@ Use for: "did we miss any Stripe events?", "webhook delivery failures today?"`,
   },
   {
     name: 'get_stripe_payment_intents',
-    description: `List recent Stripe PaymentIntents (live processor data), filterable by status and exact amount. This is the ONLY view of payment attempts that never completed — an incomplete "draft" fires no completion webhook, so it never reaches the local database and the revenue/banking tools cannot see it. The window covers intents CREATED in it plus older reused intents with a failed or action-stalled ATTEMPT in it (created_before_window + last_attempt_at mark those). last_payment_error.payment_method_type is the method the failed attempt actually used (payment_method_types is just the allowlist). Completed revenue questions still belong to the revenue tools.
+    description: `List recent Stripe PaymentIntents (live processor data), filterable by status and exact amount. This is the ONLY view of payment attempts that never completed — an incomplete "draft" fires no completion webhook, so it never reaches the local database and the revenue/banking tools cannot see it. The window covers intents CREATED in it plus older reused intents with a failed or action-stalled ATTEMPT in it (created_before_window + qualifying_event_at/_type mark those); results are ranked by recency before the limit applies. last_payment_error.payment_method_type is the method the failed attempt actually used (payment_method_types is just the allowlist). Completed revenue questions still belong to the revenue tools.
 Use for: "any incomplete payments?", "find the $33.33 drafts in Stripe", "did that payment attempt fail, and why?"`,
     input_schema: {
       type: 'object',
@@ -262,31 +262,30 @@ async function getStripePaymentIntents(input) {
   const createdGte = Math.floor((Date.now() - hours * 60 * 60 * 1000) / 1000);
 
   // The list API has no status/amount filters — page newest-first and filter
-  // here, same shape as the webhook-failures scan. matchedSeen keeps counting
-  // past the display cap so totals stay honest when a page holds more matches
-  // than the limit.
-  const matched = [];
+  // here, same shape as the webhook-failures scan. Matches collect unbounded
+  // (the window is small: ≤5 pages + ≤10 lookups) and the display cap is
+  // applied only after a global recency sort, so a retry that happened today
+  // can never be starved out by older in-window creations.
+  const matches = [];
   const scannedIds = new Set();
-  let matchedSeen = 0;
   let scanned = 0;
-  const considerIntent = (pi, extra) => {
+  const considerIntent = (pi, extra, rankTime) => {
     scannedIds.add(pi.id);
     scanned += 1;
     if (!paymentIntentMatchesStatus(pi, statusFilter)) return;
     if (amountCents !== null && pi.amount !== amountCents) return;
-    matchedSeen += 1;
-    if (matched.length < limit) matched.push({ ...mapPaymentIntent(pi), ...extra });
+    matches.push({ entry: { ...mapPaymentIntent(pi), ...extra }, rankTime });
   };
   let startingAfter = null;
   let pagesFetched = 0;
   let morePages = true;
-  while (morePages && pagesFetched < MAX_EVENT_PAGES && matched.length < limit) {
+  while (morePages && pagesFetched < MAX_EVENT_PAGES) {
     const params = { 'created[gte]': createdGte, limit: EVENTS_PAGE_SIZE };
     if (startingAfter) params.starting_after = startingAfter;
     const json = await stripeGet('/v1/payment_intents', params);
     pagesFetched += 1;
     const data = json.data || [];
-    for (const pi of data) considerIntent(pi, undefined);
+    for (const pi of data) considerIntent(pi, undefined, pi.created);
     morePages = Boolean(json.has_more) && data.length > 0;
     startingAfter = data.length ? data[data.length - 1].id : null;
   }
@@ -305,7 +304,7 @@ async function getStripePaymentIntents(input) {
   let retryLookupsDropped = 0;
   let retryLookupFailures = 0;
   {
-    // id → newest in-window attempt event time (events arrive newest-first)
+    // id → newest in-window qualifying event (events arrive newest-first)
     const retryCandidates = new Map();
     let eventsAfter = null;
     let eventPages = 0;
@@ -320,7 +319,7 @@ async function getStripePaymentIntents(input) {
         const snapshot = event.data && event.data.object;
         if (!snapshot || !snapshot.id) continue;
         if (scannedIds.has(snapshot.id) || retryCandidates.has(snapshot.id)) continue;
-        retryCandidates.set(snapshot.id, event.created);
+        retryCandidates.set(snapshot.id, { eventAt: event.created, eventType: event.type });
       }
       moreEvents = Boolean(json.has_more) && data.length > 0;
       eventsAfter = data.length ? data[data.length - 1].id : null;
@@ -344,31 +343,40 @@ async function getStripePaymentIntents(input) {
         continue;
       }
       const pi = lookup.value;
-      const attemptAt = candidateEntries[i][1];
-      // Only present because an attempt happened inside the window — carry
-      // when it happened (the intent's created can be weeks older), and flag
-      // intents that predate the window.
+      const { eventAt, eventType } = candidateEntries[i][1];
+      // Only present because a failed/stalled attempt happened inside the
+      // window. The timestamp is honestly labeled as that QUALIFYING event —
+      // the live intent may have been retried successfully since, and
+      // successful attempts are not part of the sweep, so this is not
+      // claimed to be the last attempt. Flag intents that predate the
+      // window.
       considerIntent(pi, {
-        last_attempt_at: new Date(attemptAt * 1000).toISOString(),
+        qualifying_event_at: new Date(eventAt * 1000).toISOString(),
+        qualifying_event_type: eventType,
         ...(pi.created < createdGte ? { created_before_window: true } : {}),
-      });
+      }, eventAt);
     }
   }
 
+  // Global recency ranking BEFORE the display cap — scan entries rank by
+  // creation time, sweep entries by their in-window qualifying event — so
+  // the newest activity is always shown regardless of which phase found it.
+  matches.sort((a, b) => b.rankTime - a.rankTime);
   return {
     window_hours: hours,
     status_filter: statusFilter,
     amount_filter: amountCents !== null ? Number((amountCents / 100).toFixed(2)) : null,
-    payment_intents: matched,
-    total_matched: matchedSeen,
+    payment_intents: matches.slice(0, limit).map(m => m.entry),
+    total_matched: matches.length,
     total_scanned: scanned,
     retry_lookup_failures: retryLookupFailures,
-    // Pending pages, matches beyond the display cap, a truncated retry
-    // sweep, or a failed lookup all mean the window may hold more than
-    // shown.
-    scan_exhaustive: !morePages && matchedSeen === matched.length
-      && retrySweepExhaustive && retryLookupsDropped === 0 && retryLookupFailures === 0,
-    note: 'Live Stripe data; amounts are dollars. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft. created_before_window marks an older intent surfaced by an in-window attempt; last_attempt_at is when that attempt happened.',
+    // Pending pages, a truncated retry sweep, or a failed lookup all mean
+    // the window may hold more than reported. A display cap alone does NOT
+    // clear this — total_matched stays honest and the returned entries are
+    // the most recent.
+    scan_exhaustive: !morePages && retrySweepExhaustive
+      && retryLookupsDropped === 0 && retryLookupFailures === 0,
+    note: 'Live Stripe data; amounts are dollars. payment_intents holds the most recent matches up to the limit; total_matched counts every match in the window. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft. created_before_window marks an older intent surfaced by an in-window failed/stalled attempt; qualifying_event_at/_type describe that event (the intent may have been retried since — this is not necessarily the last attempt).',
   };
 }
 

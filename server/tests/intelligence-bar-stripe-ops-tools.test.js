@@ -302,9 +302,11 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(result.error).toBeUndefined();
     expect(result.payment_intents.map(p => p.id)).toEqual(['pi_old_retry']);
     expect(result.payment_intents[0].created_before_window).toBe(true);
-    // The record answers WHEN the qualifying attempt happened, not just the
-    // weeks-old creation time.
-    expect(result.payment_intents[0].last_attempt_at).toBe(new Date((now - 600) * 1000).toISOString());
+    // The record answers WHEN the qualifying event happened (honestly labeled
+    // — the intent may have been retried since), not just the weeks-old
+    // creation time.
+    expect(result.payment_intents[0].qualifying_event_at).toBe(new Date((now - 600) * 1000).toISOString());
+    expect(result.payment_intents[0].qualifying_event_type).toBe('payment_intent.payment_failed');
     expect(result.total_matched).toBe(1);
     expect(result.scan_exhaustive).toBe(true);
     // Both attempt shapes are swept — failures AND 3DS/action stalls
@@ -436,7 +438,45 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(result.error).toBeUndefined();
     expect(result.payment_intents).toHaveLength(2);
     expect(result.total_matched).toBe(5);
-    expect(result.scan_exhaustive).toBe(false);
+    // The whole window WAS evaluated — a display cap alone doesn't clear
+    // exhaustiveness; total_matched carries the honest count.
+    expect(result.scan_exhaustive).toBe(true);
+  });
+
+  test('a retry that happened today outranks older in-window creations at the display cap', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const now = Math.floor(Date.now() / 1000);
+    const pi = (id, createdAt) => ({
+      id, status: 'requires_payment_method', amount: 3333, currency: 'usd',
+      created: createdAt, payment_method_types: ['card'],
+    });
+    global.fetch
+      // Creation scan alone would fill limit=2 with these older intents
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [pi('pi_70h_old', now - 70 * 3600), pi('pi_60h_old', now - 60 * 3600)],
+      }))
+      // ...but an intent retried 10 minutes ago surfaces via the sweep
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [{
+          id: 'evt_fail_5',
+          type: 'payment_intent.payment_failed',
+          created: now - 600,
+          data: { object: { id: 'pi_retried_today', object: 'payment_intent', status: 'requires_payment_method' } },
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        ...pi('pi_retried_today', now - 40 * 24 * 3600),
+      }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete', limit: 2 });
+    expect(result.error).toBeUndefined();
+    // Ranked by recency across BOTH phases: today's retry first, then the
+    // newest creation; the oldest creation falls to the cap but stays
+    // counted.
+    expect(result.payment_intents.map(p => p.id)).toEqual(['pi_retried_today', 'pi_60h_old']);
+    expect(result.total_matched).toBe(3);
   });
 
   test('get_stripe_payment_intents reports canceled state and unconfigured stays benign', async () => {
