@@ -171,6 +171,15 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('The fee was modest. Total due $400.'))
       .toBe('The fee was modest. Total due $400.');
   });
+  test('slash-separated and qualified fee alternatives are fully consumed', () => {
+    expect(redactInspectionFeeCues('Inspection fee $175/$250.'))
+      .toBe('Inspection fee [fee removed].');
+    expect(redactInspectionFeeCues('Inspection fee is $175 for block homes and $250 for wood-frame homes.'))
+      .toBe('Inspection fee is [fee removed] for wood-frame homes.');
+    // a qualifier naming a new money subject is never swallowed
+    expect(redactInspectionFeeCues('Inspection fee $250 for repairs and $500 deductible.'))
+      .toBe('Inspection fee [fee removed] for repairs and $500 deductible.');
+  });
   test('every amount in a fee range is consumed into one redaction', () => {
     expect(redactInspectionFeeCues('Inspection fee ranges from $175 to $250 depending on construction.'))
       .toBe('Inspection fee ranges from [fee removed] depending on construction.');

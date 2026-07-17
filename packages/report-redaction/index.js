@@ -107,13 +107,17 @@ const AMOUNT_PATTERN = [
 // structured snapshot still names is caught too. The 160 cap only bounds
 // backtracking; the clause punctuation is the real limit.
 // A range or alternative continues the SAME fee disclosure — "ranges from
-// $175 to $250", "$175–$250", "either $175 or $250" — so every amount joined
-// to the first by a range connector is consumed into the one redaction
+// $175 to $250", "$175–$250", "$175/$250", "either $175 or $250", and the
+// qualified form "$175 for block homes and $250 for wood-frame homes" — so
+// every amount joined to the first is consumed into the one redaction
 // (codex #2817: redacting only the first amount left the second visible).
-// The connector must be DIRECTLY followed by an amount, so "and treatment
-// $900" (a new subject between) is never swallowed.
+// The optional qualifier between amounts is a short breaker-tempered
+// "for <words>" phrase, so "and treatment $900" / "for repairs and $500"
+// (a new money subject between) is never swallowed.
+const CONTINUATION_QUALIFIER =
+  `(?:\\s+for\\s+(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)[\\w\\-]+\\s+){0,4}?)?`;
 const RANGE_CONTINUATION =
-  '(?:\\s?(?:to|through|thru|or|and|[-–—])\\s?'
+  `(?:${CONTINUATION_QUALIFIER}\\s?(?:to|through|thru|or|and|[-–—/])\\s?`
   + '(?:'
   + '\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?'
   + '|(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?'

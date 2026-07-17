@@ -889,6 +889,13 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
   const safeCommunicationContext = typeCarriesFee
     ? redactInspectionFeeCues(communicationContext)
     : communicationContext;
+  // Photo captions are technician free text too — a caption quoting the fee
+  // would otherwise reach the model verbatim and can be paraphrased into the
+  // narrative without the literal cue the downstream guards key on
+  // (codex #2817).
+  const safePhotoLines = typeCarriesFee
+    ? redactInspectionFeeCues(photoLines)
+    : photoLines;
   const findingsLines = Object.entries(stripInternalFindingKeys(findings, { redactValues: typeCarriesFee }) || {})
     .map(([k, v]) => [k, formatFindingForPrompt(v)])
     .filter(([, v]) => v.trim() !== '')
@@ -1025,7 +1032,7 @@ Technician's raw recommendations / notes:
 ${safeRawRecommendations || '[none provided]'}
 
 Attached photo review:
-${photoLines || '[no photos attached]'}
+${safePhotoLines || '[no photos attached]'}
 
 Recent customer communication context:
 ${safeCommunicationContext || '[none provided]'}
