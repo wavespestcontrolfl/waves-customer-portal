@@ -128,8 +128,17 @@ describe('redactInspectionFeeCues', () => {
       .toBe('Inspection fee is [fee removed].');
     expect(redactInspectionFeeCues('Inspection fee: USD 250'))
       .toBe('Inspection fee: [fee removed]');
+    // the bare form consumes its own is/was/of/at introducer
     expect(redactInspectionFeeCues('The inspection fee of 175 was quoted on the phone.'))
-      .toBe('The inspection fee of [fee removed] was quoted on the phone.');
+      .toBe('The inspection fee [fee removed] was quoted on the phone.');
+    expect(redactInspectionFeeCues('Inspection fee: 250'))
+      .toBe('Inspection fee [fee removed]');
+  });
+  test('a bare number without a value introducer is never selected — the real amount still is', () => {
+    expect(redactInspectionFeeCues('Inspection fee for 123 Main Street is $250'))
+      .toBe('Inspection fee for 123 Main Street is [fee removed]');
+    expect(redactInspectionFeeCues('Inspection fee per invoice 4482 applies.'))
+      .toBe('Inspection fee per invoice 4482 applies.');
   });
   test('bare-number guards: durations, dates, times, and years survive', () => {
     expect(redactInspectionFeeCues('Inspection fee due in 30 days.'))

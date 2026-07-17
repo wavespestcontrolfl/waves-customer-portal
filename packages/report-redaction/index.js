@@ -36,14 +36,19 @@ const FEE_REACH_BREAKERS = [
 
 // Amount forms the cue can disclose. A literal $ amount, a USD/US$-prefixed
 // amount, a "250 dollars" currency-word amount, or a bare number. The bare
-// form is the corruption-prone one, so it is fenced: 2+ digits (so "tier 2"
+// form is the corruption-prone one ("Inspection fee for 123 Main Street is
+// $250" must not select the street number), so it only matches when a value
+// introducer — is/was/of/at or a colon/equals — DIRECTLY precedes the digits
+// ("inspection fee is 250", "inspection fee: 250"); an arbitrary mid-clause
+// number can never be selected, and the $ amount later in the clause is still
+// caught by the other forms. It is further fenced: 2+ digits (so "tier 2"
 // survives), not part of a date/time/range ("due 07/24", "at 10:30"), not a
 // duration or unit ("due in 30 days", "10am"), and not a 19xx/20xx year.
 const AMOUNT_PATTERN = [
   '\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
   '(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
   '\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?\\b',
-  '(?<![\\d/\\-:])(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%)\\b)(?![:/\\-]?\\d)',
+  '(?:\\b(?:is|was|of|at)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?)\\b)(?![:/\\-]?\\d)',
 ].join('|');
 
 // Remove ONLY the literal "inspection fee" phrase + an amount from free text.
@@ -67,7 +72,9 @@ function redactInspectionFeeCues(text) {
   const str = String(text || '');
   if (!str) return str;
   return str
-    .replace(FEE_CUE_RE, (m, cue, mid) => `${cue}${mid}[fee removed]`)
+    // mid can be empty when the amount form consumed its own introducer
+    // ("inspection fee: 250") — keep a space so the marker doesn't fuse.
+    .replace(FEE_CUE_RE, (m, cue, mid) => `${cue}${mid || ' '}[fee removed]`)
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/[ \t]+\n/g, '\n')
     .trim();
