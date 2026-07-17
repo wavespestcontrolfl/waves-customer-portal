@@ -2965,6 +2965,48 @@ const InvoiceService = {
       );
     }
 
+    // Applied-money fence for retotals (mirrors voidInvoice). A delivered
+    // invoice can stay in sent/viewed/overdue with money already recorded
+    // against it:
+    //   - a partial in-person prepayment reduces `total`, stamps
+    //     payment_recorded_at, and books a paid ledger row while the invoice
+    //     stays collectible (admin-dispatch / admin-schedule completion);
+    //   - a charge dispute reopens the invoice as overdue and clears its PI
+    //     while the original payment sits in 'disputed'; the dispute-won
+    //     handler later restores that payment against whatever the invoice
+    //     then says.
+    // A line-item/tax retotal recomputes from the stored lines and would
+    // erase the partial-payment reduction (resent invoice demands collected
+    // money again) or let a dispute settle against edited amounts. Metadata
+    // edits (title/notes/email_message/due_date) stay allowed. Fail CLOSED
+    // if the ledger can't be read, same as the payment-plan guard.
+    const isRetotal = Boolean(updates.line_items) || updates.tax_rate !== undefined;
+    if (isRetotal) {
+      if (existing.payment_recorded_at) {
+        throw new Error(
+          "Cannot edit amounts on an invoice with payment already applied — refund it or issue a new invoice instead",
+        );
+      }
+      let appliedMoneyRow = null;
+      try {
+        appliedMoneyRow = await db("payments")
+          .whereIn("status", ["paid", "processing", "disputed"])
+          .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id])
+          .first("id", "status");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the payment ledger — refusing to edit (${err.message})`,
+        );
+      }
+      if (appliedMoneyRow) {
+        throw new Error(
+          appliedMoneyRow.status === "disputed"
+            ? "Cannot edit amounts on an invoice with a payment dispute in progress — resolve the dispute first"
+            : `Cannot edit amounts on an invoice with payment already applied (payment ${appliedMoneyRow.id}) — refund it or issue a new invoice instead`,
+        );
+      }
+    }
+
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
     const data = { updated_at: new Date() };
     for (const key of allowed) {
@@ -3110,7 +3152,7 @@ const InvoiceService = {
           throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by editing a billed line");
         }
       }
-      const [edited] = await client("invoices")
+      let editQuery = client("invoices")
         .where({ id })
         .whereIn("status", EDIT_ALLOWED_STATUSES)
         .whereNull("stripe_payment_intent_id")
@@ -3120,9 +3162,23 @@ const InvoiceService = {
             .from("payment_plans")
             .whereRaw("payment_plans.invoice_id = invoices.id")
             .where("payment_plans.status", "active");
-        })
-        .update(data)
-        .returning("*");
+        });
+      // Retotals also re-assert the applied-money fence at write time so a
+      // partial payment or dispute recorded between the guard read and this
+      // write fails closed instead of rewriting collected money.
+      if (isRetotal) {
+        editQuery = editQuery
+          .whereNull("payment_recorded_at")
+          .whereNotExists(function () {
+            this.select(db.raw("1"))
+              .from("payments")
+              .whereRaw(
+                "payments.metadata::jsonb ->> 'invoice_id' = invoices.id::text",
+              )
+              .whereIn("payments.status", ["paid", "processing", "disputed"]);
+          });
+      }
+      const [edited] = await editQuery.update(data).returning("*");
       if (!edited) {
         throw new Error(
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
@@ -3141,6 +3197,31 @@ const InvoiceService = {
     const edited = await (existing.payer_statement_id
       ? db.transaction(runEdit)
       : runEdit(db));
+    // A changed due date moves the collection timeline — re-anchor an ACTIVE
+    // follow-up sequence so the customer isn't dunned on the pre-edit
+    // schedule. Compared as calendar dates (the column is a DATE; the editor
+    // sends YYYY-MM-DD) so an unchanged date doesn't re-anchor a
+    // send-anchored cadence. Best-effort after commit: the edit stands even
+    // if rescheduling fails.
+    const asDateOnly = (v) => {
+      if (!v) return "";
+      const d = new Date(v);
+      return Number.isNaN(d.getTime())
+        ? String(v)
+        : d.toISOString().slice(0, 10);
+    };
+    if (
+      data.due_date !== undefined &&
+      asDateOnly(existing.due_date) !== asDateOnly(data.due_date)
+    ) {
+      try {
+        await require("./invoice-followups").rescheduleForInvoiceEdit(id);
+      } catch (err) {
+        logger.warn(
+          `[invoice-followups] rescheduleForInvoiceEdit failed for invoice ${id}: ${err.message}`,
+        );
+      }
+    }
     // Audit trail: a delivered invoice was rewritten after the customer could
     // have seen it — the emailed PDF is now stale until it's resent. Outside
     // the write on purpose (best-effort; a logging failure must not roll back

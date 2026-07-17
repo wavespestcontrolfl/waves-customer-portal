@@ -662,6 +662,25 @@ async function resumeSequence(invoiceId) {
   });
 }
 
+/**
+ * Re-anchor an ACTIVE sequence after an admin edits a delivered invoice's
+ * due date (the 2026-07-17 ruling made sent/viewed/overdue invoices
+ * editable). The stored next_touch_at was computed against the old
+ * timeline; left alone it can dun the customer on the pre-edit schedule.
+ * Uses the same due_date-anchored formula as resume/release. Held / paused /
+ * stopped rows keep their null next_touch_at and are re-anchored by their
+ * own release paths.
+ */
+async function rescheduleForInvoiceEdit(invoiceId) {
+  const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+  if (!seq || seq.status !== 'active') return;
+  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  if (!invoice || isTerminalInvoice(invoice)) return;
+  await db('invoice_followup_sequences').where({ id: seq.id }).update({
+    next_touch_at: computeNextTouchAt(invoice.due_date || invoice.created_at, seq.step_index),
+  });
+}
+
 async function stopSequence(invoiceId, { reason, adminId } = {}) {
   await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
     status: 'stopped',
@@ -738,6 +757,7 @@ module.exports = {
   handleAutopayFailure,
   pauseSequence,
   resumeSequence,
+  rescheduleForInvoiceEdit,
   stopSequence,
   sendNextTouchNow,
   hasActiveSequence,

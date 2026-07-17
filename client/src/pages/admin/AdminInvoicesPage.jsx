@@ -4873,19 +4873,28 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             amount: lineAmount(i),
           }));
       }
-      await adminFetch(`/admin/invoices/${editInvoice.id}`, {
+      const saved = await adminFetch(`/admin/invoices/${editInvoice.id}`, {
         method: "PUT",
         body: JSON.stringify(body),
       });
-      // A delivered invoice's emailed copy is now stale — hand the parent the
-      // id so the list view opens the resend modal for it.
+      // Delivered-ness comes from the SAVED row, not the list snapshot: a
+      // scheduled send can complete while the form is open (the server
+      // allows that edit now), and the resend prompt must still fire for it.
+      const savedStatus = String(
+        saved?.status || editInvoice.status || "",
+      ).toLowerCase();
+      const deliveredAfterSave = ["sent", "viewed", "overdue"].includes(
+        savedStatus,
+      );
+      // The emailed copy is now stale — hand the parent the id so the list
+      // view opens the resend modal for it.
       showToast(
-        editingDelivered
+        deliveredAfterSave
           ? `Invoice updated: ${editInvoice.invoice_number} — resend it so the customer sees the new version`
           : `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
       );
       onCreated(
-        editingDelivered ? { promptResendId: editInvoice.id } : undefined,
+        deliveredAfterSave ? { promptResendId: editInvoice.id } : undefined,
       );
     } catch (e) {
       showToast(`Error: ${e.message}`);
