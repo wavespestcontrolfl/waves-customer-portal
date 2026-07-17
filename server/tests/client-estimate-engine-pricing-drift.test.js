@@ -77,7 +77,7 @@ function loadClientEstimator(source) {
     logLevel: 'silent',
   });
   const module = { exports: {} };
-  // eslint-disable-next-line no-new-func
+   
   new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
   return module.exports;
 }
@@ -88,7 +88,7 @@ function loadAdminPreviewOneTimeHelpers(source) {
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
   const helperSource = source.slice(start, end);
-  // eslint-disable-next-line no-new-func
+   
   return new Function('serviceDetailText', 'fmtInt', `
     ${helperSource}
     return { oneTimePestChoiceRowsForCustomerPreview };
@@ -210,21 +210,25 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(source).not.toContain('disc: 0.92');
   });
 
-  test('mirrors the pest post-discount program floor (floor 89, per-visit basis rounded first)', () => {
-    // Server: constants.PEST.floor + discount-engine pestProgramFloorAnnual.
-    // The mirror must (a) stamp floor metadata on the stored pest tier rows so
-    // the public estimator can hold the discounted price at the floor, and
-    // (b) cap the pooled WaveGuard discount on the pest line the same way the
-    // server's per-line margin guard does.
-    expect(source).toContain('const floorPa = Math.round(89 * ft.disc * 100) / 100;');
-    expect(source).toContain('const floorAnn = Math.round(floorPa * ft.f * 100) / 100;');
-    expect(source).toContain('pestProgramFloorApplied');
+  test('mirrors the DISARMED pest post-discount program floor (owner ruling 2026-07-17)', () => {
+    // Server: PEST.enforceFloorPostDiscount defaults false and applyMarginGuard
+    // is report-only, so new estimates carry NO floor metadata and the pooled
+    // WaveGuard discount applies in full. The mirror must (a) not stamp
+    // floorPa/floorAnn/floorMo on stored pest tier rows, and (b) keep the
+    // pestProgramFloorApplied field in the return shape (always false) so
+    // stored-payload consumers don't lose it.
+    expect(source).not.toContain('const floorPa = Math.round(89 * ft.disc * 100) / 100;');
+    expect(source).not.toContain('const floorAnn = Math.round(floorPa * ft.f * 100) / 100;');
+    expect(source).toContain('const pestProgramFloorApplied = false;');
   });
 
-  test('client fallback holds a floor-priced Platinum pest line at the program floor', () => {
+  test('client fallback applies the full WaveGuard percent at the list bottom (floors disarmed 2026-07-17)', () => {
     // 800 sf townhome footprint + light shrubs + simple landscape → the
-    // pest per-visit price clamps to the $89 floor; tree density is context
-    // only. Four qualifying services → Platinum 20%.
+    // pest per-visit LIST price sits at the $89 bottom cell (price-book
+    // curve, unchanged); tree density is context only. Four qualifying
+    // services → Platinum 20%, which now applies in full — the old
+    // post-discount pest floor and $50/mo lawn program-minimum give-backs
+    // are disarmed per the owner ruling.
     const bundle = {
       homeSqFt: 800,
       stories: 1,
@@ -247,41 +251,29 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(estimate.error).toBeUndefined();
     expect(estimate.recurring.waveGuardTier).toBe('Platinum');
     expect(estimate.results.pest.pa).toBe(89);
-    expect(estimate.results.pest).toEqual(expect.objectContaining({
-      floorPa: 89, floorAnn: 356, floorMo: 29.67,
-    }));
-    // Pest sits exactly at the floor, so its entire 20% share is given back.
-    // This 4,000 sf St. Augustine lawn ALSO prices at the $50/mo lawn program
-    // minimum, so on the merged tree BOTH floors compose: the lawn slice the
-    // floor protects is given back too (independent lines, order-free — see
-    // the lawn guard just above the pest mirror in estimateEngine.js).
+    // No floor metadata rides new estimates (mirrors the server's
+    // snapshot semantics with enforcement off).
+    expect(estimate.results.pest.floorPa).toBeUndefined();
+    expect(estimate.results.pest.floorAnn).toBeUndefined();
+    // The entire 20% applies — no pest give-back, no lawn program-minimum
+    // give-back (programMinimumMonthly is 0).
     const ra = estimate.recurring.annualBeforeDiscount;
     const fullDa = Math.round(ra * 0.20 * 100) / 100;
-    const pestShare = Math.round(356 * 0.20 * 100) / 100;
-    const lawnAnn = estimate.results.lawn.find((row) => row.recommended).ann;
-    const lawnGiveBack = Math.max(0, Math.min(lawnAnn, 600) - lawnAnn * 0.80);
-    expect(lawnGiveBack).toBeGreaterThan(0); // fixture exercises the combined case
-    expect(estimate.recurring.pestProgramFloorApplied).toBe(true);
-    expect(estimate.recurring.savings)
-      .toBe(Math.round((fullDa - pestShare - lawnGiveBack) * 100) / 100);
+    expect(estimate.recurring.pestProgramFloorApplied).toBe(false);
+    expect(estimate.recurring.savings).toBe(fullDa);
     expect(estimate.recurring.annualAfterDiscount)
-      .toBe(Math.round((ra - estimate.recurring.savings) * 100) / 100);
+      .toBe(Math.round((ra - fullDa) * 100) / 100);
 
-    // Pest floor in ISOLATION: with a lawn big enough to keep its full 20%
-    // headroom above the $600/yr lawn floor, only pest's share is given back
-    // and the other services keep their full percent.
+    // Same at a larger lawn — the full percent everywhere.
     const bigLawn = calculateEstimate({ ...bundle, measuredTurfSf: 12000 });
     expect(bigLawn.error).toBeUndefined();
     expect(bigLawn.recurring.waveGuardTier).toBe('Platinum');
     expect(bigLawn.results.pest.pa).toBe(89);
-    const bigLawnAnn = bigLawn.results.lawn.find((row) => row.recommended).ann;
-    expect(Math.min(bigLawnAnn, 600) - bigLawnAnn * 0.80).toBeLessThanOrEqual(0); // no lawn give-back
     const bigRa = bigLawn.recurring.annualBeforeDiscount;
-    const bigFullDa = Math.round(bigRa * 0.20 * 100) / 100;
-    expect(bigLawn.recurring.pestProgramFloorApplied).toBe(true);
-    expect(bigLawn.recurring.savings).toBe(Math.round((bigFullDa - pestShare) * 100) / 100);
+    expect(bigLawn.recurring.pestProgramFloorApplied).toBe(false);
+    expect(bigLawn.recurring.savings).toBe(Math.round(bigRa * 0.20 * 100) / 100);
 
-    // Above the floor (standard 2,000 sf home) the full percent applies untouched.
+    // And on a standard 2,000+ sf home priced above the list bottom.
     const standard = calculateEstimate({ ...bundle, homeSqFt: 3000, measuredTurfSf: 12000, shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE' });
     expect(standard.error).toBeUndefined();
     expect(standard.recurring.pestProgramFloorApplied).toBe(false);

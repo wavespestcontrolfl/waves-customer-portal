@@ -52,17 +52,19 @@ function scanLadderGrid() {
   const violations = [];
   let cellsChecked = 0;
 
-  // The DB bridge deep-merges lawn config without validating this field, so a
-  // malformed live value must be a violation — `Number(...) || 0` would
-  // silently DISABLE the below-minimum check (and priceLawnCare stops
-  // enforcing the owner-mandated floor) while the sweep reports clean.
+  // The DB bridge deep-merges lawn config without validating this field, so
+  // a malformed live value must be a violation. 0 is EXEMPT: it is the
+  // designed disarm value (every reader guards on > 0) and has been the
+  // shipped default since the 2026-07-17 owner ruling ("forget all floors")
+  // — a clean sweep must not ring a permanent critical bell over deliberate
+  // policy. Non-numeric or negative values still mean a corrupted config row.
   const rawProgramMinimum = LAWN_PRICING_V2.programMinimumMonthly;
   const programMinimumMonthly = Number(rawProgramMinimum);
-  if (!Number.isFinite(programMinimumMonthly) || programMinimumMonthly <= 0) {
+  if (!Number.isFinite(programMinimumMonthly) || programMinimumMonthly < 0) {
     violations.push({
       check: 'malformed_program_minimum',
       cell: 'lawn_pricing_v2.programMinimumMonthly',
-      detail: `live config program minimum is ${JSON.stringify(rawProgramMinimum)} — the monthly floor is not being enforced`,
+      detail: `live config program minimum is ${JSON.stringify(rawProgramMinimum)} — not a valid dollar amount (0 = disarmed by design)`,
     });
   }
   // Same class of guard for the collected-margin floor: a blanked/0 live

@@ -204,16 +204,18 @@ describe('existing-customer public estimate page', () => {
     expect(html).not.toContain('Add Seasonal Mosquito and save more');
   });
 
-  test('leads on a lawn estimate: no setup fee, 5% prepay discount, pest-control cross-sell', () => {
+  test('leads on a lawn estimate: no setup fee, full 5% prepay discount, pest-control cross-sell', () => {
     const html = renderPage('lead-token', lawnEstimate(), lawnEstimateData(), null);
 
     // New customers still get the annual prepay option — now a prepay
     // discount in place of the setup waiver, since lawn carries no $99.00
-    // setup. The $50.00/mo lawn program minimum protects $600.00 of the $753.36
-    // base, so the effective rate is ~1%, not the configured 5%.
+    // setup. Owner ruling 2026-07-17 ("forget all pricing floors") set the
+    // lawn program minimum to 0, so no slice of the base is floor-protected —
+    // the full configured 5% applies to the whole $753.36 base.
     expect(html).toContain('<h3>Pay the 12-month plan in full</h3>');
     expect(html).toContain('data-payment-setup="prepay_annual"');
-    expect(html).toContain('Prepay discount (1%)');
+    expect(html).toContain('Prepay discount (5%)');
+    expect(html).toContain('data-prepay-protected-floor="0" data-prepay-configured-rate="0.05">$715.69');
     expect(html).not.toContain('<span>WaveGuard Membership Setup</span><strong>$99.00</strong>');
     expect(html).not.toContain("you're already a Waves customer");
     expect(html).toContain('Add Pest Control for bundled pricing');

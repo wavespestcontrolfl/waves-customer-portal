@@ -81,12 +81,13 @@ const PEST = {
   // competitor comparison, or historical anchor). v4.3 operator baseline.
   base: r(117),
   floor: r(89),
-  // Post-discount program floor (owner decision 2026-07-09): WaveGuard tier
-  // discounts may not take the collected annual below floor × freqMult ×
-  // visitsPerYear — the list-price floor holds after discounts too, per
-  // cadence. Enforced in discount-engine.applyMarginGuard. DB kill switch:
-  // pest_base row enforce_floor_post_discount=false.
-  enforceFloorPostDiscount: true,
+  // Post-discount program floor DISARMED (owner ruling 2026-07-17: "forget
+  // all floors" — margins are surfaced to the owner, who adjusts prices in
+  // the estimator; nothing moves a price automatically). The floor value
+  // stays for reporting; the enforcement flag is the designed kill switch
+  // (mirrored to false on the pricing_config pest_base row by migration
+  // 20260717120000). Re-arm: flip the DB flag back to true.
+  enforceFloorPostDiscount: false,
   footprintBrackets: [
     { sqft: 800,  adj: -r(15) },   // Was -r(20). Flattened — old value produced prices below floor.
     { sqft: 1200, adj: -r(10) },   // Was -r(12).
@@ -223,13 +224,13 @@ const LAWN_TIERS = {
 const LAWN_SOLD_TIERS = ['basic', 'standard', 'enhanced', 'premium'];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
-  // Hard program minimum (owner directive 2026-07-09, raised $45→$50 same
-  // day): no recurring lawn plan is sold below this monthly price, on ANY
-  // track/size/cadence, and the customer-facing ladder re-clamps AFTER
-  // WaveGuard/manual discounts AND the annual-prepay % (prepay is NOT
-  // exempt) — the bracket bottom cells ($25 Bahia) and discount stacking
-  // can't recreate a below-floor plan. 0/null disables the floor.
-  programMinimumMonthly: 50,
+  // Program minimum DISARMED (owner ruling 2026-07-17: "forget all floors").
+  // 0 is the designed disable value — every #2540 backstop (ladder clamp,
+  // post-discount guard, prepay protection, below-floor requote) reads this
+  // live and goes inert at 0. Mirrored to 0 on the pricing_config
+  // lawn_pricing_v2 row by migration 20260717120000. Re-arm: set the DB key
+  // back to a monthly dollar amount (was 50, owner directive 2026-07-09).
+  programMinimumMonthly: 0,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',

@@ -30,7 +30,7 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
     await db.destroy();
   });
 
-  test('DB-loaded constants apply the dense-route 35% floor pricing', () => {
+  test('DB-loaded constants price the dense route off the market table (floors disarmed 2026-07-17)', () => {
     const lawn = PricingEngine.priceLawnCare(property(), {
       track: 'st_augustine',
       lawnFreq: 9,
@@ -52,20 +52,20 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
         SPARSE: 20,
       },
     });
-    // Under the 35% floor the cost floor (~$572/yr) drops below the market
-    // table (~$576/yr = $48/mo) — but the $50/mo program minimum (owner
-    // directive 2026-07-09, #2540) clamps this property up to $603/yr, so the
-    // program minimum is the final price, not the market table.
-    expect(lawn.perApp).toBe(67);
-    expect(lawn.annual).toBe(603);
-    expect(lawn.monthly).toBe(50.25);
+    // Floors disarmed (owner ruling 2026-07-17, migration 20260717120000
+    // sets programMinimumMonthly 0 on the row this suite loads): the market
+    // table is the price. The cost-floor math still reports (~$572/yr
+    // minimum-collected, costs ~$371.75) without moving the $576/yr quote.
+    expect(lawn.perApp).toBe(64);
+    expect(lawn.annual).toBe(576);
+    expect(lawn.monthly).toBe(48);
     expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
     expect(lawn.costs.total).toBeLessThan(372);
     expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(571);
     expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(572);
     expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
-    expect(lawn.pricingSource).toBe('PROGRAM_MINIMUM');
-    expect(lawn.pricingBasis).toBe('PROGRAM_MINIMUM_MONTHLY');
+    expect(lawn.pricingSource).toBe('MARKET_TABLE');
+    expect(lawn.pricingBasis).toBe('TABLE_INTERPOLATION');
     expect(lawn.marketAnnual).toBe(576);
     // 6/9/12-visit ladder — the 4-visit 'basic' tier is no longer sold.
     expect(lawn.tiers.map((tier) => tier.tier)).toEqual(['standard', 'enhanced', 'premium']);
@@ -91,12 +91,12 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
       qualifyingCount: 2,
       activeServices: ['pest_control', 'lawn_care'],
     });
-    // WaveGuard silver takes 10% off $603 → $542.70, but the $50/mo program
-    // minimum re-clamps AFTER discounts (discounts are NOT exempt from the
-    // floor, owner directive 2026-07-09): final $600/yr = $50/mo exactly.
-    expect(lawn.annual).toBe(603);
-    expect(lawn.annualAfterDiscount).toBe(600);
-    expect(lawn.monthlyAfterDiscount).toBe(50);
+    // WaveGuard Silver takes the full 10% off the $576 market price — the
+    // program minimum that used to re-clamp after discounts is disarmed
+    // (owner ruling 2026-07-17): final $518.40/yr = $43.20/mo.
+    expect(lawn.annual).toBe(576);
+    expect(lawn.annualAfterDiscount).toBe(518.4);
+    expect(lawn.monthlyAfterDiscount).toBe(43.2);
     expect(lawn.discount).toMatchObject({
       discountable: true,
       requestedDiscountPercent: 0.10,

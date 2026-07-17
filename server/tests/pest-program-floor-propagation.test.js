@@ -38,6 +38,9 @@ function platinumBundle() {
 
 describe('program floor metadata on engine tier rows + legacy mapper', () => {
   test('every pest tier row carries the floor for ITS cadence (v1 curve)', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     const est = generateEstimate(platinumBundle());
     const pest = est.lineItems.find(i => i.service === 'pest_control');
     const byFreq = Object.fromEntries(pest.tiers.map(t => [t.frequency, t]));
@@ -48,6 +51,9 @@ describe('program floor metadata on engine tier rows + legacy mapper', () => {
   });
 
   test('legacy mapper copies the floor onto pestTiers rows and the selected R.pest', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     const est = generateEstimate(platinumBundle());
     const mapped = mapV1ToLegacyShape(est);
     const quarterly = mapped.results.pestTiers.find(t => t.label === 'Quarterly');
@@ -231,6 +237,9 @@ describe('normalizeClientPestFloorMetadata — server-authoritative restamp at s
   }
 
   test('restamps the client 89-literal floors from the live DB-synced floor', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     constants.PEST.floor = 79; // prod-style DB override
     const estData = clientStampedEstData();
     normalizeClientPestFloorMetadata(estData);
@@ -351,6 +360,9 @@ describe('normalizeClientPestFloorMetadata — totals correction (codex r5 P1)',
   }
 
   test('DB floor below the client literal: baked 89-lift is replaced by the server lift', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     constants.PEST.floor = 79; // server floorAnn 316 → server lift 31.20, client lift 71.20, delta −40
     const estData = clientEnginePayload();
     normalizeClientPestFloorMetadata(estData);
@@ -378,6 +390,9 @@ describe('normalizeClientPestFloorMetadata — totals correction (codex r5 P1)',
   });
 
   test('floor at the client literal: totals unchanged (delta 0)', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     // constants default floor 89 — client lift == server lift.
     const estData = clientEnginePayload();
     normalizeClientPestFloorMetadata(estData);
@@ -424,6 +439,9 @@ describe('normalizeClientPestFloorMetadata — legacy no-flag payloads stay unto
   });
 
   test('bare rows WITH the client-engine flag get stamped and the totals lifted', () => {
+    // Default is DISARMED since the 2026-07-17 owner ruling; arm the flag
+    // to pin the metadata machinery kept for legacy stored payloads.
+    constants.PEST.enforceFloorPostDiscount = true;
     // Flagged payload whose metadata was somehow absent: stamping is safe
     // because the totals correction applies the matching server lift.
     const estData = {

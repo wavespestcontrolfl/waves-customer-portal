@@ -680,7 +680,9 @@ function generateEstimate(input) {
         track: services.lawn.track || 'st_augustine',
         tier: services.lawn.tier || 'enhanced',
         lawnFreq: services.lawn.lawnFreq || input.lawnFreq,
-        useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? true,
+        // Default false since the 2026-07-17 owner ruling ("forget all
+        // floors") — callers can still opt in explicitly for previews.
+        useLawnCostFloor: services.lawn.useLawnCostFloor ?? input.useLawnCostFloor ?? false,
         targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
         routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,
         lawnMaterialCostPerK: services.lawn.lawnMaterialCostPerK ?? input.lawnMaterialCostPerK,
@@ -1495,6 +1497,10 @@ function generateEstimate(input) {
         item.marginGuardApplied = guarded.marginGuardApplied;
         item.programFloorApplied = guarded.programFloorApplied === true;
         item.discountCapped = guarded.discountCapped;
+        // Report-only flags (owner ruling 2026-07-17): "this looks low"
+        // signals for the owner/estimator — nothing moves the price.
+        item.belowMarginFloor = guarded.belowMarginFloor === true;
+        item.belowProgramFloor = guarded.belowProgramFloor === true;
         if (guarded.minAnnualForMargin !== undefined) {
           item.minAnnualForMargin = guarded.minAnnualForMargin;
         }

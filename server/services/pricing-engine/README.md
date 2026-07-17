@@ -17,7 +17,7 @@ Single source of truth for what this engine prices, how, and with what constants
 | `LABOR_RATE` | $35.00/hr | Loaded wages + benefits + WC + vehicle + insurance |
 | `DRIVE_TIME` | 20 min | Per-visit drive allowance baked into labor cost |
 | `ADMIN_ANNUAL` | $51 | Per-service/yr admin overhead (billing, scheduling, CRM) |
-| `MARGIN_FLOOR` | 35% | Minimum contribution margin for recurring lines |
+| `MARGIN_FLOOR` | 35% | Margin REPORTING threshold for recurring lines (enforcement removed 2026-07-17 — owner ruling "forget all floors") |
 | `DIRECT_COST_RATIO_TARGET_TS` | 43% | Tree & Shrub direct-cost ratio target |
 | `CONDITIONAL_CEILING` | $60 | Max conditional material/yr before reprice |
 | `PROCESSING_ADJUSTMENT` | 1.00 | Card-fee multiplier (currently no-op; 3.99% added at checkout) |
@@ -83,7 +83,7 @@ Tree density and large-driveway observations remain available as property contex
 **Frequency discounts (v1 — currently live):** quarterly 1.00, bimonthly 0.85, monthly 0.70
 **v2 (experimental):** quarterly 1.00, bimonthly 0.88, monthly 0.78
 
-**Margin guard (post-discount):** like Tree & Shrub, recurring pest now enforces the 35% margin floor against **auto** discounts. The WaveGuard tier discount is capped so displayed margin `(annual − costs.annualCost) / annual` never drops below the floor; capped lines return `marginGuardApplied`, `discountCapped`, `requestedDiscountPct`, `actualDiscountPct`, `finalMargin`, `minAnnualForMargin`. **Manual** owner discounts are NOT capped (loss-leader pricing is allowed) — instead they emit a warn-only entry in `summary.marginWarnings` (`type: manual_discount_below_margin_floor`) and set `manualMarginWarning`/`manualFinalMargin` on the line. At default constants the cap never binds (margins sit ~47–61% even at Platinum); it only engages if base is lowered or discounts deepened.
+**Margin report (post-discount):** since the 2026-07-17 owner ruling ("forget all floors") the guard is REPORT-ONLY for Tree & Shrub and recurring pest. Discounts apply exactly as configured; the line reports displayed margin `(annual − costs.annualCost) / annual` as `finalMargin` plus `belowMarginFloor` / `belowProgramFloor` flags for the owner/estimator to judge — nothing lifts or caps a price. **Manual** owner discounts still emit a warn-only entry in `summary.marginWarnings` (`type: manual_discount_below_margin_floor`) and set `manualMarginWarning`/`manualFinalMargin` on the line. The historical pest post-discount program floor is disarmed (`PEST.enforceFloorPostDiscount` false; re-arming it only re-enables reporting + floor metadata stamping).
 
 ---
 
@@ -131,7 +131,7 @@ Estimated bed area is capped at 8,000 sqft. Manual review is required for fallba
 
 **Recommendation logic:** The 6-visit Standard plan is the mandated default and is always the recommended tier. Light (4x) is a selectable alternative customers can choose, but it is never auto-recommended (Standard stays the pre-selected default). `recommendationReasons` (bed area 2,000 sqft+, heavy shrub density, moderate/complex landscaping, tree count 8+, difficult access, known pest/disease pressure) are advisory signals that the property warrants the full 6-visit program (i.e. reasons not to downsell to Light); they no longer change the recommended tier.
 
-**Post-discount guard:** after zone modifiers and WaveGuard discounts, Tree & Shrub final annual revenue is guarded so true margin after direct cost and admin cannot fall below the recurring 35% floor. If needed, the effective discount is capped and audit fields are returned (`finalAnnual`, `finalMonthly`, `requestedDiscountPct`, `actualDiscountPct`, `finalMargin`, `marginGuardApplied`, `discountCapped`).
+**Post-discount report:** after zone modifiers and WaveGuard discounts, Tree & Shrub reports true margin after direct cost and admin (`finalAnnual`, `finalMonthly`, `requestedDiscountPct`, `actualDiscountPct`, `finalMargin`, `belowMarginFloor`) — since the 2026-07-17 owner ruling nothing caps the discount; margins below 35% are surfaced for the owner to raise in the estimator.
 
 ---
 

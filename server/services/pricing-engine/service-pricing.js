@@ -1862,7 +1862,11 @@ function priceLawnCare(property, options = {}) {
     track = 'st_augustine',
     tier = 'enhanced',
     lawnFreq,
-    useLawnCostFloor = true,
+    // Cost-floor pricing DISARMED by default (owner ruling 2026-07-17:
+    // "forget all floors" — the market table prices every quote; the floor
+    // math still runs for margin REPORTING: minimumCollectedAnnualPrice and
+    // margin stay on every quote for the owner/estimator to judge).
+    useLawnCostFloor = false,
     includeHiddenTiers = false,
     // Internal-only escape hatch for callers that need the raw market
     // baseline (one-time lawn derives its base from recurring perApp and
