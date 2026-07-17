@@ -416,6 +416,8 @@ describe('BudgetManager live Google Ads push', () => {
       await expect(BudgetManager.setBudget('c-1', '50junk', 'test')).rejects.toThrow(/Invalid budget/);
       await expect(BudgetManager.setBudget('c-1', -5, 'test')).rejects.toThrow(/Invalid budget/);
       await expect(BudgetManager.setBudget('c-1', 0, 'test')).rejects.toThrow(/Invalid budget/);
+      // 0.004 passes the > 0 check but rounds to $0 — must be rejected too.
+      await expect(BudgetManager.setBudget('c-1', 0.004, 'test')).rejects.toThrow(/rounds to \$0|minimum/);
 
       expect(mockCampaignUpdate).not.toHaveBeenCalled();
       expect(mockLogInsert).not.toHaveBeenCalled();
@@ -503,6 +505,21 @@ describe('BudgetManager live Google Ads push', () => {
       // spend and local state don't drift; no false success is returned.
       expect(mockUpdateBudget).toHaveBeenNthCalledWith(1, '1234567890', 50);
       expect(mockUpdateBudget).toHaveBeenNthCalledWith(2, '1234567890', 40);
+    });
+
+    test('logs when the compensating rollback push does not take (updateBudget returns null)', async () => {
+      const logger = require('../services/logger');
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      // push succeeds; the persist then fails; the rollback push returns null
+      // (Google API error — updateBudget returns null rather than throwing).
+      mockUpdateBudget.mockResolvedValueOnce({ success: true }).mockResolvedValueOnce(null);
+      mockCampaignUpdate.mockRejectedValueOnce(new Error('db down'));
+
+      await expect(BudgetManager.setBudget('c-1', 50, 'test')).rejects.toThrow(/db down/);
+
+      expect(mockUpdateBudget).toHaveBeenNthCalledWith(2, '1234567890', 40); // rollback attempted
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('did NOT take'));
     });
   });
 });

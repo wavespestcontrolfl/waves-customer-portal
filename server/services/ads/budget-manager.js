@@ -436,6 +436,12 @@ class BudgetManager {
     // while the DB rounds to 50.00, re-creating the live/local drift this path
     // is meant to prevent.
     base = Math.round(base * 100) / 100;
+    // Re-check after rounding: a sub-cent input like 0.004 passes the > 0 check
+    // above but rounds to 0, which would push an invalid $0 to Google / persist a
+    // 0 base. The minimum daily budget is one cent.
+    if (base <= 0) {
+      throw new Error(`Invalid budget "${newBaseBudget}" — rounds to $0; the minimum is $0.01`);
+    }
 
     const campaign = await db('ad_campaigns').where({ id: campaignId }).first();
     if (!campaign) throw new Error('Campaign not found');
@@ -500,10 +506,18 @@ class BudgetManager {
       if (googleAdsUpdated && campaign.platform_campaign_id) {
         const prevLive = parseFloat(campaign.daily_budget_current);
         if (Number.isFinite(prevLive)) {
+          // updateBudget RETURNS null on an API error (it doesn't throw), so a
+          // failed rollback must be detected on the return value, not just via a
+          // catch — otherwise it fails silently and Google keeps running the new
+          // budget while local state shows the old one.
+          let rolled = null;
           try {
-            await getGoogleAds().updateBudget(campaign.platform_campaign_id, prevLive);
+            rolled = await getGoogleAds().updateBudget(campaign.platform_campaign_id, prevLive);
           } catch (rollbackErr) {
-            logger.error(`setBudget: rollback push failed for ${campaign.campaign_name} after a persist error — Google may run ${effectiveBudget} while local shows the old base: ${rollbackErr.message}`);
+            logger.error(`setBudget: rollback push threw for ${campaign.campaign_name} after a persist error — Google may run ${effectiveBudget} while local shows the old base: ${rollbackErr.message}`);
+          }
+          if (!rolled) {
+            logger.error(`setBudget: rollback push did NOT take for ${campaign.campaign_name} after a persist error — Google may still run ${effectiveBudget} while local shows the old base; manual reconciliation may be needed`);
           }
         } else {
           logger.error(`setBudget: persist failed for ${campaign.campaign_name} after pushing ${effectiveBudget} live, and prior live budget is unknown — manual reconciliation may be needed`);
