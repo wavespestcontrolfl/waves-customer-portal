@@ -31,6 +31,8 @@ const {
   getProjectType,
   stripInternalFindingKeys,
   redactInspectionFeeCues,
+  redactInspectionFeeCuesForType,
+  projectTypeConfigHasInternalFindingKeys,
 } = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
@@ -873,9 +875,13 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
   // field, so an admin note or edit like "Inspection fee $250" would otherwise
   // reach the model and yield a new customer-facing narrative containing it
   // (codex #2817 P2). redactInspectionFeeCues removes only fee language, never
-  // a legitimate estimate.
-  const safeRawRecommendations = redactInspectionFeeCues(rawRecommendations);
-  const findingsLines = Object.entries(stripInternalFindingKeys(findings) || {})
+  // a legitimate estimate. Gated on the type config: only a type carrying the
+  // internal fee field (WDO) gets its free text scrubbed.
+  const typeCarriesFee = projectTypeConfigHasInternalFindingKeys(typeCfg);
+  const safeRawRecommendations = typeCarriesFee
+    ? redactInspectionFeeCues(rawRecommendations)
+    : rawRecommendations;
+  const findingsLines = Object.entries(stripInternalFindingKeys(findings, { redactValues: typeCarriesFee }) || {})
     .map(([k, v]) => [k, formatFindingForPrompt(v)])
     .filter(([, v]) => v.trim() !== '')
     .map(([k, v]) => `${labelMap[k] || k.replace(/_/g, ' ')}: ${v}`)
@@ -1543,7 +1549,9 @@ router.post('/', async (req, res, next) => {
         findings: findings || null,
         // inspection fee must never be customer-facing — sanitize on WRITE so
         // it's durable, not dependent on the one-time backfill (codex #2817).
-        recommendations: recommendations ? redactInspectionFeeCues(recommendations) : null,
+        // Type-gated: only WDO carries the internal fee field; on other types
+        // "inspection fee" prose is a legitimate customer disclosure.
+        recommendations: recommendations ? redactInspectionFeeCuesForType(recommendations, project_type) : null,
         service_record_id: service_record_id || null,
         // Persist the DERIVED link too (record-only callers): the linked-only
         // gate accepted this create because the record resolved to a scheduled
@@ -1929,7 +1937,8 @@ router.put('/:id', async (req, res, next) => {
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
     // Durable inspection-fee guard: an admin-saved narrative can't persist the
     // internal fee, regardless of the one-time backfill (codex #2817).
-    if (updates.recommendations != null) updates.recommendations = redactInspectionFeeCues(updates.recommendations);
+    // Type-gated — see the create path.
+    if (updates.recommendations != null) updates.recommendations = redactInspectionFeeCuesForType(updates.recommendations, project.project_type);
     dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 

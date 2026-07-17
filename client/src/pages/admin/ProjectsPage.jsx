@@ -8,7 +8,7 @@ import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
-import { INTERNAL_FINDING_KEYS } from "../../lib/wdoReportFields";
+import { INTERNAL_FINDING_KEYS, redactInspectionFeeCues } from "../../lib/wdoReportFields";
 import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
@@ -867,8 +867,20 @@ function CustomerProjectReportPreview({
   // WDO keeps findings unless a filled FDACS filing is archived —
   // fdacs_pdf_available is computed by the detail endpoint with the same
   // rule as the public page (the raw archive index isn't served).
-  const aiNarrativeSections = recommendations
-    ? parseSections(String(recommendations))
+  // Preview == public: the sent link serves the fee-scrubbed narrative and
+  // finding values (server /data egress applies @waves/report-redaction), so
+  // the preview staff approve applies the SAME shared module — a legacy
+  // narrative with a baked-in fee must look redacted here too, or staff
+  // approve text the customer never sees (codex #2817). Type-gated to WDO,
+  // the only type carrying the internal fee field.
+  const feeRedact = project.project_type === WDO_TYPE
+    ? (text) => (typeof text === "string" ? redactInspectionFeeCues(text) : text)
+    : (text) => text;
+  const customerRecommendations = recommendations
+    ? feeRedact(String(recommendations))
+    : recommendations;
+  const aiNarrativeSections = customerRecommendations
+    ? parseSections(String(customerRecommendations))
     : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (project.project_type !== WDO_TYPE || Boolean(project.fdacs_pdf_available));
@@ -1007,7 +1019,7 @@ function CustomerProjectReportPreview({
                       {projectFieldLabel(typeCfg, key)}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      {formatProjectPreviewValue(value)}
+                      {feeRedact(formatProjectPreviewValue(value))}
                     </div>
                   </div>
                 ))}
@@ -1044,7 +1056,7 @@ function CustomerProjectReportPreview({
                       {label}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      {formatProjectPreviewValue(value)}
+                      {feeRedact(formatProjectPreviewValue(value))}
                     </div>
                   </div>
                 ))}
@@ -1052,9 +1064,9 @@ function CustomerProjectReportPreview({
             </div>
           )}
 
-          {recommendations ? (
+          {customerRecommendations ? (
             <ProjectPreviewRecommendationsBlock
-              text={recommendations}
+              text={customerRecommendations}
               upcomingAppointment={upcomingAppointment}
             />
           ) : null}

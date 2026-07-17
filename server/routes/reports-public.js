@@ -9,7 +9,7 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { answerProjectReportQuestion } = require('../services/project-report-assistant');
-const { stripInternalFindingKeys, redactInspectionFeeCues } = require('../services/project-types');
+const { stripInternalFindingKeys, redactInspectionFeeCuesForType, projectTypeHasInternalFindingKeys } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
@@ -570,8 +570,10 @@ router.get('/project/:token/data', async (req, res, next) => {
     // raw payload, so the strip is enforced at the egress point too (audit
     // 2026-07-16). The narrative fee (an inspection fee an old draft may have
     // baked into prose) is handled by the redactInspectionFeeCues guard on
-    // `recommendations` below.
-    viewerFindings = stripInternalFindingKeys(viewerFindings);
+    // `recommendations` below. The value scrub is type-gated: only a type
+    // carrying the internal fee field (WDO) gets free text redacted.
+    const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
+    viewerFindings = stripInternalFindingKeys(viewerFindings, { redactValues: typeCarriesFee });
 
     res.json({
       projectType: project.project_type,
@@ -605,11 +607,11 @@ router.get('/project/:token/data', async (req, res, next) => {
       findings: viewerFindings,
       // Serve-time inspection-fee guard: covers legacy narratives and any
       // written by an old instance during the deploy window (codex #2817).
-      recommendations: redactInspectionFeeCues(project.recommendations),
+      recommendations: redactInspectionFeeCuesForType(project.recommendations, project.project_type),
       followupDate: project.followup_date,
       // Follow-up findings are findings-shaped jsonb rendered key→value on
       // the page — same internal-key strip + fee scrub as the main findings.
-      followupFindings: stripInternalFindingKeys(project.followup_findings),
+      followupFindings: stripInternalFindingKeys(project.followup_findings, { redactValues: typeCarriesFee }),
       followupCompletedAt: project.followup_completed_at,
       upcomingAppointment: upcomingAppointment ? {
         serviceType: upcomingAppointment.service_type,

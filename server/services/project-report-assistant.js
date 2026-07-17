@@ -6,7 +6,11 @@
  * from data already rendered on the page — no LLM, nothing new can leak.
  */
 
-const { getProjectType, INTERNAL_FINDING_KEYS, redactInspectionFeeCues } = require('./project-types');
+const {
+  getProjectType,
+  INTERNAL_FINDING_KEYS,
+  redactInspectionFeeCuesForType,
+} = require('./project-types');
 
 // Internal/office-only finding keys — never in an answer. Shared with the
 // payload + narrative egress points via project-types (codex #2807).
@@ -21,11 +25,11 @@ function cleanFindings(project) {
   }
   const findings = raw && typeof raw === 'object' ? raw : {};
   const entries = {};
+  // A fee typed into a free-text finding (WDO comments) must not surface in
+  // an answer either — same type-gated guard as the /data payload (codex #2817).
   for (const [key, value] of Object.entries(findings)) {
     if (INTERNAL_FINDING_KEY_SET.has(key)) continue;
-    // A fee typed into a free-text finding (WDO comments) must not surface
-    // in an answer either — same guard as the /data payload (codex #2817).
-    const text = redactInspectionFeeCues(String(value ?? '')).trim();
+    const text = redactInspectionFeeCuesForType(String(value ?? ''), project.project_type).trim();
     if (text) entries[key] = text;
   }
   return entries;
@@ -87,8 +91,8 @@ function answerNextVisit({ project, payload }) {
 }
 
 function answerRecommendations({ project }) {
-  // same inspection-fee guard as the /data egress (codex #2817)
-  const rec = redactInspectionFeeCues(String(project.recommendations || '')).trim();
+  // same type-gated inspection-fee guard as the /data egress (codex #2817)
+  const rec = redactInspectionFeeCuesForType(String(project.recommendations || ''), project.project_type).trim();
   if (rec) {
     // Narrative drafts use WHAT WE RECOMMEND sections — answer with that
     // section when present, else the first two sentences.

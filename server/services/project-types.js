@@ -1010,77 +1010,73 @@ const PROJECT_TYPE_KEYS = Object.keys(PROJECT_TYPES);
 // customer-facing (audit 2026-07-16). inspection_fee is an invoicing fee-tier
 // helper. Enforced at every egress: the public /data payload, the narrative
 // prompt (so the model can't echo it into recommendations), and the project
-// report assistant. Mirrors the client registry in
-// client/src/lib/wdoReportFields.js.
-const INTERNAL_FINDING_KEYS = ['inspection_fee'];
+// report assistant. The registry and the fee-cue scrubber live in
+// @waves/report-redaction — the client report surfaces
+// (client/src/lib/wdoReportFields.js) import the SAME module, so the admin
+// preview and the public page cannot drift from these guards.
+const { INTERNAL_FINDING_KEYS, redactInspectionFeeCues } = require('@waves/report-redaction');
+
+// Whether a project type's form carries any internal finding key (today:
+// inspection_fee, WDO only). The narrative/finding scrubs are gated on this —
+// on a type with no internal fee field, "a follow-up inspection fee of $100
+// applies" is a legitimate customer disclosure and must never be redacted
+// (codex #2817 P1). Unknown/missing types fail CLOSED (treated as carrying
+// the fee) so an unrecognized key can't skip the privacy guard.
+function fieldsCarryInternalKeys(fields) {
+  return (fields || []).some((field) => INTERNAL_FINDING_KEYS.includes(field.key)
+    || fieldsCarryInternalKeys(field.fields));
+}
+function projectTypeConfigHasInternalFindingKeys(cfg) {
+  if (!cfg) return true;
+  return fieldsCarryInternalKeys(cfg.findingsFields) || fieldsCarryInternalKeys(cfg.fields);
+}
+function projectTypeHasInternalFindingKeys(typeKey) {
+  return projectTypeConfigHasInternalFindingKeys(PROJECT_TYPES[typeKey]);
+}
+
+// Type-gated wrapper for the write/egress boundaries: scrub only when the
+// project type actually carries the internal fee field.
+function redactInspectionFeeCuesForType(text, projectTypeKey) {
+  return projectTypeHasInternalFindingKeys(projectTypeKey)
+    ? redactInspectionFeeCues(text)
+    : text;
+}
 
 // Finding VALUES need the fee scrub too, not just the dedicated internal key
 // — an inspection fee typed into a free-text field (most plausibly the WDO
 // "Comments / financial disclosure notes") would otherwise ride the public
-// payload and the narrative prompt verbatim (codex #2817). Walks arrays and
-// nested objects so a structured value can't smuggle the string through.
-function redactFindingValue(value) {
-  if (typeof value === 'string') return redactInspectionFeeCues(value);
-  if (Array.isArray(value)) return value.map(redactFindingValue);
+// payload and the narrative prompt verbatim (codex #2817). The walk covers
+// arrays and nested objects — dropping internal KEYS at every depth (a nested
+// { details: { inspection_fee } } must not survive the top-level filter) and
+// scrubbing string values when redactValues is on.
+function sanitizeFindingValue(value, redactValues) {
+  if (typeof value === 'string') {
+    return redactValues ? redactInspectionFeeCues(value) : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeFindingValue(item, redactValues));
+  }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [key, redactFindingValue(nested)]),
+      Object.entries(value)
+        .filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key))
+        .map(([key, nested]) => [key, sanitizeFindingValue(nested, redactValues)]),
     );
   }
   return value;
 }
 
-function stripInternalFindingKeys(findings) {
+// redactValues gates the VALUE scrub — callers on a known project type pass
+// projectTypeHasInternalFindingKeys(type) so a type with no internal fee
+// field keeps its legitimate "inspection fee" prose (codex #2817 P1).
+// Internal KEYS are dropped regardless (they only exist on types that define
+// them, so the filter is free elsewhere). Default fails closed: values are
+// scrubbed.
+function stripInternalFindingKeys(findings, { redactValues = true } = {}) {
   let parsed = findings;
   if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return {}; } }
   if (!parsed || typeof parsed !== 'object') return parsed;
-  return Object.fromEntries(
-    Object.entries(parsed)
-      .filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key))
-      .map(([key, value]) => [key, redactFindingValue(value)]),
-  );
-}
-
-// Remove ONLY the literal "inspection fee" phrase + a dollar amount from free
-// text — "inspection fee $250", "the inspection fee is $250", "the inspection
-// fee is due at time of service: $250". Deliberately does NOT match a bare
-// "fee" or a generic price/cost/charge, so a legitimate customer-facing
-// estimate — "Repair cost $1,250", "repair fee $1,250", "permit fee $125",
-// "treatment fee $90" — is never touched (codex #2817 P1).
-// The cue's reach is one clause, not a fixed character window: it ends at
-// sentence/clause punctuation, and it aborts on a waiver word ("inspection
-// fee waived; repair $1,250" — a waived fee HAS no amount, so whatever
-// follows is something else) or on a word that starts a NEW money subject
-// ("inspection fee noted, treatment estimate $900"). That pairing resolves
-// the two failure modes codex found: a long bridging clause no longer hides
-// the fee, and an unrelated amount after the cue is never redacted.
-// Targets the fee PHRASE, not a specific value, so a stale draft fee no
-// structured snapshot still names is caught too. Enforced at every
-// customer-facing boundary: on write (project create + PUT + the
-// project-completion notes copy), at the public /data egress
-// (recommendations + free-text finding values), in the report assistant,
-// and on the AI-write prompt input.
-const FEE_REACH_BREAKERS = [
-  // the fee was waived/comped — any amount that follows is not the fee
-  'waiv\\w*', 'comped', 'complimentary', 'free', 'included', 'covered', 'no charge',
-  // a new money subject — its amount is legitimate customer-facing text
-  'repairs?', 're-?treatments?', 'treatments?', 'permits?', 'damages?',
-  'estimates?', 'quotes?', 'deductibles?', 'discounts?', 'credits?', 'balance',
-].join('|');
-function redactInspectionFeeCues(text) {
-  const str = String(text || '');
-  if (!str) return str;
-  // Gap chars: anything inside the cue's clause ([.;!?\n] end its reach;
-  // colon and comma stay legal — "due at time of service: $250" is still the
-  // fee) that does not begin a breaker word. The 160 cap only bounds
-  // backtracking; the clause punctuation is the real limit.
-  const gap = `(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)[^.;!?\\n]){0,160}?`;
-  const re = new RegExp(`\\b(inspection\\s+fee)\\b(${gap})\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?`, 'gi');
-  return str
-    .replace(re, (m, cue, mid) => `${cue}${mid}[fee removed]`)
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/[ \t]+\n/g, '\n')
-    .trim();
+  return sanitizeFindingValue(parsed, redactValues);
 }
 
 function getProjectType(key) {
@@ -1103,4 +1099,7 @@ module.exports = {
   INTERNAL_FINDING_KEYS,
   stripInternalFindingKeys,
   redactInspectionFeeCues,
+  redactInspectionFeeCuesForType,
+  projectTypeHasInternalFindingKeys,
+  projectTypeConfigHasInternalFindingKeys,
 };

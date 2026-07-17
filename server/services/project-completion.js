@@ -7,7 +7,7 @@ const { resolveCompletionProfileForScheduledService } = require('./service-compl
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
-const { redactInspectionFeeCues } = require('./project-types');
+const { redactInspectionFeeCuesForType } = require('./project-types');
 const { createAlertOnce } = require('./dispatch-alerts');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
@@ -311,10 +311,11 @@ function buildServiceRecordInsert({
   // The recommendation copied here lands in service_records.technician_notes,
   // which the authenticated portal service-history API returns verbatim — so
   // a legacy narrative that predates the create/PUT write guard gets its
-  // inspection-fee scrub at this copy boundary too (codex #2817).
+  // inspection-fee scrub at this copy boundary too (codex #2817). Type-gated:
+  // only WDO carries the internal fee field.
   const notes = [
     project.title ? `Project completed: ${project.title}` : 'Project completed.',
-    project.recommendations ? redactInspectionFeeCues(String(project.recommendations)) : '',
+    project.recommendations ? redactInspectionFeeCuesForType(String(project.recommendations), project.project_type) : '',
   ].filter(Boolean).join('\n\n');
   const structuredNotes = projectCompletionNotes({
     project,

@@ -6,6 +6,8 @@ const {
   INTERNAL_FINDING_KEYS,
   stripInternalFindingKeys,
   redactInspectionFeeCues,
+  redactInspectionFeeCuesForType,
+  projectTypeHasInternalFindingKeys,
 } = require('../services/project-types');
 
 describe('stripInternalFindingKeys', () => {
@@ -49,6 +51,36 @@ describe('stripInternalFindingKeys', () => {
       details: { note: 'inspection fee due: [fee removed]' },
     });
   });
+
+  test('drops internal keys at every depth, not just top level', () => {
+    expect(stripInternalFindingKeys({
+      details: { inspection_fee: '$250', other: 'kept' },
+      items: [{ inspection_fee: '175' }, { note: 'clear' }],
+    })).toEqual({
+      details: { other: 'kept' },
+      items: [{}, { note: 'clear' }],
+    });
+  });
+
+  test('value scrub is gated off for types with no internal fee field', () => {
+    const findings = { comments: 'A follow-up inspection fee of $100 applies.' };
+    expect(stripInternalFindingKeys(findings, { redactValues: false }))
+      .toEqual({ comments: 'A follow-up inspection fee of $100 applies.' });
+  });
+});
+
+describe('type gating', () => {
+  test('only WDO carries the internal fee field; unknown types fail closed', () => {
+    expect(projectTypeHasInternalFindingKeys('wdo_inspection')).toBe(true);
+    expect(projectTypeHasInternalFindingKeys('rodent_trapping')).toBe(false);
+    expect(projectTypeHasInternalFindingKeys('no_such_type')).toBe(true);
+  });
+
+  test('redactInspectionFeeCuesForType leaves non-fee types untouched', () => {
+    const disclosure = 'A follow-up inspection fee of $100 applies.';
+    expect(redactInspectionFeeCuesForType(disclosure, 'rodent_trapping')).toBe(disclosure);
+    expect(redactInspectionFeeCuesForType(disclosure, 'wdo_inspection')).toContain('[fee removed]');
+  });
 });
 
 describe('redactInspectionFeeCues', () => {
@@ -84,6 +116,32 @@ describe('redactInspectionFeeCues', () => {
       .toBe('Inspection fee noted, treatment estimate $900.');
     expect(redactInspectionFeeCues('Inspection fee applies; permit $125 billed separately.'))
       .toBe('Inspection fee applies; permit $125 billed separately.');
+  });
+  test('a paid/collected fee never swallows a later total', () => {
+    expect(redactInspectionFeeCues('Inspection fee paid separately, total due $400.'))
+      .toBe('Inspection fee paid separately, total due $400.');
+    expect(redactInspectionFeeCues('Inspection fee collected on site; amount due $150.'))
+      .toBe('Inspection fee collected on site; amount due $150.');
+  });
+  test('redacts currency-word and bare-number amounts, not just $', () => {
+    expect(redactInspectionFeeCues('Inspection fee is 250 dollars.'))
+      .toBe('Inspection fee is [fee removed].');
+    expect(redactInspectionFeeCues('Inspection fee: USD 250'))
+      .toBe('Inspection fee: [fee removed]');
+    expect(redactInspectionFeeCues('The inspection fee of 175 was quoted on the phone.'))
+      .toBe('The inspection fee of [fee removed] was quoted on the phone.');
+  });
+  test('bare-number guards: durations, dates, times, and years survive', () => {
+    expect(redactInspectionFeeCues('Inspection fee due in 30 days.'))
+      .toBe('Inspection fee due in 30 days.');
+    expect(redactInspectionFeeCues('Inspection fee due 07/24 at the office.'))
+      .toBe('Inspection fee due 07/24 at the office.');
+    expect(redactInspectionFeeCues('Inspection fee due by 10:30 am tomorrow.'))
+      .toBe('Inspection fee due by 10:30 am tomorrow.');
+    expect(redactInspectionFeeCues('Inspection fee for 2026 renewals to be announced.'))
+      .toBe('Inspection fee for 2026 renewals to be announced.');
+    expect(redactInspectionFeeCues('Inspection fee tier 2 selected.'))
+      .toBe('Inspection fee tier 2 selected.');
   });
   test('leaves fee-free prose and preserves line breaks', () => {
     expect(redactInspectionFeeCues('Monitor bait stations quarterly.')).toBe('Monitor bait stations quarterly.');
