@@ -38,11 +38,17 @@ const LAWN_TIER_VISITS = { basic: 4, standard: 6, enhanced: 9, premium: 12 };
 
 // Annual material budgets at the 4,500 sqft reference, by track → visits.
 // Sun/shade is NOT a pricing input — every lawn prices on its track's budget.
+// 2026-07-16 (owner-approved): budgets now FUND the protocol spot-treatment
+// reserves (protocols.json conditional_cost — ¼ of gated fungicide/
+// insecticide apps, ⅛ of herbicide spot), summed per tier via each visit's
+// tiers flags and added to the prior scheduled-only budgets. Reserves per
+// track at 4/6/9/12 visits: st_aug 15/16/20/20, bermuda 5/5/10/10,
+// zoysia 23/23/26/26 (large-patch program dominates), bahia 9/15/16/16.
 const LAWN_MATERIAL_BUDGETS = {
-  st_augustine: { 4: 64, 6: 87, 9: 167, 12: 205 },
-  bermuda: { 4: 57, 6: 87, 9: 164, 12: 215 },
-  zoysia: { 4: 67, 6: 101, 9: 174, 12: 178 },
-  bahia: { 4: 45, 6: 68, 9: 95, 12: 115 },
+  st_augustine: { 4: 79, 6: 103, 9: 187, 12: 225 },
+  bermuda: { 4: 62, 6: 92, 9: 174, 12: 225 },
+  zoysia: { 4: 90, 6: 124, 9: 200, 12: 204 },
+  bahia: { 4: 54, 6: 83, 9: 111, 12: 131 },
 };
 
 const MATERIAL_REFERENCE_SQFT = 4500;

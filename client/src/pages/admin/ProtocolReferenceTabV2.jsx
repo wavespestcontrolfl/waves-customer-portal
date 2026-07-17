@@ -56,14 +56,25 @@ function parseProductLines(text) {
     .map((line) => {
       const warning = /^\u26a0/.test(line.trim());
       let clean = line.replace(/^[\u2605\u26a0]\s*/, "").trim();
-      // Trailing cost annotation: "... ($4.68)" or "... ($6.56 est)"
+      // Cost annotation anywhere in the line: "($4.68)", "($6.56 est)",
+      // combined "($1.91+$21.79)"; suffix text after it is preserved
+      // ("Headway ONLY if severe ($26.13) — resets FRAC 11 clock").
       let cost = null;
       let estimated = false;
-      const costMatch = clean.match(/\s*\(\$([\d.]+)(\s+est)?\)\s*$/);
+      const costMatch = clean.match(
+        /\(\$([\d.]+(?:\s*\+\s*\$?[\d.]+)*)(\s+est)?\)/,
+      );
       if (costMatch) {
-        cost = parseFloat(costMatch[1]);
+        cost = costMatch[1]
+          .split("+")
+          .reduce((sum, part) => sum + (parseFloat(part.replace(/[^\d.]/g, "")) || 0), 0);
         estimated = Boolean(costMatch[2]);
-        clean = clean.slice(0, costMatch.index).trim();
+        clean = (
+          clean.slice(0, costMatch.index) +
+          clean.slice(costMatch.index + costMatch[0].length)
+        )
+          .replace(/\s{2,}/g, " ")
+          .trim();
       }
       const conditional = CONDITIONAL_LINE_RE.test(clean);
       // "Product name: rate and detail" \u2192 split name from detail

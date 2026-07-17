@@ -36,7 +36,15 @@ const VISITS_BY_TIER = { standard: 6, enhanced: 9, premium: 12 };
 function protocolAnnualMaterialAtSize(track, tier, turfSqft) {
   const protocolTier = PROTOCOL_TIER_BY_PRICING_TIER[tier];
   const visits = protocols.lawn[track].visits.filter((visit) => visit.tiers?.[protocolTier]);
-  const totalAtTenK = visits.reduce((sum, visit) => sum + Number(visit.material_cost || 0), 0);
+  // material_cost = scheduled apps; conditional_cost = the spot-treatment
+  // reserve (¼ gated fungicide/insecticide, ⅛ herbicide spot). Both are
+  // funded by LAWN_MATERIAL_BUDGETS as of 2026-07-16, so the audit's cost
+  // basis must include both or it understates real treatment cost.
+  const totalAtTenK = visits.reduce(
+    (sum, visit) =>
+      sum + Number(visit.material_cost || 0) + Number(visit.conditional_cost || 0),
+    0,
+  );
   return totalAtTenK * (turfSqft / 10000);
 }
 
