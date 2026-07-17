@@ -16,6 +16,11 @@
  *    change here. Demand CS (already public) is left exactly as-is; the owner
  *    enriches it during the approval pass. Publishing the rest is the owner's
  *    one-step flip to approved_for_public + public.
+ *  - Corrects the Advance Termite Bait Station EPA number (499-488 -> 499-500;
+ *    the diflubenzuron 0.25% row is Advance Compressed Termite Bait II) together
+ *    with its matching label and an appended provenance note, so no field cites
+ *    499-488 beside 499-500. Guarded to the stale value and to non-public rows.
+ *
  * Rows match by exact name. down() is a non-destructive no-op (additive seed;
  * prior NULLs are not restorable).
  */
@@ -716,6 +721,23 @@ exports.up = async function up(knex) {
       updated_at: knex.fn.now(),
     });
   }
+
+  // Correct the Advance Termite Bait Station EPA registration. The catalog row
+  // carries the diflubenzuron 0.25% formulation, which is EPA Reg. 499-500
+  // (Advance Compressed Termite Bait II, verified against the EPA-stamped BASF
+  // label); the imported 499-488 is the original Advance bait. Correct the
+  // number, add the matching 499-500 label, and APPEND the correction to the
+  // provenance note (preserving the original) so nothing cites 499-488 beside
+  // 499-500. Guarded to the stale value (idempotent) and to non-public rows.
+  await knex('products_catalog')
+    .where({ name: 'Advance Termite Bait Station', epa_reg_number: '499-488' })
+    .whereRaw("(content_status IS DISTINCT FROM 'approved_for_public' OR customer_visibility IS DISTINCT FROM 'public')")
+    .update({
+      epa_reg_number: '499-500',
+      label_url: knex.raw('COALESCE(label_url, ?)', ['https://www3.epa.gov/pesticides/chem_search/ppls/000499-00500-20220221.pdf']),
+      label_source_note: knex.raw("COALESCE(label_source_note, '') || ?", [' | CORRECTION 2026-07-17: 499-488 is the original Advance bait; this row (diflubenzuron 0.25%) is Advance Compressed Termite Bait II = EPA Reg. 499-500, per the EPA-stamped BASF label.']),
+      updated_at: knex.fn.now(),
+    });
 };
 
 exports.down = async function down(knex) {
