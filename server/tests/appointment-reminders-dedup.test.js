@@ -25,6 +25,7 @@ const AppointmentReminders = require('../services/appointment-reminders');
 function chain(overrides = {}) {
   return {
     where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereExists: jest.fn().mockReturnThis(),
     whereNotExists: jest.fn().mockReturnThis(),

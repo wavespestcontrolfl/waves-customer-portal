@@ -66,7 +66,9 @@ $$ LANGUAGE sql IMMUTABLE;
 const PROMOTE_SQL = `
 CREATE OR REPLACE FUNCTION promote_suppressed_reminder_sibling(
   p_customer_id uuid, p_departing_service_id uuid, p_slot_time timestamptz,
-  p_slot_date date, p_slot_window time
+  p_slot_date date, p_slot_window time,
+  p_owner_72h_sent boolean DEFAULT false, p_owner_72h_sent_at timestamptz DEFAULT NULL,
+  p_owner_24h_sent boolean DEFAULT false, p_owner_24h_sent_at timestamptz DEFAULT NULL
 ) RETURNS void AS $$
 BEGIN
   -- Promote ONE suppressed sibling whose service still occupies the slot,
@@ -75,15 +77,23 @@ BEGIN
   -- delivered its reminders is never re-armed.
   UPDATE appointment_reminders arp
      SET suppressed_by_sibling = false,
-         -- Past-or-due times close the window (a flag left false on a past
-         -- appointment keeps the row in every cron scan forever); only a
-         -- genuinely future 24h window re-arms.
-         reminder_72h_sent = (arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes'),
+         -- Carry forward the departing owner's window state: its reminders
+         -- were rendered with the merged slot label, so a window it already
+         -- delivered (or covered) is delivered for the sibling too —
+         -- re-arming it would duplicate the text. Beyond that, past-or-due
+         -- times close the window (a flag left false on a past appointment
+         -- keeps the row in every cron scan forever).
+         reminder_72h_sent = p_owner_72h_sent
+                             OR (arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes'),
          reminder_72h_sent_at = CASE
+           WHEN p_owner_72h_sent THEN COALESCE(p_owner_72h_sent_at, NOW())
            WHEN arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
            ELSE NULL END,
-         reminder_24h_sent = (arp.appointment_time <= NOW()),
-         reminder_24h_sent_at = CASE WHEN arp.appointment_time <= NOW() THEN NOW() ELSE NULL END,
+         reminder_24h_sent = p_owner_24h_sent OR (arp.appointment_time <= NOW()),
+         reminder_24h_sent_at = CASE
+           WHEN p_owner_24h_sent THEN COALESCE(p_owner_24h_sent_at, NOW())
+           WHEN arp.appointment_time <= NOW() THEN NOW()
+           ELSE NULL END,
          updated_at = NOW()
    WHERE arp.id = (
            SELECT ar2.id
@@ -158,6 +168,10 @@ DECLARE
   time_changed boolean;
   l_new integer;
   l_old integer;
+  dep_72h boolean;
+  dep_72h_at timestamptz;
+  dep_24h boolean;
+  dep_24h_at timestamptz;
 BEGIN
   became_terminal := NEW.status IN ${TERMINAL_SERVICE}
                      AND OLD.status NOT IN ${TERMINAL_SERVICE};
@@ -181,6 +195,20 @@ BEGIN
   old_appt_time := ((OLD.scheduled_date + COALESCE(OLD.window_start, TIME '08:00'))::timestamp
                     AT TIME ZONE 'America/New_York');
 
+  -- Capture the departing row's window state BEFORE any update rewrites it:
+  -- when this row was the slot owner, its reminders were rendered with the
+  -- merged slot label, so a promoted sibling must inherit what was already
+  -- delivered rather than re-arming it.
+  SELECT ar0.reminder_72h_sent, ar0.reminder_72h_sent_at,
+         ar0.reminder_24h_sent, ar0.reminder_24h_sent_at
+    INTO dep_72h, dep_72h_at, dep_24h, dep_24h_at
+    FROM appointment_reminders ar0
+   WHERE ar0.scheduled_service_id = NEW.id
+     AND ar0.cancelled = false
+     AND ar0.suppressed_by_sibling = false;
+  dep_72h := COALESCE(dep_72h, false);
+  dep_24h := COALESCE(dep_24h, false);
+
   IF became_terminal THEN
     -- Serialize with registration on the vacated slot BEFORE touching any
     -- reminder row: registration takes the advisory lock first and then
@@ -193,7 +221,8 @@ BEGIN
        SET cancelled = true, updated_at = NOW()
      WHERE scheduled_service_id = NEW.id AND cancelled = false;
     PERFORM promote_suppressed_reminder_sibling(NEW.customer_id, NEW.id, old_appt_time,
-                                                OLD.scheduled_date, OLD.window_start);
+                                                OLD.scheduled_date, OLD.window_start,
+                                                dep_72h, dep_72h_at, dep_24h, dep_24h_at);
     RETURN NEW;
   END IF;
 
@@ -254,6 +283,14 @@ BEGIN
        SET appointment_time = new_appt_time,
            cancelled = false,
            suppressed_by_sibling = owner_exists,
+           -- A row landing suppressed under an owner must also claim any
+           -- still-pending confirmation: the deferred/recovery confirmation
+           -- senders check only cancelled/confirmation_sent, and the slot's
+           -- owner already speaks for this visit.
+           confirmation_sent = CASE WHEN owner_exists THEN true ELSE confirmation_sent END,
+           confirmation_sent_at = CASE
+             WHEN owner_exists THEN COALESCE(confirmation_sent_at, NOW())
+             ELSE confirmation_sent_at END,
            reminder_72h_sent = CASE
              WHEN owner_exists THEN true
              WHEN time_changed OR suppressed_by_sibling
@@ -278,7 +315,8 @@ BEGIN
 
     IF time_changed THEN
       PERFORM promote_suppressed_reminder_sibling(NEW.customer_id, NEW.id, old_appt_time,
-                                                  OLD.scheduled_date, OLD.window_start);
+                                                  OLD.scheduled_date, OLD.window_start,
+                                                  dep_72h, dep_72h_at, dep_24h, dep_24h_at);
     END IF;
   END IF;
 
@@ -289,7 +327,8 @@ BEGIN
   IF entered_rescheduled AND NOT time_changed THEN
     PERFORM pg_advisory_xact_lock(reminder_slot_lock_key(NEW.customer_id, old_appt_time));
     PERFORM promote_suppressed_reminder_sibling(NEW.customer_id, NEW.id, old_appt_time,
-                                                OLD.scheduled_date, OLD.window_start);
+                                                OLD.scheduled_date, OLD.window_start,
+                                                dep_72h, dep_72h_at, dep_24h, dep_24h_at);
   END IF;
 
   RETURN NEW;
@@ -340,6 +379,9 @@ exports.up = async function up(knex) {
   `);
 
   await knex.raw(LOCK_KEY_SQL);
+  // CREATE OR REPLACE cannot change a function's signature — drop the prior
+  // 5-arg shape first so re-runs don't leave an ambiguous overload behind.
+  await knex.raw('DROP FUNCTION IF EXISTS promote_suppressed_reminder_sibling(uuid, uuid, timestamptz, date, time)');
   await knex.raw(PROMOTE_SQL);
   await knex.raw(FUNCTION_SQL);
   await knex.raw(LEGACY_MARKER_SQL);
@@ -476,6 +518,7 @@ exports.down = async function down(knex) {
   await knex.raw('DROP FUNCTION IF EXISTS mark_legacy_suppressed_reminder_insert()');
   await knex.raw('DROP FUNCTION IF EXISTS sync_appointment_reminder_on_service_change()');
   await knex.raw('DROP FUNCTION IF EXISTS promote_suppressed_reminder_sibling(uuid, uuid, timestamptz, date, time)');
+  await knex.raw('DROP FUNCTION IF EXISTS promote_suppressed_reminder_sibling(uuid, uuid, timestamptz, date, time, boolean, timestamptz, boolean, timestamptz)');
   await knex.raw('DROP FUNCTION IF EXISTS reminder_slot_lock_key(uuid, timestamptz)');
   const hasReminders = await knex.schema.hasTable('appointment_reminders');
   if (hasReminders) {

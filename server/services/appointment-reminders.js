@@ -471,9 +471,17 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
   // string split corrupts them. Suppressed sibling rows keep their
   // scheduled_service_id, which joins to the untouched source name;
   // ar.service_type is only the fallback for legacy rows with no link.
+  // Only services the customer will actually receive at this slot belong in
+  // the label: a 'rescheduled' pending-rebook placeholder or terminal row
+  // parked on the slot must not be advertised in confirmations/reminders.
+  // Suppressed-but-sendable siblings stay — the owner texts on their behalf.
+  // Legacy rows with no linked service keep their fallback label.
   const rows = await conn('appointment_reminders as ar')
     .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
     .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
+    .andWhere(function liveServiceSendableOrLegacy() {
+      this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+    })
     .orderBy('ar.created_at', 'asc')
     .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
 
