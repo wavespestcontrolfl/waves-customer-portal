@@ -43,6 +43,11 @@ const FEE_REACH_BREAKERS = [
   // is handled by DIRECT_BRIDGE below — adjacent to the cue it is the fee's
   // own amount, not a new subject.
   'prices?', 'costs?', 'charges?', 'values?', 'purchase',
+  // a bare transaction party starts a NEW payment clause ("…, buyer paid
+  // $400 at closing") — its amount is never the fee. As the AGENT of the
+  // fee's own payment ("paid by seller: $250") the party is consumed by
+  // PARTY_AGENT_PHRASE below, so the breaker never sees it.
+  'buyers?', 'sellers?', 'owners?', 'tenants?', 'landlords?', 'realtors?', 'lenders?',
 ].join('|');
 
 // Immediately after the cue, cost/charge/price/run read as the VERB stating
@@ -87,6 +92,13 @@ const FEE_SCOPE_PHRASE =
 // notes…") keeps the newline boundary. A blank line (two breaks) always
 // terminates.
 const AMOUNT_LINE_BREAK = '\\r?\\n(?=[ \\t]*(?:\\$|USD\\b|US\\$|\\d))';
+
+// "by/from + party" names the AGENT of the fee's own payment — "paid by
+// seller: $250" is still the fee — so the phrase is consumed atomically and
+// the party-noun breaker never fires on it. A bare party noun (new clause,
+// new payer) still breaks.
+const PARTY_AGENT_PHRASE =
+  '\\b(?:by|from)\\s+(?:the\\s+)?(?:buyers?|sellers?|owners?|tenants?|landlords?|realtors?|lenders?|title\\s+compan(?:y|ies))\\b';
 
 // Amount-FIRST constructions name their subject right after the number —
 // "$400,000 purchase price", "$400 balance remains". An amount directly
@@ -160,12 +172,15 @@ const RANGE_CONTINUATION =
 
 const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
-  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${CONTAINER_PHRASE}|${FEE_SCOPE_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
+  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${CONTAINER_PHRASE}|${FEE_SCOPE_PHRASE}|${PARTY_AGENT_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
   + `(?:${AMOUNT_PATTERN})`
   + RANGE_CONTINUATION
   // (?![,.]?\d) forbids backtracking into a partial number ("$400" out of
-  // "$400,000") to dodge the subject guard that follows.
-  + `(?![,.]?\\d)(?!\\s{1,3}(?:${AMOUNT_FIRST_SUBJECTS})\\b)`,
+  // "$400,000") to dodge the subject guard that follows. Horizontal
+  // whitespace ONLY: a subject word opening the NEXT LINE is a new
+  // paragraph, not this amount's subject ("Inspection fee $250\nRepair
+  // notes follow" must still redact).
+  + `(?![,.]?\\d)(?![ \\t]{1,3}(?:${AMOUNT_FIRST_SUBJECTS})\\b)`,
   'gi',
 );
 

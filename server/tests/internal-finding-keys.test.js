@@ -183,6 +183,16 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee has a cost of $250.'))
       .toBe('Inspection fee has a cost of [fee removed].');
   });
+  test('a fee ending a line still redacts when the next line opens with a subject word', () => {
+    expect(redactInspectionFeeCues('Inspection fee $250\nRepair notes follow'))
+      .toBe('Inspection fee [fee removed]\nRepair notes follow');
+  });
+  test('a payment-agent phrase bridges; a new payer breaks', () => {
+    expect(redactInspectionFeeCues('Inspection fee paid by seller: $250'))
+      .toBe('Inspection fee paid by seller: [fee removed]');
+    expect(redactInspectionFeeCues('Inspection fee paid by seller, buyer paid $400 at closing.'))
+      .toBe('Inspection fee paid by seller, buyer paid $400 at closing.');
+  });
   test('a wrapped amount on the next line redacts; paragraphs stay bounded', () => {
     expect(redactInspectionFeeCues('Inspection fee:\n$250'))
       .toBe('Inspection fee:\n[fee removed]');
