@@ -9,6 +9,7 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { answerProjectReportQuestion } = require('../services/project-report-assistant');
+const { stripInternalFindingKeys } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
@@ -557,6 +558,21 @@ router.get('/project/:token/data', async (req, res, next) => {
       fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket);
     }
 
+    // Internal/office-only finding keys must never ride the public JSON — the
+    // client registry hides them visually, but any token holder can read the
+    // raw payload, so the strip is enforced at the egress point too (audit
+    // 2026-07-16). The narrative (project.recommendations) needs no
+    // request-time scrub: NEW narratives never contain the fee (it is stripped
+    // from the model prompt), and LEGACY fee-bearing narratives were scrubbed
+    // once by migration 20260716150000 — so no fragile hot-path text surgery.
+    viewerFindings = stripInternalFindingKeys(viewerFindings);
+
+    // Same privacy headers as the sibling /fdacs-pdf route: the JSON carries
+    // the customer's name/contact/address on a shareable token — shared-device
+    // browsers and intermediaries must not cache it, and it must never index.
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     res.json({
       projectType: project.project_type,
       fdacsPdfAvailable,
@@ -595,7 +611,9 @@ router.get('/project/:token/data', async (req, res, next) => {
         serviceType: upcomingAppointment.service_type,
         scheduledDate: upcomingAppointment.scheduled_date,
         windowStart: upcomingAppointment.window_start,
-        windowEnd: upcomingAppointment.window_end,
+        // NO window_end: it is the internal job-duration block — the customer
+        // arrival window is always window_start + 2h, computed client-side
+        // (owner rule; the client already ignored this field).
         technicianName: upcomingAppointment.technician_name,
         status: upcomingAppointment.status,
       } : null,

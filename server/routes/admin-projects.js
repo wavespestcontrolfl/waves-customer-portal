@@ -29,6 +29,7 @@ const {
   TERMITE_PERIMETER_METHODS,
   isValidProjectType,
   getProjectType,
+  stripInternalFindingKeys,
 } = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
@@ -863,7 +864,12 @@ function formatFindingForPrompt(value) {
 
 function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext }) {
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
-  const findingsLines = Object.entries(findings || {})
+  // Internal keys (inspection_fee) must never reach the model — the drafted
+  // narrative is returned verbatim as customer-facing `recommendations`.
+  // Stripping the structured findings keeps the fee out of the prompt, so no
+  // new narrative can contain it; legacy fee-bearing narratives fed back on a
+  // re-draft were scrubbed once by migration 20260716150000 (codex P2 #2807).
+  const findingsLines = Object.entries(stripInternalFindingKeys(findings) || {})
     .map(([k, v]) => [k, formatFindingForPrompt(v)])
     .filter(([, v]) => v.trim() !== '')
     .map(([k, v]) => `${labelMap[k] || k.replace(/_/g, ' ')}: ${v}`)
@@ -2970,7 +2976,10 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         ? `${sendAction === 'project_report_resent' ? 'Project report resent' : 'Project report sent'}: ${typeLabel}`
         : `Project report delivery failed: ${typeLabel}`,
       {
-        report_token: token,
+        // prefix only — activity metadata is an audit trail, and the full
+        // value is a never-expiring bearer credential (audit 2026-07-16);
+        // the projects row holds the real token
+        report_token_prefix: String(token).slice(0, 6),
         channels,
         delivery_status: deliveryStatus,
         ...(hasReadinessOverride ? {
@@ -2982,7 +2991,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       },
     );
 
-    logger.info(`[projects] delivery ${project.id} token=${token} status=${deliveryStatus} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
+    logger.info(`[projects] delivery ${project.id} token=${String(token).slice(0, 6)}… status=${deliveryStatus} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
     res.json({
       project_id: project.id,
       report_token: token,
@@ -3340,10 +3349,10 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
       refreshed,
       'project_report_released_after_payment',
       `Paid report released: ${typeLabel} (invoice ${invoice.invoice_number || invoice.id} settled)`,
-      { report_token: token, invoice_id: invoice.id, channels, source },
+      { report_token_prefix: String(token).slice(0, 6), invoice_id: invoice.id, channels, source },
     ).catch(() => {});
 
-    logger.info(`[projects] hold release delivered ${projectId} token=${token} source=${source} email=${channels.email?.ok} sms=${channels.sms?.ok}`);
+    logger.info(`[projects] hold release delivered ${projectId} token=${String(token).slice(0, 6)}… source=${source} email=${channels.email?.ok} sms=${channels.sms?.ok}`);
     return { released: true, channels, reportUrl };
   } catch (err) {
     logger.error(`[projects] hold release failed for ${projectId}: ${err.message}`);
@@ -4357,7 +4366,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         : (holdActive
           ? `Invoice delivery failed (report hold not armed): ${typeLabel}`
           : `Report + invoice delivery failed: ${typeLabel}`),
-      { report_token: token, invoice_id: invoice.id, invoice_created: created, channels,
+      { report_token_prefix: String(token).slice(0, 6), invoice_id: invoice.id, invoice_created: created, channels,
         ...(holdActive ? { report_hold: true } : {}),
         ...(hasReadinessOverride ? { readiness_override: { reason: overrideReason, missing: readiness.missing } } : {}) },
     );

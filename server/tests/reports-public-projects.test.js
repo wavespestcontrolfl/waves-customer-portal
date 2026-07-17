@@ -18,10 +18,14 @@ jest.mock('@aws-sdk/client-s3', () => ({
 jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: jest.fn(),
 }));
+jest.mock('../services/report-followup-appointment', () => ({
+  findReportFollowupAppointment: jest.fn(),
+}));
 
 const express = require('express');
 const db = require('../models/db');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const reportsRouter = require('../routes/reports-public');
 
 function chain(overrides = {}) {
@@ -219,5 +223,67 @@ describe('public project reports', () => {
         expect(body.customerPhone).toBe(expectedPhone);
       });
     }
+  });
+
+  // 2026-07-16 egress-hygiene audit fixes: the public project JSON never
+  // carries internal finding keys or the internal window_end, and it ships
+  // the same privacy headers as the sibling /fdacs-pdf route.
+  test('public payload strips internal finding keys, drops window_end, and sets privacy headers', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-hyg',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'ss-source',
+        report_token: '0123456789abcdef0123456789abcdef',
+        report_viewed_at: '2026-05-02T14:00:00.000Z',
+        status: 'sent',
+        project_type: 'wdo_inspection',
+        first_name: 'Test',
+        last_name: 'Customer',
+        findings: JSON.stringify({
+          wdo_finding: 'No visible signs of WDO observed',
+          inspection_fee: '$250',
+        }),
+        recommendations: 'Keep mulch pulled back from the foundation and stay on the annual schedule.',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return projectRead;
+      if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+      if (table === 'service_records') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    // A real linked follow-up whose SOURCE row carries window_end — the
+    // serializer must surface window_start and drop window_end (internal
+    // job-duration block). Mocked so the assertion actually exercises the
+    // serializer, not a null upcomingAppointment (codex P2).
+    findReportFollowupAppointment.mockResolvedValue({
+      service_type: 'WDO Re-Inspection',
+      scheduled_date: '2999-01-05',
+      window_start: '08:00:00',
+      window_end: '12:00:00',
+      technician_name: 'Alex',
+      status: 'confirmed',
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toContain('noindex');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(body.findings.wdo_finding).toBe('No visible signs of WDO observed');
+      expect(body.findings.inspection_fee).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain('$250');
+      // recommendations served verbatim — legacy fee-bearing narratives are
+      // scrubbed once by migration 20260716150000, not on the hot path
+      expect(body.recommendations).toContain('Keep mulch pulled back');
+      // appointment surfaced, window_start present, window_end stripped
+      expect(body.upcomingAppointment).toBeTruthy();
+      expect(body.upcomingAppointment.windowStart).toBe('08:00:00');
+      expect(body.upcomingAppointment.windowEnd).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain('12:00:00');
+    });
   });
 });

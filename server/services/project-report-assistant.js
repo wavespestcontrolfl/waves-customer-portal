@@ -6,11 +6,11 @@
  * from data already rendered on the page — no LLM, nothing new can leak.
  */
 
-const { getProjectType } = require('./project-types');
+const { getProjectType, INTERNAL_FINDING_KEYS } = require('./project-types');
 
-// Internal/office-only finding keys — never in an answer (mirrors the client
-// registry in client/src/lib/wdoReportFields.js).
-const INTERNAL_FINDING_KEYS = new Set(['inspection_fee']);
+// Internal/office-only finding keys — never in an answer. Shared with the
+// payload + narrative egress points via project-types (codex #2807).
+const INTERNAL_FINDING_KEY_SET = new Set(INTERNAL_FINDING_KEYS);
 
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 
@@ -22,7 +22,7 @@ function cleanFindings(project) {
   const findings = raw && typeof raw === 'object' ? raw : {};
   const entries = {};
   for (const [key, value] of Object.entries(findings)) {
-    if (INTERNAL_FINDING_KEYS.has(key)) continue;
+    if (INTERNAL_FINDING_KEY_SET.has(key)) continue;
     const text = String(value ?? '').trim();
     if (text) entries[key] = text;
   }

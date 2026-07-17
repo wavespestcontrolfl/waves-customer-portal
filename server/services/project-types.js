@@ -1006,6 +1006,23 @@ const PROJECT_TYPES = {
 
 const PROJECT_TYPE_KEYS = Object.keys(PROJECT_TYPES);
 
+// Internal/office-only finding keys — captured on the create form but NEVER
+// customer-facing (audit 2026-07-16). inspection_fee is an invoicing fee-tier
+// helper. Enforced at every egress: the public /data payload, the narrative
+// prompt (so the model can't echo it into recommendations), and the project
+// report assistant. Mirrors the client registry in
+// client/src/lib/wdoReportFields.js.
+const INTERNAL_FINDING_KEYS = ['inspection_fee'];
+
+function stripInternalFindingKeys(findings) {
+  let parsed = findings;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return {}; } }
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  return Object.fromEntries(
+    Object.entries(parsed).filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key)),
+  );
+}
+
 function getProjectType(key) {
   return PROJECT_TYPES[key] || null;
 }
@@ -1023,4 +1040,6 @@ module.exports = {
   TERMITE_PERIMETER_METHODS,
   getProjectType,
   isValidProjectType,
+  INTERNAL_FINDING_KEYS,
+  stripInternalFindingKeys,
 };
