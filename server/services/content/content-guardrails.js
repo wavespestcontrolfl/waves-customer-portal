@@ -643,8 +643,8 @@ function productClaimFinding(text) {
     // efficacy claims
     'works?\\b', 'kills?\\b', 'knocks?\\s+(?:out|down)', 'wipes?\\s+out', 'eliminates?', 'eradicates?', 'outperforms?',
     'is\\s+(?:the\\s+)?(?:best|most\\s+effective|effective|strongest|stronger)',
-    // passive usage
-    '(?:is|are|gets?)\\s+(?:applied|used|placed|sprayed|injected|installed|put\\s+(?:down|out))',
+    // passive usage — present AND past tense
+    '(?:is|are|was|were|gets?|got)\\s+(?:applied|used|placed|sprayed|injected|installed|put\\s+(?:down|out))',
   ].join('|');
   const brandInRecommendation = new RegExp(`\\b(?:${PRODUCT_CONTEXT_VERBS_SRC}|rel(?:y|ies|ying)\\s+on)\\b[^.!?\\n]{0,120}\\b(?:${brandAlt})\\b|\\b(?:${brandAlt})\\b[^.!?\\n]{0,120}\\b(?:${POST_BRAND_CLAIM_SRC})`, 'i');
   const brandMatch = s.match(brandInRecommendation);
@@ -727,8 +727,14 @@ function preventionPromiseFinding(text) {
     const re = new RegExp(src, 'gi');
     let m;
     while ((m = re.exec(s)) !== null) {
+      // The negation must live in the SAME sentence as the promise — a
+      // disclaimer in one sentence must not shield an unrelated marketing
+      // claim in the next ("No honest company can promise permanent
+      // prevention. Our treatment eliminates ants." → second sentence flags).
       const before = s.slice(Math.max(0, m.index - 80), m.index);
-      if (NEGATED_PROMISE_CONTEXT_RE.test(before)) {
+      const sentenceBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n'));
+      const sameSentence = sentenceBreak >= 0 ? before.slice(sentenceBreak + 1) : before;
+      if (NEGATED_PROMISE_CONTEXT_RE.test(sameSentence)) {
         if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
         continue;
       }

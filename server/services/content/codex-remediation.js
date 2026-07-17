@@ -159,7 +159,10 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
     .map((c) => Date.parse(c.created_at || c.createdAt || 0) || 0)
     .reduce((a, b) => Math.max(a, b), 0);
   if (latestRequestAt > 0) {
-    findings = findings.filter((f) => (Date.parse(f.created_at || 0) || 0) >= latestRequestAt);
+    // STRICTLY after: GitHub timestamps have second precision, so a finding
+    // stamped in the same second as the re-request is ambiguous — it could
+    // be the previous review's output. Fail closed (pending) on ties.
+    findings = findings.filter((f) => (Date.parse(f.created_at || 0) || 0) > latestRequestAt);
     if (findings.length === 0) {
       return { eligible: false, reason: 'latest same-head review request has no response yet (pending)' };
     }

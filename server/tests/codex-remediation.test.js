@@ -1844,3 +1844,16 @@ describe('p2OnlyMergeEligible — same-head re-request handling (Codex round-2 P
     expect(r.eligible).toBe(false);
   });
 });
+
+describe('p2OnlyMergeEligible — timestamp-tie fail-closed (Codex round-3 P2)', () => {
+  test('a finding stamped in the SAME second as the re-request does not qualify', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const gh = makeGh({
+      reviewComments: [finding({ body: '**<sub><sub>![P2 Badge](x)</sub></sub>  tie**\n\nd', created_at: '2026-07-17T02:00:00Z' })],
+      issueComments: [{ body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' }],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/no response yet/);
+  });
+});

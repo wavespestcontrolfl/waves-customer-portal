@@ -242,6 +242,11 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
               'astro_pr_url',
               db.raw("draft_payload->'frontmatter'->>'title' AS title"),
               db.raw("draft_payload->'frontmatter'->>'primary_keyword' AS keyword"),
+              // The draft's future route — the writer is instructed to LINK a
+              // same-intent in-flight draft like a published page, which is
+              // impossible without its slug/canonical.
+              db.raw("draft_payload->'frontmatter'->>'slug' AS slug"),
+              db.raw("draft_payload->'frontmatter'->>'canonical' AS canonical"),
             )
             .limit(20);
         } catch (pendingErr) {

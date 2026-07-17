@@ -898,3 +898,20 @@ describe('prevention-promise guard — round-2 hardening (Codex findings)', () =
     expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
   });
 });
+
+describe('prevention-promise guard — round-3 hardening (Codex findings)', () => {
+  test('a disclaimer cannot shield a promise in the NEXT sentence', () => {
+    const r = guardrails.evaluate({ body: 'No honest company can promise permanent prevention. Our treatment eliminates ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('same-sentence disclaimer still exempts', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant, and we will not either.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('past-tense passive product usage blocks', () => {
+    const r = guardrails.evaluate({ body: 'Advion was applied in pea-sized dabs along ant trails.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+});
