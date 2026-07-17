@@ -4786,6 +4786,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     });
     if (autopayCoversVisit && hasVisitPrice) {
       logger.info(`[dispatch] visit ${svc.id}: monthly membership dues cover this recurring visit — stamped estimated_price $${Number(svc.estimated_price).toFixed(2)} NOT invoiced`);
+      // Park the ambiguous shape for office review instead of deciding
+      // silently: cadence children inherit the booking modal's
+      // create_invoice_on_complete via createInvoiceEffective
+      // (admin-schedule.js), so neither the stamped price nor the flag is
+      // per-visit operator intent — but a genuinely billable recurring
+      // add-on for a membership customer would otherwise complete
+      // uninvoiced with no trace. One bell per series, not per visit.
+      try {
+        const dedupeKey = `dues_covered_priced_series:${svc.recurring_parent_id || svc.id}`;
+        const already = await db('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+          .first();
+        if (!already) {
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Visit covered by membership dues — stamped price not billed',
+            `A completed recurring visit for a monthly-membership customer carried a $${Number(svc.estimated_price).toFixed(2)} per-visit price${svc.create_invoice_on_complete ? " and the series' create-invoice default" : ''}. Membership dues cover plan visits, so NO invoice was cut. If this series is a separately billable add-on rather than the plan itself, bill it manually and clear the stamped price on the series.`,
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey } },
+          );
+        }
+      } catch (e) { logger.warn(`[dispatch] dues-covered review alert failed: ${e.message}`); }
     }
     // Skip invoice creation if a paid invoice already exists for this service record
     // (covers the "customer paid prior to service report" case)
