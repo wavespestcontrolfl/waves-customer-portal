@@ -224,6 +224,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
       }
 
       advice.date = etDateString(now);
+      this.normalizeRecommendations(advice, campaigns);
       await this.storeReport(advice);
       await this.sendSummary(advice);
 
@@ -234,6 +235,49 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
       await this.storeReport(fallback);
       return fallback;
     }
+  }
+
+  // Model recommendations are stored verbatim and drive real Apply buttons,
+  // so their apply fields must pass the same executability guards
+  // /advisor/apply enforces (google_ads + active + concrete value + base
+  // mode + within the 3× bound + not a no-op). A rec failing any of them
+  // keeps its advice text but loses apply_action/apply_value — the client
+  // shows the "Manual action" hint instead of a button that
+  // deterministically 422s. The resolved row's id is stamped back on as the
+  // stable campaign_id the route prefers.
+  normalizeRecommendations(advice, campaigns) {
+    if (!advice || !Array.isArray(advice.recommendations)) return advice;
+    const AUTO = new Set(['increase_budget', 'decrease_budget', 'change_mode']);
+    const byId = new Map(campaigns.map((c) => [String(c.id), c]));
+    const byName = new Map();
+    for (const c of campaigns) {
+      const key = String(c.campaign_name || '').toLowerCase();
+      byName.set(key, byName.has(key) ? null : c); // null = ambiguous name
+    }
+    for (const rec of advice.recommendations) {
+      if (!rec || !AUTO.has(rec.apply_action)) continue;
+      const strip = () => { delete rec.apply_action; delete rec.apply_value; delete rec.campaign_id; };
+      const campaign = byId.get(String(rec.campaign_id || ''))
+        || byName.get(String(rec.campaign || '').toLowerCase())
+        || null;
+      if (!campaign || campaign.platform !== 'google_ads' || campaign.status !== 'active') { strip(); continue; }
+      // The card shows the NAME — an id resolving to a different campaign is
+      // exactly the mislabel the route rejects.
+      if (rec.campaign && String(campaign.campaign_name).toLowerCase() !== String(rec.campaign).toLowerCase()) { strip(); continue; }
+      if (rec.apply_action === 'change_mode') {
+        if (!['base', 'spent', 'stop'].includes(rec.apply_value) || rec.apply_value === campaign.budget_mode) { strip(); continue; }
+      } else {
+        const amount = Number(rec.apply_value);
+        const baseBudget = Number(campaign.daily_budget_base);
+        const boundRef = Number.isFinite(baseBudget) && baseBudget > 0 ? baseBudget : Number(campaign.daily_budget_current);
+        const throttled = Boolean(campaign.budget_mode) && campaign.budget_mode !== 'base';
+        const noop = amount === baseBudget && amount === Number(campaign.daily_budget_current);
+        if (!Number.isFinite(amount) || amount <= 0 || throttled || !(boundRef > 0)
+          || amount > boundRef * 3 || amount < boundRef / 3 || noop) { strip(); continue; }
+      }
+      rec.campaign_id = campaign.id;
+    }
+    return advice;
   }
 
   generateFallbackAdvice(summaries, targets) {

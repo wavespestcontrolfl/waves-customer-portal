@@ -548,6 +548,10 @@ async function applyLive(fn, res) {
       res.status(409).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
+    if (err.code === 'campaign_inactive') {
+      res.status(422).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
     throw err;
   }
 }
@@ -642,7 +646,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' }), res);
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {
@@ -655,7 +659,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (value === campaign.budget_mode) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already in ${value} mode — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`, { requireLivePush: true, trigger: 'advisor' }), res);
+      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`, { requireLivePush: true, requireActive: true, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     }
 

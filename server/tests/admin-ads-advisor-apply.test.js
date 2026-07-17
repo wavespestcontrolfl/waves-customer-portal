@@ -92,7 +92,7 @@ test('increase_budget resolves the campaign by name and applies', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, trigger: 'advisor' });
   expect(mockIncrement).toHaveBeenCalledTimes(1);
 });
 
@@ -108,7 +108,7 @@ test('campaignId is preferred over the name lookup', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith(UUID_A, 25, expect.any(String), { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith(UUID_A, 25, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, trigger: 'advisor' });
 });
 
 test('a malformed (non-UUID) campaign_id falls back to the name lookup instead of a 500', async () => {
@@ -120,7 +120,7 @@ test('a malformed (non-UUID) campaign_id falls back to the name lookup instead o
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, trigger: 'advisor' });
 });
 
 test('change_mode applies via setMode', async () => {
@@ -131,7 +131,7 @@ test('change_mode applies via setMode', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetMode).toHaveBeenCalledWith('c-9', 'stop', expect.any(String), { requireLivePush: true, trigger: 'advisor' });
+  expect(mockSetMode).toHaveBeenCalledWith('c-9', 'stop', expect.any(String), { requireLivePush: true, requireActive: true, trigger: 'advisor' });
 });
 
 test('unlinked campaign (no live push attempted) still counts as applied', async () => {
@@ -211,7 +211,7 @@ test('a sane budget within 3× of the base still applies', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, trigger: 'advisor' });
 });
 
 test('budget bound falls back to the current daily budget when no base exists', async () => {
@@ -447,5 +447,65 @@ describe('rule-based fallback recommendations are executable', () => {
     expect(meta).toBeDefined();
     expect(meta.apply_action).toBeUndefined();
     expect(meta.campaign_id).toBeUndefined();
+  });
+});
+
+describe('normalizeRecommendations — model output passes the apply guards', () => {
+  const advisor = require('../services/ads/campaign-advisor');
+
+  const google = (over = {}) => ({
+    id: 'g-uuid-1', campaign_name: 'Pest Bradenton', platform: 'google_ads',
+    status: 'active', budget_mode: 'base', daily_budget_base: 20, daily_budget_current: 20,
+    ...over,
+  });
+
+  const norm = (rec, campaigns) => advisor.normalizeRecommendations(
+    { recommendations: [rec] }, campaigns).recommendations[0];
+
+  test('a valid budget rec keeps its apply fields and gets the stable campaign_id', () => {
+    const rec = norm(
+      { campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 30 },
+      [google()],
+    );
+    expect(rec.apply_action).toBe('increase_budget');
+    expect(rec.campaign_id).toBe('g-uuid-1');
+  });
+
+  test('paused / throttled / no-op / out-of-bound / unknown-campaign recs are stripped to advisory', () => {
+    const cases = [
+      [{ campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 30 }, [google({ status: 'paused' })]],
+      [{ campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 30 }, [google({ budget_mode: 'spent' })]],
+      [{ campaign: 'Pest Bradenton', apply_action: 'change_mode', apply_value: 'base' }, [google()]], // already base
+      [{ campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 3000 }, [google()]], // > 3x
+      [{ campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 20 }, [google()]], // no-op: == base == current
+      [{ campaign: 'Ghost', apply_action: 'increase_budget', apply_value: 30 }, [google()]],
+      [{ campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 30 }, [google({ platform: 'facebook' })]],
+    ];
+    for (const [rec, campaigns] of cases) {
+      const out = norm({ ...rec }, campaigns);
+      expect(out.apply_action).toBeUndefined();
+      expect(out.apply_value).toBeUndefined();
+    }
+  });
+
+  test('an id pointing at a different campaign than the displayed name is stripped', () => {
+    const rec = norm(
+      { campaign: 'Pest Bradenton', campaign_id: 'g-uuid-2', apply_action: 'increase_budget', apply_value: 30 },
+      [google(), google({ id: 'g-uuid-2', campaign_name: 'Lawn Venice' })],
+    );
+    expect(rec.apply_action).toBeUndefined();
+  });
+
+  test('an ambiguous bare name (two rows) is stripped', () => {
+    const rec = norm(
+      { campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 30 },
+      [google(), google({ id: 'g-uuid-2', platform: 'facebook' })],
+    );
+    expect(rec.apply_action).toBeUndefined();
+  });
+
+  test('advisory recs pass through untouched', () => {
+    const rec = norm({ campaign: 'page/query', apply_action: 'update_meta' }, [google()]);
+    expect(rec.apply_action).toBe('update_meta');
   });
 });

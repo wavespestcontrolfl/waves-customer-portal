@@ -36,6 +36,7 @@ const mockDb = jest.fn((table) => {
   if (table === 'ad_campaigns') {
     const builder = {
       where: jest.fn(() => builder),
+      forUpdate: jest.fn(() => builder),
       first: jest.fn(() => Promise.resolve(campaignFirstRow)),
       update: mockCampaignUpdate,
       then: (resolve, reject) => Promise.resolve(campaignRows).then(resolve, reject),
@@ -51,6 +52,10 @@ const mockDb = jest.fn((table) => {
   }
   throw new Error(`Unexpected table in test: ${table}`);
 });
+// requireLivePush runs inside db.transaction with a FOR UPDATE row lock;
+// the mock trx is the same dispatcher (rollback semantics are the DB's job —
+// these tests assert WHICH writes were attempted).
+mockDb.transaction = (cb) => cb(mockDb);
 jest.mock('../models/db', () => mockDb);
 
 const BudgetManager = require('../services/ads/budget-manager');
