@@ -43,10 +43,11 @@ export default function InstallPrompt() {
   async function handleInstall() {
     if (!deferredPrompt) return;
     deferredPrompt.prompt();
-    const result = await deferredPrompt.userChoice;
-    if (result.outcome === 'accepted') {
-      setShow(false);
-    }
+    await deferredPrompt.userChoice;
+    // The captured beforeinstallprompt event is single-use: whether the
+    // customer accepted or dismissed, the Install button can never work
+    // again this session — leaving the banner up would offer a dead button.
+    setShow(false);
     setDeferredPrompt(null);
   }
 
