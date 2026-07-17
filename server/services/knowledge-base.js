@@ -576,37 +576,46 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     } catch (e) { logger.error(`[kb-sync] Products sync failed: ${e.message}`); }
 
     // ── 2. PROTOCOLS from protocols.json ──
+    // Every program category syncs (lawn nests per-turf tracks; the rest are
+    // single programs at the top level). Visit costs are NUMERIC only on the
+    // lawn tracks — the other programs carry token costs ('inventory',
+    // 'standard'), which previously rendered as literal "$inventory" garbage.
     try {
       const protocols = require('../config/protocols.json');
-      for (const [trackId, track] of Object.entries(protocols.lawn || {})) {
-        const lines = [`**${track.name}**\n`];
+      const costLine = (v) => {
+        const mc = Number(v.material_cost);
+        const lc = Number(v.labor_cost);
+        // Zero-zero placeholders (termite v1) are as uninformative as tokens.
+        if (Number.isFinite(mc) && Number.isFinite(lc) && (mc > 0 || lc > 0)) {
+          return `  Legacy materials: $${mc} | Labor: $${lc}`;
+        }
+        return '  Materials: inventory/rate-based (see admin protocols for product detail)';
+      };
+      const syncProgram = async (programKey, track, tags) => {
+        if (!track || typeof track !== 'object') return;
+        const lines = [`**${track.name || programKey}**\n`];
         if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
         if (track.visits?.length) {
           lines.push(`**${track.visits.length} Visits/Year:**\n`);
           for (const v of track.visits) {
-            const tierList = Object.entries(v.tiers || {}).filter(([,on]) => on).map(([t]) => t).join(', ');
+            const tierList = Object.entries(v.tiers || {}).filter(([, on]) => on).map(([t]) => t).join(', ');
             lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
-            lines.push(`  Legacy materials: $${v.material_cost} | Labor: $${v.labor_cost} | Tiers: ${tierList}`);
+            lines.push(`${costLine(v)}${tierList ? ` | Tiers: ${tierList}` : ''}`);
             if (v.notes) lines.push(`  Notes: ${v.notes}`);
           }
         }
-        const slug = `protocol-${slugify(trackId)}`;
-        await upsert(slug, track.name, lines.join('\n'), 'protocols', ['lawn', trackId]);
+        const slug = `protocol-${slugify(programKey)}`;
+        await upsert(slug, track.name || programKey, lines.join('\n'), 'protocols', tags);
+      };
+
+      for (const [trackId, track] of Object.entries(protocols.lawn || {})) {
+        await syncProgram(trackId, track, ['lawn', trackId]);
       }
-      for (const [trackId, track] of Object.entries(protocols.pest || {})) {
-        const lines = [`**${track.name}**\n`];
-        if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
-        if (track.visits?.length) {
-          lines.push(`**${track.visits.length} Visits/Year:**\n`);
-          for (const v of track.visits) {
-            lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
-            lines.push(`  Legacy materials: $${v.material_cost} | Labor: $${v.labor_cost}`);
-          }
-        }
-        const slug = `protocol-${slugify(trackId)}`;
-        await upsert(slug, track.name, lines.join('\n'), 'protocols', ['pest', trackId]);
+      for (const [programKey, program] of Object.entries(protocols)) {
+        if (programKey === 'lawn') continue;
+        await syncProgram(programKey, program, [programKey]);
       }
-      logger.info(`[kb-sync] Protocols synced`);
+      logger.info(`[kb-sync] Protocols synced (all categories)`);
     } catch (e) { logger.error(`[kb-sync] Protocols sync failed: ${e.message}`); }
 
     // ── 3. PRICING ENGINE snapshot ──

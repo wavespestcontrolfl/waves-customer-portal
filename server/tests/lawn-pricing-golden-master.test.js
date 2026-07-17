@@ -51,7 +51,7 @@ describe('lawn pricing golden master', () => {
     expect(r.annual).toBe(576);
     expect(r.monthly).toBe(48);
     expect(r.pricingSource).toBe('MARKET_TABLE');
-    expect(r.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
+    expect(r.pricingVersion).toBe('LAWN_PRICING_V2_SPOT_RESERVE');
     // Annual is source-of-truth; monthly is derived and must reconcile within ¢.
     expect(Math.abs(r.monthly * 12 - r.annual)).toBeLessThanOrEqual(0.5);
   });
@@ -62,7 +62,7 @@ describe('lawn pricing golden master', () => {
         .toContain(c.out.pricingBasis);
       expect(['MARKET_TABLE', 'EXTRAPOLATED_TABLE', 'COST_FLOOR', 'PROGRAM_MINIMUM'])
         .toContain(c.out.pricingSource);
-      expect(c.out.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
+      expect(c.out.pricingVersion).toBe('LAWN_PRICING_V2_SPOT_RESERVE');
     }
   });
 

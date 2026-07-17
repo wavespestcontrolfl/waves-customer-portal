@@ -557,33 +557,172 @@ router.post('/advisor/generate', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/ads/advisor/apply — apply a recommendation
+// Only budget/mode recommendations map to an automated change; everything else
+// (add_negative, bid/keyword/SEO/GBP actions) is advisory and returns
+// applied:false so the UI never claims an action it didn't take. Applies only
+// when the campaign resolves and a concrete value is present; increments the
+// day's applied_count only on a genuine apply.
+// Runs a budget-manager call made with requireLivePush and maps its typed
+// failures onto the honest applied:false contract ('live_push_unavailable' →
+// 422, 'live_push_failed' → 502). Push-first means NOTHING was persisted on
+// either failure — the reconcile cron has no recorded intent to retry later.
+const APPLY_FAILED = Symbol('apply-failed');
+async function applyLive(fn, res) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err.code === 'live_push_unavailable') {
+      res.status(422).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (err.code === 'live_push_failed' || err.code === 'live_push_rolled_back' || err.code === 'live_push_ambiguous') {
+      res.status(502).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (err.code === 'mode_conflict') {
+      res.status(409).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (['campaign_inactive', 'mode_noop', 'budget_noop', 'budget_out_of_bounds', 'budget_unbounded'].includes(err.code)) {
+      res.status(422).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    throw err;
+  }
+}
+
 router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
   try {
     const { action, campaignId, campaignName, value, reason } = req.body;
+    // ad_budget_log.reason is varchar(255) and the client sends the model's
+    // rec prose — an oversized reason would fail the audit insert AFTER the
+    // live push and force a pointless compensating rollback, permanently
+    // blocking that rec from applying.
+    const auditReason = String(reason || '').trim().slice(0, 255);
 
-    let result;
-    switch (action) {
-      case 'increase_budget':
-      case 'decrease_budget':
-        result = await getBudgetManager().setBudget(campaignId, value, reason || `Advisor: ${action}`);
-        break;
-      case 'change_mode':
-        result = await getBudgetManager().setMode(campaignId, value, reason || `Advisor: set ${value}`);
-        break;
-      case 'add_negative':
-        // Store the negative keyword request (actual Google Ads API integration later)
-        result = { action: 'add_negative', terms: value, status: 'queued', note: 'Add these as negative keywords in Google Ads' };
-        break;
-      default:
-        result = { action, status: 'noted', note: 'Manual action required' };
+    const isBudgetAction = action === 'increase_budget' || action === 'decrease_budget';
+    if (!isBudgetAction && action !== 'change_mode') {
+      // add_negative / adjust_bid / SEO / GBP / etc. — no automated action yet.
+      return res.json({ applied: false, manual: true, note: 'This recommendation needs a manual change (no automated action for it yet).' });
     }
 
-    // Increment applied count for today's report
-    await db('ad_advisor_reports')
-      .where({ date: etDateString() })
-      .increment('applied_count', 1);
+    // The Apply confirm shows campaignName — an id-only request would let a
+    // spend change go through without the admin ever seeing which campaign
+    // it targets (the advisor normalizer strips such recs; this is the
+    // server-side backstop).
+    if (!String(campaignName || '').trim()) {
+      return res.status(422).json({ applied: false, error: 'This recommendation carries no campaign name — apply it manually from the campaign editor.' });
+    }
+    // Prefer the stable id the advisor now carries; a bare name is a fallback
+    // for older stored reports. campaign_name is NOT unique (Google vs Meta
+    // rows, duplicated experiments), so a name matching more than one row is
+    // rejected rather than mutating whichever row Postgres returns first.
+    // The id is model output: a malformed one (not UUID-shaped) would 22P02
+    // the uuid column into a 500, so it's ignored in favor of the name.
+    const usableId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(campaignId || ''))
+      ? campaignId : null;
+    let campaign = null;
+    if (usableId) {
+      campaign = await db('ad_campaigns').where({ id: usableId }).first();
+    } else if (campaignName) {
+      const matches = await db('ad_campaigns')
+        .whereRaw('lower(campaign_name) = ?', [String(campaignName).toLowerCase()])
+        .select('*');
+      if (matches.length > 1) {
+        return res.status(422).json({ applied: false, error: `More than one campaign is named "${campaignName}" — apply this manually to the right one.` });
+      }
+      campaign = matches[0] || null;
+    }
+    if (!campaign) {
+      return res.status(422).json({ applied: false, error: `Couldn't find a campaign named "${campaignName || ''}" to apply this to — adjust it manually.` });
+    }
+    // The advisor sees every platform's rows, but only Google campaigns are
+    // remotely controllable (the budget manager throws on the rest — that
+    // must surface as an honest "can't", not a 500).
+    if (campaign.platform !== 'google_ads') {
+      return res.status(422).json({ applied: false, manual: true, error: `"${campaign.campaign_name}" is a ${campaign.platform} campaign managed outside this dashboard — apply this in its own Ads Manager.` });
+    }
+    // The advisor sees every non-removed status; a paused campaign must not
+    // take a budget/mode change that would silently revive it later with an
+    // advisor-selected value.
+    if (campaign.status !== 'active') {
+      return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is ${campaign.status || 'not active'} — re-enable it before applying advisor changes.` });
+    }
+    // The id is model output too: a rec can carry campaign A's id under
+    // campaign B's name. The card shows the NAME, so a mismatch means the
+    // click would mutate a different campaign than the admin approved.
+    if (usableId && campaignName
+      && String(campaign.campaign_name).toLowerCase() !== String(campaignName).toLowerCase()) {
+      return res.status(422).json({ applied: false, error: `This recommendation's campaign id resolves to "${campaign.campaign_name}", not "${campaignName}" — the advisor mislabeled it. Apply the change manually.` });
+    }
 
-    res.json({ success: true, result });
+    let result;
+    if (isBudgetAction) {
+      const amount = toFiniteNumber(value);
+      if (!(amount > 0)) {
+        return res.status(422).json({ applied: false, error: 'This recommendation has no concrete target budget — set the budget manually.' });
+      }
+      // A throttled campaign ('spent'/'stop') deliberately runs a mode-derived
+      // budget (frozen current / 1% of base), so setBudget would record the
+      // new BASE but push the throttled amount — not the target this rec
+      // claims. Applying it would report "$X/day set" while Google keeps the
+      // cap. Mode changes go through change_mode recs; budget edits on a
+      // throttled campaign are a manual, eyes-open action.
+      if (campaign.budget_mode && campaign.budget_mode !== 'base') {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is throttled in "${campaign.budget_mode}" mode, so a new daily budget wouldn't take effect. Apply a change_mode recommendation (or set the mode to base) first, or edit the budget manually.` });
+      }
+      // Safety bound on AI-supplied budgets: apply_value is unvalidated model
+      // output, and the card's prose can say "$30" while the value is 3000.
+      // One click moves a budget at most 3× in either direction from the
+      // campaign's known base (falling back to the current daily budget);
+      // with NO recorded budget there is nothing trustworthy to bound an AI
+      // number against, so the change is manual-only. Anything larger goes
+      // through the manual budget editor, where the number is typed by hand.
+      const baseBudget = toFiniteNumber(campaign.daily_budget_base);
+      const boundRef = baseBudget > 0 ? baseBudget : toFiniteNumber(campaign.daily_budget_current);
+      if (!(boundRef > 0)) {
+        return res.status(422).json({ applied: false, error: 'This campaign has no recorded daily budget to sanity-check an AI-suggested amount against — set the budget manually in the campaign editor.' });
+      }
+      if (amount > boundRef * 3 || amount < boundRef / 3) {
+        return res.status(422).json({ applied: false, error: `Refusing to one-click a budget change from $${boundRef}/day to $${amount}/day (more than a 3× move) — if that's really intended, set it in the campaign's budget editor.` });
+      }
+      // Known no-op (stale report / re-apply after success): base AND current
+      // already match the target — counting it as applied would be the same
+      // false green. A same-base apply with DRIFTED current stays allowed:
+      // that push reconciles the live budget back to the recorded base.
+      if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
+      }
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' }), res);
+      if (result === APPLY_FAILED) return undefined;
+    } else {
+      if (!['base', 'spent', 'stop'].includes(value)) {
+        return res.status(422).json({ applied: false, error: 'This recommendation has no concrete mode (base/spent/stop) — set the mode manually.' });
+      }
+      // A rec targeting the mode the campaign is already in is a no-op — the
+      // fallback advisor emits STOP for every low-ROAS campaign without
+      // checking, and reporting "applied" for zero state change is the same
+      // false green this endpoint exists to prevent.
+      if (value === campaign.budget_mode) {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already in ${value} mode — nothing to apply.` });
+      }
+      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, auditReason || `Advisor: set ${value}`, { requireLivePush: true, requireActive: true, trigger: 'advisor' }), res);
+      if (result === APPLY_FAILED) return undefined;
+    }
+
+    // Count only genuinely-applied actions against today's report. Reporting
+    // only: the live mutation is already done, so a transient failure here
+    // must not flip the response to "not applied" (the admin would retry and
+    // push the same change live twice).
+    try {
+      await db('ad_advisor_reports')
+        .where({ date: etDateString() })
+        .increment('applied_count', 1);
+    } catch (err) {
+      logger.warn(`[ads] advisor apply succeeded but applied_count increment failed: ${err.message}`);
+    }
+
+    res.json({ applied: true, result });
   } catch (err) { next(err); }
 });
 

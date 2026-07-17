@@ -771,7 +771,7 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.selected.costFloorApplied).toBe(false);
     // Cost-floor MATH still runs for reporting and sits below market here.
     expect(lawn.selected.costFloorAnnual).toBeLessThan(lawn.selected.marketAnnual);
-    expect(lawn.margin).toBeGreaterThan(0.45); // 0.464 on the $564 market price
+    expect(lawn.margin).toBeGreaterThan(0.44); // 0.447 on the $564 market price (reserve-folded budgets, #2812)
   });
 
   test('reviewed 2,870 sqft estimate stays at 9 applications and Silver-discounted market price', () => {
@@ -819,46 +819,50 @@ describe('lawn pricing production follow-up', () => {
     const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9, useLawnCostFloor: true });
     const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9, useLawnCostFloor: true });
 
-    // St. Augustine enhanced at 4,492 sqft: 35% collected-margin floor
-    // ($590.63 → ceil'd to a 9-app multiple = $594/yr = $66/app). The old
+    // St. Augustine enhanced at 4,492 sqft: 35% collected-margin floor with
+    // spot reserves folded in (#2812) lands at $621/yr = $69/app. The old
     // ride-up to the $600 program minimum is gone (minimum is now $0).
-    expect(stAug.selected.perApp).toBe(66);
+    expect(stAug.selected.perApp).toBe(69);
     expect(stAug.selected.costFloorApplied).toBe(true);
 
     // Bermuda enhanced remains market-table priced because market is above the floor.
     expect(bermuda.selected.perApp).toBe(68);
     expect(bermuda.selected.costFloorApplied).toBe(false);
 
-    // Zoysia enhanced has a higher material budget but still lands below market.
-    expect(zoysia.selected.perApp).toBe(68);
-    expect(zoysia.selected.costFloorApplied).toBe(false);
+    // Zoysia enhanced carries the largest reserve budget (#2812 fold), which
+    // pushes its floor above the market table — floor-priced when re-armed.
+    expect(zoysia.selected.perApp).toBe(73);
+    expect(zoysia.selected.costFloorApplied).toBe(true);
 
     // Per-grass-type budgets, not a flat $/K: three distinct floor dollars.
-    expect(stAug.selected.costFloorAnnual).toBeCloseTo(590.63, 2);
-    expect(bermuda.selected.costFloorAnnual).toBeCloseTo(586.02, 2);
-    expect(zoysia.selected.costFloorAnnual).toBeCloseTo(601.38, 2);
+    // (Recomputed on the folded budgets — see PLACEHOLDER pins below.)
+    expect(stAug.selected.costFloorAnnual).toBeCloseTo(613.67, 2);
+    expect(bermuda.selected.costFloorAnnual).toBeCloseTo(598.31, 2);
+    expect(zoysia.selected.costFloorAnnual).toBeCloseTo(648.99, 2);
   });
 
-  test('dense route St. Augustine enhanced quote prices off the market table just above the 35% reporting floor', () => {
+  test('dense route St. Augustine enhanced sells the market price below the folded reporting floor', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4250 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    // Owner 2026-07-17 ("forget all pricing floors"): the $600 program
-    // minimum is disarmed, so the $576/yr market cell IS the customer price
-    // ($64/app, $48/mo). The cost-floor MATH still runs for reporting —
-    // minimumCollectedAnnualPrice (~$571.93) happens to sit just below the
-    // market price here, so the reported margin (0.355) still clears 0.35,
-    // but nothing enforces that anymore.
+    // Owner 2026-07-17 ("forget all pricing floors"): the $576/yr market
+    // cell IS the customer price ($64/app, $48/mo). The cost-floor MATH
+    // still reports — with spot reserves folded in (#2812) the reporting
+    // floor (~$593.72 minimum-collected, costs ~$385.92) sits ABOVE the
+    // market price, so the reported margin (0.33) is below the 35% target.
+    // Nothing lifts the price: this is exactly the surfaced-not-enforced
+    // case the owner reviews in the estimator.
     expect(lawn.selected.perApp).toBe(64);
     expect(lawn.annual).toBe(576);
     expect(lawn.monthly).toBe(48);
-    expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
-    expect(lawn.costs.total).toBeLessThan(372);
-    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(571);
-    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(572);
-    expect(lawn.margin).toBe(0.355);
-    expect(lawn.pricingBasis).toBe('TABLE_INTERPOLATION');
     expect(lawn.selected.costFloorApplied).toBe(false);
+    expect(lawn.costs.total).toBeGreaterThanOrEqual(385);
+    expect(lawn.costs.total).toBeLessThan(386);
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(593);
+    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(594);
+    expect(lawn.margin).toBeCloseTo(0.33, 2);
+    expect(lawn.pricingBasis).toBe('TABLE_INTERPOLATION');
+    expect(lawn.pricingSource).toBe('MARKET_TABLE');
     expect(lawn.selected.marketAnnual).toBe(576);
   });
 

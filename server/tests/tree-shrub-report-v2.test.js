@@ -142,7 +142,9 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     expect(v2.snapshot.peaceOfMind).toMatch(/No urgent plant decline/);
   });
 
-  it('peace-of-mind reads clean when everything is healthy', () => {
+  it('peace-of-mind on a clean INSPECTION-ONLY visit never claims a treatment happened', () => {
+    // No applications → "scheduled treatment is complete / protected" would
+    // fabricate a treatment (audit 2026-07-16 P3).
     const v2 = buildTreeShrubReportV2({
       treeShrubAssessment: assessment({
         scores: { foliageFullness: 92, leafColorVigor: 90, pestActivity: 95, diseaseLeafSpot: 95, waterHeatStress: 90, overallScore: 92 },
@@ -151,7 +153,36 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     });
     expect(v2.snapshot.noActionNeeded).toBe(true);
     expect(v2.snapshot.statusHeadline).toBe('Landscape looking great');
-    expect(v2.snapshot.peaceOfMind).toMatch(/protected/);
+    expect(v2.snapshot.peaceOfMind).toMatch(/No urgent plant decline/);
+    expect(v2.snapshot.peaceOfMind).toMatch(/inspection/);
+    expect(v2.snapshot.peaceOfMind).not.toMatch(/treatment is complete|protected/);
+  });
+
+  it('peace-of-mind stays inspection-only when only protocol ACTIONS (no products) were recorded', () => {
+    // buildTreatment returns a truthy focus-carrying object for action-only
+    // visits — treatment truthiness must not trigger "treatment is complete"
+    // (codex P2 r4).
+    const v2 = buildTreeShrubReportV2({
+      treeShrubAssessment: assessment({
+        scores: { foliageFullness: 92, leafColorVigor: 90, pestActivity: 95, diseaseLeafSpot: 95, waterHeatStress: 90, overallScore: 92 },
+        observations: 'All plant groups look healthy and full.',
+      }),
+      actions: ['Pruned dead fronds'],
+    });
+    expect(v2.snapshot.peaceOfMind).toMatch(/inspection/);
+    expect(v2.snapshot.peaceOfMind).not.toMatch(/treatment is complete|protected/);
+  });
+
+  it('peace-of-mind keeps the treatment copy when products were actually applied', () => {
+    const v2 = buildTreeShrubReportV2({
+      treeShrubAssessment: assessment({
+        scores: { foliageFullness: 92, leafColorVigor: 90, pestActivity: 95, diseaseLeafSpot: 95, waterHeatStress: 90, overallScore: 92 },
+        observations: 'All plant groups look healthy and full.',
+      }),
+      applications: [{ product: { name: 'Merit 2F', active_ingredient: 'Imidacloprid', category: 'systemic insecticide' } }],
+    });
+    expect(v2.snapshot.noActionNeeded).toBe(true);
+    expect(v2.snapshot.peaceOfMind).toMatch(/treatment is complete/);
   });
 
   it('surfaces applied products as treatment focus + kinds', () => {

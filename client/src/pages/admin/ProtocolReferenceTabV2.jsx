@@ -45,28 +45,78 @@ function adminFetch(path, options = {}) {
   });
 }
 
+const CONDITIONAL_LINE_RE =
+  /^if\s|\bif\b|\bonly\b|\bwhere\b|\binstead\b|\brescue\b|\bcurative\b|\bthreshold\b|\bspot treat|\bpremium\b|\bfor (whitefly|scale|aphid|caterpillar|mite|borer|confirmed)/i;
+
 function parseProductLines(text) {
   if (!text) return [];
   return text
     .split("\n")
     .filter((l) => l.trim())
     .map((line) => {
-      const clean = line
-        .replace(/^\u2605\s*/, "")
-        .replace(/^IF\s+.*?:\s*/, "")
+      const warning = /^\u26a0/.test(line.trim());
+      let clean = line.replace(/^[\u2605\u26a0]\s*/, "").trim();
+      // Cost annotations anywhere in the line, ALL occurrences summed:
+      // "($4.68)", "($6.56 est)", combined "($1.91+$21.79)", and multiple
+      // separate annotations ("Hydretain ($10.59) + Chelated AM ($1.40)").
+      // Surrounding text is preserved ("Headway ONLY if severe ($26.13) —
+      // resets FRAC 11 clock").
+      let cost = null;
+      let estimated = false;
+      let costTotal = 0;
+      let costFound = false;
+      clean = clean
+        .replace(
+          /\(\$([\d.]+(?:\s*\+\s*\$?[\d.]+)*)(\s+est)?\)/g,
+          (_full, amounts, estFlag) => {
+            costFound = true;
+            costTotal += amounts
+              .split("+")
+              .reduce(
+                (sum, part) =>
+                  sum + (parseFloat(part.replace(/[^\d.]/g, "")) || 0),
+                0,
+              );
+            if (estFlag) estimated = true;
+            return "";
+          },
+        )
+        .replace(/\s{2,}/g, " ")
         .trim();
-      const nameMatch = clean.match(
-        /^([A-Za-z][A-Za-z0-9\s\-+/.]+?)(?:\s+(?:split|liquid|broadleaf|preventive|fert|foliar|biostimulant|drought|wetting|late|curative|PGR)|\s*\(|\s*\$|$)/i,
-      );
-      const productName = nameMatch ? nameMatch[1].trim().toLowerCase() : "";
-      let desc = null;
+      if (costFound) cost = costTotal;
+      const conditional = CONDITIONAL_LINE_RE.test(clean);
+      // "Product name: rate and detail" \u2192 split name from detail
+      let name = clean;
+      let detail = null;
+      const colonIdx = clean.indexOf(": ");
+      if (colonIdx > 0 && colonIdx <= 48) {
+        name = clean.slice(0, colonIdx).trim();
+        detail = clean.slice(colonIdx + 2).trim();
+      }
+      const lookupName = name.toLowerCase();
+      const lookupLine = clean.toLowerCase();
+      let description = null;
       for (const [key, val] of Object.entries(PRODUCT_DESCRIPTIONS)) {
-        if (productName.includes(key) || clean.toLowerCase().includes(key)) {
-          desc = val;
+        // Word-boundary match — bare `includes` matched "pillar" inside
+        // "caterpillar" and hung fungicide copy on an insecticide line.
+        const keyRe = new RegExp(
+          `(^|[^a-z0-9])${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^a-z0-9])`,
+        );
+        if (keyRe.test(lookupName) || keyRe.test(lookupLine)) {
+          description = val;
           break;
         }
       }
-      return { raw: line, description: desc };
+      return {
+        raw: line,
+        name,
+        detail,
+        cost,
+        estimated,
+        conditional,
+        warning,
+        description,
+      };
     });
 }
 
@@ -120,7 +170,49 @@ function formatProtocolCost(value) {
   if (value == null || value === "") return "—";
   const n = Number(value);
   if (Number.isFinite(n)) return `$${n.toFixed(2)}`;
+  // Legacy placeholder strings from protocols.json
+  if (value === "inventory") return "Per job";
+  if (value === "standard") return "Standard";
   return String(value);
+}
+
+function ProductLineRow({ line, muted }) {
+  return (
+    <div className="flex items-baseline gap-3 py-1 border-b border-hairline border-zinc-100 last:border-b-0">
+      <div className="min-w-0 flex-1">
+        <div
+          className={cn(
+            "text-13 leading-normal",
+            muted ? "text-ink-secondary" : "text-ink-primary",
+            line.warning && "text-alert-fg",
+          )}
+        >
+          {line.conditional && (
+            <span className="mr-1.5 inline-block align-middle rounded-xs border-hairline border-zinc-300 px-1 text-10 font-medium u-label text-ink-tertiary">
+              IF
+            </span>
+          )}
+          <span className="font-medium">{line.name}</span>
+        </div>
+        {line.detail && (
+          <div className="text-12 text-ink-tertiary leading-normal">
+            {line.detail}
+          </div>
+        )}
+        {line.description && (
+          <div className="text-11 text-ink-tertiary italic leading-normal">
+            {line.description}
+          </div>
+        )}
+      </div>
+      <div className="flex-shrink-0 text-12 font-mono u-nums text-ink-primary whitespace-nowrap">
+        {line.cost != null ? `$${line.cost.toFixed(2)}` : "—"}
+        {line.estimated && (
+          <span className="ml-0.5 text-10 text-ink-tertiary">est</span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function visitSopText(visit) {
@@ -133,14 +225,68 @@ function visitSopText(visit) {
     .join("\n");
 }
 
-function CurrentVisitCardV2({ visit, trackName }) {
+function CalendarLine({ line, muted }) {
+  return (
+    <div className="mb-1 last:mb-0 flex items-baseline gap-2">
+      <div className="min-w-0 flex-1 leading-normal">
+        {line.conditional && (
+          <span className="mr-1 inline-block align-middle rounded-xs border-hairline border-zinc-300 px-0.5 text-10 font-medium u-label text-ink-tertiary">
+            IF
+          </span>
+        )}
+        <span
+          className={cn(
+            "font-medium",
+            muted ? "text-ink-secondary" : "text-ink-primary",
+            line.warning && "text-alert-fg",
+          )}
+        >
+          {line.name}
+        </span>
+        {line.detail && (
+          <span className="text-ink-tertiary"> — {line.detail}</span>
+        )}
+        {line.description && (
+          <div className="text-10 text-ink-tertiary italic">
+            {line.description}
+          </div>
+        )}
+      </div>
+      {line.cost != null && (
+        <span className="flex-shrink-0 font-mono u-nums text-11 text-ink-primary whitespace-nowrap">
+          ${line.cost.toFixed(2)}
+          {line.estimated && (
+            <span className="ml-0.5 text-10 text-ink-tertiary">est</span>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function CurrentVisitCardV2({ visit, trackName, isLawnTrack }) {
   if (!visit) return null;
   const primaryProducts = parseProductLines(visit.primary);
   const secondaryProducts = parseProductLines(visit.secondary);
+  const materialCost = parseFloat(visit.material_cost);
+  // Lawn material_cost is the 10,000 sqft basis while conditional_cost
+  // reserves derive from ~4,500 sqft inline line costs — normalize before
+  // summing. Service programs (tree_shrub/pest/termite) are per-property
+  // on both fields; no scaling. (This card only renders behind the
+  // isServiceProgram gate today, but stays correct if that ever changes.)
+  const rawConditional = parseFloat(visit.conditional_cost);
+  const conditionalCost = Number.isFinite(rawConditional)
+    ? rawConditional * (isLawnTrack ? 10000 / 4500 : 1)
+    : rawConditional;
   const laborCost = parseFloat(visit.labor_cost);
-  const hasNumericCost = Number.isFinite(laborCost);
-  const costLabel = (value) =>
-    Number.isFinite(parseFloat(value)) ? `$${value}` : value || "0";
+  const expectedTotal =
+    (Number.isFinite(materialCost) ? materialCost : 0) +
+    (Number.isFinite(conditionalCost) ? conditionalCost : 0) +
+    (Number.isFinite(laborCost) ? laborCost : 0);
+  const hasNumericCost =
+    Number.isFinite(materialCost) ||
+    Number.isFinite(conditionalCost) ||
+    Number.isFinite(laborCost);
 
   const warnings = [];
   if (visit.notes) {
@@ -196,44 +342,28 @@ function CurrentVisitCardV2({ visit, trackName }) {
           </div>
         )}
         {" "}
-        <div className="mb-3">
+        <div className="mb-3 rounded-sm border-hairline border-zinc-200 overflow-hidden">
           {" "}
-          <div className="text-11 font-medium u-label text-ink-tertiary mb-2">
-            Primary Products
+          <div className="text-11 font-medium u-label text-ink-tertiary px-3 py-1.5 bg-zinc-50 border-b border-hairline border-zinc-200">
+            Primary Applications
           </div>
-          {primaryProducts.map((p, i) => (
-            <div key={i} className="mb-1.5">
-              {" "}
-              <div className="text-13 text-ink-primary leading-normal">
-                {p.raw}
-              </div>
-              {p.description && (
-                <div className="text-11 text-ink-tertiary ml-3 italic leading-normal">
-                  {p.description}
-                </div>
-              )}
-            </div>
-          ))}
+          <div className="px-3 py-1">
+            {primaryProducts.map((p, i) => (
+              <ProductLineRow key={i} line={p} />
+            ))}
+          </div>
         </div>
         {secondaryProducts.length > 0 && (
-          <div className="mb-3">
+          <div className="mb-3 rounded-sm border-hairline border-zinc-200 overflow-hidden">
             {" "}
-            <div className="text-11 font-medium u-label text-ink-tertiary mb-2">
-              Secondary / Conditional
+            <div className="text-11 font-medium u-label text-ink-tertiary px-3 py-1.5 bg-zinc-50 border-b border-hairline border-zinc-200">
+              Conditional / Spot Treatments
             </div>
-            {secondaryProducts.map((p, i) => (
-              <div key={i} className="mb-1.5">
-                {" "}
-                <div className="text-13 text-ink-secondary leading-normal">
-                  {p.raw}
-                </div>
-                {p.description && (
-                  <div className="text-11 text-ink-tertiary ml-3 italic leading-normal">
-                    {p.description}
-                  </div>
-                )}
-              </div>
-            ))}
+            <div className="px-3 py-1">
+              {secondaryProducts.map((p, i) => (
+                <ProductLineRow key={i} line={p} muted />
+              ))}
+            </div>
           </div>
         )}
         {warnings.length > 0 && (
@@ -257,14 +387,19 @@ function CurrentVisitCardV2({ visit, trackName }) {
         <div className="flex gap-3 flex-wrap items-center px-3 py-2 bg-zinc-50 rounded border border-hairline border-zinc-200">
           {" "}
           <div className="text-12 text-ink-tertiary">
-            Legacy Mat:{" "}
+            Materials:{" "}
             <span className="font-mono u-nums text-ink-primary font-medium">
               {formatProtocolCost(visit.material_cost)}
             </span>{" "}
-            <span className="text-10 text-ink-tertiary ml-1">
-              reference
-            </span>
-          </div>{" "}
+          </div>
+          {Number.isFinite(conditionalCost) && (
+            <div className="text-12 text-ink-tertiary">
+              Spot reserve:{" "}
+              <span className="font-mono u-nums text-ink-primary font-medium">
+                ${conditionalCost.toFixed(2)}
+              </span>{" "}
+            </div>
+          )}
           <div className="text-12 text-ink-tertiary">
             Labor:{" "}
             <span className="font-mono u-nums text-ink-primary font-medium">
@@ -273,7 +408,9 @@ function CurrentVisitCardV2({ visit, trackName }) {
           </div>
           {hasNumericCost && (
             <div className="ml-auto text-13 text-ink-primary font-medium font-mono u-nums">
-              Labor: ${laborCost.toFixed(2)}
+              {Number.isFinite(laborCost)
+                ? `Expected: $${expectedTotal.toFixed(2)}`
+                : `Materials + reserve: $${expectedTotal.toFixed(2)}`}
             </div>
           )}
         </div>
@@ -1063,6 +1200,7 @@ export default function ProtocolReferenceTabV2() {
             <CurrentVisitCardV2
               visit={currentVisit}
               trackName={trackData.name}
+              isLawnTrack={isLawnTrack}
             />
           )}
           {!currentVisit && trackData.visits?.length > 0 && (
@@ -1091,6 +1229,13 @@ export default function ProtocolReferenceTabV2() {
             <span className="text-11 text-ink-tertiary u-label">
               B=Bronze S=Silver E=Enhanced P=Premium
             </span>{" "}
+            {trackData.visits?.some(
+              (v) => parseFloat(v.conditional_cost) > 0,
+            ) && (
+              <span className="text-11 text-ink-tertiary u-label">
+                Spot reserve = ¼ gated fungicide/insecticide · ⅛ herbicide spot
+              </span>
+            )}{" "}
           </div>{" "}
           <Button
             variant="secondary"
@@ -1131,7 +1276,7 @@ export default function ProtocolReferenceTabV2() {
                         { k: "Month", cls: "" },
                         { k: "Primary Applications", cls: "min-w-[250px]" },
                         { k: "Secondary / Conditional", cls: "min-w-[200px]" },
-                        { k: "Legacy Mat$", cls: "text-right whitespace-nowrap" },
+                        { k: "Mat$", cls: "text-right whitespace-nowrap" },
                         { k: "Lab$", cls: "text-right whitespace-nowrap" },
                         { k: "Tiers", cls: "" },
                         { k: "Notes / SOP", cls: "min-w-[200px]" },
@@ -1179,35 +1324,37 @@ export default function ProtocolReferenceTabV2() {
                               </span>
                             )}
                           </td>{" "}
-                          <td className="px-2.5 py-2 text-12 text-ink-primary whitespace-pre-wrap align-top">
+                          <td className="px-2.5 py-2 text-12 text-ink-primary align-top">
                             {parseProductLines(v.primary).map((p, pi) => (
-                              <div key={pi} className="mb-0.5 last:mb-0">
-                                {" "}
-                                <div>{p.raw}</div>
-                                {p.description && (
-                                  <div className="text-10 text-ink-tertiary italic ml-2">
-                                    {p.description}
-                                  </div>
-                                )}
-                              </div>
+                              <CalendarLine key={pi} line={p} />
                             ))}
                           </td>{" "}
-                          <td className="px-2.5 py-2 text-12 text-ink-secondary whitespace-pre-wrap align-top">
+                          <td className="px-2.5 py-2 text-12 text-ink-secondary align-top">
                             {parseProductLines(v.secondary).map((p, pi) => (
-                              <div key={pi} className="mb-0.5 last:mb-0">
-                                {" "}
-                                <div>{p.raw}</div>
-                                {p.description && (
-                                  <div className="text-10 text-ink-tertiary italic ml-2">
-                                    {p.description}
-                                  </div>
-                                )}
-                              </div>
+                              <CalendarLine key={pi} line={p} muted />
                             ))}
                             {!v.secondary && "\u2014"}
                           </td>{" "}
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {formatProtocolCost(v.material_cost)}
+                            {Number.isFinite(parseFloat(v.conditional_cost)) &&
+                              parseFloat(v.conditional_cost) > 0 && (
+                                <div className="text-10 text-ink-tertiary">
+                                  {/* Lawn material_cost is the 10,000 sqft
+                                      basis; conditional_cost reserves derive
+                                      from the ~4,500 sqft inline line costs —
+                                      scale so both numbers in this cell share
+                                      the Mat$ basis. Service programs
+                                      (tree_shrub/pest) are per-property; no
+                                      scaling. */}
+                                  +$
+                                  {(
+                                    parseFloat(v.conditional_cost) *
+                                    (isLawnTrack ? 10000 / 4500 : 1)
+                                  ).toFixed(2)}{" "}
+                                  spot
+                                </div>
+                              )}
                           </td>{" "}
                           <td className="px-2.5 py-2 text-12 font-mono u-nums text-ink-primary whitespace-nowrap align-top text-right">
                             {formatProtocolCost(v.labor_cost)}

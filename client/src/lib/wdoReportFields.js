@@ -3,4 +3,9 @@
 // page and the admin "Customer report preview" so the preview staff approve
 // can't diverge from what the customer actually sees. (inspection_fee is a
 // fee-tier helper for invoicing — the invoice carries the actual price.)
-export const INTERNAL_FINDING_KEYS = new Set(['inspection_fee']);
+export const INTERNAL_FINDING_KEYS = new Set([
+  'inspection_fee',
+  // Historical helper from the retired footprint-based fee concept. It is
+  // neither an FDACS field nor customer-facing report content.
+  'structure_sqft',
+]);

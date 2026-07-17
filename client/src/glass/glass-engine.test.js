@@ -20,7 +20,6 @@ beforeEach(() => {
 afterEach(() => {
   setSearch('');
   document.documentElement.removeAttribute('data-glass-theme');
-  document.documentElement.removeAttribute('data-glass-surface');
   document.documentElement.style.background = '';
   document.body.style.background = '';
   document.body.innerHTML = '';
@@ -55,14 +54,6 @@ describe('applyGlassScene', () => {
     expect(document.querySelector('.glass-scene-grain')).toBeNull();
     cleanup();
     expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
-  });
-
-  it('scopes shared glass rules to an identified surface and restores the prior scope', () => {
-    document.documentElement.setAttribute('data-glass-surface', 'previous');
-    const { cleanup } = applyGlassScene('full', 'app');
-    expect(document.documentElement.getAttribute('data-glass-surface')).toBe('app');
-    cleanup();
-    expect(document.documentElement.getAttribute('data-glass-surface')).toBe('previous');
   });
 });
 
@@ -127,12 +118,5 @@ describe('useGlassSurface', () => {
     expect(document.documentElement.getAttribute('data-glass-theme')).toBe('pro');
     expect(document.querySelector('.glass-scene-orbs')).toBeNull();
     unmount();
-  });
-
-  it('exposes an optional surface scope for app-only visual rules', () => {
-    const { unmount } = renderHook(() => useGlassSurface(true, 'full', 'app'));
-    expect(document.documentElement.getAttribute('data-glass-surface')).toBe('app');
-    unmount();
-    expect(document.documentElement.hasAttribute('data-glass-surface')).toBe(false);
   });
 });

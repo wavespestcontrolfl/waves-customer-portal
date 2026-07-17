@@ -524,6 +524,16 @@ function generateEstimate(input) {
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
   const modifiers = deriveModifiers(property);
+  // Caller-supplied overrides for modifiers the caller computed from richer
+  // data than the profile carries — e.g. the property lookup's graduated
+  // mosquitoWaterMult (POND_ON_PROPERTY 1.75 … vs the profile scale's
+  // ADJACENT 1.35 ceiling). Only keys deriveModifiers already emits apply;
+  // unknown keys are ignored, and each pricer still normalizes its value.
+  for (const [key, value] of Object.entries(input.modifierOverrides || {})) {
+    if (key in modifiers && value != null && Number.isFinite(Number(value))) {
+      modifiers[key] = Number(value);
+    }
+  }
   const structuralNotes = deriveNotes(property);
 
   // ── 3. Price each requested service ────────────────────────
