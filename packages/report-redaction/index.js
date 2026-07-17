@@ -62,6 +62,19 @@ const GAP_ABBREVIATIONS = '(?:approx|appx|est|min|max|incl|excl)';
 // "purchase price $400,000" (no container prep) still breaks.
 const CONTAINER_PHRASE = '\\b(?:in|into|within|under)\\s+(?:\\w+\\s+){0,2}?(?:costs?|prices?|charges?|values?)\\b';
 
+// Amount-FIRST constructions name their subject right after the number —
+// "$400,000 purchase price", "$400 balance remains". An amount directly
+// followed by a money-subject noun is that subject's amount, never the fee,
+// so the match is rejected (the gap then walks into the noun and the breaker
+// aborts the cue entirely). Direct adjacency only — "fee $250 for the
+// treatment area" is still the fee.
+const AMOUNT_FIRST_SUBJECTS = [
+  'prices?', 'costs?', 'charges?', 'values?', 'purchase', 'balance',
+  'totals?', 'subtotal', 'deductibles?', 'discounts?', 'credits?',
+  'estimates?', 'quotes?', 'repairs?', 're-?treatments?', 'treatments?',
+  'permits?', 'damages?',
+].join('|');
+
 // Amount forms the cue can disclose. A literal $ amount, a USD/US$-prefixed
 // amount, a "250 dollars" currency-word amount, or a bare number. The bare
 // form is the corruption-prone one ("Inspection fee for 123 Main Street is
@@ -112,7 +125,10 @@ const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
   + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?:${CONTAINER_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|[^.;!?\\n])){0,160}?)`
   + `(?:${AMOUNT_PATTERN})`
-  + RANGE_CONTINUATION,
+  + RANGE_CONTINUATION
+  // (?![,.]?\d) forbids backtracking into a partial number ("$400" out of
+  // "$400,000") to dodge the subject guard that follows.
+  + `(?![,.]?\\d)(?!\\s{1,3}(?:${AMOUNT_FIRST_SUBJECTS})\\b)`,
   'gi',
 );
 

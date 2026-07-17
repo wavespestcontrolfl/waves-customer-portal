@@ -147,6 +147,15 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee on file, home value $400,000.'))
       .toBe('Inspection fee on file, home value $400,000.');
   });
+  test('amount-first constructions keep their subject — the amount is never the fee', () => {
+    expect(redactInspectionFeeCues('Inspection fee paid separately, $400,000 purchase price.'))
+      .toBe('Inspection fee paid separately, $400,000 purchase price.');
+    expect(redactInspectionFeeCues('Inspection fee paid separately, $400 balance remains.'))
+      .toBe('Inspection fee paid separately, $400 balance remains.');
+    // direct adjacency only — a fee amount followed by ordinary prose still redacts
+    expect(redactInspectionFeeCues('Inspection fee $250 for the treatment area.'))
+      .toBe('Inspection fee [fee removed] for the treatment area.');
+  });
   test('cost/charge/price/run directly after the cue bridge the fee, not a new subject', () => {
     expect(redactInspectionFeeCues('Inspection fee costs $250.'))
       .toBe('Inspection fee costs [fee removed].');
