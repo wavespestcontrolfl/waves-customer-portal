@@ -30,8 +30,13 @@ const PRODUCTS = [
     formulation: 'liquid',
     rate_unit: 'fl_oz',
     inventory_unit: 'fl_oz',
-    // 1% v/v at ~2.5 gal finished carrier per 1,000 sq ft of beds/canopy.
-    default_rate_per_1000: 3.2,
+    // Dilution product — the protocol specifies 1.0-1.5% v/v tank
+    // concentration (1.28-1.92 fl oz/gal). Seeded via the default_rate +
+    // /gal default_unit path so closeout prefills the label band's low end
+    // as a mix concentration; a per-1k rate here would render as a bare
+    // "Rate" with no carrier context (foliar apps have no sqft requirement).
+    default_rate: '1.28-1.92',
+    default_unit: 'fl_oz/gal',
     container_size: '2.5 gal',
     unit_size_oz: 320,
     best_price: 76.02,
@@ -48,8 +53,10 @@ const PRODUCTS = [
     formulation: 'liquid',
     rate_unit: 'fl_oz',
     inventory_unit: 'fl_oz',
-    // 10 fl oz/100 gal foliar at ~2.5 gal carrier per 1,000 sq ft.
-    default_rate_per_1000: 0.25,
+    // Dilution product — 10 fl oz/100 gal foliar = 0.1 fl oz/gal mix
+    // concentration (same default_rate + /gal unit path as TriTek).
+    default_rate: '0.1',
+    default_unit: 'fl_oz/gal',
     container_size: '1 qt',
     unit_size_oz: 32,
     best_price: 595.92,
@@ -85,8 +92,11 @@ const PRODUCTS = [
     formulation: 'liquid',
     rate_unit: 'fl_oz',
     inventory_unit: 'fl_oz',
-    // 1-2 tsp/gal (27.15% concentrate) at ~2.5 gal carrier per 1,000 sq ft.
-    default_rate_per_1000: 0.6,
+    // Dilution product — label 1-2 tsp/gal (27.15% concentrate) =
+    // 0.17-0.33 fl oz/gal, kept in fl_oz/gal to match the rate and
+    // inventory units.
+    default_rate: '0.17-0.33',
+    default_unit: 'fl_oz/gal',
     container_size: '1 pt',
     unit_size_oz: 16,
     best_price: 36.33,
@@ -131,7 +141,11 @@ async function ensureProduct(knex, spec) {
       formulation: spec.formulation,
       rate_unit: spec.rate_unit,
       inventory_unit: spec.inventory_unit,
-      default_rate_per_1000: spec.default_rate_per_1000,
+      // Area-based products carry a per-1k rate; dilution products carry a
+      // /gal mix-concentration band instead (closeout prefills its low end).
+      default_rate_per_1000: spec.default_rate_per_1000 ?? null,
+      default_rate: spec.default_rate ?? null,
+      default_unit: spec.default_unit ?? null,
       container_size: spec.container_size,
       unit_size_oz: spec.unit_size_oz,
       best_price: spec.best_price,
