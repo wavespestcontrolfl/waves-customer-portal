@@ -420,7 +420,7 @@ class BudgetManager {
     // collapse to the $20 fallback), and the 2-hourly reconcile would keep
     // re-pushing it. A daily budget must be strictly positive; use mode 'stop'
     // to throttle. parseFloat is deliberately avoided so '50junk' is rejected.
-    const base = typeof newBaseBudget === 'number'
+    let base = typeof newBaseBudget === 'number'
       ? newBaseBudget
       : (typeof newBaseBudget === 'string' && newBaseBudget.trim() !== '' ? Number(newBaseBudget) : NaN);
     if (!Number.isFinite(base) || base <= 0) {
@@ -431,6 +431,11 @@ class BudgetManager {
     if (base > MAX_DAILY_BUDGET) {
       throw new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
     }
+    // Round to cents so Google receives EXACTLY what the decimal(10,2) columns
+    // store — a value like 50.001 would otherwise push exact micros to Google
+    // while the DB rounds to 50.00, re-creating the live/local drift this path
+    // is meant to prevent.
+    base = Math.round(base * 100) / 100;
 
     const campaign = await db('ad_campaigns').where({ id: campaignId }).first();
     if (!campaign) throw new Error('Campaign not found');
@@ -469,21 +474,27 @@ class BudgetManager {
     // then surface the failure. No false success, and the reconcile cron isn't
     // left chasing a phantom. (calculateBudget's fallbacks mean a null prior
     // current can't be safely restored — log for manual follow-up instead.)
+    // Atomic: the campaign write and the audit insert must land together, or the
+    // catch below would roll Google back while the campaign row keeps the new
+    // base — in base mode the reconcile check then sees current === base and
+    // never restores Google, leaving the old higher spend running.
     try {
-      await db('ad_campaigns').where({ id: campaignId }).update({
-        daily_budget_base: base,
-        daily_budget_current: newCurrent,
-      });
+      await db.transaction(async (trx) => {
+        await trx('ad_campaigns').where({ id: campaignId }).update({
+          daily_budget_base: base,
+          daily_budget_current: newCurrent,
+        });
 
-      await db('ad_budget_log').insert({
-        campaign_id: campaignId,
-        campaign_name: campaign.campaign_name,
-        previous_mode: campaign.budget_mode,
-        new_mode: campaign.budget_mode,
-        previous_budget: campaign.daily_budget_base,
-        new_budget: base,
-        reason,
-        trigger: 'manual',
+        await trx('ad_budget_log').insert({
+          campaign_id: campaignId,
+          campaign_name: campaign.campaign_name,
+          previous_mode: campaign.budget_mode,
+          new_mode: campaign.budget_mode,
+          previous_budget: campaign.daily_budget_base,
+          new_budget: base,
+          reason,
+          trigger: 'manual',
+        });
       });
     } catch (persistErr) {
       if (googleAdsUpdated && campaign.platform_campaign_id) {

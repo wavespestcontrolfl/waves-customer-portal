@@ -47,10 +47,12 @@ function toFiniteNumber(v) {
 // google_ads is remotely budget-controllable — that guard lives in setBudget/
 // setMode). Matches ad_campaigns.platform's documented set.
 const CAMPAIGN_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
+const CAMPAIGN_STATUSES = ['active', 'paused', 'removed'];
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
-// Settable only at creation (identity); an update must not repoint them.
-const CAMPAIGN_CREATE_ONLY_FIELDS = ['platform', 'platform_campaign_id'];
+// Settable only at creation (identity + initial status); an update must not
+// repoint them (status changes go through /pause + /enable, which sync Google).
+const CAMPAIGN_CREATE_ONLY_FIELDS = ['platform', 'platform_campaign_id', 'status'];
 // Free-form metadata columns editable via either create or update.
 const CAMPAIGN_META_FIELDS = [
   'campaign_name', 'campaign_type', 'target_area', 'service_category',
@@ -85,6 +87,12 @@ function sanitizeCampaignWrite(body, isUpdate) {
     if (out.platform_campaign_id !== undefined && out.platform_campaign_id !== null
         && !/^\d+$/.test(String(out.platform_campaign_id))) {
       return { ok: false, error: 'platform_campaign_id must be digits only' };
+    }
+    // Honor a requested initial status (validated) rather than silently dropping
+    // it and letting the DB default the campaign to 'active' — an unexpectedly
+    // active row would be eligible for the autonomous budget cron.
+    if (out.status !== undefined && !CAMPAIGN_STATUSES.includes(out.status)) {
+      return { ok: false, error: `status must be one of: ${CAMPAIGN_STATUSES.join(', ')}` };
     }
   }
 
@@ -129,11 +137,21 @@ function sanitizeTargetsWrite(body, existing) {
     if (!Number.isInteger(n) || n < 1) return { ok: false, error: 'max_services_per_tech must be an integer ≥ 1' };
     out.max_services_per_tech = n;
   }
-  // Resolve the effective thresholds against what's already stored, then enforce
-  // strict green < yellow < orange ordering on the merged result.
-  const g = out.capacity_green_max ?? parseFloat(existing?.capacity_green_max ?? 70);
-  const y = out.capacity_yellow_max ?? parseFloat(existing?.capacity_yellow_max ?? 85);
-  const o = out.capacity_orange_max ?? parseFloat(existing?.capacity_orange_max ?? 95);
+  // Enforce strict green < yellow < orange ordering on the values that will
+  // ACTUALLY be in effect for the cron after this write. A field being written
+  // as null (clearing it) persists null, and the cron then reads its hard-coded
+  // default (`targets?.field || DEFAULT`) — so resolve null/blank to that same
+  // default here, not to the old stored value, or a cleared threshold could
+  // violate an ordering the request appeared to pass.
+  const effThreshold = (field, def) => {
+    const has = Object.prototype.hasOwnProperty.call(out, field);
+    const raw = has ? out[field] : existing?.[field];
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? n : def; // null / blank / missing → cron default
+  };
+  const g = effThreshold('capacity_green_max', 70);
+  const y = effThreshold('capacity_yellow_max', 85);
+  const o = effThreshold('capacity_orange_max', 95);
   if (!(g < y && y < o)) {
     return { ok: false, error: 'capacity thresholds must satisfy green < yellow < orange' };
   }

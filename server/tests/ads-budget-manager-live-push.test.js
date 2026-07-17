@@ -51,6 +51,9 @@ const mockDb = jest.fn((table) => {
   }
   throw new Error(`Unexpected table in test: ${table}`);
 });
+// db.transaction(cb) runs cb with a trx that dispatches like db itself; a throw
+// inside rejects (knex would roll back). setBudget's atomic writes use this.
+mockDb.transaction = (cb) => cb(mockDb);
 jest.mock('../models/db', () => mockDb);
 
 const BudgetManager = require('../services/ads/budget-manager');
@@ -471,6 +474,21 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockLogInsert).toHaveBeenCalledTimes(1);
       const logged = mockLogInsert.mock.calls[0][0];
       expect(logged.reason.length).toBe(255);
+    });
+
+    test('rounds the base to cents so Google and the DB agree', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      const result = await BudgetManager.setBudget('c-1', 50.007, 'test'); // → 50.01
+
+      expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 50.01);
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50.01,
+        daily_budget_current: 50.01,
+      });
+      expect(result.newBudget).toBe(50.01);
     });
 
     test('post-push persist failure rolls Google back to the prior live budget, then rethrows', async () => {

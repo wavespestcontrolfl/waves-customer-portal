@@ -180,4 +180,20 @@ describe('write-body validation (admin role)', () => {
     const res = await call('put', '/api/admin/ads/targets', { max_services_per_tech: 2.5 });
     expect(res.status).toBe(400);
   });
+
+  test('PUT /targets rejects a null threshold that breaks the effective ordering', async () => {
+    // Clearing green to null persists null → cron reads its default (70); with
+    // yellow=60 that violates green<yellow, so it must be rejected up front.
+    const res = await call('put', '/api/admin/ads/targets', {
+      capacity_green_max: null, capacity_yellow_max: 60, capacity_orange_max: 90,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/green < yellow < orange/);
+  });
+
+  test('POST /campaigns rejects an invalid initial status', async () => {
+    const res = await call('post', '/api/admin/ads/campaigns', { campaign_name: 'X', platform: 'google_ads', status: 'bogus' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/status/);
+  });
 });
