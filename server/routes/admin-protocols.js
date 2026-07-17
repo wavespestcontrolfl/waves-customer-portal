@@ -129,7 +129,12 @@ function serializeProtocolProduct(product) {
     activeIngredient: product.active_ingredient || null,
     defaultRatePer1000: product.default_rate_per_1000 != null ? Number(product.default_rate_per_1000) : null,
     rateUnit: product.rate_unit || null,
-    defaultUnit: product.rate_unit || null,
+    // Dilution products carry a /gal mix-concentration band in
+    // default_rate/default_unit instead of a per-1k rate — SchedulePage's
+    // addProduct prefills the band's low end from these. Fall back to
+    // rate_unit for area-based products (the previous behavior).
+    defaultRate: product.default_rate || null,
+    defaultUnit: product.default_unit || product.rate_unit || null,
     maxLabelRatePer1000: product.max_label_rate_per_1000 != null ? Number(product.max_label_rate_per_1000) : null,
   };
 }
@@ -1348,7 +1353,7 @@ async function getProtocolProducts() {
       'id', 'name', 'category', 'active_ingredient', 'moa_group',
       'frac_group', 'irac_group', 'hrac_group',
       'analysis_n', 'analysis_p', 'analysis_k',
-      'default_rate_per_1000', 'rate_unit',
+      'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit',
       'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'unit_size_oz', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
       'label_verified_at', 'rainfast_minutes', 'rei_hours',
@@ -2119,6 +2124,8 @@ router.get('/lawn/substitution-products', async (req, res, next) => {
         'active_ingredient',
         'default_rate_per_1000',
         'rate_unit',
+        'default_rate',
+        'default_unit',
         'inventory_on_hand',
         'inventory_unit',
         'low_stock_threshold',
@@ -2133,6 +2140,10 @@ router.get('/lawn/substitution-products', async (req, res, next) => {
         activeIngredient: row.active_ingredient,
         defaultRatePer1000: row.default_rate_per_1000 != null ? Number(row.default_rate_per_1000) : null,
         rateUnit: row.rate_unit || null,
+        // /gal dilution band for concentration products (see
+        // serializeProtocolProduct) — addProduct prefills its low end.
+        defaultRate: row.default_rate || null,
+        defaultUnit: row.default_unit || row.rate_unit || null,
         inventoryOnHand: row.inventory_on_hand != null ? Number(row.inventory_on_hand) : null,
         inventoryUnit: row.inventory_unit || null,
         lowStockThreshold: row.low_stock_threshold != null ? Number(row.low_stock_threshold) : null,

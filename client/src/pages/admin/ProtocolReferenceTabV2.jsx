@@ -1229,9 +1229,13 @@ export default function ProtocolReferenceTabV2() {
             <span className="text-11 text-ink-tertiary u-label">
               B=Bronze S=Silver E=Enhanced P=Premium
             </span>{" "}
-            <span className="text-11 text-ink-tertiary u-label">
-              Spot reserve = ¼ gated fungicide/insecticide · ⅛ herbicide spot
-            </span>{" "}
+            {trackData.visits?.some(
+              (v) => parseFloat(v.conditional_cost) > 0,
+            ) && (
+              <span className="text-11 text-ink-tertiary u-label">
+                Spot reserve = ¼ gated fungicide/insecticide · ⅛ herbicide spot
+              </span>
+            )}{" "}
           </div>{" "}
           <Button
             variant="secondary"
