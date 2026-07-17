@@ -139,7 +139,12 @@ describe('invoice follow-up email sidecar', () => {
       customer_interactions: [emailInteraction, finalInteraction],
       // fireStep now claims the sequence (touch_claimed_at) before sending
       // and clears it after — the cadence advance is the middle entry.
-      invoice_followup_sequences: [chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+      invoice_followup_sequences: [
+        chain({ result: 1 }), // touch claim
+        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-claim revalidation
+        sequenceUpdate, // cadence advance
+        chain({ result: 1 }), // claim clear
+      ],
     });
 
     await InvoiceFollowUps.runPending();
@@ -178,6 +183,25 @@ describe('invoice follow-up email sidecar', () => {
       interaction_type: 'sms_outbound',
       metadata: expect.stringContaining('"email_sent":true'),
     }));
+  });
+
+  test('skips a touch whose sequence was postponed between the batch select and the claim', async () => {
+    // A delivered-invoice due-date edit (rescheduleForInvoiceEdit) can move
+    // next_touch_at into the future after runPending materialized its batch —
+    // the post-claim revalidation must drop the stale snapshot unsent.
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      invoice_followup_sequences: [
+        chain({ result: 1 }), // claim succeeds
+        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-30T14:00:00.000Z', anchor_at: null } }), // postponed
+        chain({ result: 1 }), // claim clear
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('cron excludes every non-sendable invoice status', async () => {
@@ -231,7 +255,12 @@ describe('invoice follow-up email sidecar', () => {
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       // Claim → cadence advance → claim clear (see the sidecar test above).
-      invoice_followup_sequences: [chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+      invoice_followup_sequences: [
+        chain({ result: 1 }), // touch claim
+        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-claim revalidation
+        sequenceUpdate, // cadence advance
+        chain({ result: 1 }), // claim clear
+      ],
     });
 
     await InvoiceFollowUps.runPending();

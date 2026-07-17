@@ -99,8 +99,13 @@ describe('invoice-followups micro-deposit diversion', () => {
       'invoice_followup_sequences as s': [chain({ result: [row] })],
       customers: [chain({ first: customer })],
       invoices: [chain({ first: { total: '129.00', credit_applied: null, status: 'viewed', title: 'Quarterly Pest Control', token: 'token-1', due_date: '2026-05-10', invoice_number: 'WPC-2026-1042' } })],
-      // Claim → cadence advance → claim clear.
-      invoice_followup_sequences: [chain({ updateResult: 1 }), chain({ updateResult: 1 }), chain({ updateResult: 1 })],
+      // Claim → post-claim revalidation → cadence advance → claim clear.
+      invoice_followup_sequences: [
+        chain({ updateResult: 1 }),
+        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ updateResult: 1 }),
+        chain({ updateResult: 1 }),
+      ],
       customer_interactions: [chain()],
     });
 
@@ -138,8 +143,13 @@ describe('invoice-followups micro-deposit diversion', () => {
         chain({ first: { id: 'inv-1', status: 'viewed', title: 'Quarterly Pest Control', total: '129.00', credit_applied: null, due_date: '2026-05-10', service_date: '2026-05-01', invoice_number: 'WPC-2026-1042' } }), // sendFollowupEmail re-read
       ],
       notification_prefs: [chain({ first: {} })],
-      // Claim → cadence advance → claim clear.
-      invoice_followup_sequences: [chain({ updateResult: 1 }), chain({ updateResult: 1 }), chain({ updateResult: 1 })],
+      // Claim → post-claim revalidation → cadence advance → claim clear.
+      invoice_followup_sequences: [
+        chain({ updateResult: 1 }),
+        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ updateResult: 1 }),
+        chain({ updateResult: 1 }),
+      ],
       customer_interactions: [chain()],
     });
 

@@ -368,6 +368,24 @@ async function fireStep(row) {
     return;
   }
   try {
+    // Post-claim revalidation: the caller's row is a batch snapshot —
+    // between the cron select and this claim, a due-date edit
+    // (rescheduleForInvoiceEdit) can postpone next_touch_at, or an admin can
+    // pause/stop/advance the sequence. Fire only if it is still active, on
+    // the same step, and actually due; and progress from the LIVE anchor so
+    // a postponed timeline is never overwritten from the stale snapshot.
+    const liveSeq = await db('invoice_followup_sequences').where({ id: row.id }).first();
+    if (
+      !liveSeq ||
+      liveSeq.status !== 'active' ||
+      liveSeq.step_index !== row.step_index ||
+      !liveSeq.next_touch_at ||
+      new Date(liveSeq.next_touch_at).getTime() > Date.now()
+    ) {
+      logger.info(`[invoice-followups] sequence ${row.id} changed after batch select; skipping touch`);
+      return;
+    }
+    row.anchor_at = liveSeq.anchor_at;
     await fireTouch(row);
   } finally {
     await db('invoice_followup_sequences')
@@ -436,12 +454,17 @@ async function fireTouch(row) {
     const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
     const dunCreditResult = await autoApplyAccountCreditIfEnabled(row.invoice_id);
     dunAppliedCredit = dunCreditResult?.applied || 0;
+  } catch (creditErr) {
+    logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
+  }
+  // The refresh runs in its OWN try: it is what keeps the reminder's
+  // amounts/copy on the just-edited live row instead of the batch snapshot
+  // (edits are fenced out from the claim onward, so this read is the settled
+  // state) — a credit-helper failure above must not bypass it.
+  try {
     const fresh = await db('invoices').where({ id: row.invoice_id })
       .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number');
     if (fresh) {
-      // Refresh everything the touch renders — the cron's row snapshot can
-      // predate a just-committed delivered-invoice edit (edits are fenced
-      // out from the claim onward, so this read is the settled state).
       row.total = fresh.total;
       row.credit_applied = fresh.credit_applied;
       row.title = fresh.title;
@@ -453,8 +476,8 @@ async function fireTouch(row) {
         return;
       }
     }
-  } catch (creditErr) {
-    logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
+  } catch (refreshErr) {
+    logger.warn(`[invoice-followups] invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
   }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
