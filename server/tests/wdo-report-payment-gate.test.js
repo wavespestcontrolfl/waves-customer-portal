@@ -329,6 +329,7 @@ function invoiceRow(overrides = {}) {
 function mockTables({
   project = wdoProject(),
   invoice = invoiceRow(),
+  customer = CUSTOMER,
   invoiceFirstResults = null,
   updates = {},
   projectUpdateResult = null,
@@ -357,7 +358,7 @@ function mockTables({
         update: invoiceUpdate,
       });
     }
-    if (table === 'customers') return chain({ first: jest.fn(async () => CUSTOMER) });
+    if (table === 'customers') return chain({ first: jest.fn(async () => customer) });
     if (table === 'notification_prefs') return chain({ first: jest.fn(async () => null) });
     if (table === 'sms_log') {
       const filters = { where: [], raw: [] };
@@ -547,6 +548,28 @@ describe('send-with-invoice hold_report_until_paid', () => {
       expect(buildWdoReportPDFBuffer).not.toHaveBeenCalled();
       expect(mockS3Send).not.toHaveBeenCalled();
       expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(true);
+    });
+  });
+
+  test('phone-only certificate hold promises automatic release by text, not email', async () => {
+    mockTables({
+      project: preTreatmentProject(),
+      customer: { ...CUSTOMER, email: '' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hold_report_until_paid: true, invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.sent).toBe(true);
+      expect(body.report_held).toBe(true);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      const smsBody = sendCustomerMessage.mock.calls[0][0].body;
+      expect(smsBody).toMatch(/sent by text automatically/i);
+      expect(smsBody).not.toMatch(/emailed automatically/i);
     });
   });
 
@@ -756,6 +779,25 @@ describe('releaseHeldProjectReport', () => {
     const releasedStamp = (updates.projects || []).find((u) => u.report_hold_status === 'released');
     expect(releasedStamp).toBeTruthy();
     expect(releasedStamp.status).toBe('closed');
+  });
+
+  test('does not release a paid certificate whose required fields were cleared while held', async () => {
+    const project = preTreatmentProject({
+      report_hold_status: 'held',
+      status: 'closed',
+      findings: { ...PRE_TREATMENT_FINDINGS, treatment_address: '' },
+    });
+    const { updates } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
+
+    const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+
+    expect(result.released).toBe(false);
+    expect(result.reason).toMatch(/Missing required certificate details/i);
+    expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+    expect(revert).toBeTruthy();
+    expect(revert.report_hold_last_error).toMatch(/Treatment address/i);
   });
 
   test('does not release while the invoice is unsettled, without burning an attempt', async () => {

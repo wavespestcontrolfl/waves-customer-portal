@@ -54,6 +54,7 @@ const InvoiceService = require('../services/invoice');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { isEnabled } = require('../config/feature-gates');
+const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('../services/wdo-inspection-fee');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -2429,35 +2430,6 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
   };
 }
 
-// WDO inspection auto-invoice fee. The tech enters any fee on the form
-// (findings.inspection_fee) — WDO pricing varies by construction (wood frame),
-// new build, prior termite history, etc. That entry always wins. If it's
-// left blank, the fee is $250 FLAT (owner decision 2026-07-12 — Q8 of the
-// universal one-time services plan replaced the old structure-sqft tiers so
-// every fee source agrees).
-function parseWdoFee(value) {
-  const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  const n = m ? Number(m[1]) : 0;
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-// An EXPLICIT zero entry ("0", "$0", "0.00 — comped") is a statement, not an
-// omission: the first number in the field is 0. Digit-free text ("waived",
-// blank) is NOT explicit zero — that's the blank case and keeps the owner's
-// $250 flat default.
-function wdoFeeIsExplicitZero(value) {
-  const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  return m != null && Number(m[1]) === 0;
-}
-function resolveWdoInspectionFee(findings) {
-  const picked = parseWdoFee(findings?.inspection_fee);
-  if (picked > 0) return picked;
-  // Owner ruling 2026-07-15 (#2751 follow-up): an explicitly $0 fee means the
-  // inspection is no-charge — resolve 0 so the invoice paths refuse to bill
-  // it, instead of falling through to the blank-fee default.
-  if (wdoFeeIsExplicitZero(findings?.inspection_fee)) return 0;
-  return 250; // flat WDO fee when the operator did not enter an override
-}
-
 function isReusableInvoice(inv) {
   return inv && !['void', 'paid'].includes(inv.status);
 }
@@ -3359,6 +3331,13 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     const readiness = evaluateProjectSendReadiness({ project, customer });
     if (readiness.hardMissing.length > 0) {
       return await revertToHeld(`Missing required compliance details: ${readiness.hardMissing.map((m) => m.label).join('; ')}`);
+    }
+    // Certificate fields are intentionally soft during an interactive send so
+    // an admin can explicitly override a thin draft. Automatic release has no
+    // operator present to make that judgment, so revalidate every required
+    // statutory field against the current (possibly edited) certificate.
+    if (project.project_type === 'pre_treatment_termite_certificate' && readiness.missing.length > 0) {
+      return await revertToHeld(`Missing required certificate details: ${readiness.missing.map((m) => m.label).join('; ')}`);
     }
 
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
@@ -4415,8 +4394,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         // service) but NOT the pay link — AR routes to the payer's AP inbox.
         // Held sends text the pay link only — the report link must not go out
         // before payment.
+        const holdReleaseDelivery = emailRecipient.email ? 'emailed' : 'sent by text';
         const smsBody = holdActive
-          ? `Hi ${firstName}, your Waves ${typeLabel} is complete. Invoice ${invoice.invoice_number} — pay online: ${payUrl}\n\nYour report is emailed automatically as soon as it's paid.`
+          ? `Hi ${firstName}, your Waves ${typeLabel} is complete. Invoice ${invoice.invoice_number} — pay online: ${payUrl}\n\nYour report is ${holdReleaseDelivery} automatically as soon as it's paid.`
           : isPayerInvoice
             ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
             : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;

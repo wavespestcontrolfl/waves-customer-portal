@@ -8,6 +8,7 @@ const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-c
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
 const { createAlertOnce } = require('./dispatch-alerts');
+const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspection-fee');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
@@ -112,7 +113,13 @@ function positiveMoney(value) {
   return Number.isFinite(amount) && amount > 0 ? amount : 0;
 }
 
-function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {} } = {}) {
+function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {}, project = null } = {}) {
+  // WDO owns a flat/default inspection fee independent of legacy appointment
+  // pricing. This shares the canonical resolver with invoice creation so a
+  // blank fee bills $250, a custom fee wins, and an explicit zero stays comped.
+  if (project?.project_type === 'wdo_inspection') {
+    return resolveWdoInspectionFee(parseJsonObject(project.findings));
+  }
   const estimated = positiveMoney(scheduledService.estimated_price);
   if (estimated > 0) return estimated;
   // Callbacks (re-services, e.g. pest_re_service / lawn_re_service) are free
@@ -130,8 +137,7 @@ function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {} }
 function projectIsExplicitlyNoCharge(project = {}) {
   if (!project || project.project_type !== 'wdo_inspection') return false;
   const findings = parseJsonObject(project.findings);
-  const match = String(findings.inspection_fee ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  return match != null && Number(match[1]) === 0;
+  return wdoFeeIsExplicitZero(findings.inspection_fee);
 }
 
 function projectReportPaymentIsHeld(project = {}) {
@@ -194,7 +200,7 @@ async function resolveProjectCompletionBilling({
   if (projectIsExplicitlyNoCharge(project)) {
     return { required: false, resolved: true, amount: 0, reason: 'wdo_no_charge' };
   }
-  const invoiceAmount = projectCompletionInvoiceAmount({ scheduledService, customer });
+  const invoiceAmount = projectCompletionInvoiceAmount({ scheduledService, customer, project });
   if (!(invoiceAmount > 0)) {
     return { required: false, resolved: true, amount: 0, reason: 'not_billable' };
   }
