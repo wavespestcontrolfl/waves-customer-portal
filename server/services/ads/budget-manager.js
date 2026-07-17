@@ -15,6 +15,16 @@ function getGoogleAds() { return _googleAds || (_googleAds = require('./google-a
 // it up front, before any push. (Google itself enforces its own maxima too.)
 const MAX_DAILY_BUDGET = 99999999.99;
 
+// ad_budget_log.reason is a varchar(255). A caller-supplied reason longer than
+// that would make the ad_budget_log insert fail AFTER the live Google push (and,
+// in setBudget, after the campaign write) — losing the audit row and 500-ing an
+// otherwise-successful change. Bound it up front so the audit insert can't fail
+// on length. Cron-generated reasons are short by construction.
+const MAX_REASON_LEN = 255;
+function boundReason(reason) {
+  return String(reason == null ? '' : reason).slice(0, MAX_REASON_LEN);
+}
+
 class BudgetManager {
   /**
    * Core budget adjustment — runs every 2 hours via cron.
@@ -349,6 +359,7 @@ class BudgetManager {
    * Manually set a campaign's budget mode (from advisor "Apply" button).
    */
   async setMode(campaignId, mode, reason = 'manual') {
+    reason = boundReason(reason);
     // Now that setMode can mutate real Google Ads spend, an unknown mode
     // must be rejected up front — calculateBudget's default case would
     // silently price a typo as the full base budget AND persist the invalid
@@ -403,6 +414,7 @@ class BudgetManager {
    * Manually update a campaign's base daily budget.
    */
   async setBudget(campaignId, newBaseBudget, reason = 'manual') {
+    reason = boundReason(reason);
     // Validate the amount up front — a non-positive / NaN / non-finite base would
     // be written locally and pushed to Google as garbage micros (or, at 0,
     // collapse to the $20 fallback), and the 2-hourly reconcile would keep

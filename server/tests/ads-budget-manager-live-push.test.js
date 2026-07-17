@@ -460,5 +460,17 @@ describe('BudgetManager live Google Ads push', () => {
       });
       expect(result.googleAdsUpdated).toBe(false);
     });
+
+    test('over-long reason is bounded to 255 chars so the audit insert cannot fail after the push', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      await BudgetManager.setBudget('c-1', 50, 'x'.repeat(500));
+
+      expect(mockLogInsert).toHaveBeenCalledTimes(1);
+      const logged = mockLogInsert.mock.calls[0][0];
+      expect(logged.reason.length).toBe(255);
+    });
   });
 });
