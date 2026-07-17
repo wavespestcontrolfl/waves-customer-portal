@@ -4935,18 +4935,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       logger.info(`[dispatch] visit ${svc.id}: monthly membership dues cover this recurring visit — stamped estimated_price $${Number(svc.estimated_price).toFixed(2)} NOT invoiced`);
       try {
         const dedupeKey = `dues_covered_priced_series:${svc.recurring_parent_id || svc.id}`;
-        const already = await db('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-          .first();
-        if (!already) {
+        await db.transaction(async (trx) => {
+          // Transaction-scoped advisory lock serializes concurrent
+          // completions of the same series so the check-then-insert can't
+          // double-bell (Codex r3).
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeKey]);
+          const already = await trx('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first();
+          if (already) return;
           await require('../services/notification-service').notifyAdmin(
             'billing',
             'Visit covered by membership dues — stamped price not billed',
             `A completed recurring visit for a monthly-membership customer carried a $${Number(svc.estimated_price).toFixed(2)} per-visit price${svc.create_invoice_on_complete ? " and the series' create-invoice default" : ''}. Membership dues cover plan visits, so NO invoice was cut. If this series is actually a separately billable add-on, bill this visit manually and KEEP its per-visit price — every visit in the series will complete uninvoiced the same way, so bill each manually or roll the add-on into the customer's monthly rate.`,
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey } },
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
-        }
+        });
       } catch (e) { logger.warn(`[dispatch] dues-covered review alert failed: ${e.message}`); }
     }
     // Customer-facing SMS URL must be the canonical portal domain, not
