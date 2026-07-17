@@ -1623,8 +1623,12 @@ export function calculateEstimate(inputs) {
       const marketPrice = lawnLookup(lp, lsf, freqIdx);
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
       const marketAnnual = marketPrice.monthly * 12;
-      const floorApplied = floorPrice.costFloorAnnual > marketAnnual;
-      let ann = floorApplied ? floorPrice.ann : marketAnnual;
+      // Cost-floor SELECTION disarmed (owner ruling 2026-07-17: "forget all
+      // floors") — mirrors the server's useLawnCostFloor=false default so the
+      // preview matches the server-recomputed save. costFloorAnnual is still
+      // computed and emitted below for margin visibility.
+      const floorApplied = false;
+      let ann = marketAnnual;
       const programMinimumApplied = lawnProgramMinAnnual > 0 && ann < lawnProgramMinAnnual;
       if (programMinimumApplied) ann = Math.ceil(lawnProgramMinAnnual / f.v) * f.v;
       const mo = Math.round(ann / 12 * 100) / 100;

@@ -53,18 +53,26 @@ function scanLadderGrid() {
   let cellsChecked = 0;
 
   // The DB bridge deep-merges lawn config without validating this field, so
-  // a malformed live value must be a violation. 0 is EXEMPT: it is the
-  // designed disarm value (every reader guards on > 0) and has been the
-  // shipped default since the 2026-07-17 owner ruling ("forget all floors")
-  // — a clean sweep must not ring a permanent critical bell over deliberate
-  // policy. Non-numeric or negative values still mean a corrupted config row.
+  // a malformed live value must be a violation. A DELIBERATE zero is
+  // EXEMPT: 0 is the designed disarm value (every reader guards on > 0)
+  // and the shipped default since the 2026-07-17 owner ruling ("forget all
+  // floors") — a clean sweep must not ring a permanent critical bell over
+  // policy. Deliberate means the numeric 0 or a numeric-string zero
+  // ("0"/"0.00", how pg returns numerics) — null/false/''/whitespace/arrays
+  // also COERCE to 0 but mean a corrupted config row, and pricing readers
+  // would silently treat them as disabled while the sweep reported clean.
   const rawProgramMinimum = LAWN_PRICING_V2.programMinimumMonthly;
   const programMinimumMonthly = Number(rawProgramMinimum);
-  if (!Number.isFinite(programMinimumMonthly) || programMinimumMonthly < 0) {
+  const deliberateZero =
+    (typeof rawProgramMinimum === 'number' && rawProgramMinimum === 0)
+    || (typeof rawProgramMinimum === 'string'
+      && rawProgramMinimum.trim() !== ''
+      && Number(rawProgramMinimum.trim()) === 0);
+  if (!deliberateZero && !(Number.isFinite(programMinimumMonthly) && programMinimumMonthly > 0)) {
     violations.push({
       check: 'malformed_program_minimum',
       cell: 'lawn_pricing_v2.programMinimumMonthly',
-      detail: `live config program minimum is ${JSON.stringify(rawProgramMinimum)} — not a valid dollar amount (0 = disarmed by design)`,
+      detail: `live config program minimum is ${JSON.stringify(rawProgramMinimum)} — not a valid dollar amount (numeric 0 = disarmed by design)`,
     });
   }
   // Same class of guard for the collected-margin floor: a blanked/0 live
