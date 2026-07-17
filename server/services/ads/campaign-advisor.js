@@ -15,6 +15,19 @@ try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 let SearchConsole;
 try { SearchConsole = require('../seo/search-console-v2'); } catch { SearchConsole = null; }
 
+// Lazy: whether the Google Ads client can actually push. Apply buttons on
+// LINKED campaigns are stripped when it can't — both locked manager paths
+// throw live_push_unavailable for linked rows without a configured client,
+// so the button would deterministically fail (preview envs, credential
+// outages).
+let _adsClient;
+function adsClientConfigured() {
+  try {
+    if (!_adsClient) _adsClient = require('./google-ads');
+    return Boolean(_adsClient.isConfigured());
+  } catch { return false; }
+}
+
 class CampaignAdvisor {
   async generateDailyAdvice() {
     logger.info('Running AI Campaign Advisor...');
@@ -249,6 +262,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
   normalizeRecommendations(advice, campaigns) {
     if (!advice || !Array.isArray(advice.recommendations)) return advice;
     const AUTO = new Set(['increase_budget', 'decrease_budget', 'change_mode']);
+    const adsConfigured = adsClientConfigured();
     const byId = new Map(campaigns.map((c) => [String(c.id), c]));
     const byName = new Map();
     for (const c of campaigns) {
@@ -266,6 +280,8 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
         || byName.get(String(rec.campaign || '').toLowerCase())
         || null;
       if (!campaign || campaign.platform !== 'google_ads' || campaign.status !== 'active') { strip(); continue; }
+      // A linked campaign needs a live push the unconfigured client can't run.
+      if (campaign.platform_campaign_id && !adsConfigured) { strip(); continue; }
       // An id resolving to a different campaign than the displayed name is
       // exactly the mislabel the route rejects.
       if (String(campaign.campaign_name).toLowerCase() !== String(rec.campaign).toLowerCase()) { strip(); continue; }
@@ -300,10 +316,13 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     // already stopped is a no-op the route rejects, and a budget rec for a
     // throttled (spent/stop) campaign can't take effect — either would render
     // an Apply button that is guaranteed to 422.
+    const adsConfigured = adsClientConfigured();
     for (const c of summaries) {
       // Mirrors /advisor/apply: only active Google campaigns take one-click
-      // changes (a paused campaign's apply would 422).
-      const controllable = c.platform === 'google_ads' && c.status === 'active';
+      // changes (a paused campaign's apply would 422), and a LINKED campaign
+      // needs a configured client for its live push.
+      const controllable = c.platform === 'google_ads' && c.status === 'active'
+        && !(c.linked && !adsConfigured);
       if (c.last7d.roas > 0 && c.last7d.roas < minRoas * 0.5) {
         recommendations.push({
           priority: 'high', campaign: c.name,
@@ -322,7 +341,11 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
         const target = Number.isFinite(baseBudget) && baseBudget > 0
           ? Math.max(Math.round(baseBudget * 1.25), Math.floor(baseBudget) + 1)
           : null;
+        // target <= 3x base mirrors the route's bound: a tiny budget's
+        // whole-dollar minimum (e.g. $0.30 -> $1) would otherwise carry an
+        // Apply button that deterministically 422s as out-of-bounds.
         const budgetApplicable = controllable && target
+          && target <= baseBudget * 3
           && (!c.budgetMode || c.budgetMode === 'base');
         recommendations.push({
           priority: 'medium', campaign: c.name,

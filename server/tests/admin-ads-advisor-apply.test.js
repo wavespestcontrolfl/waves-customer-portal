@@ -31,6 +31,15 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 
+// campaign-advisor's normalizer/fallback check whether the Google Ads client
+// can push (linked campaigns strip their Apply otherwise); mocked configured
+// by default so executability tests exercise the other guards.
+const mockAdsConfigured = jest.fn(() => true);
+jest.mock('../services/ads/google-ads', () => ({
+  isConfigured: mockAdsConfigured,
+  updateBudget: jest.fn(),
+}));
+
 const mockSetBudget = jest.fn();
 const mockSetMode = jest.fn();
 jest.mock('../services/ads/budget-manager', () => ({
@@ -388,6 +397,17 @@ test('a budget/mode apply with no campaign name → 422 (admin must see the targ
   expect(mockSetBudget).not.toHaveBeenCalled();
 });
 
+test('an oversized model reason is truncated to the varchar(255) audit column', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20 }];
+  mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: true, livePushAttempted: true });
+
+  const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30, reason: 'x'.repeat(600) });
+
+  expect(res.status).toBe(200);
+  const sentReason = mockSetBudget.mock.calls[0][2];
+  expect(sentReason.length).toBeLessThanOrEqual(255);
+});
+
 test('manager-thrown in-lock rechecks (budget_noop / budget_out_of_bounds) map to 422', async () => {
   mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20, daily_budget_current: 18 }];
   mockSetBudget.mockRejectedValueOnce(Object.assign(new Error('already at $30/day'), { code: 'budget_noop' }));
@@ -567,5 +587,43 @@ describe('normalizeRecommendations r7 — name required, linkage-aware', () => {
     const rec = advice.recommendations[0];
     expect(rec).toBeDefined();
     expect(rec.apply_action).toBeUndefined();
+  });
+});
+
+describe('normalize/fallback r9 — client availability and tiny-budget bound', () => {
+  const advisor = require('../services/ads/campaign-advisor');
+
+  afterEach(() => { mockAdsConfigured.mockReturnValue(true); });
+
+  test('a linked rec is stripped when the Google Ads client is unconfigured', () => {
+    mockAdsConfigured.mockReturnValue(false);
+    const rec = advisor.normalizeRecommendations({ recommendations: [
+      { campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 30 },
+    ] }, [{
+      id: 'g-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
+      platform_campaign_id: '123', budget_mode: 'base', daily_budget_base: 20, daily_budget_current: 20,
+    }]).recommendations[0];
+    expect(rec.apply_action).toBeUndefined();
+  });
+
+  test('fallback recs for a linked campaign stay advisory when the client is unconfigured', () => {
+    mockAdsConfigured.mockReturnValue(false);
+    const advice = advisor.generateFallbackAdvice([{
+      id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
+      linked: true, dailyBudgetBase: 20, dailyBudgetCurrent: 20,
+      last7d: { roas: 6, lostISBudget: 30 }, last30d: {}, trending: 'flat',
+    }], { min_roas: 4 });
+    expect(advice.recommendations[0].apply_action).toBeUndefined();
+  });
+
+  test('tiny-budget fallback whose whole-dollar minimum exceeds the 3x bound stays advisory', () => {
+    const advice = advisor.generateFallbackAdvice([{
+      id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
+      linked: false, dailyBudgetBase: 0.3, dailyBudgetCurrent: 0.3,
+      last7d: { roas: 6, lostISBudget: 30 }, last30d: {}, trending: 'flat',
+    }], { min_roas: 4 });
+    const rec = advice.recommendations[0];
+    expect(rec).toBeDefined();
+    expect(rec.apply_action).toBeUndefined(); // $1 target would be > 3x $0.30
   });
 });

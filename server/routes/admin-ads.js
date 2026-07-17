@@ -559,6 +559,11 @@ async function applyLive(fn, res) {
 router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
   try {
     const { action, campaignId, campaignName, value, reason } = req.body;
+    // ad_budget_log.reason is varchar(255) and the client sends the model's
+    // rec prose — an oversized reason would fail the audit insert AFTER the
+    // live push and force a pointless compensating rollback, permanently
+    // blocking that rec from applying.
+    const auditReason = String(reason || '').trim().slice(0, 255);
 
     const isBudgetAction = action === 'increase_budget' || action === 'decrease_budget';
     if (!isBudgetAction && action !== 'change_mode') {
@@ -653,7 +658,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' }), res);
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {

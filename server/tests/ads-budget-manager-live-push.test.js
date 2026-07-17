@@ -693,3 +693,45 @@ describe('in-lock rechecks (requireLivePush)', () => {
     jest.restoreAllMocks();
   });
 });
+// r9: sync-mirror detection + gate-aware ambiguity
+describe('rollbackAfterLivePush r9', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    campaignRows = [];
+    campaignFirstRow = null;
+  });
+
+  test('a sync mirror of OUR failed push is restored, not treated as superseded', async () => {
+    // Snapshot: base mode, current $40. The daily sync mirrored our failed
+    // push's live amount (0.4) into current — mode untouched.
+    campaignFirstRow = { ...baseCampaign(), daily_budget_current: '0.4' };
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+
+    const err = await BudgetManager.rollbackAfterLivePush(baseCampaign(), new Error('db down'), 0.4);
+
+    expect(err.code).toBe('live_push_rolled_back');
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
+    // The mirrored current is corrected back too.
+    expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40 });
+  });
+
+  test('ambiguous outcome with the live-push gate OFF says it will not self-heal', async () => {
+    mockIsEnabled.mockReturnValue(false);
+    // NULL prior current → no safe restore possible → ambiguous.
+    const err = await BudgetManager.rollbackAfterLivePush(
+      { ...baseCampaign(), daily_budget_current: null }, new Error('db down'), 30);
+
+    expect(err.code).toBe('live_push_ambiguous');
+    expect(err.message).toMatch(/will NOT self-heal/);
+  });
+
+  test('ambiguous outcome with the gate ON still promises the reconcile', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    const err = await BudgetManager.rollbackAfterLivePush(
+      { ...baseCampaign(), daily_budget_current: null }, new Error('db down'), 30);
+
+    expect(err.code).toBe('live_push_ambiguous');
+    expect(err.message).toMatch(/within ~2 hours/);
+  });
+});

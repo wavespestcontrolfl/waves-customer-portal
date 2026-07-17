@@ -1045,9 +1045,14 @@ function AdvisorTab() {
 
   const handleGenerate = async () => {
     setGenerating(true);
-    const r = await adminPost("/admin/ads/advisor/generate", {});
+    // Invalidate the OLD report's apply state when generation STARTS, not
+    // when it finishes — the AI request is slow, and an apply clicked during
+    // it would capture a token that's still current, executing a live budget
+    // change whose feedback the incoming report then silently discards.
+    // (Apply buttons are also disabled while generating.)
     reportGenRef.current += 1;
     setApplied({});
+    const r = await adminPost("/admin/ads/advisor/generate", {});
     setReport({
       report_data: r.report,
       date: etDateString(),
@@ -1057,6 +1062,7 @@ function AdvisorTab() {
   };
 
   const handleApply = async (rec, idx) => {
+    if (generating) return; // stale report — a new one is being generated
     // The button label shows the parsed value, and this confirm repeats it —
     // the server applies rec.apply_value, not whatever number the rec's prose
     // mentions, so the admin must see the actual amount before it goes live.
@@ -1351,7 +1357,7 @@ function AdvisorTab() {
                                     <div>
                                       <button
                                         onClick={() => handleApply(rec, globalIdx)}
-                                        disabled={done || pending}
+                                        disabled={done || pending || generating}
                                         style={{
                                           padding: "6px 14px",
                                           borderRadius: 6,
@@ -1359,10 +1365,10 @@ function AdvisorTab() {
                                           fontSize: 12,
                                           fontWeight: 600,
                                           cursor:
-                                            done || pending ? "default" : "pointer",
+                                            done || pending || generating ? "default" : "pointer",
                                           background: done ? D.green + "22" : D.teal,
                                           color: done ? D.green : D.heading,
-                                          opacity: pending ? 0.6 : 1,
+                                          opacity: pending || generating ? 0.6 : 1,
                                         }}
                                       >
                                         {done
