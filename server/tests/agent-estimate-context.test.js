@@ -3,6 +3,7 @@ const mockLoadSmsThread = jest.fn(async () => [{ body: 'phone-scoped text' }]);
 const mockLoadPriorEstimates = jest.fn(async () => [{ id: 'phone-scoped-estimate' }]);
 let mockContextLead = null;
 let mockContextCallRows = [];
+let mockContextSidCallRow = null;
 let mockContextOtherLeads = [];
 
 jest.mock('../models/db', () => {
@@ -17,8 +18,10 @@ jest.mock('../models/db', () => {
       whereRaw() { return this; },
       orderBy() { return this; },
       limit() { return this; },
+      modify(fn) { fn(this); return this; },
       async first() {
         if (table === 'leads') return this._leftJoin ? mockContextLead : null;
+        if (table === 'call_log') return mockContextSidCallRow;
         return null;
       },
       catch() { return this; },
@@ -258,6 +261,40 @@ describe('suppressed-caller sentinel phones', () => {
     expect(mockLoadCustomerByPhone).not.toHaveBeenCalled();
     expect(mockLoadSmsThread).not.toHaveBeenCalled();
     expect(mockLoadPriorEstimates).not.toHaveBeenCalled();
+  });
+});
+
+describe('lead call anchoring', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockContextLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      first_name: 'Pat', last_name: 'Caller', phone: '9415550100',
+      email: null, address: '1 St', city: 'Bradenton', zip: '34208',
+      twilio_call_sid: 'CA-anchor', transcript_summary: null, extracted_data: null,
+      status: 'new',
+    };
+    mockContextSidCallRow = {
+      id: 'call-anchor', twilio_call_sid: 'CA-anchor', direction: 'inbound',
+      duration_seconds: 120, transcription: 'the quote call itself', created_at: '2026-07-01',
+    };
+    // Three NEWER phone-matched calls — before the anchor fix these filled
+    // every slot and crowded the lead's own transcript out of the pack.
+    mockContextCallRows = [
+      { id: 'call-n1', twilio_call_sid: 'CA-n1', direction: 'inbound', duration_seconds: 30, transcription: 'newer 1', created_at: '2026-07-10' },
+      { id: 'call-n2', twilio_call_sid: 'CA-n2', direction: 'outbound', duration_seconds: 30, transcription: 'newer 2', created_at: '2026-07-09' },
+      { id: 'call-n3', twilio_call_sid: 'CA-n3', direction: 'inbound', duration_seconds: 30, transcription: 'newer 3', created_at: '2026-07-08' },
+    ];
+    mockContextOtherLeads = [];
+  });
+  afterEach(() => { mockContextSidCallRow = null; });
+
+  test("the lead's own call is never crowded out by newer phone-matched calls", async () => {
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.calls.map((call) => call.call_sid)).toContain('CA-anchor');
   });
 });
 

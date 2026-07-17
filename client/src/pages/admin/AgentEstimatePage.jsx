@@ -319,9 +319,19 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
   // A cleared lead field counts as a mismatch too — the snapshot then points
   // at a contact the lead no longer carries, which is exactly the stale-
   // recipient case. Mismatch DISABLES delivery until the draft is revised.
+  // The service ADDRESS gates the same way: the draft's pricing and property
+  // evidence describe the address it was built for, so an office correction
+  // to the lead's address must force a rebuild, not deliver the old quote.
+  const normalizedAddress = (value) => String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(fl|florida)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   const recipientMismatch = !!(
     (recipientPhone && phoneDigits(recipientPhone) !== phoneDigits(contact?.phone))
     || (recipientEmail && String(recipientEmail).toLowerCase() !== String(contact?.email || "").toLowerCase())
+    || (draft.address && normalizedAddress(draft.address) !== normalizedAddress(contact?.address))
   );
   return (
     <div className="space-y-4 p-4">
@@ -370,9 +380,10 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
         <div className="rounded-sm bg-zinc-50 p-3 text-[14px] leading-5 text-zinc-700">
           <div className="font-medium text-zinc-900">Delivers to the contact saved on this draft</div>
           <div>{recipientPhone || "No phone on draft"} · {recipientEmail || "No email on draft"}</div>
+          {draft.address && <div>{draft.address}</div>}
           {recipientMismatch && (
             <div className="mt-1">
-              The lead's contact info changed after this draft was created — sending is disabled until you revise the draft to re-anchor it.
+              The lead's contact info or service address changed after this draft was created — sending is disabled until you rebuild the draft so it prices and delivers against the current details.
             </div>
           )}
         </div>
@@ -696,7 +707,10 @@ export default function AgentEstimatePage() {
   // scheduled) can never be drafted or revised here — the server rejects both
   // paths deterministically — so don't send the operator through a paid AI
   // run and confirmation that is guaranteed to fail.
-  const buildBlocked = !!draft && draft.editable_here !== true;
+  // An ARCHIVED linked estimate is replaceable (the confirmed write path
+  // permits the replacement draft) — only a live non-editable estimate
+  // blocks the Agent Estimate entry points.
+  const buildBlocked = !!draft && !draft.archived && draft.editable_here !== true;
   // Closed (won/lost/unresponsive/duplicate) leads and blocked drafts must
   // not reach the draft tool through ANY estimator entry — Build, quick
   // actions, or a typed Ask AI prompt — since every Agent Estimate prompt is

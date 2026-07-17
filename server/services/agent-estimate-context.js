@@ -104,19 +104,41 @@ async function loadCalls(lead, phoneKey) {
   try {
     const digits = last10(phoneKey);
     if (!lead.twilio_call_sid && !digits) return [];
-    const rows = await db('call_log')
-      .where(function callMatch() {
-        if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
-        if (digits) {
-          this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
-          this.orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
-        }
-      })
-      .orderBy('created_at', 'desc')
-      .limit(3)
-      .select('id', 'twilio_call_sid', 'direction', 'duration_seconds', 'transcription',
-        'transcription_status', 'recording_url', 'ai_extraction', 'ai_extraction_enriched',
-        'v2_extraction_status', 'created_at');
+    const CALL_COLS = ['id', 'twilio_call_sid', 'direction', 'duration_seconds', 'transcription',
+      'transcription_status', 'recording_url', 'ai_extraction', 'ai_extraction_enriched',
+      'v2_extraction_status', 'created_at'];
+    // The lead's OWN call is the anchor evidence — fetch it first so three
+    // newer phone-matched calls can never crowd its transcript/extraction
+    // out of the pack; the remaining slots fill with recent phone history.
+    const rows = [];
+    if (lead.twilio_call_sid) {
+      const sidRow = await db('call_log')
+        .where('twilio_call_sid', lead.twilio_call_sid)
+        .orderBy('created_at', 'desc')
+        .first(...CALL_COLS);
+      if (sidRow) rows.push(sidRow);
+    }
+    if (digits && rows.length < 3) {
+      const phoneRows = await db('call_log')
+        .where(function phoneMatch() {
+          this.whereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+            .orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
+        })
+        // NULL-safe exclusion of the already-fetched anchor row — a bare
+        // whereNot would also drop rows whose sid is NULL.
+        .modify((q) => {
+          if (rows.length) {
+            q.where(function notAnchor() {
+              this.whereNull('twilio_call_sid').orWhereNot('twilio_call_sid', lead.twilio_call_sid);
+            });
+          }
+        })
+        .orderBy('created_at', 'desc')
+        .limit(3 - rows.length)
+        .select(...CALL_COLS);
+      rows.push(...phoneRows);
+    }
+    rows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     const calls = rows.map((call) => {
       const { extraction, source } = extractionFromCall(call);
       return {
@@ -157,7 +179,15 @@ async function loadCalls(lead, phoneKey) {
         });
       }
     }
-    return calls.slice(0, 3);
+    // The cap must never evict the lead's own call — it can be the OLDEST
+    // row (the quote call that created the lead, with newer unrelated calls
+    // on the same number since), and it is the whole point of the pack.
+    const capped = calls.slice(0, 3);
+    if (lead.twilio_call_sid && !capped.some((call) => call.call_sid === lead.twilio_call_sid)) {
+      const anchor = calls.find((call) => call.call_sid === lead.twilio_call_sid);
+      if (anchor) capped[capped.length - 1] = anchor;
+    }
+    return capped;
   } catch (err) {
     logger.warn(`[agent-estimate] call load failed: ${err.message}`);
     return [];
@@ -260,7 +290,7 @@ async function buildAgentEstimateContext(leadId) {
     lead.estimate_id
       ? db('estimates').where({ id: lead.estimate_id }).first('id', 'token', 'status', 'source',
         'monthly_total', 'annual_total', 'onetime_total', 'service_interest', 'estimate_data',
-        'customer_phone', 'customer_email', 'updated_at').catch(() => null)
+        'customer_phone', 'customer_email', 'address', 'archived_at', 'updated_at').catch(() => null)
       : Promise.resolve(null),
     db('agent_estimate_memory').where({ status: 'approved' }).orderBy('reviewed_at', 'desc')
       .limit(20).select('id', 'rule_text', 'rationale', 'version', 'reviewed_at').catch(() => []),
@@ -394,10 +424,19 @@ async function buildAgentEstimateContext(leadId) {
       // send the link to a stale phone/email.
       customer_phone: currentEstimate.customer_phone || null,
       customer_email: currentEstimate.customer_email || null,
+      // The priced service address snapshot — a post-draft lead-address
+      // correction must gate delivery exactly like a phone/email change
+      // (the estimate's pricing and property evidence describe THIS parcel).
+      address: currentEstimate.address || null,
+      // An archived linked estimate is replaceable, not blocking — the
+      // confirmed write path already permits a replacement draft, so the
+      // workspace must not treat the archived row as a live block.
+      archived: !!currentEstimate.archived_at,
       agent_origin: currentEngine.origin || null,
       lane: currentEngine.lane || null,
       lane_reasons: currentEngine.laneReasons || [],
       editable_here: currentEstimate.status === 'draft'
+        && !currentEstimate.archived_at
         && currentEstimate.source === 'estimator_engine'
         && currentEngine.origin === 'manual_agent',
       presentation_template: currentEngine.presentationTemplate || null,
