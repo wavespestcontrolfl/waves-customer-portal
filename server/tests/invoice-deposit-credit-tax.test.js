@@ -411,7 +411,12 @@ describe('line-item edits on deposit-credited invoices are blocked (P1)', () => 
 });
 
 describe('editability guard blocks updates once an invoice leaves the safe-to-edit window', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Every edit now runs runEdit inside a transaction (invoice row lock is
+    // the serialization point against dun sends) — pass-through.
+    db.transaction = jest.fn(async (fn) => fn(db));
+  });
 
   // Re-reads the CURRENT invoice row at write time; some cases also probe
   // payment_plans for an active plan and the payments ledger for the
@@ -543,6 +548,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
           whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => stored),
           // Predicate-guarded write no longer matches — simulates a concurrent
           // worker stamping the PI / flipping status / creating a payment plan
@@ -574,6 +580,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
           whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'updated' }]) })),
         };
@@ -607,6 +614,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
           whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'updated' }]) })),
         };
@@ -647,6 +655,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
           whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'call before arrival' }]) })),
         };
@@ -679,6 +688,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
           whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, due_date: '2026-08-15' }]) })),
         };
@@ -698,10 +708,11 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       throw new Error(`Unexpected table query: ${table}`);
     });
     await InvoiceService.update('inv-1', { due_date: '2026-08-15' });
-    expect(mockRescheduleForInvoiceEdit).toHaveBeenCalledWith('inv-1', {
-      previousDueDate: '2026-07-30',
-      newDueDate: '2026-08-15',
-    });
+    expect(mockRescheduleForInvoiceEdit).toHaveBeenCalledWith(
+      'inv-1',
+      { previousDueDate: '2026-07-30', newDueDate: '2026-08-15' },
+      expect.anything(), // the edit's own transaction — reschedule commits atomically with it
+    );
   });
 
   it('does NOT re-anchor the follow-up sequence when the due date is unchanged', async () => {
@@ -714,6 +725,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
           whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored }]) })),
         };
@@ -751,6 +763,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
           whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, status: 'sent', notes: 'updated' }]) })),
         };
@@ -785,6 +798,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           whereIn: jest.fn(() => q),
           whereNull: jest.fn(() => q),
           whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
           first: jest.fn(async () => stored),
           update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, notes: 'updated' }]) })),
         };

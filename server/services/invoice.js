@@ -3171,7 +3171,48 @@ const InvoiceService = {
     // transactions. Left as-is on purpose: it needs two admins on the SAME
     // draft within a sub-second window, the already-exists cases are blocked
     // above, and any resulting total mismatch is visible and recoverable.
+    // A changed due date must re-anchor the follow-up sequence ATOMICALLY
+    // with the edit (inside runEdit): committing the new due date first
+    // would leave a gap where a cron worker claims the still-due sequence
+    // and sends the old reminder. Compared as calendar dates (the column is
+    // a DATE; the editor sends YYYY-MM-DD) so an unchanged date doesn't
+    // re-anchor a send-anchored cadence.
+    const asDateOnly = (v) => {
+      if (!v) return "";
+      const d = new Date(v);
+      return Number.isNaN(d.getTime())
+        ? String(v)
+        : d.toISOString().slice(0, 10);
+    };
+    const dueDateChanged =
+      data.due_date !== undefined &&
+      asDateOnly(existing.due_date) !== asDateOnly(data.due_date);
+
     const runEdit = async (client) => {
+      // Serialize against in-flight dun sends: lock the invoice row FIRST.
+      // fireStep's claim transaction locks this same row before stamping
+      // touch_claimed_at, so one of the two strictly precedes the other —
+      // then the claim re-check below runs on a fresh statement that can
+      // see the winner's commit (the pre-check alone could read a snapshot
+      // taken before a concurrent claim committed).
+      const lockedRow = await client("invoices")
+        .where({ id })
+        .forUpdate()
+        .first();
+      if (!lockedRow) {
+        throw new Error(
+          "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      const inFlightNow = await client("invoice_followup_sequences")
+        .where({ invoice_id: id })
+        .where("touch_claimed_at", ">", touchClaimFreshCutoff)
+        .first("id");
+      if (inFlightNow) {
+        throw new Error(
+          "A payment reminder for this invoice is sending right now — try again in a minute",
+        );
+      }
       // Accrued: lock the parent statement and re-verify it's still OPEN inside
       // this transaction, so a concurrent close can't finalize between the
       // pre-check above and this write.
@@ -3238,41 +3279,24 @@ const InvoiceService = {
       if (edited.payer_statement_id) {
         await require("./payer-statements").rollupStatement(edited.payer_statement_id, client);
       }
-      return edited;
-    };
-    // An accrued invoice's edit + statement reroll must commit atomically; other
-    // invoices keep the existing single-statement write (no transaction).
-    const edited = await (existing.payer_statement_id
-      ? db.transaction(runEdit)
-      : runEdit(db));
-    // A changed due date moves the collection timeline — re-anchor an ACTIVE
-    // follow-up sequence so the customer isn't dunned on the pre-edit
-    // schedule. Compared as calendar dates (the column is a DATE; the editor
-    // sends YYYY-MM-DD) so an unchanged date doesn't re-anchor a
-    // send-anchored cadence. Best-effort after commit: the edit stands even
-    // if rescheduling fails.
-    const asDateOnly = (v) => {
-      if (!v) return "";
-      const d = new Date(v);
-      return Number.isNaN(d.getTime())
-        ? String(v)
-        : d.toISOString().slice(0, 10);
-    };
-    if (
-      data.due_date !== undefined &&
-      asDateOnly(existing.due_date) !== asDateOnly(data.due_date)
-    ) {
-      try {
-        await require("./invoice-followups").rescheduleForInvoiceEdit(id, {
-          previousDueDate: existing.due_date,
-          newDueDate: data.due_date,
-        });
-      } catch (err) {
-        logger.warn(
-          `[invoice-followups] rescheduleForInvoiceEdit failed for invoice ${id}: ${err.message}`,
+      if (dueDateChanged) {
+        // In the SAME transaction (and under the invoice row lock): a cron
+        // worker's claim can't interleave between the committed due date and
+        // the moved sequence, and a reschedule failure aborts the edit
+        // rather than leaving the old dunning timeline against the new date.
+        await require("./invoice-followups").rescheduleForInvoiceEdit(
+          id,
+          { previousDueDate: existing.due_date, newDueDate: data.due_date },
+          client,
         );
       }
-    }
+      return edited;
+    };
+    // Every edit runs in a transaction now: the invoice row lock at the top
+    // of runEdit is the serialization point against fireStep's claim, and
+    // the statement reroll / follow-up re-anchor must commit atomically
+    // with the edit.
+    const edited = await db.transaction(runEdit);
     // Audit trail: a delivered invoice was rewritten after the customer could
     // have seen it — the emailed PDF is now stale until it's resent. Keyed on
     // the SAVED row's status, not the pre-read one: a scheduled send can

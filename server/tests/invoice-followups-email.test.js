@@ -42,6 +42,7 @@ function chain({ result = [], first, returning } = {}) {
     'whereNotExists',
     'select',
     'orderBy',
+    'forUpdate',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -118,6 +119,9 @@ describe('invoice follow-up email sidecar', () => {
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
     jest.clearAllMocks();
+    // fireStep claims inside a transaction that locks the invoice row —
+    // pass-through so the queued table chains serve it.
+    db.transaction = jest.fn(async (fn) => fn(db));
   });
 
   afterEach(() => {
@@ -134,14 +138,17 @@ describe('invoice follow-up email sidecar', () => {
       // fireStep re-reads the invoice after the account-credit draw-down
       // (total/credit_applied/status), THEN sendFollowupEmail fetches it
       // again for the eligibility check — two reads per fired step.
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() })],
+      // Claim-txn row lock read + the credit path's own invoice read (it
+      // bails at its payment_plans probe in this harness) + the pre-dun
+      // refresh + the email-eligibility read.
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       // fireStep now claims the sequence (touch_claimed_at) before sending
       // and clears it after — the cadence advance is the middle entry.
       invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-lock revalidation
         chain({ result: 1 }), // touch claim
-        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-claim revalidation
         sequenceUpdate, // cadence advance
         chain({ result: 1 }), // claim clear
       ],
@@ -188,13 +195,13 @@ describe('invoice follow-up email sidecar', () => {
   test('skips a touch whose sequence was postponed between the batch select and the claim', async () => {
     // A delivered-invoice due-date edit (rescheduleForInvoiceEdit) can move
     // next_touch_at into the future after runPending materialized its batch —
-    // the post-claim revalidation must drop the stale snapshot unsent.
+    // the post-lock revalidation must drop the stale snapshot unsent (no
+    // claim is taken, so there is nothing to clear).
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      invoices: [chain({ first: invoice() })], // claim-txn row lock read
       invoice_followup_sequences: [
-        chain({ result: 1 }), // claim succeeds
         chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-30T14:00:00.000Z', anchor_at: null } }), // postponed
-        chain({ result: 1 }), // claim clear
       ],
     });
 
@@ -251,13 +258,16 @@ describe('invoice follow-up email sidecar', () => {
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: customer({ phone: null }) })],
       // Two invoice reads per fired step: credit re-read + email eligibility.
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() })],
+      // Claim-txn row lock read + the credit path's own invoice read (it
+      // bails at its payment_plans probe in this harness) + the pre-dun
+      // refresh + the email-eligibility read.
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       // Claim → cadence advance → claim clear (see the sidecar test above).
       invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-lock revalidation
         chain({ result: 1 }), // touch claim
-        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-claim revalidation
         sequenceUpdate, // cadence advance
         chain({ result: 1 }), // claim clear
       ],

@@ -75,10 +75,27 @@ describe('rescheduleForInvoiceEdit shifts the whole cadence by the due-date delt
     });
     expect(seqUpdate).toHaveBeenCalledTimes(1);
     const patch = seqUpdate.mock.calls[0][0];
-    // Anchor: sent_at + 30 days.
-    expect(patch.anchor_at.toISOString()).toBe('2026-07-31T15:00:00.000Z');
+    // Anchor: sent NY day Jul 1 + 30 → NY day Jul 31, pinned at noon UTC
+    // (the cadence only consumes the anchor's NY calendar date).
+    expect(patch.anchor_at.toISOString()).toBe('2026-07-31T12:00:00.000Z');
     // d7 step off the shifted anchor: NY day 2026-07-31 + 7 → Aug 7, 10 AM EDT.
     expect(patch.next_touch_at.toISOString()).toBe('2026-08-07T14:00:00.000Z');
+  });
+
+  it('advances by Eastern calendar days across the spring DST boundary, not by 24-hour periods', async () => {
+    // Sent Sat 2026-03-07 11:30 PM EST (= 2026-03-08T04:30Z). +24h lands
+    // 12:30 AM EDT on Mar 9 (DST starts Mar 8) — one NY day too far. The
+    // shift must anchor NY day Mar 7 + 1 = Mar 8.
+    const { seqUpdate } = setupDb({
+      seq: { id: 'seq-1', status: 'active', step_index: 0, anchor_at: null },
+      invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-03-08T04:30:00Z', due_date: '2026-03-16' },
+    });
+    await rescheduleForInvoiceEdit('inv-1', {
+      previousDueDate: '2026-03-15',
+      newDueDate: '2026-03-16',
+    });
+    const patch = seqUpdate.mock.calls[0][0];
+    expect(patch.anchor_at.toISOString()).toBe('2026-03-08T12:00:00.000Z');
   });
 
   it('compounds a second shift from the stored anchor_at, not from sent_at', async () => {
@@ -91,7 +108,8 @@ describe('rescheduleForInvoiceEdit shifts the whole cadence by the due-date delt
       newDueDate: '2026-08-21',
     });
     const patch = seqUpdate.mock.calls[0][0];
-    expect(patch.anchor_at.toISOString()).toBe('2026-08-07T15:00:00.000Z');
+    // Stored anchor's NY day Jul 31 + 7 → NY day Aug 7 at noon UTC.
+    expect(patch.anchor_at.toISOString()).toBe('2026-08-07T12:00:00.000Z');
   });
 
   it('is a no-op when the due date is unchanged', async () => {
@@ -120,7 +138,7 @@ describe('rescheduleForInvoiceEdit shifts the whole cadence by the due-date delt
       newDueDate: '2026-08-14',
     });
     const patch = seqUpdate.mock.calls[0][0];
-    expect(patch.anchor_at.toISOString()).toBe('2026-07-31T15:00:00.000Z');
+    expect(patch.anchor_at.toISOString()).toBe('2026-07-31T12:00:00.000Z');
     expect('next_touch_at' in patch).toBe(false);
   });
 
@@ -134,7 +152,7 @@ describe('rescheduleForInvoiceEdit shifts the whole cadence by the due-date delt
       newDueDate: '2026-08-14',
     });
     const patch = seqUpdate.mock.calls[0][0];
-    expect(patch.anchor_at.toISOString()).toBe('2026-07-31T15:00:00.000Z');
+    expect(patch.anchor_at.toISOString()).toBe('2026-07-31T12:00:00.000Z');
     expect('next_touch_at' in patch).toBe(false);
   });
 

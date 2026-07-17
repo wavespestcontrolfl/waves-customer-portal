@@ -355,37 +355,57 @@ async function fireStep(row) {
   // here would release the successor's live claim and let an edit race its
   // in-flight reminder.
   const claimStamp = new Date();
-  const claimed = await db('invoice_followup_sequences')
-    .where({ id: row.id })
-    .where(function () {
-      this.whereNull('touch_claimed_at').orWhere(
-        'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
-      );
-    })
-    .update({ touch_claimed_at: claimStamp });
-  if (!claimed) {
-    logger.warn(`[invoice-followups] touch already in flight for invoice ${row.invoice_id}; skipping`);
+  let claimedSeq = null;
+  try {
+    // Claim inside a transaction that locks the INVOICE row first.
+    // InvoiceService.update locks the same row before re-checking the claim,
+    // so Postgres strictly orders an edit against this claim — without a
+    // common row lock, both single-statement writes could pass on
+    // pre-commit snapshots of each other. The transaction holds no external
+    // work: it commits before any rendering or sending.
+    await db.transaction(async (trx) => {
+      const lockedInvoice = await trx('invoices')
+        .where({ id: row.invoice_id })
+        .forUpdate()
+        .first();
+      if (!lockedInvoice) return;
+      // Post-claim... now post-LOCK revalidation: the caller's row is a
+      // batch snapshot — a due-date edit (rescheduleForInvoiceEdit, which
+      // commits atomically with its invoice edit) can postpone
+      // next_touch_at, or an admin can pause/stop/advance the sequence.
+      // Fire only if it is still active, on the same step, and actually
+      // due; progress from the LIVE anchor so a postponed timeline is
+      // never overwritten from the stale snapshot.
+      const liveSeq = await trx('invoice_followup_sequences').where({ id: row.id }).first();
+      if (
+        !liveSeq ||
+        liveSeq.status !== 'active' ||
+        liveSeq.step_index !== row.step_index ||
+        !liveSeq.next_touch_at ||
+        new Date(liveSeq.next_touch_at).getTime() > Date.now()
+      ) {
+        return;
+      }
+      const claimed = await trx('invoice_followup_sequences')
+        .where({ id: row.id })
+        .where(function () {
+          this.whereNull('touch_claimed_at').orWhere(
+            'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
+          );
+        })
+        .update({ touch_claimed_at: claimStamp });
+      if (claimed) claimedSeq = liveSeq;
+    });
+  } catch (err) {
+    logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
     return;
   }
+  if (!claimedSeq) {
+    logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; skipping touch`);
+    return;
+  }
+  row.anchor_at = claimedSeq.anchor_at;
   try {
-    // Post-claim revalidation: the caller's row is a batch snapshot —
-    // between the cron select and this claim, a due-date edit
-    // (rescheduleForInvoiceEdit) can postpone next_touch_at, or an admin can
-    // pause/stop/advance the sequence. Fire only if it is still active, on
-    // the same step, and actually due; and progress from the LIVE anchor so
-    // a postponed timeline is never overwritten from the stale snapshot.
-    const liveSeq = await db('invoice_followup_sequences').where({ id: row.id }).first();
-    if (
-      !liveSeq ||
-      liveSeq.status !== 'active' ||
-      liveSeq.step_index !== row.step_index ||
-      !liveSeq.next_touch_at ||
-      new Date(liveSeq.next_touch_at).getTime() > Date.now()
-    ) {
-      logger.info(`[invoice-followups] sequence ${row.id} changed after batch select; skipping touch`);
-      return;
-    }
-    row.anchor_at = liveSeq.anchor_at;
     await fireTouch(row);
   } finally {
     await db('invoice_followup_sequences')
@@ -750,7 +770,7 @@ async function resumeSequence(invoiceId) {
  * but keep next_touch_at null until their release paths re-arm them;
  * stopped / completed rows are terminal and untouched.
  */
-async function rescheduleForInvoiceEdit(invoiceId, { previousDueDate, newDueDate } = {}) {
+async function rescheduleForInvoiceEdit(invoiceId, { previousDueDate, newDueDate } = {}, dbc = db) {
   const dayMs = 24 * 60 * 60 * 1000;
   const prev = previousDueDate ? new Date(previousDueDate) : null;
   const next = newDueDate ? new Date(newDueDate) : null;
@@ -765,18 +785,36 @@ async function rescheduleForInvoiceEdit(invoiceId, { previousDueDate, newDueDate
   // sequence carries a scheduled next touch; held/paused rows keep
   // next_touch_at null until released. Stopped/completed are terminal.
   const RESCHEDULABLE_STATUSES = ['active', 'paused', 'autopay_hold'];
-  const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+  const seq = await dbc('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq || !RESCHEDULABLE_STATUSES.includes(seq.status)) return;
-  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  const invoice = await dbc('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
 
   const baseAnchor = seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
-  const shiftedAnchor = new Date(new Date(baseAnchor).getTime() + deltaDays * dayMs);
+  const shiftedAnchor = shiftAnchorNYCalendarDays(new Date(baseAnchor), deltaDays);
   const patch = { anchor_at: shiftedAnchor };
   if (seq.status === 'active') {
     patch.next_touch_at = computeNextTouchAt(shiftedAnchor, seq.step_index);
   }
-  await db('invoice_followup_sequences').where({ id: seq.id }).update(patch);
+  await dbc('invoice_followup_sequences').where({ id: seq.id }).update(patch);
+}
+
+/**
+ * Advance an anchor by N America/New_York CALENDAR days. The cadence only
+ * consumes an anchor's NY calendar date (anchorTo10amNY), so the shifted
+ * anchor is pinned to noon UTC of the target day — fixed 24-hour arithmetic
+ * would move a near-midnight anchor across the spring DST boundary onto the
+ * wrong Eastern date and delay every remaining reminder by a day.
+ */
+function shiftAnchorNYCalendarDays(anchorDate, days) {
+  const nyParts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(anchorDate).map((p) => [p.type, p.value])
+  );
+  const base = new Date(Date.UTC(+nyParts.year, +nyParts.month - 1, +nyParts.day, 12));
+  base.setUTCDate(base.getUTCDate() + days);
+  return base;
 }
 
 async function stopSequence(invoiceId, { reason, adminId } = {}) {
