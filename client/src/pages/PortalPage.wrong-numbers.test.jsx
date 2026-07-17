@@ -30,7 +30,10 @@ const customer = {
   monthlyRate: 89, property: { propertySqFt: 5000, bedSqFt: 800, lotSqFt: 9000 },
 };
 
-const THIS_YEAR = new Date().getFullYear();
+// BillingTab computes its YTD year from the EASTERN date — during the first
+// UTC hours of Jan 1 the UTC year is already ahead, so derive the fixture
+// year the same way to keep this test green through that window.
+const THIS_YEAR = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })).getFullYear();
 
 beforeEach(() => {
   vi.clearAllMocks();

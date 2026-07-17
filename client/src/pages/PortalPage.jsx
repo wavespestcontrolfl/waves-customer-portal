@@ -2253,7 +2253,13 @@ function ServicesTab() {
     setLoadingMore(true);
     api.getServices({ limit: SERVICES_PAGE_SIZE, offset: services.length })
       .then(d => {
-        setServices(prev => [...prev, ...(d.services || [])]);
+        // The offset runs against a live newest-first query — a visit
+        // completed between pages shifts the boundary and re-sends the last
+        // row of the previous page. Dedupe by id so it can't render twice.
+        setServices(prev => {
+          const seen = new Set(prev.map(s => s.id));
+          return [...prev, ...(d.services || []).filter(s => !seen.has(s.id))];
+        });
         if (Number.isFinite(d.total)) setTotalServices(d.total);
       })
       .catch(err => {
@@ -4295,7 +4301,9 @@ function BillingTab({ customer }) {
   const cardExpiringSoon = (() => {
     if (!defaultCard) return null;
     const now = new Date();
-    const expDate = new Date(defaultCard.expYear, defaultCard.expMonth, 0); // last day of exp month
+    // End of the last day of the expiry month (23:59:59, matching
+    // useCustomerCards) — the card stays valid through month-end.
+    const expDate = new Date(defaultCard.expYear, defaultCard.expMonth, 0, 23, 59, 59);
     const diffMs = expDate - now;
     const diffDays = Math.ceil(diffMs / 86400000);
     if (diffDays <= 0) return { last4: defaultCard.lastFour, expired: true };
