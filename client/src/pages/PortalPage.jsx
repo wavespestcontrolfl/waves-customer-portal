@@ -2221,24 +2221,60 @@ function ServicesTab() {
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
-  const [photoMap, setPhotoMap] = useState({});
+  const [detailMap, setDetailMap] = useState({});
+  const [totalServices, setTotalServices] = useState(null);
+  // Raw pagination cursor — counts rows RECEIVED, not rows kept after the
+  // boundary-row dedupe, so the next page never re-requests a seen row.
+  const [servicesOffset, setServicesOffset] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
   const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
     (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
   );
 
+  const SERVICES_PAGE_SIZE = 100;
   const loadServices = useCallback(() => {
     setLoading(true);
     setLoadError('');
-    api.getServices({ limit: 100 })
-      .then(d => { setServices(d.services || []); })
+    api.getServices({ limit: SERVICES_PAGE_SIZE })
+      .then(d => {
+        setServices(d.services || []);
+        setServicesOffset((d.services || []).length);
+        setTotalServices(Number.isFinite(d.total) ? d.total : null);
+      })
       .catch(err => {
         console.error(err);
         setLoadError(err?.message || 'Could not load service history.');
       })
       .finally(() => setLoading(false));
   }, []);
+
+  // The server caps each page at 100 rows — older visits stay reachable
+  // through an explicit Load More instead of silently vanishing from history.
+  const loadMoreServices = () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
+      .then(d => {
+        // The offset runs against a live newest-first query — a visit
+        // completed between pages shifts the boundary and re-sends the last
+        // row of the previous page. Dedupe by id so it can't render twice,
+        // but advance the cursor by rows RECEIVED so paging never stalls.
+        setServices(prev => {
+          const seen = new Set(prev.map(s => s.id));
+          return [...prev, ...(d.services || []).filter(s => !seen.has(s.id))];
+        });
+        setServicesOffset(prev => prev + (d.services || []).length);
+        if (Number.isFinite(d.total)) setTotalServices(d.total);
+      })
+      .catch(err => {
+        console.error(err);
+        showCustomerAlert(err?.message || 'Could not load more visits. Please try again.');
+      })
+      .finally(() => setLoadingMore(false));
+  };
+  const hasMoreServices = totalServices != null && servicesOffset < totalServices;
 
   useEffect(() => {
     loadServices();
@@ -2247,10 +2283,13 @@ function ServicesTab() {
   const toggleExpand = (svc) => {
     const next = expanded === svc.id ? null : svc.id;
     setExpanded(next);
-    if (next && svc.hasPhotos && !photoMap[svc.id]) {
+    // The list payload carries a reduced product projection (no rate or
+    // amount) — hydrate the full record once per row so the expanded table
+    // and photos render the stored data instead of dashes.
+    if (next && !detailMap[svc.id]) {
       api.getService(svc.id)
-        .then(d => setPhotoMap(prev => ({ ...prev, [svc.id]: d.photos || [] })))
-        .catch(err => console.error('Failed to load service photos', err));
+        .then(d => setDetailMap(prev => ({ ...prev, [svc.id]: d })))
+        .catch(err => console.error('Failed to load service details', err));
     }
   };
 
@@ -2517,6 +2556,11 @@ function ServicesTab() {
                 const status = getStatus(s);
                 const cat = classifyType(s.type);
                 const tip = aftercareTips[cat];
+                // Hydrated full record (rate/amount columns + photos); the
+                // reduced list projection is the fallback while it loads.
+                const detail = detailMap[s.id];
+                const rowProducts = detail?.products?.length ? detail.products : (s.products || []);
+                const rowPhotos = detail ? (detail.photos || []) : null;
                 return (
                   <div key={s.id} style={{
                     ...card,
@@ -2621,7 +2665,7 @@ function ServicesTab() {
                         )}
 
                         {/* Products Applied — full table */}
-                        {s.products?.length > 0 && (
+                        {rowProducts.length > 0 && (
                           <div style={{ padding: '14px 18px', borderBottom: '1px solid #E7E2D7' }}>
                             <div style={{ ...sectionTitle, marginBottom: 10 }}>Products Applied</div>
                             <div style={{ overflowX: 'auto', border: '1px solid #E7E2D7', borderRadius: 8 }}>
@@ -2635,7 +2679,7 @@ function ServicesTab() {
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {s.products.map((p, i) => (
+                                  {rowProducts.map((p, i) => (
                                     <tr key={`${s.id}-${p.product_name || ''}-${p.active_ingredient || ''}-${i}`}>
                                       <td style={{ ...tdSt, fontWeight: 600 }}>
                                         {p.product_name}
@@ -2669,13 +2713,13 @@ function ServicesTab() {
                             <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                               <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
-                            {!photoMap[s.id] ? (
+                            {!rowPhotos ? (
                               <PortalInlineState
                                 icon="camera"
                                 title="Loading photos"
                                 message="Fetching service photos for this visit."
                               />
-                            ) : photoMap[s.id].length === 0 ? (
+                            ) : rowPhotos.length === 0 ? (
                               <PortalInlineState
                                 icon="camera"
                                 title="No photos available"
@@ -2683,7 +2727,7 @@ function ServicesTab() {
                               />
                             ) : (
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 8 }}>
-                                {photoMap[s.id].map((p) => (
+                                {rowPhotos.map((p) => (
                                   <div key={p.id}
                                     onClick={() => setLightbox(p)}
                                     style={{
@@ -2804,6 +2848,23 @@ function ServicesTab() {
           </div>
         );
       })}
+
+      {hasMoreServices && (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '4px 0 8px' }}>
+          <button
+            type="button"
+            onClick={loadMoreServices}
+            disabled={loadingMore}
+            style={{ ...PORTAL_SECONDARY_ACTION, opacity: loadingMore ? 0.65 : 1, cursor: loadingMore ? 'wait' : 'pointer' }}
+          >
+            {loadingMore ? 'Loading...' : 'Load More Visits'}
+          </button>
+          <div style={{ fontSize: 12, color: muted, fontWeight: 700 }}>
+            Showing {services.length} of {totalServices} visits
+          </div>
+        </div>
+      )}
+
       {preview && (
         <DocumentPreviewOverlay
           preview={preview}
@@ -4240,26 +4301,37 @@ function BillingTab({ customer }) {
   const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
   const discount = activeTierName ? (TIER_DISCOUNTS[tierName] || 0) : 0;
 
-  // Card expiry check — within 60 days
+  // Card expiry check — already expired, or expiring within 60 days. An
+  // expired default card must never fall through to the green "all good"
+  // state: it cannot be charged.
   const cardExpiringSoon = (() => {
     if (!defaultCard) return null;
+    // Bank accounts (ACH) carry null expiry fields — they never expire and
+    // must not be flagged. Only real cards with expiry data participate.
+    if (defaultCard.methodType && defaultCard.methodType !== 'card') return null;
+    if (!defaultCard.expMonth || !defaultCard.expYear) return null;
     const now = new Date();
-    const expDate = new Date(defaultCard.expYear, defaultCard.expMonth, 0); // last day of exp month
+    // End of the last day of the expiry month (23:59:59, matching
+    // useCustomerCards) — the card stays valid through month-end.
+    const expDate = new Date(defaultCard.expYear, defaultCard.expMonth, 0, 23, 59, 59);
     const diffMs = expDate - now;
     const diffDays = Math.ceil(diffMs / 86400000);
-    if (diffDays > 0 && diffDays <= 60) {
+    if (diffDays <= 0) return { last4: defaultCard.lastFour, expired: true };
+    if (diffDays <= 60) {
       const months = Math.ceil(diffDays / 30);
       return { last4: defaultCard.lastFour, months };
     }
     return null;
   })();
 
-  // Banner state: red (failed) > amber (expiring) > green (all good)
+  // Banner state: red (failed/expired) > amber (expiring) > green (all good)
   const bannerState = lastPaymentFailed
     ? 'failed'
-    : cardExpiringSoon
-      ? 'expiring'
-      : autopayState === 'active'
+    : cardExpiringSoon?.expired
+      ? 'expired'
+      : cardExpiringSoon
+        ? 'expiring'
+        : autopayState === 'active'
         ? 'active'
         : autopayState === 'paused'
           ? 'paused'
@@ -4272,6 +4344,12 @@ function BillingTab({ customer }) {
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: 'Payment failed - update your payment method',
       detail: 'Your last payment could not be processed. Update your card to avoid service interruption.',
+    },
+    expired: {
+      bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
+      badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
+      title: `Card ending in ${cardExpiringSoon?.last4 || ''} has expired`,
+      detail: 'This card can no longer be charged. Update your payment method to avoid any disruption to service.',
     },
     expiring: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'warning',
@@ -4358,9 +4436,13 @@ function BillingTab({ customer }) {
     const yr = parseDate(p.date).getFullYear();
     return yr === currentYear && p.status === 'paid';
   });
-  const ytdTotal = ytdPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
-  const ytdRecurring = ytdPayments.filter(p => p.type === 'recurring').reduce((sum, p) => sum + (p.amount || 0), 0);
-  const ytdOneTime = ytdPayments.filter(p => p.type === 'one_time').reduce((sum, p) => sum + (p.amount || 0), 0);
+  // Partially refunded payments stay status 'paid' while refundAmount
+  // carries the returned portion — YTD figures count only what the customer
+  // actually kept paying.
+  const netPaid = (p) => Math.max(0, (p.amount || 0) - (p.refundAmount || 0));
+  const ytdTotal = ytdPayments.reduce((sum, p) => sum + netPaid(p), 0);
+  const ytdRecurring = ytdPayments.filter(p => p.type === 'recurring').reduce((sum, p) => sum + netPaid(p), 0);
+  const ytdOneTime = ytdPayments.filter(p => p.type === 'one_time').reduce((sum, p) => sum + netPaid(p), 0);
   const paymentYears = Array.from(new Set([
     currentYear,
     ...payments.map(p => parseDate(p.date).getFullYear()).filter(Number.isFinite),
@@ -4938,6 +5020,11 @@ function BillingTab({ customer }) {
             </div>
             <div style={{ textAlign: 'right', flexShrink: 0 }}>
               <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>{money(p.amount)}</div>
+              {p.refundAmount > 0 && p.status === 'paid' && (
+                <div style={{ fontSize: 12, color: muted, marginTop: 2, fontWeight: 700 }}>
+                  −{money(p.refundAmount)} refunded
+                </div>
+              )}
               <span style={{
                 display: 'inline-flex',
                 marginTop: 5,
@@ -5683,9 +5770,11 @@ function PropertyTab({ customer }) {
   const cleanTurf = (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '').trim() || 'Not set';
   const tierHasLawnCare = ['Silver', 'Gold', 'Platinum'].includes(String(customer.tier || ''));
   const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim();
-  const homeSqFt = Number(customer.property?.propertySqFt || 0);
+  // Schema semantics (initial_schema.js): property_sqft IS the treated lawn
+  // area and bed_sqft is the separate ornamental-bed measurement — never
+  // subtract one from the other, that understates the service area.
+  const lawnSqFt = Number(customer.property?.propertySqFt || 0);
   const bedSqFt = Number(customer.property?.bedSqFt || 0);
-  const treatedSqFt = homeSqFt ? Math.max(0, homeSqFt - bedSqFt) : 0;
   const accessReady = [
     prefs.neighborhoodGateCode,
     prefs.propertyGateCode,
@@ -5803,8 +5892,8 @@ function PropertyTab({ customer }) {
           }}>
             {[
               { label: 'Turf', value: cleanTurf, sub: 'Lawn profile' },
-              { label: 'Home', value: sqft(homeSqFt), sub: 'Property size' },
-              { label: 'Treated Area', value: treatedSqFt ? sqft(treatedSqFt) : sqft(homeSqFt), sub: 'Estimated service area' },
+              { label: 'Treated Lawn', value: sqft(lawnSqFt), sub: 'Service area on file' },
+              { label: 'Beds', value: sqft(bedSqFt), sub: 'Ornamental beds' },
               { label: 'Lot', value: sqft(customer.property?.lotSqFt), sub: 'Parcel size' },
             ].map((item) => (
               <div key={item.label} style={{
@@ -13437,4 +13526,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab };
