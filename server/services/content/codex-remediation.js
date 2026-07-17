@@ -1116,7 +1116,17 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
         logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} not in main)`);
         return { skipped: true, reason: 'pr left the open state during remediation (post-push check)' };
       }
-      // Open on the re-read → proceed with the round.
+      // The re-read must ALSO agree our push is the head: a concurrent push C
+      // can land between the ref confirmation and this read, and proceeding
+      // would sync content the merge won't take. Park on any disagreement —
+      // stamped with OUR push, both cases converge: a real C re-arms via
+      // head-advance next tick; a still-stale read re-arms via the
+      // contradiction check (the ref will again confirm our push is the tip).
+      if (!recheck.head?.sha
+        || String(recheck.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead);
+      }
+      // Open AND at our head on the re-read → proceed with the round.
     }
   } catch (e) {
     // Fail CLOSED: proceeding could mirror a fix into portal state that

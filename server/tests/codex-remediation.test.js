@@ -319,15 +319,45 @@ describe('runRemediationForPr', () => {
   });
 
   test('stale post-push getPr head + ref confirms our push → round completes (no park)', async () => {
-    // getPr keeps serving the PRE-push head (read-after-write lag behind our
-    // own putFile — PR #383); the branch ref says our commit is the head.
+    // The post-push getPr serves the PRE-push head (read-after-write lag
+    // behind our own putFile — PR #383); the branch ref says our commit is
+    // the head, and the mandatory state re-read has caught up.
     const db = makeDb();
-    const gh = makeGh({ gh: { getPr: async () => ({ state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }) } });
+    let getPrCalls = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => {
+        getPrCalls += 1;
+        if (getPrCalls === 2) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }; // stale post-push read
+        return { state: 'open', head: { sha: getPrCalls === 1 ? HEAD : 'newcommit999aaa', ref: 'content/blog-x' } };
+      },
+    } });
     const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
     expect(r.remediated).toBe(true);
     expect(gh._calls.comments).toHaveLength(1); // re-review request posted
     expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
     expect(db._tables.codex_remediation_state[0].rounds).toBe(1);
+  });
+
+  test('ref confirms our push but the state re-read shows a NEWER head → park stamped with OUR push', async () => {
+    // A concurrent push C lands between the ref confirmation and the state
+    // re-read: syncing our B would mirror content the merge won't take.
+    const db = makeDb();
+    let getPrCalls = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => {
+        getPrCalls += 1;
+        if (getPrCalls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+        if (getPrCalls === 2) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }; // stale post-push read
+        return { state: 'open', head: { sha: 'parallel777push', ref: 'content/blog-x' } }; // re-read sees C
+      },
+    } });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/moved past the remediation push/);
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].parked_head_sha).toBe('newcommit999aaa');
   });
 
   test('genuine parallel push (ref shows a third sha) → park stamped with OUR push', async () => {
