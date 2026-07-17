@@ -1626,16 +1626,32 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   };
 
   const handleSatFeedback = async () => {
+    const note = satFeedback.trim();
+    if (!note) {
+      // Nothing to save — the rating from the previous step already went
+      // through, and an empty POST would only draw the duplicate 409.
+      setSatPhase('thanks');
+      return;
+    }
     setSatSubmitting(true);
     setSatError('');
     try {
+      // The server updates the response the rating step inserted, filling
+      // in the written note (satisfaction.js duplicate-update path).
       await api.submitSatisfaction({
         serviceRecordId: pendingSatisfaction.id,
         rating: satRating,
-        feedbackText: satFeedback,
+        feedbackText: note,
       });
       setSatPhase('thanks');
     } catch (err) {
+      if (err?.status === 409) {
+        // A note is already stored for this visit (double-submit) — that IS
+        // the saved state, not a failure.
+        setSatPhase('thanks');
+        setSatSubmitting(false);
+        return;
+      }
       // The rating from the previous step is already recorded, but this
       // note is NOT — thanking the customer for a message we never received
       // silently loses a service concern. Keep the form open to retry.
@@ -2962,6 +2978,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       setUpcoming(schedData.upcoming || []);
       setPrefsError(prefsResult.failed);
       if (prefsResult.data) setPrefs(prefsResult.data);
+      // A failed refresh must not keep rendering stale interactive settings
+      // from an earlier load — clear them so the failure panel shows.
+      else if (prefsResult.failed) setPrefs(null);
       setPropertyPrefsError(propertyPrefsData.failed);
       if (propertyPrefsData.data) {
         setPropertyPrefs(propertyPrefsData.data.properties || []);

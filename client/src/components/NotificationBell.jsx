@@ -163,14 +163,21 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
   // Load notifications when opened. A failed load is recorded — rendering
   // "No notifications yet" (or stale rows) for an outage would present a
-  // broken inbox as a confirmed-empty one.
+  // broken inbox as a confirmed-empty one. Monotonic sequence: reopening
+  // while a request is in flight starts a new one, and only the latest
+  // issued request may write — a slow older failure must not hide a newer
+  // successful list behind the retry screen.
+  const loadSeqRef = useRef(0);
   const loadNotifications = async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setLoadFailed(false);
     try {
       const d = await requestJson(`${basePath}?limit=30`);
+      if (seq !== loadSeqRef.current) return;
       setNotifications(d.notifications || []);
     } catch {
+      if (seq !== loadSeqRef.current) return;
       setLoadFailed(true);
     }
     setLoading(false);

@@ -4,7 +4,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Any api method not explicitly mocked returns a forever-pending promise, so
@@ -147,6 +147,43 @@ describe('satisfaction note failures', () => {
     expect(await screen.findByText(/your note could not be sent/i)).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/anything we could do better/i)).toHaveValue('Tech left the gate open');
     expect(screen.queryByText(/we appreciate the note/i)).not.toBeInTheDocument();
+  });
+
+  it('treats a duplicate 409 on the note as already saved', async () => {
+    api.getPendingSatisfaction.mockResolvedValue({
+      pending: [{ id: 'svc-9', serviceType: 'Pest Control', date: futureDate }],
+    });
+    const dupe = new Error('Already rated this service');
+    dupe.status = 409;
+    api.submitSatisfaction
+      .mockResolvedValueOnce({ action: 'feedback' })
+      .mockRejectedValueOnce(dupe);
+
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '3' }));
+    const noteBox = await screen.findByPlaceholderText(/anything we could do better/i);
+    fireEvent.change(noteBox, { target: { value: 'Second tab double-submit' } });
+    fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
+
+    expect(await screen.findByText(/we appreciate the note/i)).toBeInTheDocument();
+    expect(screen.queryByText(/your note could not be sent/i)).not.toBeInTheDocument();
+  });
+
+  it('skips the POST entirely for an empty note', async () => {
+    api.getPendingSatisfaction.mockResolvedValue({
+      pending: [{ id: 'svc-9', serviceType: 'Pest Control', date: futureDate }],
+    });
+    api.submitSatisfaction.mockResolvedValueOnce({ action: 'feedback' });
+
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '3' }));
+    await screen.findByPlaceholderText(/anything we could do better/i);
+    fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
+
+    expect(await screen.findByText(/we appreciate the note/i)).toBeInTheDocument();
+    expect(api.submitSatisfaction).toHaveBeenCalledTimes(1); // rating only
   });
 });
 
