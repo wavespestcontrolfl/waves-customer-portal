@@ -182,13 +182,16 @@ BEGIN
                     AT TIME ZONE 'America/New_York');
 
   IF became_terminal THEN
+    -- Serialize with registration on the vacated slot BEFORE touching any
+    -- reminder row: registration takes the advisory lock first and then
+    -- updates the owner's merged label, so locking a reminder row here and
+    -- only then requesting the advisory lock would invert that order and
+    -- deadlock. It also ensures the promotion below sees any suppressed
+    -- sibling a concurrent registration is inserting.
+    PERFORM pg_advisory_xact_lock(reminder_slot_lock_key(NEW.customer_id, old_appt_time));
     UPDATE appointment_reminders
        SET cancelled = true, updated_at = NOW()
      WHERE scheduled_service_id = NEW.id AND cancelled = false;
-    -- Serialize with registration on the vacated slot: an in-flight
-    -- registration may have observed this owner and be inserting a
-    -- suppressed sibling this promotion can't see yet.
-    PERFORM pg_advisory_xact_lock(reminder_slot_lock_key(NEW.customer_id, old_appt_time));
     PERFORM promote_suppressed_reminder_sibling(NEW.customer_id, NEW.id, old_appt_time,
                                                 OLD.scheduled_date, OLD.window_start);
     RETURN NEW;
@@ -233,22 +236,43 @@ BEGIN
          AND ar2.scheduled_service_id <> NEW.id
          AND ss2.status IN ${SENDABLE_SERVICE});
 
+    -- Window flags:
+    --   owner_exists            -> fully suppressed under the slot owner.
+    --   time_changed            -> re-arm for the new time (old sent state
+    --                              was for a different time); past-or-due
+    --                              times close the window instead (an armed
+    --                              flag on a past appointment keeps the row
+    --                              in every cron scan forever).
+    --   same-time reactivation  -> a previously suppressed row is re-decided
+    --                              like an arrival; a previous owner KEEPS
+    --                              its sent flags — a customer who already
+    --                              got the day-before text for this exact
+    --                              slot must not get it again just because
+    --                              the visit bounced through 'rescheduled'
+    --                              or a terminal status and back.
     UPDATE appointment_reminders
        SET appointment_time = new_appt_time,
            cancelled = false,
            suppressed_by_sibling = owner_exists,
-           -- Past-or-due times close the window (an armed flag on a past
-           -- appointment keeps the row in every cron scan forever).
-           reminder_72h_sent = owner_exists
-                               OR new_appt_time <= NOW() + INTERVAL '72 hours 15 minutes',
+           reminder_72h_sent = CASE
+             WHEN owner_exists THEN true
+             WHEN time_changed OR suppressed_by_sibling
+               THEN new_appt_time <= NOW() + INTERVAL '72 hours 15 minutes'
+             ELSE reminder_72h_sent END,
            reminder_72h_sent_at = CASE
-             WHEN owner_exists
-                  OR new_appt_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
-             ELSE NULL END,
-           reminder_24h_sent = owner_exists OR new_appt_time <= NOW(),
+             WHEN owner_exists THEN NOW()
+             WHEN time_changed OR suppressed_by_sibling THEN
+               CASE WHEN new_appt_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW() ELSE NULL END
+             ELSE reminder_72h_sent_at END,
+           reminder_24h_sent = CASE
+             WHEN owner_exists THEN true
+             WHEN time_changed OR suppressed_by_sibling THEN new_appt_time <= NOW()
+             ELSE reminder_24h_sent END,
            reminder_24h_sent_at = CASE
-             WHEN owner_exists OR new_appt_time <= NOW() THEN NOW()
-             ELSE NULL END,
+             WHEN owner_exists THEN NOW()
+             WHEN time_changed OR suppressed_by_sibling THEN
+               CASE WHEN new_appt_time <= NOW() THEN NOW() ELSE NULL END
+             ELSE reminder_24h_sent_at END,
            updated_at = NOW()
      WHERE scheduled_service_id = NEW.id;
 
