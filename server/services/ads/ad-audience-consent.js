@@ -142,9 +142,12 @@ async function loadMarketingSuppression() {
  *
  * Throws if the opt-out lists can't be loaded (fail-closed).
  */
-async function partitionMarketingSuppressed(members, { audienceKey, mode = 'full' } = {}) {
+async function partitionMarketingSuppressed(members, { audienceKey, mode = 'full', suppression = null } = {}) {
   if (!Array.isArray(members) || members.length === 0) return { kept: members || [], dropped: [] };
-  const sup = await loadMarketingSuppression();
+  // Callers that also compute platform-side removals pass ONE pre-loaded
+  // snapshot so filtering and removal can never disagree — an opt-out landing
+  // between two separate loads would leave the contact uploaded but unremoved.
+  const sup = suppression || await loadMarketingSuppression();
   const kept = [];
   // Members removed entirely (person opt-out, or no usable identifier left).
   // Callers use these to derive platform-side removal hashes from the SAME

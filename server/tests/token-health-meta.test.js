@@ -406,4 +406,36 @@ describe('token health meta checks', () => {
     const kept = db._query.whereNotIn.mock.calls[0][1];
     expect(kept).toEqual(expect.arrayContaining(['meta_ads', 'meta_capi', 'meta_audiences']));
   });
+
+  test('meta lane probes use the lane API version (default v23.0), not the social default', async () => {
+    process.env.META_ADS_ACCESS_TOKEN = 'ads-token';
+    process.env.META_ADS_ACCOUNT_ID = '111222333';
+    const urls = [];
+    global.fetch = jest.fn(async (url) => {
+      urls.push(String(url));
+      return { ok: true, status: 200, json: async () => (String(url).includes('/debug_token')
+        ? { data: { is_valid: true } }
+        : { id: 'act_111222333' }) };
+    });
+    const tokenHealth = require('../services/token-health');
+    const result = await tokenHealth.checkSingle('meta_ads');
+    expect(result.status).toBe('healthy');
+    expect(urls.every((u) => u.includes('/v23.0/'))).toBe(true);
+  });
+
+  test('meta lane probes honor a pinned META_ADS_API_VERSION', async () => {
+    process.env.META_ADS_ACCESS_TOKEN = 'ads-token';
+    process.env.META_ADS_ACCOUNT_ID = '111222333';
+    process.env.META_ADS_API_VERSION = 'v24.0';
+    const urls = [];
+    global.fetch = jest.fn(async (url) => {
+      urls.push(String(url));
+      return { ok: true, status: 200, json: async () => (String(url).includes('/debug_token')
+        ? { data: { is_valid: true } }
+        : { id: 'act_111222333' }) };
+    });
+    const tokenHealth = require('../services/token-health');
+    await tokenHealth.checkSingle('meta_ads');
+    expect(urls.every((u) => u.includes('/v24.0/'))).toBe(true);
+  });
 });

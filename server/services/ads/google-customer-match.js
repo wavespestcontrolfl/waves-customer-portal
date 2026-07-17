@@ -285,7 +285,11 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
   const dryRun = validateOnly === true || !uploadsAllowed();
 
   return runExclusive(`google-customer-match:${audienceKey}`, async () => {
-    const members = await def.collect();
+    // ONE suppression snapshot for both collection filtering and the removal
+    // calculation below — separate loads could disagree about an opt-out
+    // landing between them (see meta-audiences for the same contract).
+    const suppression = await loadMarketingSuppression();
+    const members = await def.collect({ suppression });
 
     // Keep only members with usable match keys; store the hash row so removals survive
     // a hard-deleted source row and a corrected identifier re-uploads later.
@@ -367,7 +371,6 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     // A prior row carrying one of these must be removed even when it shares its
     // OTHER identifier with a current member — shared-identifier retention must
     // not keep an opted-out email matchable forever via a household phone.
-    const suppression = await loadMarketingSuppression();
     const suppressedIdHashes = new Set();
     for (const raw of suppression.rawOptOutEmails) {
       const email = canonicalEmail(raw);
