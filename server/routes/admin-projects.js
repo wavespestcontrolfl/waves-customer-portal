@@ -1341,7 +1341,7 @@ router.get('/:id', async (req, res, next) => {
           const filings = loadWdoFilings(project);
           const lastFiling = filings.length ? filings[filings.length - 1] : null;
           return Boolean(lastFiling?.s3_key && config.s3?.bucket)
-            && !filingBinaryMayDiscloseFee(lastFiling, { hasPhotos: photos.length > 0 });
+            && !filingBinaryMayDiscloseFee(lastFiling);
         })(),
         property_profile: propertyProfile,
         wdo_history: wdoHistory,

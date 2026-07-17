@@ -4,22 +4,12 @@ const Joi = require('joi');
 const db = require('../models/db');
 const PhotoService = require('../services/photos');
 const { authenticate } = require('../middleware/auth');
-const { redactInspectionFeeCues, projectTypeHasInternalFindingKeys } = require('../services/project-types');
+// Shared with the service-report PDF renderer (documents.js) so every
+// customer-facing render of technician_notes applies the same legacy
+// inspection-fee scrub (codex #2817).
+const { customerSafeServiceNotes } = require('../services/project-types');
 
 router.use(authenticate);
-
-// A WDO project completion copies the narrative into technician_notes — rows
-// written before the write-time scrub can still carry the internal
-// inspection-fee amount, so it is redacted at this egress (codex #2817).
-// Gated on the completing project's type: on any other service, "inspection
-// fee" prose is a legitimate disclosure and must not be touched.
-function customerSafeNotes(notes, structuredNotes) {
-  if (!notes) return notes || null;
-  const type = structuredNotes?.projectType;
-  return (type && projectTypeHasInternalFindingKeys(type))
-    ? redactInspectionFeeCues(notes)
-    : notes;
-}
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -111,7 +101,7 @@ router.get('/', async (req, res, next) => {
         technician: svc.technician_name || null,
         checkInTime: svc.effective_check_in_time || null,
         checkOutTime: svc.effective_check_out_time || null,
-        notes: suppressCustomerArtifacts ? null : customerSafeNotes(svc.technician_notes, structuredNotes),
+        notes: suppressCustomerArtifacts ? null : customerSafeServiceNotes(svc.technician_notes, structuredNotes),
         soilTemp: svc.soil_temp ? parseFloat(svc.soil_temp) : null,
         thatchMeasurement: svc.thatch_measurement ? parseFloat(svc.thatch_measurement) : null,
         soilPh: svc.soil_ph ? parseFloat(svc.soil_ph) : null,
@@ -215,7 +205,7 @@ router.get('/:id', async (req, res, next) => {
       technician: service.technician_name,
       checkInTime: service.effective_check_in_time || null,
       checkOutTime: service.effective_check_out_time || null,
-      notes: suppressCustomerArtifacts ? null : customerSafeNotes(service.technician_notes, structuredNotes),
+      notes: suppressCustomerArtifacts ? null : customerSafeServiceNotes(service.technician_notes, structuredNotes),
       measurements: {
         soilTemp: service.soil_temp ? parseFloat(service.soil_temp) : null,
         thatchMeasurement: service.thatch_measurement ? parseFloat(service.thatch_measurement) : null,

@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
-const { getProjectType } = require('../services/project-types');
+const { getProjectType, customerSafeServiceNotes } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
@@ -384,7 +384,10 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT WE DID
   // ══════════════════════════════════════════════════════
-  const notes = (service.technician_notes || '').trim();
+  // Same legacy inspection-fee scrub as the service-history JSON — this PDF
+  // (and its auto_report share links) is a customer render of the same notes
+  // (codex #2817).
+  const notes = (customerSafeServiceNotes(service.technician_notes, structuredNotes) || '').trim();
   if (notes) {
     if (y > 620) { doc.addPage(); y = 50; }
     y = sectionHeader(doc, 'What We Did', L, y);

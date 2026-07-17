@@ -170,13 +170,17 @@ const FEE_CUE_RE = new RegExp(
 );
 
 // Amount BEFORE the cue — "The $250 inspection fee was collected", "a $175
-// WDO inspection fee applies". The amount must sit within two words of the
-// cue, so "$1,250 repair completed near the inspection fee area" (three
-// words away, different subject) is never touched. Currency-marked amounts
-// only: a bare number before the cue ("250 inspection fee"?) has no natural
-// reading worth the corruption risk.
+// WDO inspection fee applies", and ranges: "The $175-$250 inspection fee
+// depends on construction" consumes the WHOLE range so no bound survives.
+// The amount must sit within two words of the cue, so "$1,250 repair
+// completed near the inspection fee area" (three words away, different
+// subject) is never touched. Currency-marked amounts only: a bare number
+// before the cue ("250 inspection fee"?) has no natural reading worth the
+// corruption risk.
+const PRE_CUE_AMOUNT =
+  '(?:\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?)';
 const PRE_CUE_RE = new RegExp(
-  '(\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?)'
+  `(${PRE_CUE_AMOUNT}(?:\\s?(?:to|through|thru|or|and|[-–—/])\\s?${PRE_CUE_AMOUNT})*)`
   + '(\\s+(?:[\\w\\-]+\\s+){0,2}?inspection\\s+fee)\\b',
   'gi',
 );

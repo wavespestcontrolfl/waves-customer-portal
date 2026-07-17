@@ -184,6 +184,9 @@ describe('redactInspectionFeeCues', () => {
       .toBe('A [fee removed] WDO inspection fee applies.');
     expect(redactInspectionFeeCues('$1,250 repair completed near the inspection fee area.'))
       .toBe('$1,250 repair completed near the inspection fee area.');
+    // a range before the cue is consumed whole — no bound survives
+    expect(redactInspectionFeeCues('The $175-$250 inspection fee depends on construction.'))
+      .toBe('The [fee removed] inspection fee depends on construction.');
   });
   test('a determined amount belongs to something else — home/escrow prose survives', () => {
     expect(redactInspectionFeeCues('Inspection fee covered by seller for the $400,000 home.'))

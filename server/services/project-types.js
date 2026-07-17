@@ -1056,22 +1056,35 @@ function findingsContainFeeCue(rawFindings) {
 }
 
 // Whether an archived FDACS binary may print a raw fee. Filings stamped with
-// pdf_renderer were rendered through the customer-safe scrub, so a cue in
-// their (deliberately raw) snapshot is fine — the PDF itself is clean. An
-// UNMARKED legacy binary is unsafe if its findings snapshot carries a cue OR
-// the project has ANY photos: legacy PDFs printed captions raw, the archive
-// entry stores no caption snapshot, and current project_photos rows are
-// MUTABLE (an admin can clear a fee-bearing caption after filing), so
-// current captions can never prove the archived binary clean — photo
-// existence is the conservative gate (codex #2817). A re-send re-archives
+// pdf_renderer were rendered through the customer-safe scrub — clean by
+// construction, always served (a cue in their deliberately-raw snapshot is
+// fine; the PDF itself is scrubbed). EVERY unmarked legacy binary is gated:
+// the archive entry stores no caption snapshot and project_photos rows are
+// mutable (editable AND deletable after filing), so no live row can ever
+// prove a legacy binary clean — findings-only heuristics kept reopening
+// caption/deletion holes (codex #2817 r15–r18). A re-send re-archives
 // through the sanitized renderer with the marker, restoring availability.
 // Shared by the public /data + /fdacs-pdf gates AND the admin detail
 // serializer so the staff preview can never advertise a filing the customer
 // page withholds.
-function filingBinaryMayDiscloseFee(filing, { hasPhotos = false } = {}) {
+function filingBinaryMayDiscloseFee(filing) {
   if (!filing) return false;
-  if (filing.pdf_renderer) return false;
-  return findingsContainFeeCue(filing.findings) || Boolean(hasPhotos);
+  return !filing.pdf_renderer;
+}
+
+// A WDO project completion copies the narrative into
+// service_records.technician_notes — rows written before the write-time
+// scrub can still carry the internal fee, so every customer-facing render
+// of those notes (service-history JSON, service-report PDF, share links)
+// applies this scrub at egress (codex #2817). Gated on the completing
+// project's type: on any other service, "inspection fee" prose is a
+// legitimate disclosure and must not be touched.
+function customerSafeServiceNotes(notes, structuredNotes) {
+  if (!notes) return notes || null;
+  const type = structuredNotes?.projectType;
+  return (type && projectTypeHasInternalFindingKeys(type))
+    ? redactInspectionFeeCues(notes)
+    : notes;
 }
 
 // Finding VALUES need the fee scrub too, not just the dedicated internal key
@@ -1134,6 +1147,7 @@ module.exports = {
   containsInspectionFeeCue,
   findingsContainFeeCue,
   filingBinaryMayDiscloseFee,
+  customerSafeServiceNotes,
   redactInspectionFeeCuesForType,
   projectTypeHasInternalFindingKeys,
   projectTypeConfigHasInternalFindingKeys,

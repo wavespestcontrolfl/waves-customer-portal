@@ -585,10 +585,9 @@ router.get('/project/:token/data', async (req, res, next) => {
         if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
       }
       fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket)
-        // legacy binary that may print a raw fee (findings cue, or any
-        // photos — captions were printed raw and can't be proven clean) —
-        // gated, see filingBinaryMayDiscloseFee
-        && !filingBinaryMayDiscloseFee(lastFiling, { hasPhotos: photos.length > 0 });
+        // unmarked legacy binary — may print a raw fee, gated; see
+        // filingBinaryMayDiscloseFee
+        && !filingBinaryMayDiscloseFee(lastFiling);
     }
 
     // Internal/office-only finding keys must never ride the public JSON — the
@@ -735,19 +734,11 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     if (!lastFiling?.s3_key || !config.s3?.bucket) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    // Same generic 404 as a missing archive: a LEGACY binary that may print
-    // a raw fee (findings cue, or any photos — legacy PDFs printed captions
-    // raw and mutable photo rows can't prove the archive clean) is never
-    // served; the /data payload also stops advertising it — see
-    // filingBinaryMayDiscloseFee.
-    if (!lastFiling.pdf_renderer) {
-      const photoCount = await db('project_photos')
-        .where({ project_id: project.id })
-        .count('id as count')
-        .first();
-      if (filingBinaryMayDiscloseFee(lastFiling, { hasPhotos: (parseInt(photoCount?.count, 10) || 0) > 0 })) {
-        return res.status(404).json({ error: 'Report not found' });
-      }
+    // Same generic 404 as a missing archive: an unmarked LEGACY binary may
+    // print a raw fee and is never served; the /data payload also stops
+    // advertising it — see filingBinaryMayDiscloseFee.
+    if (filingBinaryMayDiscloseFee(lastFiling)) {
+      return res.status(404).json({ error: 'Report not found' });
     }
     const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
     const s3 = new S3Client({
