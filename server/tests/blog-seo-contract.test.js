@@ -207,4 +207,87 @@ describe('blog SEO contract helpers', () => {
     expect(inferLinkReason('/termite-control-englewood-fl/')).toBe('city');
     expect(inferLinkReason('/termite-control/')).toBe('service');
   });
+
+  test('defaults breadcrumbs to the layout trail when the draft carries none', () => {
+    const bare = draft();
+    delete bare.seo_contract;
+
+    const { contract, validation } = buildBlogSeoContract({
+      draft: bare,
+      brief: {
+        page_type: 'supporting-blog',
+        action_type: 'new_supporting_blog',
+        city: 'Lakewood Ranch',
+        service: 'pest',
+      },
+    });
+
+    expect(contract.breadcrumbs.map((item) => item.name)).toEqual([
+      'Home',
+      'Waves Blog',
+      'Ghost Ants in Lakewood Ranch Kitchens',
+    ]);
+    // BreadcrumbList schema_types no longer errors against an empty draft list
+    expect(validation.errors).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'breadcrumb_schema_without_breadcrumbs' }),
+    ]));
+    expect(validation.reviewFlags).not.toContain('missing_breadcrumbs');
+  });
+
+  test('explicit draft breadcrumbs win over the layout default', () => {
+    const { contract } = buildBlogSeoContract({
+      draft: draft({
+        seo_contract: {
+          breadcrumbs: [
+            { name: 'Home', url: '/' },
+            { name: 'Custom Trail', url: '/custom/' },
+            { name: 'Leaf', url: '/leaf/' },
+          ],
+        },
+      }),
+      brief: { page_type: 'supporting-blog', service: 'pest' },
+    });
+
+    expect(contract.breadcrumbs.map((item) => item.name)).toEqual(['Home', 'Custom Trail', 'Leaf']);
+  });
+
+  test('pest-practices matching survives typographic punctuation', () => {
+    const { extractPestPractices } = require('../services/content/blog-seo-contract')._internals;
+    const body = [
+      'How to tell what you’re dealing with: signs of roaches near the pantry.',
+      'Southwest Florida humidity pushes them indoors after afternoon storms.',
+      'Check the sink base and look for droppings; inspect door sweeps.',
+      'Don’t reach for a fogger — never spray baseboards blindly.',
+      'When to call a professional: schedule an inspection if activity persists.',
+      'Waves Pest Control can inspect entry points — our approach starts at the exterior.',
+    ].join('\n');
+
+    const practices = extractPestPractices(body);
+    expect(practices.whatNotToDo.length).toBeGreaterThan(0);
+    expect(practices.identification).toBeTruthy();
+    expect(practices.swflContext).toBeTruthy();
+    expect(practices.homeownerChecks.length).toBeGreaterThan(0);
+    expect(practices.whenToCallPro).toBeTruthy();
+    expect(practices.wavesApproach).toBeTruthy();
+  });
+
+  test('neither "whenever" nor reassurance-"never" satisfies the what-not-to-do bucket (codex r1+r2)', () => {
+    const { extractPestPractices } = require('../services/content/blog-seo-contract')._internals;
+    const noAvoidance = extractPestPractices('Call whenever activity returns and schedule a visit.');
+    expect(noAvoidance.whatNotToDo).toHaveLength(0);
+    const reassurance = extractPestPractices("With WaveGuard you'll never have to worry again.");
+    expect(reassurance.whatNotToDo).toHaveLength(0);
+    const realProhibition = extractPestPractices("Don't spray baseboards blindly; avoid foggers.");
+    expect(realProhibition.whatNotToDo.length).toBeGreaterThan(0);
+  });
+
+  test('default Home breadcrumb keeps the root URL as "/" (codex r1)', () => {
+    const bare = draft();
+    delete bare.seo_contract;
+    const { contract } = buildBlogSeoContract({
+      draft: bare,
+      brief: { page_type: 'supporting-blog', service: 'pest' },
+    });
+    expect(contract.breadcrumbs[0]).toEqual({ name: 'Home', url: '/' });
+  });
 });

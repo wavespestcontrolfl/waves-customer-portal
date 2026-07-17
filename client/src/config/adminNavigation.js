@@ -73,6 +73,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/service-library",
     label: "Services",
     icon: BookOpen,
+    adminOnly: true,
   },
   jobs: {
     id: "jobs",
@@ -319,6 +320,7 @@ function materializeItem(itemId, surface) {
       surface === "mobileTab" && item.mobileTabIcon
         ? item.mobileTabIcon
         : item.icon,
+    adminOnly: Boolean(item.adminOnly),
   };
 }
 

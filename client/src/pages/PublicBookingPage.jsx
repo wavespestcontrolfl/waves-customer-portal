@@ -111,6 +111,7 @@ export default function PublicBookingPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [confCode, setConfCode] = useState('');
+  const [secureCardUrl, setSecureCardUrl] = useState(null);
   // Custom date/time finder — Waves AI search + 90-day date picker
   const [searchResult, setSearchResult] = useState(null);
   const [browseDays, setBrowseDays] = useState(null);
@@ -249,6 +250,7 @@ export default function PublicBookingPage() {
     const KNOWN_SOURCES = new Set(['direct', 'marketing-site', 'estimate-accept', 'quote-wizard', 'quote-wizard-onetime', 'newsletter-quiz']);
     const safeSource = KNOWN_SOURCES.has(source) ? source : 'other';
     track(FUNNEL_EVENTS.BOOKING_VIEWED, { source: safeSource, service: service.id });
+    // Deliberately fires once on mount (funnel-top event).
   }, []);
 
   useEffect(() => {
@@ -330,6 +332,7 @@ export default function PublicBookingPage() {
   // otherwise leave a STALE intent (recovery would name the wrong appointment).
   useEffect(() => {
     if ((contact.phone || '').replace(/\D/g, '').length === 10 && selectedSlot) captureBookingIntent();
+    // Deliberately keyed on slot/service/address identity, not the callback.
   }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
@@ -394,6 +397,10 @@ export default function PublicBookingPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Booking failed');
       setConfCode(data.confirmationCode || 'WPC-????');
+      // Card-on-file step (dark until the funnel's gate flips): when the
+      // server minted an inline capture link, the confirmation screen shows
+      // the "secure your booking" step pointing at /secure/:token.
+      setSecureCardUrl(data.secureCard?.url || null);
       track(FUNNEL_EVENTS.BOOKING_CONFIRMED, {
         service: service.id,
         is_existing_customer: !!existingCustomerId,
@@ -1062,6 +1069,39 @@ export default function PublicBookingPage() {
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>
+            {secureCardUrl ? (
+              <div data-glass="card" style={{
+                position: 'relative',
+                background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
+                borderRadius: 12, padding: 18, marginBottom: 20, textAlign: 'left',
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
+                  One last step
+                </div>
+                <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6, marginBottom: 14 }}>
+                  <strong style={{ color: COLORS.glassNavy }}>Add a card on file to secure your visit.</strong>{' '}
+                  Nothing is charged today — your card is only charged after your
+                  service is completed.
+                </div>
+                <a
+                  href={secureCardUrl}
+                  // _top, not self (Codex #2771 r3): /book embeds in the
+                  // marketing-site iframe under the embeddable helmet policy,
+                  // but /secure/:token serves under strictHelmet and is
+                  // refused inside a frame — the CTA must break out to the
+                  // top window (a no-op when not embedded).
+                  target="_top"
+                  rel="noopener"
+                  data-glass-accent=""
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    minHeight: 48, padding: '0 20px', background: COLORS.glassNavy,
+                    color: COLORS.white, border: `1px solid ${COLORS.glassNavy}`,
+                    borderRadius: 8, fontWeight: 800, fontSize: 15, textDecoration: 'none',
+                  }}
+                >Secure my visit — $0 today</a>
+              </div>
+            ) : null}
             <p style={{ fontSize: 12, color: COLORS.slate400 }}>
               Need to change it? Text us at (941) 297-5749 or reply RESCHEDULE to the confirmation text.
             </p>

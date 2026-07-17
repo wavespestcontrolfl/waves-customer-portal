@@ -83,6 +83,11 @@ import {
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
+import {
+  mergePostPaymentService,
+  shouldReopenCompletionAfterPayment,
+  TERMINAL_VISIT_STATUSES,
+} from "../../lib/dispatchCompletionRouting";
 import { requestDispatchSync } from "../../lib/dispatchSync";
 
 const TechMatchPanel = lazy(
@@ -143,13 +148,6 @@ function projectCompletionIsClosed(service) {
 // Visit statuses the dispatch status route treats as terminal — the
 // appointment detail sheet hides Cancel/No-show for these, and the
 // continue-snapshot sync below refuses to downgrade past them.
-const TERMINAL_VISIT_STATUSES = new Set([
-  "completed",
-  "cancelled",
-  "no_show",
-  "skipped",
-]);
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const SKIP_REASONS = [
@@ -1276,6 +1274,14 @@ export default function DispatchPageV2({
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
   const pendingPaymentAfterCompletionRef = useRef(null);
+  const [completionDetourPhotos, setCompletionDetourPhotos] = useState(null);
+  const handleCompletionDetourPhotosChange = useCallback((serviceId, photos) => {
+    setCompletionDetourPhotos((current) =>
+      String(current?.serviceId) === String(serviceId)
+        ? { ...current, photos: Array.isArray(photos) ? photos : [] }
+        : current,
+    );
+  }, []);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -1341,7 +1347,10 @@ export default function DispatchPageV2({
     return () => setOpenCreateHandler(null);
   }, [setOpenCreateHandler]);
 
-  const fetchSchedule = useCallback(async (d, { silent = false } = {}) => {
+  const fetchSchedule = useCallback(async (
+    d,
+    { silent = false, updateState = true } = {},
+  ) => {
     // silent: refresh data without tripping the page-level loading/error
     // gates — both render ABOVE the overlays, so a loud refresh (or a
     // transient refresh failure) unmounts the in-place project editor and
@@ -1356,8 +1365,10 @@ export default function DispatchPageV2({
         adminFetch(`/admin/schedule?date=${d}`),
         adminFetch("/admin/dispatch/products/catalog"),
       ]);
-      setData(scheduleData);
-      setProducts(catalogData.products || []);
+      if (updateState) {
+        setData(scheduleData);
+        setProducts(catalogData.products || []);
+      }
       if (!silent) setLoading(false);
       return scheduleData;
     } catch (e) {
@@ -2436,19 +2447,33 @@ export default function DispatchPageV2({
         <CompletionPanel
           service={completingService}
           products={products}
-          onClose={() => {
+          billingDetourPhotos={
+            String(completionDetourPhotos?.serviceId) === String(completingService.id)
+              ? completionDetourPhotos.photos
+              : []
+          }
+          onDiscardBillingDetour={() => setCompletionDetourPhotos(null)}
+          onBillingDetourPhotosChange={handleCompletionDetourPhotosChange}
+          onClose={(completed) => {
             setCompletingService(null);
+            if (completed) setCompletionDetourPhotos(null);
             if (pendingPaymentAfterCompletionRef.current) {
               setPaymentData(pendingPaymentAfterCompletionRef.current);
               pendingPaymentAfterCompletionRef.current = null;
             }
           }}
           onSubmit={handleCompleteSubmit}
-          onBillingRequired={(svc) => {
+          onBillingRequired={(svc, detourState) => {
             // Typed one-time completion hit the billing 409 — close the
             // panel (its draft autosave preserves the findings) and open
             // the existing checkout flow; the post-payment paths re-open
             // completion automatically.
+            setCompletionDetourPhotos({
+              serviceId: svc.id,
+              photos: Array.isArray(detourState?.servicePhotos)
+                ? detourState.servicePhotos
+                : [],
+            });
             setCompletingService(null);
             setCheckoutService(svc);
           }}
@@ -2751,7 +2776,9 @@ export default function DispatchPageV2({
           }}
           onCompleteService={(svc) => {
             setDetailService(null);
-            handleComplete(svc);
+            if (shouldReopenCompletionAfterPayment(svc)) {
+              handleComplete(svc);
+            }
           }}
           onBookNext={(svc) => {
             setDetailService(null);
@@ -2911,7 +2938,7 @@ export default function DispatchPageV2({
           amount={paymentData.amount}
           desktopVisible
           onClose={() => setPaymentData(null)}
-          onInvoiceSent={() => {
+          onInvoiceSent={async () => {
             // Invoice SMS+email was just sent — the bill is now in the
             // customer's hands. Mirror the cash/check tender flow and
             // punch straight to the completion sheet so the tech can
@@ -2923,11 +2950,20 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
+            const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
-            handleComplete(svc);
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
+            setScheduleRefreshKey((k) => k + 1);
             setProjectReloadKey((k) => k + 1);
-            fetchSchedule(date, { silent: true });
           }}
           onChargeSuccess={async () => {
             // Card paths reopen completion like the invoice/cash/check
@@ -2942,11 +2978,19 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date, { silent: true });
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
-            handleComplete(updated ? { ...updated, ...svc } : svc);
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
+            setScheduleRefreshKey((k) => k + 1);
             setProjectReloadKey((k) => k + 1);
           }}
           onPrepaidRecorded={async ({ invoice } = {}) => {
@@ -2961,11 +3005,19 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date, { silent: true });
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
-            handleComplete(updated ? { ...updated, ...svc } : svc);
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
+            setScheduleRefreshKey((k) => k + 1);
             setProjectReloadKey((k) => k + 1);
           }}
         />

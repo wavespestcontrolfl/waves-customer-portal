@@ -416,7 +416,9 @@ export default function AdminLayoutV2() {
               >
                 {section}
               </h2>
-              {items.map((item) => {
+              {items
+                .filter((item) => !item.adminOnly || user?.role === "admin")
+                .map((item) => {
                 const { path, icon: Icon, label } = item;
                 const isActive = isAdminNavItemActive(
                   item,

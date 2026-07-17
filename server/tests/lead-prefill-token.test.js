@@ -1,6 +1,6 @@
 /**
  * Lead-prefill HMAC token (utils/lead-prefill-token.js) — the security
- * boundary for the voicemail text-back /estimate prefill+attach flow
+ * boundary for the voicemail text-back /quote prefill+attach flow
  * (GET /lead-prefill exchange + the lead-attach on both wizard submit paths).
  * Pins: mint/verify round-trip, lead binding, expiry, tamper rejection, and
  * the fail-closed no-secret path. PREFILL authority only — identity/pricing

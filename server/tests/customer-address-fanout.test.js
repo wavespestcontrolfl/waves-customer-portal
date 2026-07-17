@@ -10,6 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const {
   addressMatchKey,
+  formatAddressBounded,
   snapshotMatchesContact,
   snapshotMatchesLine1,
   propagateCustomerAddressChange,
@@ -54,6 +55,18 @@ const AFTER = {
 };
 
 describe('addressMatchKey / snapshotMatchesLine1', () => {
+  test('bounded formatting preserves the unit and place instead of truncating the tail', () => {
+    const formatted = formatAddressBounded({
+      line1: `123 ${'Very Long Street Name '.repeat(20)}`,
+      line2: 'Unit 4',
+      city: 'Lakewood Ranch',
+      state: 'FL',
+      zip: '34211',
+    }, 255);
+    expect(formatted.length).toBeLessThanOrEqual(255);
+    expect(formatted).toMatch(/, Unit 4, Lakewood Ranch, FL 34211$/);
+  });
+
   test('spacing, punctuation, and case differences compare equal', () => {
     expect(addressMatchKey('4867 Tober Morey Way')).toBe(addressMatchKey('4867 Tobermorey Way'));
     expect(addressMatchKey('123 Main St.')).toBe(addressMatchKey('123 main st'));
@@ -92,6 +105,16 @@ describe('addressMatchKey / snapshotMatchesLine1', () => {
     expect(snapshotMatchesContact('123 Main St, # 4, Bradenton, FL', contact)).toBe(false);
     // a city segment is NOT a unit segment
     expect(snapshotMatchesContact('123 Main St, Bradenton, FL 34205', contact)).toBe(true);
+  });
+
+  test('unit-bearing snapshots only match the same canonical unit', () => {
+    const contact = {
+      address_line1: '123 Main St', address_line2: 'Unit 4', city: 'Bradenton', zip: '34205',
+    };
+    expect(snapshotMatchesContact('123 Main St, Apt 4, Bradenton, FL 34205', contact)).toBe(true);
+    expect(snapshotMatchesContact('123 Main St Apt 4, Bradenton, FL 34205', contact)).toBe(true);
+    expect(snapshotMatchesContact('123 Main St, Unit 5, Bradenton, FL 34205', contact)).toBe(false);
+    expect(snapshotMatchesContact('123 Main St, Bradenton, FL 34205', contact)).toBe(false);
   });
 
   test('suffix spelling differences compare equal (Street vs St)', () => {
@@ -149,6 +172,38 @@ describe('propagateCustomerAddressChange', () => {
     const estUpdate = conn.__updates.find((u) => u.table === 'estimates');
     expect(estUpdate.ids).toEqual(['est-match']);
     expect(estUpdate.patch).toMatchObject({ address: '4857 Tobermory Way, Bradenton, FL 34211' });
+  });
+
+  test('propagates a newly added unit into open lead and estimate snapshots', async () => {
+    const afterWithUnit = { ...BEFORE, address_line2: 'Unit 4' };
+    const conn = makeConn({
+      leads: [{ id: 'lead-match', address: BEFORE.address_line1, city: BEFORE.city, zip: BEFORE.zip }],
+      estimates: [{ id: 'est-match', address: '4867 Tobermorey Way, Lakewood Ranch, FL 34211' }],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: afterWithUnit }, conn);
+
+    expect(counts).toEqual({ leads: 1, estimates: 1 });
+    expect(conn.__updates.find((update) => update.table === 'leads').patch.address)
+      .toBe('4867 Tobermorey Way, Unit 4');
+    expect(conn.__updates.find((update) => update.table === 'estimates').patch.address)
+      .toBe('4867 Tobermorey Way, Unit 4, Lakewood Ranch, FL 34211');
+  });
+
+  test('updates a unit-only lead snapshot even when the customer has no city or ZIP', async () => {
+    const before = {
+      id: 'cust-1', address_line1: '123 Main St', address_line2: 'Unit 4', city: null, zip: null,
+    };
+    const after = { ...before, address_line2: 'Unit 5' };
+    const conn = makeConn({
+      leads: [{ id: 'lead-match', address: '123 Main St, Unit 4', city: null, zip: null }],
+      estimates: [],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before, after }, conn);
+
+    expect(counts).toEqual({ leads: 1, estimates: 0 });
+    expect(conn.__updates[0].patch.address).toBe('123 Main St, Unit 5');
   });
 
   test('an authored proposal snapshot (estimate_data.proposal.propertyAddress) is patched under the same guard', async () => {

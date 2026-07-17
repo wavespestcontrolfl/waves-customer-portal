@@ -278,7 +278,7 @@ describe('voicemail lead text-back send outcomes', () => {
     // Token rides the redirect target's FRAGMENT — never a query string a
     // server would log.
     const longUrl = createShortCode.mock.calls[0][0];
-    expect(longUrl).toContain(`/estimate#vlead=${encodeURIComponent(LEAD_ID)}`);
+    expect(longUrl).toContain(`/quote#vlead=${encodeURIComponent(LEAD_ID)}`);
     expect(longUrl).toContain('vt=');
     expect(longUrl).not.toContain('?vlead');
 

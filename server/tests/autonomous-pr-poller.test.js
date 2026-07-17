@@ -119,6 +119,7 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         return q;
       }),
       whereNot: jest.fn(() => q),
+      whereNotIn: jest.fn(() => q),
       whereNull: jest.fn(function (col) {
         q._filters[`null:${col}`] = true;
         return q;
@@ -159,6 +160,12 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
     };
     return q;
   });
+  // markPrTerminal's atomic upsert — record it like a normal
+  // codex_remediation_state update so stamp assertions read one shape.
+  db.raw = jest.fn(async (sql, params) => {
+    updates.push({ table: 'codex_remediation_state', filters: { pr_number: params[0] }, updates: { status: params[1] } });
+    return { rowCount: 1 };
+  });
   return updates;
 }
 
@@ -167,10 +174,15 @@ function runUpdates(updates) {
   // first-observation stamp (day-cap accounting, fires on every merged-PR
   // observation) and the poll_pending_* observability tracker (fires on
   // every pending verdict) are filtered out so state assertions stay exact;
-  // both have their own dedicated suites.
-  return updates.filter((u) => u.table === 'autonomous_runs'
-    && !('astro_pr_merged_at' in u.updates)
-    && !Object.keys(u.updates).some((k) => k.startsWith('poll_pending')));
+  // both have their own dedicated suites. Terminal claims now carry
+  // poll_pending_* CLEARS inline (crash-safe atomicity), so the filter drops
+  // an update only when it has no substantive key beyond those trackers.
+  return updates.filter((u) => {
+    if (u.table !== 'autonomous_runs') return false;
+    return Object.keys(u.updates).some(
+      (k) => k !== 'updated_at' && k !== 'astro_pr_merged_at' && !k.startsWith('poll_pending'),
+    );
+  });
 }
 
 beforeEach(() => {
@@ -804,8 +816,9 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    // the PR is never even looked up — the run is out of lifecycle tracking
-    expect(gh.getPr).not.toHaveBeenCalled();
+    // lifecycle actions never run; the single getPr is the best-effort
+    // terminal-stamp observation added for tick-start supersedes (codex r2)
+    expect(gh.getPr).toHaveBeenCalledTimes(1);
     expect(indexNow.submit).not.toHaveBeenCalled();
     expect(gh.mergePr).not.toHaveBeenCalled();
 
@@ -835,7 +848,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).not.toHaveBeenCalled();
+    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
     const annotate = runUpdates(updates)[0];
     expect(annotate.updates).not.toMatchObject({ outcome: 'failed' });
     expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
@@ -848,7 +861,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).not.toHaveBeenCalled();
+    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
   });
 
   test('run with no opportunity_id has nothing to cross-check and reconciles normally', async () => {
@@ -929,7 +942,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).not.toHaveBeenCalled();
+    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
   });
 });
 
@@ -1398,5 +1411,155 @@ describe('pending-reason tracking (silent-starvation observability)', () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     const run = { id: 'run-1', astro_pr_url: PR_URL, poll_pending_reason: null };
     await expect(trackPendingReason(run, { pending: true, reason: 'preview_build_pending' })).resolves.toBeUndefined();
+  });
+});
+
+// 2026-07-16 finalize-hygiene audit fixes: terminal writes clear the
+// poll_pending_* tracker inline (a crash between the claim and the separate
+// tracker clear froze reasons like 'awaiting_live_deploy' onto completed
+// rows — prod run for PR #374), and the PR's codex_remediation_state row is
+// retired to a terminal status so merged PRs stop reading as live parks.
+describe('terminal-write hygiene (claim clears tracker + remediation row retired)', () => {
+  test('finalizeMerged claim clears poll_pending_* atomically and stamps the remediation row merged', async () => {
+    const updates = setupDb({ pending: [makeRun({ poll_pending_reason: 'awaiting_live_deploy', poll_pending_since: new Date() })] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'ok' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    await poller.pollPending();
+
+    const claim = runUpdates(updates)[0];
+    expect(claim.updates).toMatchObject({
+      outcome: 'completed_published',
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
+    });
+
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.filters).toMatchObject({ pr_number: 42 });
+    expect(stamp.updates).toMatchObject({ status: 'merged' });
+  });
+
+  test('finalizeClosed claim clears poll_pending_* and stamps the remediation row closed', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+
+    await poller.pollPending();
+
+    const claim = runUpdates(updates)[0];
+    expect(claim.updates).toMatchObject({
+      outcome: 'failed',
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
+    });
+
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.updates).toMatchObject({ status: 'closed' });
+  });
+
+  test('the remediation row is stamped merged at FIRST merged observation, even while finalize waits on the deploy (codex r1)', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    // Hub deploy not live yet: finalize stays pending on awaiting_live_deploy…
+    pagesPoll.liveUrlResponds.mockResolvedValue(false);
+
+    await poller.pollPending();
+
+    // …no completed-published claim happened…
+    expect(runUpdates(updates).find((u) => u.updates.outcome === 'completed_published')).toBeUndefined();
+    // …but the remediation row is already terminal (PR left the open state).
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.updates).toMatchObject({ status: 'merged' });
+  });
+
+  test('supersedeRun clears poll_pending_* (pollPending continues past the tracker on that path)', async () => {
+    const updates = setupDb({
+      pending: [makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date() })],
+      queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+
+    await poller.pollPending();
+
+    const supersede = runUpdates(updates).find((u) => u.updates.skip_reason);
+    expect(supersede).toBeDefined();
+    expect(supersede.updates).toMatchObject({
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
+    });
+  });
+});
+
+// codex r-local: the closed-PR stamp must land at FIRST closed observation —
+// a superseded/already-finalized run (or a crash between writes) previously
+// left the closed PR's remediation row parked forever.
+describe('closed-PR terminal stamp ordering', () => {
+  test('a superseded closed run still retires the remediation row', async () => {
+    // queueFirst simulates the operator requeue landing AFTER the tick-start
+    // snapshot: pollRun runs (PR observed closed → stamp), then the
+    // finalize-time re-check supersedes the run instead of failing it.
+    const updates = setupDb({
+      pending: [makeRun()],
+      queueFirst: { id: 'opp-1', status: 'done', skip_reason: null },
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+
+    await poller.pollPending();
+
+    // Run was superseded (no failed claim)…
+    expect(runUpdates(updates).find((u) => u.updates.outcome === 'failed')).toBeUndefined();
+    // …but the closed PR's remediation row is already terminal.
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.updates).toMatchObject({ status: 'closed' });
+  });
+});
+
+// codex r2: a run superseded at TICK-START (queue moved on before pollRun
+// ever fetched the PR) previously left a merged/closed PR's remediation row
+// unstamped forever — the poller now observes the PR once, best-effort.
+describe('tick-start supersede terminal stamp', () => {
+  test('closed PR is stamped when the run is superseded before pollRun', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+
+    await poller.pollPending();
+
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.updates).toMatchObject({ status: 'closed' });
+  });
+
+  test('an OPEN PR is deliberately left unstamped on supersede', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'open', merged: false });
+
+    await poller.pollPending();
+
+    expect(updates.find((u) => u.table === 'codex_remediation_state')).toBeUndefined();
+  });
+
+  test('a GitHub error during the best-effort stamp never breaks the supersede', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
+    });
+    gh.getPr.mockRejectedValue(new Error('gh 502'));
+
+    const res = await poller.pollPending();
+    expect(res.count).toBe(1);
+    expect(runUpdates(updates).find((u) => u.updates.skip_reason)).toBeDefined();
   });
 });

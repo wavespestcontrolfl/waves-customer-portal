@@ -159,7 +159,10 @@ function formatCustomerAddress(address) {
     const cityStateZip = [address.city, address.state, address.zip]
       .filter(Boolean)
       .join(" ");
-    return [address.line1, cityStateZip].filter(Boolean).join(", ").trim();
+    return [address.line1, address.line2, cityStateZip]
+      .filter(Boolean)
+      .join(", ")
+      .trim();
   }
   return "";
 }
@@ -412,6 +415,7 @@ const EMPTY_QUICK_ADD_FORM = {
   phone: "",
   email: "",
   address: "",
+  addressLine2: "",
   city: "",
   state: "FL",
   zip: "",
@@ -524,7 +528,10 @@ function QuickAddModalV2({
         },
         body: JSON.stringify(body),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) {
+        const errorBody = await r.json().catch(() => ({}));
+        throw new Error(errorBody.message || errorBody.error || `HTTP ${r.status}`);
+      }
       const data = await r.json().catch(() => ({}));
       onCreated(data);
       onClose();
@@ -608,6 +615,7 @@ function QuickAddModalV2({
                 setForm((p) => ({
                   ...p,
                   address: parts.line1 || parts.formatted || p.address,
+                  addressLine2: parts.line2 || "",
                   city: parts.city || p.city,
                   state: parts.state || p.state || "FL",
                   zip: parts.zip || p.zip,
@@ -617,6 +625,16 @@ function QuickAddModalV2({
               style={{ height: 36 }}
             />{" "}
           </div>{" "}
+          <div>
+            <label className={LABEL_CLS}>Address line 2</label>
+            <input
+              value={form.addressLine2}
+              onChange={(e) => set("addressLine2", e.target.value)}
+              className={INPUT_CLS}
+              autoComplete="address-line2"
+              placeholder="Unit, suite, apartment"
+            />
+          </div>
           <div className="grid grid-cols-[1fr_80px_120px] gap-3">
             {" "}
             <div>
@@ -957,6 +975,38 @@ export default function CustomersPageV2() {
   const [savingEdit, setSavingEdit] = useState(false);
   const loadSeqRef = useRef(0);
   const loadAbortRef = useRef(null);
+
+  const selectCustomer = (id, { replace = false } = {}) => {
+    const nextId = id ? String(id) : null;
+    setSelected360Id(nextId);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (nextId) next.set("customerId", nextId);
+      else next.delete("customerId");
+      return next;
+    }, { replace });
+  };
+
+  const changeView = (nextView) => {
+    setView(nextView);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (nextView === "directory") next.delete("view");
+      else next.set("view", nextView);
+      return next;
+    });
+  };
+
+  // Keep the page state aligned with notification/command-palette links and
+  // browser back/forward navigation after the component is already mounted.
+  useEffect(() => {
+    const urlView = searchParams.get("view") || "directory";
+    const urlCustomerId = searchParams.get("customerId") || null;
+    setView((current) => (current === urlView ? current : urlView));
+    setSelected360Id((current) =>
+      current === urlCustomerId ? current : urlCustomerId,
+    );
+  }, [searchParams]);
   // True once the first customer fetch has resolved. Gates the full-page
   // "Loading customers…" screen so it only shows on initial load — never on
   // a search/filter refetch. Without this, narrowing a search to zero
@@ -977,23 +1027,12 @@ export default function CustomersPageV2() {
   };
 
   const openCustomerProfile = (customerId) => {
-    if (!customerId) return;
-    const next = new URLSearchParams(searchParams);
-    next.set("customerId", String(customerId));
-    setSearchParams(next);
-    setSelected360Id(customerId);
+    selectCustomer(customerId);
   };
 
   const closeCustomerProfile = () => {
-    const next = new URLSearchParams(searchParams);
-    next.delete("customerId");
-    setSearchParams(next, { replace: true });
-    setSelected360Id(null);
+    selectCustomer(null, { replace: true });
   };
-
-  useEffect(() => {
-    setSelected360Id(searchParams.get("customerId") || null);
-  }, [searchParams]);
 
   const startEdit = (c) => {
     setEditingId(c.id);
@@ -1074,6 +1113,11 @@ export default function CustomersPageV2() {
       })
       .catch((e) => {
         if (e.name === "AbortError" || seq !== loadSeqRef.current) return;
+        // Never leave rows from the previous query visible under the new
+        // search/filter state: operators could otherwise open the wrong account.
+        setCustomers([]);
+        setTotalCustomers(0);
+        setTotalPages(1);
         setError(e);
         setLoading(false);
       });
@@ -1240,26 +1284,6 @@ export default function CustomersPageV2() {
     );
   }
 
-  if (view !== "pipeline" && error && customers.length === 0) {
-    const rateLimited = isRateLimitError(error);
-    return (
-      <div className="p-16 text-center">
-        {" "}
-        <div className="text-14 text-alert-fg mb-3">
-          {rateLimited ? "Too many requests" : "Failed to load customers"}
-        </div>{" "}
-        <div className="text-13 text-ink-tertiary mb-4">
-          {rateLimited
-            ? "Wait a few seconds and try again."
-            : error?.message || String(error)}
-        </div>{" "}
-        <Button variant="primary" onClick={() => loadCustomers()}>
-          Retry
-        </Button>{" "}
-      </div>
-    );
-  }
-
   const TABLE_COLS = "1.6fr 2fr 0.3fr 0.6fr 0.9fr";
 
   const activeFilterCount =
@@ -1274,7 +1298,7 @@ export default function CustomersPageV2() {
       {/* ======================= HEADER ======================= */}
       <CustomersCommandHeader
         view={view}
-        onViewChange={setView}
+        onViewChange={changeView}
         onAddCustomer={() => openAddCustomer()}
         canAdd={isAdmin}
       />
@@ -1543,7 +1567,25 @@ export default function CustomersPageV2() {
             </div>
           )}
           {/* Rows */}
-          {filteredSorted.length === 0 ? (
+          {error ? (
+            <Card>
+              <CardBody className="p-12 text-center">
+                <div className="text-14 text-alert-fg mb-2">
+                  {isRateLimitError(error)
+                    ? "Too many requests"
+                    : "Failed to load customers"}
+                </div>
+                <div className="text-13 text-ink-tertiary mb-4">
+                  {isRateLimitError(error)
+                    ? "Wait a few seconds and try again."
+                    : error?.message || String(error)}
+                </div>
+                <Button variant="primary" onClick={() => loadCustomers()}>
+                  Retry
+                </Button>
+              </CardBody>
+            </Card>
+          ) : filteredSorted.length === 0 ? (
             <Card>
               {" "}
               <CardBody className="p-12 text-center">
@@ -1991,11 +2033,30 @@ export default function CustomersPageV2() {
       {/* ======================= MAP ======================= */}
       {view === "map" && (
         <div className="mt-4">
-          {" "}
-          <LegacyCustomersPanel
-            exportName="CustomerMap"
-            props={{ customers, onSelect: (c) => openCustomerProfile(c.id) }}
-          />{" "}
+          {error ? (
+            <Card>
+              <CardBody className="p-12 text-center">
+                <div className="text-14 text-alert-fg mb-2">
+                  {isRateLimitError(error)
+                    ? "Too many requests"
+                    : "Failed to load customers"}
+                </div>
+                <div className="text-13 text-ink-tertiary mb-4">
+                  {isRateLimitError(error)
+                    ? "Wait a few seconds and try again."
+                    : error?.message || String(error)}
+                </div>
+                <Button variant="primary" onClick={() => loadCustomers()}>
+                  Retry
+                </Button>
+              </CardBody>
+            </Card>
+          ) : (
+            <LegacyCustomersPanel
+              exportName="CustomerMap"
+              props={{ customers, onSelect: (c) => openCustomerProfile(c.id) }}
+            />
+          )}
         </div>
       )}
 
@@ -2109,6 +2170,7 @@ export default function CustomersPageV2() {
       {/* ======================= CUSTOMER 360 (V1) ======================= */}
       {selected360Id && (
         <Customer360Profile
+          key={selected360Id}
           customerId={selected360Id}
           onSelectCustomer={openCustomerProfile}
           onAddProperty={(customer) => {

@@ -10,20 +10,41 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { SERVICE_CATEGORY_LABELS as CATEGORY_LABELS } from "../../constants/serviceCategories";
+import { buildMobileServicePayload } from "../../lib/serviceLibraryPayload";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 
-function aFetch(path, opts = {}) {
-  return fetch(`${API}${path}`, {
+async function aFetch(path, opts = {}) {
+  const response = await fetch(`${API}${path}`, {
     headers: {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
       "Content-Type": "application/json",
     },
     ...opts,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
   });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchAllServices(params = new URLSearchParams()) {
+  const rows = [];
+  let offset = 0;
+  let total = 0;
+  do {
+    const pageParams = new URLSearchParams(params);
+    pageParams.set("limit", "500");
+    pageParams.set("offset", String(offset));
+    const data = await aFetch(`/admin/services?${pageParams}`);
+    const page = data.services || [];
+    rows.push(...page);
+    total = Number(data.total || rows.length);
+    offset += page.length;
+    if (page.length === 0) break;
+  } while (rows.length < total);
+  return rows;
 }
 
 // Shared row + card styling so the three views look identical.
@@ -230,9 +251,9 @@ function CategoriesView({ onBack }) {
   const [expandedKey, setExpandedKey] = useState(null);
 
   useEffect(() => {
-    aFetch("/admin/services?is_active=true&limit=500")
-      .then((d) => {
-        setServices(d.services || []);
+    fetchAllServices(new URLSearchParams({ is_active: "true" }))
+      .then((rows) => {
+        setServices(rows);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -423,15 +444,21 @@ function DiscountsView({ onBack }) {
   const [query, setQuery] = useState("");
   const [expandedId, setExpandedId] = useState(null);
   const [creating, setCreating] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(() => {
+    setLoading(true);
+    setLoadError("");
     return aFetch("/admin/discounts")
       .then((d) => {
         // Endpoint returns a raw array.
         setDiscounts(Array.isArray(d) ? d : d.discounts || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        setLoadError(err?.message || "Failed to load discounts");
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
@@ -491,7 +518,14 @@ function DiscountsView({ onBack }) {
           />{" "}
         </div>
       )}
-      {loading ? (
+      {loadError ? (
+        <div role="alert" className="p-6 text-center text-alert-fg" style={{ fontSize: 14 }}>
+          <div>{loadError}</div>
+          <button type="button" onClick={load} className="mt-3 bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: "8px 14px" }}>
+            Retry
+          </button>
+        </div>
+      ) : loading ? (
         <div
           className="p-10 text-center text-ink-secondary"
           style={{ fontSize: 13 }}
@@ -584,6 +618,11 @@ const DISCOUNT_TYPES = [
 
 function DiscountEditPanel({ discount, onCancel, onSaved }) {
   const isNew = !discount?.id;
+  const availableDiscountTypes = DISCOUNT_TYPES.filter(
+    (type) =>
+      type.value !== "free_service" ||
+      discount?.discount_type === "free_service",
+  );
   const [name, setName] = useState(discount?.name || "");
   const [discountType, setDiscountType] = useState(
     discount?.discount_type || "percentage",
@@ -668,7 +707,7 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
             value={discountType}
             onChange={(e) => setDiscountType(e.target.value)}
           >
-            {DISCOUNT_TYPES.map((t) => (
+            {availableDiscountTypes.map((t) => (
               <option key={t.value} value={t.value}>
                 {t.label}
               </option>
@@ -735,19 +774,24 @@ function AllServicesView({ onBack }) {
   const [expandedId, setExpandedId] = useState(null);
   const [status, setStatus] = useState("active");
   const [creating, setCreating] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(() => {
     setLoading(true);
-    const params = new URLSearchParams({ limit: "500" });
+    setLoadError("");
+    const params = new URLSearchParams();
     if (status === "active") params.set("is_active", "true");
     if (status === "inactive") params.set("is_active", "false");
     if (status === "archived") params.set("is_archived", "true");
-    return aFetch(`/admin/services?${params}`)
-      .then((d) => {
-        setServices(d.services || []);
+    return fetchAllServices(params)
+      .then((rows) => {
+        setServices(rows);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        setLoadError(err?.message || "Failed to load services");
+        setLoading(false);
+      });
   }, [status]);
 
   useEffect(() => {
@@ -836,7 +880,14 @@ function AllServicesView({ onBack }) {
           </button>
         ))}
       </div>
-      {loading ? (
+      {loadError ? (
+        <div role="alert" className="p-6 text-center text-alert-fg" style={{ fontSize: 14 }}>
+          <div>{loadError}</div>
+          <button type="button" onClick={load} className="mt-3 bg-zinc-900 text-white rounded-sm u-focus-ring" style={{ padding: "8px 14px" }}>
+            Retry
+          </button>
+        </div>
+      ) : loading ? (
         <div
           className="p-10 text-center text-ink-secondary"
           style={{ fontSize: 13 }}
@@ -991,19 +1042,16 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
         isNew ? "/admin/services" : `/admin/services/${service.id}`,
         {
           method: isNew ? "POST" : "PUT",
-          body: JSON.stringify({
-            name: name.trim(),
-            category: isNew ? "other" : undefined,
-            billing_type: isNew ? "one_time" : undefined,
-            default_duration_minutes: duration === "" ? null : Number(duration),
-            pricing_type: pricingType,
-            base_price:
-              pricingType === "fixed" && basePrice !== ""
-                ? Number(basePrice)
-                : null,
-            is_active: isActive,
-            ...closeoutPayload,
-          }),
+          body: JSON.stringify(buildMobileServicePayload({
+            service,
+            isNew,
+            name,
+            duration,
+            pricingType,
+            basePrice,
+            isActive,
+            closeoutPayload,
+          })),
         },
       );
       await onSaved();

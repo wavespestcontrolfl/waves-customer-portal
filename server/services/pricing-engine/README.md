@@ -5,9 +5,8 @@ Single source of truth for what this engine prices, how, and with what constants
 **Engine entrypoint:** `generateEstimate(input)` in `estimate-engine.js` → orchestrates per-service pricing in `service-pricing.js` → applies discounts via `discount-engine.js`.
 
 **Public callers:**
-- `server/routes/public-quote.js` — homepage quote wizard (recurring only)
+- `server/routes/public-quote.js` — wavespestcontrol.com estimate and quote forms
 - `client/src/pages/admin/EstimatePage.jsx` — admin estimate tool (full coverage)
-- `client/src/pages/QuotePage.jsx` — portal quote page (recurring only)
 
 ---
 

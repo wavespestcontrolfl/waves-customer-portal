@@ -5,7 +5,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({
   alertTwilioFailure: jest.fn(),
-  isFailureStatus: jest.fn(() => false),
+  isFailureStatus: jest.fn((status) => ['failed', 'no-answer', 'busy', 'canceled'].includes(status)),
 }));
 jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(),
@@ -22,6 +22,7 @@ describe('twilio voice inbound forward acceptance', () => {
     rememberForwardAccept,
     resolveCsrName,
     resolveInboundDialCompletion,
+    shouldAlertInboundDialFailure,
     wasForwardAccepted,
   } = voiceRouter._test;
 
@@ -85,6 +86,28 @@ describe('twilio voice inbound forward acceptance', () => {
         answeredBy: 'voicemail',
       });
     }
+  });
+
+  test('does not raise a failure alert when a failed staff dial continues to voicemail', () => {
+    for (const status of ['no-answer', 'busy', 'failed']) {
+      const completion = resolveInboundDialCompletion({
+        status,
+        duration: 0,
+        forwardAccepted: false,
+      });
+
+      expect(shouldAlertInboundDialFailure({
+        status,
+        shouldRecordVoicemail: completion.shouldRecordVoicemail,
+      })).toBe(false);
+    }
+  });
+
+  test('keeps terminal dial failures alertable when no voicemail fallback applies', () => {
+    expect(shouldAlertInboundDialFailure({
+      status: 'canceled',
+      shouldRecordVoicemail: false,
+    })).toBe(true);
   });
 
   test('recognizes persisted forward acceptance metadata', () => {

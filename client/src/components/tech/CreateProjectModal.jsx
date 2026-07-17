@@ -1299,7 +1299,7 @@ export default function CreateProjectModal({
       tabIndex={-1}
       role="dialog"
       aria-modal="true"
-      aria-labelledby="create-project-title"
+      aria-labelledby="create-project-modal-title"
       style={isSheet ? {
         // Complete Service frame: scrim + full-height sheet docked right
         // (100% width on phones via maxWidth), body scrolls inside.
@@ -1340,7 +1340,7 @@ export default function CreateProjectModal({
           background: P.card,
         }}>
           <div>
-            <div id="create-project-title" style={{
+            <div style={{
               fontSize: isEstimateStyle ? 18 : 16,
               fontWeight: wStrong,
               color: P.heading,
@@ -1348,7 +1348,9 @@ export default function CreateProjectModal({
               letterSpacing: 0,
               textTransform: 'none',
             }}>
-              {isSheet ? 'Complete Service Report' : 'Create Project Report'}
+              <span id="create-project-modal-title">
+                {isSheet ? 'Complete Service Report' : 'Create Project Report'}
+              </span>
             </div>
             <div style={{
               fontSize: isEstimateStyle ? 12 : 11,

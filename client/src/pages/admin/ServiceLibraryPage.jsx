@@ -48,6 +48,22 @@ async function aFetch(path, opts = {}) {
   return r.json();
 }
 
+async function fetchAllServices(query = "") {
+  const rows = [];
+  let offset = 0;
+  let total = 0;
+  do {
+    const joiner = query ? "&" : "";
+    const data = await aFetch(`/admin/services?${query}${joiner}limit=500&offset=${offset}`);
+    const page = data.services || [];
+    rows.push(...page);
+    total = Number(data.total || rows.length);
+    offset += page.length;
+    if (page.length === 0) break;
+  } while (rows.length < total);
+  return rows;
+}
+
 const sCard = {
   background: D.card,
   border: `1px solid ${D.border}`,
@@ -87,6 +103,8 @@ const EMPTY_SVC = {
   billing_type: "recurring",
   is_waveguard: false,
   default_duration_minutes: 60,
+  min_duration_minutes: "",
+  max_duration_minutes: "",
   scheduling_buffer_minutes: 0,
   requires_follow_up: false,
   follow_up_interval_days: "",
@@ -94,12 +112,18 @@ const EMPTY_SVC = {
   visits_per_year: "",
   pricing_type: "variable",
   base_price: "",
+  price_range_min: "",
+  price_range_max: "",
   pricing_model_key: "",
   is_taxable: false,
   tax_service_key: "",
   requires_license: false,
   license_category: "",
   min_tech_skill_level: 1,
+  requires_certification: "",
+  default_equipment: "",
+  default_products: "",
+  typical_materials_cost: "",
   requires_service_report: true,
   requires_application_log: false,
   required_photo_count: 0,
@@ -220,7 +244,18 @@ function Field({ label, children, half, htmlFor }) {
 function ServiceForm({ svc, onSave, onCancel, isNew }) {
   const rawFormId = useId().replace(/:/g, "");
   const fieldId = (key) => `${rawFormId}-${key}`;
-  const [form, setForm] = useState({ ...EMPTY_SVC, ...svc });
+  const jsonForEdit = (value) => {
+    if (value === null || value === undefined || value === "") return "";
+    if (typeof value === "string") return value;
+    return JSON.stringify(value, null, 2);
+  };
+  const [form, setForm] = useState({
+    ...EMPTY_SVC,
+    ...svc,
+    requires_certification: jsonForEdit(svc?.requires_certification),
+    default_equipment: jsonForEdit(svc?.default_equipment),
+    default_products: jsonForEdit(svc?.default_products),
+  });
   const [closeoutTouched, setCloseoutTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -413,6 +448,15 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
         >
           {inp("default_duration_minutes", "number")}
         </Field>{" "}
+        <Field label="Min Duration" half htmlFor={fieldId("min_duration_minutes")}>
+          {inp("min_duration_minutes", "number")}
+        </Field>{" "}
+        <Field label="Max Duration" half htmlFor={fieldId("max_duration_minutes")}>
+          {inp("max_duration_minutes", "number")}
+        </Field>{" "}
+        <Field label="Schedule Buffer" half htmlFor={fieldId("scheduling_buffer_minutes")}>
+          {inp("scheduling_buffer_minutes", "number")}
+        </Field>{" "}
       </div>{" "}
       <div
         style={{
@@ -439,6 +483,12 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
         <Field label="Price" half htmlFor={fieldId("base_price")}>
           {inp("base_price", "number")}
         </Field>{" "}
+        <Field label="Price Range Min" half htmlFor={fieldId("price_range_min")}>
+          {inp("price_range_min", "number")}
+        </Field>{" "}
+        <Field label="Price Range Max" half htmlFor={fieldId("price_range_max")}>
+          {inp("price_range_max", "number")}
+        </Field>{" "}
         <Field
           label="Pricing Model Key"
           half
@@ -449,6 +499,23 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
         <Field label="Sort Order" half htmlFor={fieldId("sort_order")}>
           {inp("sort_order", "number")}
         </Field>{" "}
+        <Field label="Typical Materials Cost" half htmlFor={fieldId("typical_materials_cost")}>
+          {inp("typical_materials_cost", "number")}
+        </Field>{" "}
+      </div>{" "}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+        {[['requires_certification', 'Required Certifications (JSON)'], ['default_equipment', 'Default Equipment (JSON)'], ['default_products', 'Default Products (JSON)']].map(([key, label]) => (
+          <Field key={key} label={label} htmlFor={fieldId(key)}>
+            <textarea
+              id={fieldId(key)}
+              name={key}
+              style={{ ...sInput, minHeight: 70, resize: "vertical", fontFamily: "monospace" }}
+              value={form[key] || ""}
+              onChange={(e) => set(key, e.target.value)}
+              placeholder='["Example"]'
+            />
+          </Field>
+        ))}
       </div>{" "}
       <div
         style={{
@@ -1426,6 +1493,7 @@ export default function ServiceLibraryPage() {
   const [search, setSearch] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [toast, setToast] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTabState] = useState(() =>
     normalizeTab(searchParams.get("tab")),
@@ -1469,13 +1537,11 @@ export default function ServiceLibraryPage() {
 
   const loadServices = useCallback(async () => {
     try {
+      setLoadError("");
       // Load all services once; filter client-side for snappier nav.
-      const data = await aFetch(
-        "/admin/services?limit=500&include_archived=true",
-      );
-      setServices(data.services || []);
-    } catch {
-      setServices([]);
+      setServices(await fetchAllServices("include_archived=true"));
+    } catch (err) {
+      setLoadError(err?.message || "Failed to load the service catalog");
     }
   }, []);
 
@@ -1646,6 +1712,25 @@ export default function ServiceLibraryPage() {
         </div>
       )}
       {/* === CATALOG TAB === */}
+      {tab === "catalog" && loadError && (
+        <div
+          role="alert"
+          style={{
+            ...sCard,
+            color: D.red,
+            marginBottom: 12,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <span>Service catalog unavailable: {loadError}</span>
+          <button type="button" style={sBtn(D.teal, D.white)} onClick={loadServices}>
+            Retry
+          </button>
+        </div>
+      )}
       {tab === "catalog" &&
         (isTablet ? (
           // Tablet (768-1023): stacked. Chips on top, full-width list, inline detail panel.

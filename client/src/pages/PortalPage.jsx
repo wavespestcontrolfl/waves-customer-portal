@@ -9,6 +9,7 @@ import { fmtMoney } from '../lib/money';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
+import { showCustomerAlert, showCustomerConfirm } from '../components/brand/CustomerDialogHost';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
@@ -1931,7 +1932,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                     setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
                   } catch (err) {
                     console.error(err);
-                    alert('Could not confirm this visit. Please try again.');
+                    showCustomerAlert('Could not confirm this visit. Please try again.');
                   } finally {
                     setConfirmingVisit(false);
                   }
@@ -2208,7 +2209,7 @@ function ServicesTab() {
   const [lightbox, setLightbox] = useState(null);
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
   const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
-    (err) => alert(err?.message || 'Could not open this report. Please try again.')
+    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
   );
 
   const loadServices = useCallback(() => {
@@ -2763,7 +2764,7 @@ function ServicesTab() {
                                       return;
                                     }
                                     downloadAuthedPdf(api.getServiceReportUrl(s.id)).catch(() => {
-                                      alert('Could not download this report. Please try again.');
+                                      showCustomerAlert('Could not download this report. Please try again.');
                                     });
                                   }}
                                   style={{
@@ -2791,7 +2792,7 @@ function ServicesTab() {
         <DocumentPreviewOverlay
           preview={preview}
           onClose={closePreview}
-          onError={(err) => alert(err?.message || 'Could not save this report. Please try again.')}
+          onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')}
         />
       )}
       {lightbox && (
@@ -2950,7 +2951,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       await api.updateNotificationPrefs({ [key]: newVal });
     } catch (err) {
       setPrefs(prev => ({ ...prev, [key]: !newVal }));
-      alert('Could not update notification preferences. Please try again.');
+      showCustomerAlert('Could not update notification preferences. Please try again.');
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [key]: false }));
@@ -2968,7 +2969,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       await api.updateNotificationPrefs({ [channelKey]: value });
     } catch (err) {
       setPrefs(prev => ({ ...prev, [channelKey]: prevVal }));
-      alert('Could not update delivery preference. Please try again.');
+      showCustomerAlert('Could not update delivery preference. Please try again.');
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [channelKey]: false }));
@@ -2987,7 +2988,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       await api.updateNotificationPrefs(updates);
     } catch (err) {
       setPrefs(prev => ({ ...prev, ...prevById }));
-      alert('Could not update delivery preference. Please try again.');
+      showCustomerAlert('Could not update delivery preference. Please try again.');
       console.error(err);
     }
   };
@@ -3020,7 +3021,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           ? { ...p, preferences: { ...(p.preferences || {}), [key]: current } }
           : p
       )));
-      alert('Could not update notification preferences. Please try again.');
+      showCustomerAlert('Could not update notification preferences. Please try again.');
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [lockKey]: false }));
@@ -3087,7 +3088,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           : p
       )));
     } catch (err) {
-      alert('Could not save the on-location contacts. Please try again.');
+      showCustomerAlert('Could not save the on-location contacts. Please try again.');
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [lockKey]: false }));
@@ -3104,7 +3105,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       setUpcoming(prev => prev.map(s => s.id === id ? { ...s, status: 'confirmed', customerConfirmed: true } : s));
     } catch (err) {
       console.error(err);
-      alert('Could not confirm this appointment. Refreshing latest status...');
+      showCustomerAlert('Could not confirm this appointment. Refreshing latest status...');
       try {
         const fresh = await api.getSchedule(90);
         setUpcoming(fresh.upcoming || []);
@@ -3861,7 +3862,7 @@ function BillingTab({ customer }) {
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
   useLockBodyScroll(showAddCard); // freeze the page behind the add-card modal
-  const addCardDialogRef = useModalFocus(showAddCard);
+  const addCardDialogRef = useModalFocus(showAddCard, () => setShowAddCard(false));
   const [autopayRefreshKey, setAutopayRefreshKey] = useState(0);
   const [stripeLoading, setStripeLoading] = useState(false);
   const [stripeError, setStripeError] = useState('');
@@ -4072,7 +4073,12 @@ function BillingTab({ customer }) {
   };
 
   const handleRemoveCard = async (cardId) => {
-    if (!window.confirm('Remove this payment method?')) return;
+    const confirmed = await showCustomerConfirm('Remove this payment method?', {
+      title: 'Remove payment method?',
+      confirmLabel: 'Remove',
+      danger: true,
+    });
+    if (!confirmed) return;
     try {
       await api.removeCard(cardId);
       await refreshCards();
@@ -4080,7 +4086,7 @@ function BillingTab({ customer }) {
       // AutopayCard so it never shows "Active" against a removed card.
       setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
-      alert(err.message || 'Failed to remove card');
+      showCustomerAlert(err.message || 'Failed to remove card');
     }
   };
 
@@ -4090,7 +4096,7 @@ function BillingTab({ customer }) {
       await refreshCards();
       setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
-      alert(err.message || 'Failed to set default card');
+      showCustomerAlert(err.message || 'Failed to set default card');
     }
   };
 
@@ -7116,7 +7122,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
       await api.createRequest?.({ category: 'add_service', subject, description });
       setRequested(true);
     } catch (err) {
-      alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+      showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
     } finally {
       setRequesting(false);
     }
@@ -7378,7 +7384,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, secondaryButton, onClose }) {
   // Rendered only while open — lock the page behind the modal.
   useLockBodyScroll(true);
-  const dialogRef = useModalFocus();
+  const dialogRef = useModalFocus(true, onClose);
   const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : 'Bronze';
   const currentIdx = Math.max(0, TIER_ORDER.indexOf(currentTier));
   const nextTier = TIER_ORDER[Math.min(TIER_ORDER.length - 1, currentIdx + 1)] || currentTier;
@@ -7389,12 +7395,6 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
   const [error, setError] = useState('');
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);
-
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
 
   const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const targetIdx = Math.max(0, TIER_ORDER.indexOf(selectedTier));
@@ -7445,7 +7445,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
       await api.createRequest?.({ category: 'upgrade', subject, description });
       setRequested(true);
     } catch (err) {
-      alert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+      showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
     } finally {
       setRequesting(false);
     }
@@ -8768,7 +8768,7 @@ function MyPlanTab({ customer, focusService }) {
                         setPauseSubmitted(true);
                         setShowPauseForm(false);
                       } catch (err) {
-                        alert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+                        showCustomerAlert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
                       } finally {
                         setPauseSubmitting(false);
                       }
@@ -8844,7 +8844,7 @@ function MyPlanTab({ customer, focusService }) {
                         setCancelSubmitted(true);
                         setShowCancelForm(false);
                       } catch (err) {
-                        alert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+                        showCustomerAlert(`Couldn't submit cancellation request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
                       } finally {
                         setCancelSubmitting(false);
                       }
@@ -10851,7 +10851,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
 // WKWebView displays PDFs inline). Save hands the bytes to the OS share sheet.
 function DocumentPreviewOverlay({ preview, onClose, onError }) {
   useLockBodyScroll(true);
-  const dialogRef = useModalFocus();
+  const dialogRef = useModalFocus(true, onClose);
   const { doc, src, loading } = preview;
   const canSave = canSaveNative() && Boolean(preview.blob || doc.pdfUrl);
   const handleSave = async () => {
@@ -11210,7 +11210,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // =========================================================================
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   useLockBodyScroll(open);
-  const dialogRef = useModalFocus(open);
+  const dialogRef = useModalFocus(open, onClose);
   const compact = useIsMobile(760);
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
@@ -12137,13 +12137,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
 function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
-  const dialogRef = useModalFocus();
-  // Close on Esc for keyboard users.
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  const dialogRef = useModalFocus(true, onClose);
 
   const muted = PORTAL_SHELL.muted;
   const card = {
@@ -12379,7 +12373,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
 function ChatWidget({ customer, onClose, initialQuestion }) {
   // Rendered only while open — lock the page behind the chat overlay.
   useLockBodyScroll(true);
-  const dialogRef = useModalFocus();
+  const dialogRef = useModalFocus(true, onClose);
   const compact = useIsMobile(760);
   const firstName = customer?.firstName || customer?.first_name || '';
   const [messages, setMessages] = useState([
@@ -12674,7 +12668,7 @@ export default function PortalPage() {
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
   const [showMenu, setShowMenu] = useState(false);
-  const accountMenuDialogRef = useModalFocus(showMenu);
+  const accountMenuDialogRef = useModalFocus(showMenu, () => setShowMenu(false));
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
@@ -12746,14 +12740,9 @@ export default function PortalPage() {
     const onPointer = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setShowMenu(false);
     };
-    const onKey = (e) => {
-      if (e.key === 'Escape') setShowMenu(false);
-    };
     document.addEventListener('mousedown', onPointer);
-    document.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('mousedown', onPointer);
-      document.removeEventListener('keydown', onKey);
     };
   }, [showMenu]);
 
@@ -13165,13 +13154,18 @@ export default function PortalPage() {
                   <button
                     type="button"
                     onClick={async () => {
-                      if (!window.confirm('Delete your Waves account? This permanently removes your access to the app and your portal account. For questions about active service or billing, please contact us first — this can’t be undone from the app.')) return;
+                      setShowMenu(false);
+                      const confirmed = await showCustomerConfirm(
+                        'This permanently removes your access to the app and your portal account. For questions about active service or billing, please contact us first — this can’t be undone from the app.',
+                        { title: 'Delete your Waves account?', confirmLabel: 'Delete account', danger: true },
+                      );
+                      if (!confirmed) return;
                       try {
                         await api.deleteAccount();
                         logout();
                         setShowMenu(false);
                       } catch (e) {
-                        window.alert('Sorry — we couldn’t delete your account just now. Please try again or contact support.');
+                        showCustomerAlert('Sorry — we couldn’t delete your account just now. Please try again or contact support.');
                       }
                     }}
                     style={{

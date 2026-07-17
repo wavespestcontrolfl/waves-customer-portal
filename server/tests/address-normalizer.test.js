@@ -446,6 +446,11 @@ describe('parseRawAddress multi-part comma units (codex rd8)', () => {
 });
 
 describe('formatAddress', () => {
+  test('includes an apartment or unit line between the street and city', () => {
+    expect(formatAddress({ line1: '123 Main St', line2: 'Unit 4', city: 'Sarasota', state: 'FL', zip: '34231' }))
+      .toBe('123 Main St, Unit 4, Sarasota, FL 34231');
+  });
+
   test('joins a complete address', () => {
     expect(formatAddress({ line1: '123 Main St', city: 'Sarasota', state: 'FL', zip: '34231' }))
       .toBe('123 Main St, Sarasota, FL 34231');

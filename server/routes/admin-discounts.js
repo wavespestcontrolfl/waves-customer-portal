@@ -6,8 +6,23 @@ const DiscountEngine = require('../services/discount-engine');
 const logger = require('../services/logger');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { attachDiscountCatalogClassification } = require('../services/discount-catalog-classifier');
+const { auditDiscountCatalogChange, ipFromReq, uaFromReq } = require('../services/audit-log');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+function auditContext(req) {
+  return {
+    tech_user_id: req.technicianId || req.technician?.id || null,
+    ip_address: ipFromReq(req),
+    user_agent: uaFromReq(req),
+  };
+}
+
+function changedFields(before, after) {
+  const keys = new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
+  return [...keys].filter((key) => key !== 'updated_at'
+    && JSON.stringify(before?.[key] ?? null) !== JSON.stringify(after?.[key] ?? null));
+}
 
 // GET /api/admin/discounts — list all discounts
 router.get('/', async (req, res, next) => {
@@ -23,7 +38,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const data = buildDiscountData(req.body, { generateKey: true });
     if (!data.name || !String(data.name).trim()) return res.status(400).json({ error: 'Discount name is required' });
     if (!data.discount_key) return res.status(400).json({ error: 'Discount key is required' });
-    const [disc] = await db('discounts').insert(data).returning('*');
+    const disc = await db.transaction(async (trx) => {
+      const [created] = await trx('discounts').insert(data).returning('*');
+      await auditDiscountCatalogChange({
+        ...auditContext(req),
+        discount_id: created.id,
+        change_type: 'create',
+        changed_fields: Object.keys(data),
+        before: null,
+        after: created,
+        trx,
+      });
+      return created;
+    });
     DiscountEngine.clearCache();
     logger.info(`[discounts] Created: ${disc.name}`);
     res.status(201).json(disc);
@@ -40,8 +67,28 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     const data = buildDiscountData(req.body);
     if (data.name !== undefined && !String(data.name).trim()) return res.status(400).json({ error: 'Discount name is required' });
     if (data.discount_key !== undefined && !data.discount_key) return res.status(400).json({ error: 'Discount key is required' });
-    data.updated_at = new Date();
-    const [disc] = await db('discounts').where({ id: req.params.id }).update(data).returning('*');
+    const disc = await db.transaction(async (trx) => {
+      const before = await trx('discounts').where({ id: req.params.id }).forUpdate().first();
+      if (!before) return null;
+      if (data.discount_key !== undefined && data.discount_key !== before.discount_key) {
+        throw validationError('Discount key cannot be changed after creation');
+      }
+      const merged = { ...before, ...data };
+      if (merged.discount_type === 'free_service') data.amount = 0;
+      assertDiscountConsistency({ ...merged, ...data });
+      data.updated_at = new Date();
+      const [updated] = await trx('discounts').where({ id: req.params.id }).update(data).returning('*');
+      await auditDiscountCatalogChange({
+        ...auditContext(req),
+        discount_id: updated.id,
+        change_type: before.is_active && updated.is_active === false ? 'deactivate' : 'update',
+        changed_fields: changedFields(before, updated),
+        before,
+        after: updated,
+        trx,
+      });
+      return updated;
+    });
     if (!disc) return res.status(404).json({ error: 'Discount not found' });
     DiscountEngine.clearCache();
     res.json(disc);
@@ -55,8 +102,22 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 // DELETE /api/admin/discounts/:id — soft delete (set is_active = false)
 router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const [disc] = await db('discounts').where({ id: req.params.id })
-      .update({ is_active: false, updated_at: new Date() }).returning('*');
+    const disc = await db.transaction(async (trx) => {
+      const before = await trx('discounts').where({ id: req.params.id }).forUpdate().first();
+      if (!before) return null;
+      const [updated] = await trx('discounts').where({ id: req.params.id })
+        .update({ is_active: false, updated_at: new Date() }).returning('*');
+      await auditDiscountCatalogChange({
+        ...auditContext(req),
+        discount_id: updated.id,
+        change_type: 'deactivate',
+        changed_fields: changedFields(before, updated),
+        before,
+        after: updated,
+        trx,
+      });
+      return updated;
+    });
     if (!disc) return res.status(404).json({ error: 'Discount not found' });
     DiscountEngine.clearCache();
     res.json({ success: true, discount: disc });
@@ -225,6 +286,7 @@ function buildDiscountData(body, { generateKey = false } = {}) {
     data.promo_code_expiry = dt;
   }
   validateDiscountData(data, { partial: !generateKey });
+  if (generateKey) assertDiscountConsistency(data);
   return data;
 }
 
@@ -243,5 +305,15 @@ function validateDiscountData(data, { partial = false } = {}) {
   }
 }
 
+function assertDiscountConsistency(data) {
+  if ((data.discount_type === 'percentage' || data.discount_type === 'variable_percentage')
+    && Number(data.amount) > 100) {
+    throw validationError('Percentage discounts cannot exceed 100');
+  }
+  if (data.discount_type === 'free_service' && !data.service_key_filter && !data.service_category_filter) {
+    throw validationError('Free-service discounts require a service key or category filter');
+  }
+}
+
 module.exports = router;
-module.exports.__private = { buildDiscountData, validateDiscountData };
+module.exports.__private = { buildDiscountData, validateDiscountData, assertDiscountConsistency };

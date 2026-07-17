@@ -1,6 +1,6 @@
 // Server-trusted lead → quote-wizard prefill token.
 //
-// The voicemail lead text-back SMS links the prospect to the public /estimate
+// The voicemail lead text-back SMS links the prospect to the public /quote
 // wizard with `vlead=<leadId>&vt=<token>`. The wizard exchanges the pair for
 // that lead's own contact fields (name/phone/address/service interest) so the
 // form arrives prefilled, and the wizard's lead capture UPDATES the same lead

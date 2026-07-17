@@ -4,8 +4,75 @@ import { GrowthBookProvider } from '@growthbook/growthbook-react';
 import { growthbook } from './lib/growthbook';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
+import { CUSTOMER_SURFACE } from './theme-customer';
 import { useGlassSurface } from './glass/glass-engine';
 import Icon from './components/Icon';
+import CustomerDialogHost from './components/brand/CustomerDialogHost';
+
+function CustomerFailureScreen({ title, message, onRetry }) {
+  useGlassSurface(true, 'full');
+  return (
+    <main style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 24,
+      fontFamily: FONTS.body,
+      boxSizing: 'border-box',
+    }}>
+      <section data-glass="modal" style={{
+        width: 'min(420px, 100%)',
+        position: 'relative',
+        background: 'rgba(255,255,255,0.90)',
+        border: `1px solid ${CUSTOMER_SURFACE.border}`,
+        borderRadius: 16,
+        padding: 26,
+        textAlign: 'center',
+        boxShadow: '0 24px 70px rgba(4,57,94,0.20)',
+      }}>
+        <div style={{
+          width: 48,
+          height: 48,
+          borderRadius: 14,
+          margin: '0 auto 15px',
+          background: CUSTOMER_SURFACE.soft,
+          color: COLORS.glassNavy,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}>
+          <Icon name="warning" size={22} strokeWidth={2} />
+        </div>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 850, color: CUSTOMER_SURFACE.text, fontFamily: FONTS.heading }}>
+          {title}
+        </h1>
+        <p style={{ margin: '9px 0 21px', fontSize: 14, color: CUSTOMER_SURFACE.body, lineHeight: 1.55 }}>
+          {message}
+        </p>
+        <button
+          type="button"
+          data-glass-accent=""
+          onClick={onRetry}
+          style={{
+            minHeight: 42,
+            padding: '0 19px',
+            background: COLORS.glassNavy,
+            color: '#fff',
+            border: '1px solid rgba(4,57,94,0.16)',
+            borderRadius: 10,
+            fontSize: 14,
+            fontWeight: 850,
+            fontFamily: FONTS.heading,
+            cursor: 'pointer',
+          }}
+        >
+          Try Again
+        </button>
+      </section>
+    </main>
+  );
+}
 
 class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -13,6 +80,15 @@ class PageErrorBoundary extends Component {
   componentDidCatch(error, info) { console.error('[Page crash]', error, info.componentStack); }
   render() {
     if (this.state.error) {
+      if (this.props.customerGlass) {
+        return (
+          <CustomerFailureScreen
+            title="Something went wrong"
+            message={this.state.error.message || 'This page could not be displayed. Please try again.'}
+            onRetry={() => { this.setState({ error: null }); window.location.reload(); }}
+          />
+        );
+      }
       return (
         <div style={{
           minHeight: '100vh',
@@ -134,7 +210,17 @@ function NewsletterExternalRedirect() {
   return null;
 }
 
-import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
+function ExternalRedirect({ to }) {
+  useEffect(() => {
+    window.location.replace(`${to}${window.location.search}${window.location.hash}`);
+  }, [to]);
+  return null;
+}
+
+import {
+  ESTIMATE_MARKETING_REDIRECTS,
+  ESTIMATE_QUOTE_URL,
+} from './lib/estimateMarketingRedirects';
 import LoginPage from './pages/LoginPage';
 import AdminLoginPage from './pages/AdminLoginPage';
 import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
@@ -167,6 +253,16 @@ function showReloadToast() {
 // Rendered when a lazy chunk still fails after the one automatic reload —
 // a friendly retry beats the blank screen the rethrow used to produce.
 function ChunkLoadFallback() {
+  const operatorPath = /^\/(admin|tech)(\/|$)/.test(window.location.pathname);
+  if (!operatorPath) {
+    return (
+      <CustomerFailureScreen
+        title="Couldn’t load this page"
+        message="Check your connection and try again."
+        onRetry={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
+      />
+    );
+  }
   return (
     <div style={{
       minHeight: '100vh', background: '#FAF8F3', display: 'flex', alignItems: 'center',
@@ -270,6 +366,7 @@ const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
+const SecureAppointmentPage = lazyWithRetry(() => import('./pages/SecureAppointmentPage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
 const PriceChangeNoticePage = lazyWithRetry(() => import('./pages/PriceChangeNoticePage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
@@ -285,28 +382,17 @@ const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
 const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
-const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
 const LawnCareIncludedPage = lazyWithRetry(() => import('./pages/LawnCareIncludedPage'));
 const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
-
-function EstimatePublicGateway() {
-  const { token } = useParams();
-  const slug = String(token || '').toLowerCase();
-  if (SERVICE_ESTIMATE_SLUGS.has(slug)) {
-    return <QuotePage serviceSlug={slug} />;
-  }
-  // Tokened estimates get the standard shell chrome (owner 2026-07-06);
-  // the slug branch keeps the quote wizard's own hero.
-  return <WavesShell><EstimateViewPage /></WavesShell>;
-}
 
 // Route-tree error boundary: keyed on pathname so navigating away from a
 // crashed page automatically clears the fallback. Customer routes previously
 // had NO boundary — any render crash blanked the whole app.
 function RoutesErrorBoundary({ children }) {
   const location = useLocation();
-  return <PageErrorBoundary key={location.pathname}>{children}</PageErrorBoundary>;
+  const customerGlass = !/^\/(admin|tech)(\/|$)/.test(location.pathname);
+  return <PageErrorBoundary key={location.pathname} customerGlass={customerGlass}>{children}</PageErrorBoundary>;
 }
 
 function ProtectedRoute({ children }) {
@@ -396,13 +482,16 @@ export default function App() {
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReschedulePage /></Suspense>} />
+          <Route path="/secure/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><SecureAppointmentPage /></Suspense>} />
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
           <Route path="/price-change/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PriceChangeNoticePage /></Suspense>} />
-          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
+          {Object.entries(ESTIMATE_MARKETING_REDIRECTS).map(([slug, destination]) => (
+            <Route key={slug} path={`/estimate/${slug}`} element={<ExternalRedirect to={destination} />} />
+          ))}
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><EstimateViewPage /></WavesShell></Suspense>} />
           {/* #EDF4FA fallbacks = glass-adjacent wash, not the warm legacy
               #FAF8F3 — these pages all mount the glass scene, so a warm
               fallback reads as the old theme flashing before glass. The
-              /estimate quote wizard keeps #FAF8F3 (deliberately un-glassed),
               /newsletter keeps its dark hero. The /pay group joined the full
               scene 2026-07-09 (pro wash retired), so it uses the same wash. */}
           <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><LawnReportViewPage /></WavesShell></Suspense>} />
@@ -411,8 +500,8 @@ export default function App() {
           <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ServiceOutlinePage /></WavesShell></Suspense>} />
           <Route path="/review/:token" element={<ReviewLinkRedirect />} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
-          <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
-          <Route path="/quote" element={<Navigate to="/estimate" replace />} />
+          <Route path="/estimate" element={<ExternalRedirect to={ESTIMATE_QUOTE_URL} />} />
+          <Route path="/quote" element={<ExternalRedirect to={ESTIMATE_QUOTE_URL} />} />
           <Route path="/newsletter" element={<NewsletterExternalRedirect />} />
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />
@@ -550,6 +639,7 @@ export default function App() {
         </Routes>
         </RoutesErrorBoundary>
         </BiometricGate>
+        <CustomerDialogHost />
       </BrowserRouter>
     </AuthProvider>
   );

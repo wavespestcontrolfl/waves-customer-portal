@@ -194,13 +194,22 @@ export default function MobileAppointmentDetailSheet({
   const visitInvoice = (service.billedToPayer || attachedInvoice?.payerBilled)
     ? null
     : attachedInvoice;
+  const hasOpenVisitInvoice = !!(
+    visitInvoice?.open && Number(visitInvoice.amountDue || 0) > 0
+  );
+  const hasCheckoutAmount = hasChargeableAmount || hasOpenVisitInvoice;
   const completionProfile = service.completionProfile || {};
   const linkedProject = service.linkedProject || null;
   // projectBacked covers both special projects and still-project_required
   // one-time types (server 409s those out of /complete); typed
   // service_report profiles serialize projectBacked:false and use the
   // standard completion sheet.
-  const projectBackedCompletion = !!(completionProfile.projectBacked || completionProfile.requiresProject || linkedProject?.id);
+  // An explicit projectBacked value is authoritative. Cut-over service-report
+  // visits can retain a legacy linked project, but the completion endpoint
+  // follows the profile and accepts those through the standard sheet.
+  const projectBackedCompletion = typeof completionProfile.projectBacked === 'boolean'
+    ? !!(completionProfile.projectBacked || completionProfile.requiresProject)
+    : !!(completionProfile.projectBacked || completionProfile.requiresProject || linkedProject?.id);
   const projectCompletionClosed = projectBackedCompletion
     && (linkedProject?.status === 'closed' || service.status === 'completed');
   const projectCompletionLabel = projectCompletionClosed
@@ -294,8 +303,14 @@ export default function MobileAppointmentDetailSheet({
     onCompleteService?.({ ...service, notes: note });
   };
 
-  const handleReviewAction = () => {
-    if (hasChargeableAmount || canCompleteService) {
+  const handleReviewAction = async () => {
+    if (!hasCheckoutAmount && projectBackedCompletion && canCompleteService) {
+      const saved = await saveNote();
+      if (!saved) return;
+      onCompleteService?.({ ...service, notes: note });
+      return;
+    }
+    if (hasCheckoutAmount || canCompleteService) {
       onReviewCheckout?.(service);
     }
   };
@@ -354,11 +369,11 @@ export default function MobileAppointmentDetailSheet({
         <button
           type="button"
           onClick={handleReviewAction}
-          disabled={!hasChargeableAmount && !canCompleteService}
+          disabled={!hasCheckoutAmount && !canCompleteService}
           className={`w-full rounded-sm font-medium u-focus-ring ${canCompleteService ? 'bg-white text-zinc-900 border border-hairline border-zinc-300 mt-3' : 'bg-zinc-900 text-white'}`}
-          style={{ padding: '14px 20px', fontSize: 16, opacity: (!hasChargeableAmount && !canCompleteService) ? 0.55 : 1 }}
+          style={{ padding: '14px 20px', fontSize: 16, opacity: (!hasCheckoutAmount && !canCompleteService) ? 0.55 : 1 }}
         >
-          {hasChargeableAmount ? 'Review & checkout' : canCompleteService ? (projectBackedCompletion ? (linkedProject?.id ? 'Open project details' : 'Review project details') : 'Review visit details') : 'Visit complete'}
+          {hasCheckoutAmount ? 'Review & checkout' : canCompleteService ? (projectBackedCompletion ? (linkedProject?.id ? 'Open project details' : 'Review project details') : 'Review visit details') : 'Visit complete'}
         </button>
         {coveredByMembership && !isPrepaid && (
           <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>

@@ -8,6 +8,7 @@ import { Download, Share2, Printer, Lock } from 'lucide-react';
 import { canSaveNative, canShareNative, isNativeApp, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { docButton } from '../theme-doc';
+import { showCustomerAlert } from './brand/CustomerDialogHost';
 
 // Canonical document button values (incl. the #2532 border-box fix: these
 // render as width-100% grid items — content-box would add padding/border on
@@ -107,7 +108,7 @@ export default function DocumentActionBar({
               if (canSaveNative()) {
                 e.preventDefault();
                 saveUrlNative(pdfUrl, pdfFileName)
-                  .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                  .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
               }
             }}
             style={buttonStyle()}

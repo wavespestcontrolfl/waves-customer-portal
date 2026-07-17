@@ -553,7 +553,9 @@ function normalizeLeadAddress(input = {}) {
 function formatAddress(parts = {}) {
   const clean = (value) => (value == null ? '' : String(value).trim());
   const region = [clean(parts.state), clean(parts.zip)].filter(Boolean).join(' ');
-  return [clean(parts.line1), clean(parts.city), region].filter(Boolean).join(', ');
+  return [clean(parts.line1), clean(parts.line2), clean(parts.city), region]
+    .filter(Boolean)
+    .join(', ');
 }
 
 module.exports = {

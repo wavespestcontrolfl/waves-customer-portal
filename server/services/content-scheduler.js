@@ -484,6 +484,32 @@ const ContentScheduler = {
         claimed = (await db('blog_posts')
           .where('id', blog.id)
           .where('publish_status', blog.publish_status)
+          // Mutual exclusion with the manual /publish-astro lane: a live
+          // publish_claimed_at means an admin's publishAstro is mid-flight —
+          // claiming now would run two publishers over the same row and
+          // cross-wire their PR markers. Stale (>30m) claims are crashed
+          // publishes and don't block.
+          .where((q) => q.whereNull('publish_claimed_at')
+            .orWhere('publish_claimed_at', '<', new Date(Date.now() - 30 * 60 * 1000)))
+          // Re-check eligibility ATOMICALLY (mirrors the pending SELECT): a
+          // manual publish that FINISHED between the SELECT and this CAS
+          // left pr_open + a cleared lease with publish_status untouched —
+          // claiming from that stale snapshot would pair the manual PR with
+          // 'publishing', which pages-poll reads as auto-merge authorization
+          // (bypassing the Approve & Go Live click). Two lanes: the
+          // first-publish lane requires zero external progress (no PR, no
+          // branch, no in-flight astro state — 'draft' and other settled
+          // states pass); the pending_review+live lane is the social-share
+          // finish for an already-live post and keeps its markers.
+          .where((q) => q
+            .where((first) => first
+              .whereNull('astro_pr_number')
+              .whereNull('astro_branch_name')
+              .where((m) => m.whereNull('astro_status')
+                .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'publish_failed', 'merged', 'live', 'unpublish_pending'])))
+            .orWhere((share) => share
+              .where('publish_status', 'pending_review')
+              .where('astro_status', 'live')))
           .update({ publish_status: 'publishing', updated_at: new Date() })) > 0;
         if (!claimed) {
           logger.info(`[content-scheduler] blog ${blog.id} already claimed by a concurrent tick — skipping`);

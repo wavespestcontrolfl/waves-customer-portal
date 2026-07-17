@@ -14,7 +14,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const { __private } = require('../routes/admin-discounts');
-const { buildDiscountData } = __private;
+const { buildDiscountData, assertDiscountConsistency } = __private;
 
 describe('admin discount validation', () => {
   test('normalizes generated keys, promo codes, service filters, and numeric fields', () => {
@@ -64,10 +64,14 @@ describe('admin discount validation', () => {
     }, { generateKey: true })).toThrow(/sort_order must be a whole number/);
   });
 
-  test('allows partial amount updates without assuming percentage semantics', () => {
+  test('normalizes partial amounts, then validates them against the stored type', () => {
     const data = buildDiscountData({ amount: '125.75' });
 
     expect(data).toEqual({ amount: 125.75 });
+    expect(() => assertDiscountConsistency({
+      discount_type: 'percentage',
+      amount: data.amount,
+    })).toThrow(/Percentage discounts cannot exceed 100/);
   });
 
   test('parses string booleans explicitly', () => {
@@ -94,9 +98,18 @@ describe('admin discount validation', () => {
       name: 'Free Inspection',
       discount_type: 'free_service',
       amount: '99',
+      service_key_filter: 'wdo_inspection',
     }, { generateKey: true });
 
     expect(data.amount).toBe(0);
+  });
+
+  test('requires free-service discounts to be scoped to a service', () => {
+    expect(() => buildDiscountData({
+      name: 'Dangerously Broad Free Service',
+      discount_type: 'free_service',
+      amount: 0,
+    }, { generateKey: true })).toThrow(/require a service key or category filter/);
   });
 
   test('parses naive promo expiry values as Eastern Time', () => {

@@ -1494,6 +1494,25 @@ const StripeService = {
     }, { idempotencyKey: `estimate_recurring_card_${estimateId}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
   },
 
+  // "Secure your appointment" card capture (appointment-card-request funnel)
+  // — same card-only, off-session shape as the recurring-accept intent, keyed
+  // to the request row so the /secure/:token page's verify can pin the intent
+  // to ITS appointment and reject any other SetupIntent id echoed back.
+  async createAppointmentCardSetupIntent({ requestId, scheduledServiceId, generation = 0 }) {
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.setupIntents.create({
+      payment_method_types: ['card'],
+      usage: 'off_session',
+      description: 'Waves appointment — card on file',
+      metadata: {
+        purpose: 'appointment_card_request',
+        request_id: String(requestId),
+        scheduled_service_id: String(scheduledServiceId),
+      },
+    }, { idempotencyKey: `appointment_card_request_${requestId}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+  },
+
   /**
    * Off-session charge of a SPECIFIC saved payment method (not the default
    * autopay card the way charge() requires). Used by the one-time card-hold

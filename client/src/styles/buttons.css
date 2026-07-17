@@ -142,8 +142,7 @@
 /* GLASS-SCOPED NAVY SPLIT (owner ruling 2026-07-12): on glass-mounted
    customer pages (RatePage, ReviewPage, …) the authoritative navy is the
    glass navy #04395E. The base customer variant above keeps the marketing
-   navy #1B2C5B ONLY because it is shared with the quote funnel
-   (QuotePage /estimate — out of scope, mirrors wavespestcontrol.com).
+   navy #1B2C5B for retained non-glass legacy consumers.
    Non-glass customer consumers (PublicBookingPage /book) override the ink
    per-Button inline with COLORS.glassNavy instead. */
 html[data-glass-theme] .btn-primary[data-surface="customer"],

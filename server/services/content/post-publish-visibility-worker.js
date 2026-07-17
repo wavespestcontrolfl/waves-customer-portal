@@ -172,7 +172,7 @@ async function sweepRecentlyPublished({
       .where('completed_at', '>=', cutoff)
       .orderBy('completed_at', 'desc')
       .limit(limit)
-      .select('id', 'published_url');
+      .select('id', 'published_url', 'indexnow_status');
   } catch (err) {
     logger.warn(`[post-publish-visibility] sweep autonomous_runs query failed: ${err.message}`);
   }
@@ -185,6 +185,28 @@ async function sweepRecentlyPublished({
       // autonomous_runs UUID, not a db_blog_id).
       const r = await runUrl(run.published_url, { post: { source: 'autonomous_run', run_id: run.id } });
       results.push({ source: 'autonomous_run', id: run.id, url: run.published_url, ok: r?.ok ?? false });
+      // finalizeMerged persists indexnow_status in a separate post-claim
+      // patch, so a crash between claim and patch left it blank forever and
+      // the run has already left the poller's selection (prod: runs for
+      // astro PRs #371/#376) — and a transient failure it DID record
+      // ('error'/'rate_limited'/'rejected') was equally permanent. runForUrl
+      // just (re)submitted the URL — repair blank AND failure statuses on a
+      // success-ish result; a failed sweep submit writes nothing so the next
+      // sweep retries while the run is inside the window.
+      const sweptIndexNow = r?.snapshot?.indexnow_status;
+      const repairable = !run.indexnow_status
+        || ['error', 'rate_limited', 'rejected'].includes(run.indexnow_status);
+      if (repairable && ['ok', 'skipped'].includes(sweptIndexNow)) {
+        try {
+          await db('autonomous_runs')
+            .where('id', run.id)
+            .where((q) => q.whereNull('indexnow_status')
+              .orWhereIn('indexnow_status', ['', 'error', 'rate_limited', 'rejected']))
+            .update({ indexnow_status: sweptIndexNow, updated_at: new Date() });
+        } catch (err) {
+          logger.warn(`[post-publish-visibility] indexnow backfill failed for run ${run.id}: ${err.message}`);
+        }
+      }
     } catch (err) {
       logger.warn(`[post-publish-visibility] sweep check failed for run ${run.id}: ${err.message}`);
       results.push({ source: 'autonomous_run', id: run.id, url: run.published_url, error: err.message });
