@@ -585,6 +585,40 @@ describe('appointment reminder reschedule windows', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('failed notice within the 24h band leaves the 72h window covered (cron can never deliver it)', async () => {
+    const reminder = {
+      id: 'reminder-reschedule',
+      scheduled_service_id: 'svc-reschedule',
+      customer_id: 'customer-1',
+      appointment_time: new Date('2026-05-07T13:00:00.000Z'), // 9:00 AM ET tomorrow, ~23h out
+      service_type: 'Pest Control',
+      reminder_72h_sent: true,
+      reminder_24h_sent: false,
+    };
+    const lookupReminder = chain({ first: jest.fn().mockResolvedValue(reminder) });
+    const updateReminder = chain();
+    const rearmUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const reminderQueries = [lookupReminder, updateReminder, rearmUpdate];
+    const throwingCustomerLookup = chain({
+      first: jest.fn().mockRejectedValue(new Error('db connection reset')),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return reminderQueries.shift();
+      if (table === 'customers') return throwingCustomerLookup;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00', // same start, inside 24.25h of fixedNow
+    );
+
+    // hoursUntil <= 24.25 means the cron's 72h branch can never fire for this
+    // time — re-arming would only park the row in every 15-minute scan. The
+    // still-armed 24h window carries the fallback.
+    expect(rearmUpdate.update).not.toHaveBeenCalled();
+  });
+
   test('notifying reschedule with no reachable customer re-arms the 72h fallback', async () => {
     const reminder = {
       id: 'reminder-reschedule',

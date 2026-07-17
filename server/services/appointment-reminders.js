@@ -1729,9 +1729,13 @@ const AppointmentReminders = {
           }
         }
       } finally {
-        if (!noticeSent) {
-          // Guarded three ways so a failed attempt only re-arms state it
-          // still owns:
+        if (!noticeSent && (newApptTime.getTime() - Date.now()) / 3600000 > 24.25) {
+          // Re-arm ONLY while the appointment is still inside the 72h
+          // delivery band — the cron's 72h branch never fires once
+          // hoursUntil <= 24.25, so a false flag there would just keep the
+          // row in every 15-minute scan forever (the still-armed 24h window
+          // carries the fallback for those). Guarded three ways so a failed
+          // attempt only re-arms state it still owns:
           //   • appointment_time — a newer reschedule to a different time
           //     (which may have sent its own notice) makes this a no-op;
           //   • updated_at = this invocation's own write — an overlapping

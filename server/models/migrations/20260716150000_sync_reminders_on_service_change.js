@@ -310,6 +310,14 @@ exports.up = async function up(knex) {
     });
   }
 
+  // Slot index: the trigger's owner/candidate lookups (and the registration
+  // dedup) filter by (customer_id, appointment_time); without this every
+  // terminal write would seq-scan the reminders table inside the trigger.
+  await knex.raw(`
+    CREATE INDEX IF NOT EXISTS idx_appointment_reminders_customer_slot
+      ON appointment_reminders (customer_id, appointment_time)
+  `);
+
   // 2. Marker backfill for rows registration suppressed before the column
   // existed. Fingerprint: the suppressed insert stamps confirmation/72h/24h
   // with one identical timestamp (a real sender's 72h and 24h are sent ~48h
@@ -463,6 +471,7 @@ exports.down = async function down(knex) {
   const hasRemindersTable = await knex.schema.hasTable('appointment_reminders');
   if (hasRemindersTable) {
     await knex.raw('DROP TRIGGER IF EXISTS appointment_reminders_legacy_suppression ON appointment_reminders');
+    await knex.raw('DROP INDEX IF EXISTS idx_appointment_reminders_customer_slot');
   }
   await knex.raw('DROP FUNCTION IF EXISTS mark_legacy_suppressed_reminder_insert()');
   await knex.raw('DROP FUNCTION IF EXISTS sync_appointment_reminder_on_service_change()');
