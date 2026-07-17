@@ -42,7 +42,8 @@ const FEE_REACH_BREAKERS = [
 // amount, a "250 dollars" currency-word amount, or a bare number. The bare
 // form is the corruption-prone one ("Inspection fee for 123 Main Street is
 // $250" must not select the street number), so it only matches when a value
-// introducer — is/was/of or a colon/equals — DIRECTLY precedes the digits
+// introducer — is/was/of/from/between or a colon/equals — DIRECTLY precedes
+// the digits
 // ("inspection fee is 250", "inspection fee: 250"); an arbitrary mid-clause
 // number can never be selected, and the $ amount later in the clause is still
 // caught by the other forms. "at" is NOT an introducer — it is a location/
@@ -55,7 +56,7 @@ const AMOUNT_PATTERN = [
   '\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
   '(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
   '\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?\\b',
-  '(?:\\b(?:is|was|of)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b)(?![:/\\-]?\\d)',
+  '(?:\\b(?:is|was|of|from|between)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b)(?![:/\\-]?\\d)',
 ].join('|');
 
 // Remove ONLY the literal "inspection fee" phrase + an amount from free text.
@@ -68,10 +69,26 @@ const AMOUNT_PATTERN = [
 // Targets the fee PHRASE, not a specific value, so a stale draft fee no
 // structured snapshot still names is caught too. The 160 cap only bounds
 // backtracking; the clause punctuation is the real limit.
+// A range or alternative continues the SAME fee disclosure — "ranges from
+// $175 to $250", "$175–$250", "either $175 or $250" — so every amount joined
+// to the first by a range connector is consumed into the one redaction
+// (codex #2817: redacting only the first amount left the second visible).
+// The connector must be DIRECTLY followed by an amount, so "and treatment
+// $900" (a new subject between) is never swallowed.
+const RANGE_CONTINUATION =
+  '(?:\\s?(?:to|through|thru|or|and|[-–—])\\s?'
+  + '(?:'
+  + '\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?'
+  + '|(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?'
+  + '|\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?\\b'
+  + '|\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b)(?![:/\\-]?\\d)'
+  + '))*';
+
 const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
   + `((?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)[^.;!?\\n]){0,160}?)`
-  + `(?:${AMOUNT_PATTERN})`,
+  + `(?:${AMOUNT_PATTERN})`
+  + RANGE_CONTINUATION,
   'gi',
 );
 

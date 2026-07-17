@@ -139,6 +139,19 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Home of 2400 sq ft; inspection fee is 175.'))
       .toBe('Home of 2400 sq ft; inspection fee [fee removed].');
   });
+  test('every amount in a fee range is consumed into one redaction', () => {
+    expect(redactInspectionFeeCues('Inspection fee ranges from $175 to $250 depending on construction.'))
+      .toBe('Inspection fee ranges from [fee removed] depending on construction.');
+    expect(redactInspectionFeeCues('Inspection fee $175–$250.'))
+      .toBe('Inspection fee [fee removed].');
+    expect(redactInspectionFeeCues('Inspection fee is either $175 or $250 depending on size.'))
+      .toBe('Inspection fee is either [fee removed] depending on size.');
+    expect(redactInspectionFeeCues('Inspection fee between 175 and 250.'))
+      .toBe('Inspection fee [fee removed].');
+    // a connector followed by a NEW subject is not part of the range
+    expect(redactInspectionFeeCues('Inspection fee $175 and treatment estimate $900.'))
+      .toBe('Inspection fee [fee removed] and treatment estimate $900.');
+  });
   test('an included/covered fee still redacts its own amount', () => {
     expect(redactInspectionFeeCues('Inspection fee included on invoice: $250'))
       .toBe('Inspection fee included on invoice: [fee removed]');

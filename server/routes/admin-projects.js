@@ -2036,11 +2036,20 @@ function loadWdoFilings(project) {
   return Array.isArray(filings) ? filings : [];
 }
 
-// Canonical hash of the content the licensee attests to: the findings JSON
-// (key-order independent) plus the inspection date. Captured onto the
-// signature at sign time and recomputed at every send/stamp, so a
-// signed-then-edited report can never be emitted as a signed FDACS-13645 —
-// the signature only authorizes the content it was drawn against.
+// Canonical hash of the content the licensee attests to: the CUSTOMER-SAFE
+// findings JSON (key-order independent) plus the inspection date. The
+// customer-safe transform (internal-key strip + fee-cue scrub, via
+// stripInternalFindingKeys) is applied BEFORE hashing because it is also what
+// the FDACS PDF renders and what the sign-time preview shows — hash, preview,
+// and emitted filing all agree on one representation, so the signature
+// authorizes exactly the content that is emitted (codex #2817: sanitizing
+// only at render time would emit content the hash never authorized). The
+// scrub is deterministic, so the hash is stable across recomputes.
+// Consequence: signatures captured over the RAW representation (pre-change)
+// no longer verify and force one re-sign — the safe direction.
+// Captured onto the signature at sign time and recomputed at every
+// send/stamp, so a signed-then-edited report can never be emitted as a
+// signed FDACS-13645.
 function wdoContentHash(project) {
   const stable = (value) => {
     if (Array.isArray(value)) return value.map(stable);
@@ -2053,7 +2062,7 @@ function wdoContentHash(project) {
     return value;
   };
   const payload = JSON.stringify({
-    findings: stable(parseFindings(project)),
+    findings: stable(stripInternalFindingKeys(parseFindings(project)) || {}),
     project_date: normalizeDateOnly(project.project_date),
   });
   return crypto.createHash('sha256').update(payload).digest('hex');
