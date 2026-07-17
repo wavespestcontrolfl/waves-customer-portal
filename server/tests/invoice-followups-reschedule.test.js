@@ -103,9 +103,40 @@ describe('rescheduleForInvoiceEdit shifts the whole cadence by the due-date delt
     expect(seqUpdate).not.toHaveBeenCalled();
   });
 
-  it('leaves non-active sequences (paused/held/stopped) alone — their release paths re-anchor', async () => {
+  it('shifts the anchor for a PAUSED sequence but leaves next_touch_at for its release path', async () => {
+    // Release paths (resumeSequence / releaseFromAutopayHold) re-arm the
+    // CURRENT step themselves, but fireStep progression computes later steps
+    // from anchor_at — a stale anchor would burst them (codex r3).
     const { seqUpdate } = setupDb({
       seq: { id: 'seq-1', status: 'paused', step_index: 0, anchor_at: null },
+      invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-07-01T15:00:00Z' },
+    });
+    await rescheduleForInvoiceEdit('inv-1', {
+      previousDueDate: '2026-07-15',
+      newDueDate: '2026-08-14',
+    });
+    const patch = seqUpdate.mock.calls[0][0];
+    expect(patch.anchor_at.toISOString()).toBe('2026-07-31T15:00:00.000Z');
+    expect('next_touch_at' in patch).toBe(false);
+  });
+
+  it('shifts the anchor for an AUTOPAY-HELD sequence the same way', async () => {
+    const { seqUpdate } = setupDb({
+      seq: { id: 'seq-1', status: 'autopay_hold', step_index: 0, anchor_at: null },
+      invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-07-01T15:00:00Z' },
+    });
+    await rescheduleForInvoiceEdit('inv-1', {
+      previousDueDate: '2026-07-15',
+      newDueDate: '2026-08-14',
+    });
+    const patch = seqUpdate.mock.calls[0][0];
+    expect(patch.anchor_at.toISOString()).toBe('2026-07-31T15:00:00.000Z');
+    expect('next_touch_at' in patch).toBe(false);
+  });
+
+  it('leaves terminal sequences (stopped/completed) alone', async () => {
+    const { seqUpdate } = setupDb({
+      seq: { id: 'seq-1', status: 'stopped', step_index: 0, anchor_at: null },
       invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-07-01T15:00:00Z' },
     });
     await rescheduleForInvoiceEdit('inv-1', {

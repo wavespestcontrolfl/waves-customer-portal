@@ -107,6 +107,9 @@ function invoice(overrides = {}) {
     total: '129.00',
     due_date: '2026-05-19',
     service_date: '2026-05-12',
+    // fireTouch's post-claim fresh read refreshes token/title/etc onto the
+    // cron row — keep the fixture carrying the same token the row uses.
+    token: 'token-1',
     ...overrides,
   };
 }
@@ -134,7 +137,9 @@ describe('invoice follow-up email sidecar', () => {
       invoices: [chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
-      invoice_followup_sequences: [sequenceUpdate],
+      // fireStep now claims the sequence (touch_claimed_at) before sending
+      // and clears it after — the cadence advance is the middle entry.
+      invoice_followup_sequences: [chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
     });
 
     await InvoiceFollowUps.runPending();
@@ -225,7 +230,8 @@ describe('invoice follow-up email sidecar', () => {
       invoices: [chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
-      invoice_followup_sequences: [sequenceUpdate],
+      // Claim → cadence advance → claim clear (see the sidecar test above).
+      invoice_followup_sequences: [chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
     });
 
     await InvoiceFollowUps.runPending();

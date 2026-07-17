@@ -702,7 +702,10 @@ function InvoiceList({
   // After an already-delivered invoice was edited, open the resend modal for
   // it so the customer gets the updated version. Fetched by id (not from the
   // list rows) so the modal shows the fresh totals even when the invoice is
-  // outside the current page/filter.
+  // outside the current page/filter. If that refresh fails, fall back to the
+  // freshly reloaded list row so the promised modal still opens; only when
+  // neither is available does the prompt surface as a toast pointing at the
+  // row's own Resend button — never silently dropped.
   useEffect(() => {
     if (!promptResendId) return;
     let alive = true;
@@ -711,13 +714,28 @@ function InvoiceList({
         () => null,
       );
       if (!alive) return;
+      if (inv) {
+        onPromptResendHandled?.();
+        setSendModalInvoice(inv);
+        return;
+      }
+      const fromList = invoices.find(
+        (i) => String(i.id) === String(promptResendId),
+      );
+      if (fromList) {
+        onPromptResendHandled?.();
+        setSendModalInvoice(fromList);
+        return;
+      }
       onPromptResendHandled?.();
-      if (inv) setSendModalInvoice(inv);
+      showToast(
+        "Couldn't open the resend dialog — use Resend on the invoice so the customer gets the updated version",
+      );
     })();
     return () => {
       alive = false;
     };
-  }, [promptResendId, onPromptResendHandled]);
+  }, [promptResendId, onPromptResendHandled, invoices, showToast]);
 
   const handleVoid = async (id) => {
     if (!confirm("Void this invoice?")) return;

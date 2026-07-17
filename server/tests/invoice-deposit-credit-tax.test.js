@@ -374,6 +374,12 @@ describe('line-item edits on deposit-credited invoices are blocked (P1)', () => 
         };
         return q;
       }
+      // The in-flight-touch fence probes the follow-up sequence; no touch
+      // is mid-send for these drafts.
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
   }
@@ -410,7 +416,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
   // Re-reads the CURRENT invoice row at write time; some cases also probe
   // payment_plans for an active plan and the payments ledger for the
   // applied-money fence.
-  function guardDb(storedInvoice, { activePlan = null, appliedMoneyRow = null } = {}) {
+  function guardDb(storedInvoice, { activePlan = null, appliedMoneyRow = null, inFlightTouch = null } = {}) {
     const captured = { paymentsQ: null };
     db.mockImplementation((table) => {
       if (table === 'invoices') {
@@ -428,6 +434,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
           first: jest.fn(async () => appliedMoneyRow),
         };
         captured.paymentsQ = q;
+        return q;
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => inFlightTouch) };
         return q;
       }
       throw new Error(`Unexpected table query: ${table}`);
@@ -454,6 +464,18 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     guardDb({ id: 'inv-1', status: 'sent', customer_id: 'cust-1', line_items: '[]', stripe_payment_intent_id: 'pi_123' });
     await expect(InvoiceService.update('inv-1', { line_items: [{ description: 'X', quantity: 1, unit_price: 10 }] }))
       .rejects.toThrow(/already started paying/);
+  });
+
+  it('refuses any edit while a follow-up touch is mid-send (fresh claim on the sequence)', async () => {
+    // fireStep stamps touch_claimed_at before rendering/sending; an edit
+    // committing mid-send would make the reminder quote amounts the pay
+    // page no longer charges (codex r3).
+    guardDb(
+      { id: 'inv-1', status: 'sent', customer_id: 'cust-1', line_items: '[]' },
+      { inFlightTouch: { id: 'seq-1' } },
+    );
+    await expect(InvoiceService.update('inv-1', { notes: 'mid-send edit' }))
+      .rejects.toThrow(/sending right now/);
   });
 
   it('refuses to retotal a delivered invoice that carries a recorded partial payment (payment_recorded_at)', async () => {
@@ -533,6 +555,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
         const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
         return q;
       }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
     await expect(InvoiceService.update('inv-1', { notes: 'late' }))
@@ -554,6 +580,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
         return q;
       }
       if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'invoice_followup_sequences') {
         const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
         return q;
       }
@@ -590,6 +620,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       if (table === 'activity_log') {
         return { insert: activityInsert };
       }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
     const result = await InvoiceService.update('inv-1', { notes: 'updated' });
@@ -625,6 +659,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       if (table === 'activity_log') {
         return { insert: activityInsert };
       }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
     const result = await InvoiceService.update('inv-1', { notes: 'call before arrival' });
@@ -652,6 +690,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       }
       if (table === 'activity_log') {
         return { insert: activityInsert };
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
       }
       throw new Error(`Unexpected table query: ${table}`);
     });
@@ -683,6 +725,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       }
       if (table === 'activity_log') {
         return { insert: activityInsert };
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
       }
       throw new Error(`Unexpected table query: ${table}`);
     });
@@ -717,6 +763,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       if (table === 'activity_log') {
         return { insert: activityInsert };
       }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
     await InvoiceService.update('inv-1', { notes: 'updated' });
@@ -746,6 +796,10 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       }
       if (table === 'activity_log') {
         return { insert: activityInsert };
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
       }
       throw new Error(`Unexpected table query: ${table}`);
     });

@@ -340,8 +340,41 @@ async function runPending() {
 
 /**
  * Send a single step for one sequence row.
+ *
+ * Serialized against delivered-invoice edits (2026-07-17 lane): a short
+ * claim is stamped on the sequence row before rendering/sending, and
+ * InvoiceService.update refuses (pre-check + atomic predicate) while a
+ * fresh claim exists — so a reminder can't quote amounts an admin is
+ * rewriting mid-send. The claim clears in `finally`; a crashed sender
+ * self-heals via the TTL window.
  */
+const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
 async function fireStep(row) {
+  const claimed = await db('invoice_followup_sequences')
+    .where({ id: row.id })
+    .where(function () {
+      this.whereNull('touch_claimed_at').orWhere(
+        'touch_claimed_at', '<', new Date(Date.now() - TOUCH_CLAIM_TTL_MS),
+      );
+    })
+    .update({ touch_claimed_at: new Date() });
+  if (!claimed) {
+    logger.warn(`[invoice-followups] touch already in flight for invoice ${row.invoice_id}; skipping`);
+    return;
+  }
+  try {
+    await fireTouch(row);
+  } finally {
+    await db('invoice_followup_sequences')
+      .where({ id: row.id })
+      .update({ touch_claimed_at: null })
+      .catch((err) => logger.warn(
+        `[invoice-followups] could not clear touch claim for ${row.invoice_id}: ${err.message}`,
+      ));
+  }
+}
+
+async function fireTouch(row) {
   const step = config.steps[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -398,10 +431,18 @@ async function fireStep(row) {
     const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
     const dunCreditResult = await autoApplyAccountCreditIfEnabled(row.invoice_id);
     dunAppliedCredit = dunCreditResult?.applied || 0;
-    const fresh = await db('invoices').where({ id: row.invoice_id }).first('total', 'credit_applied', 'status');
+    const fresh = await db('invoices').where({ id: row.invoice_id })
+      .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number');
     if (fresh) {
+      // Refresh everything the touch renders — the cron's row snapshot can
+      // predate a just-committed delivered-invoice edit (edits are fenced
+      // out from the claim onward, so this read is the settled state).
       row.total = fresh.total;
       row.credit_applied = fresh.credit_applied;
+      row.title = fresh.title;
+      row.token = fresh.token;
+      row.due_date = fresh.due_date;
+      row.invoice_number = fresh.invoice_number;
       if (['prepaid', 'paid'].includes(String(fresh.status || '').toLowerCase())) {
         await stopOnPayment(row.invoice_id).catch(() => {});
         return;
@@ -673,8 +714,9 @@ async function resumeSequence(invoiceId) {
  * progression reads anchor_at first) stay on one shifted timeline —
  * re-anchoring only the current step would leave progression computing
  * later steps from sent_at in the past and burst the remaining reminders
- * on consecutive cron runs. Held / paused / stopped rows keep their null
- * next_touch_at and are re-anchored by their own release paths.
+ * on consecutive cron runs. Paused / autopay-held rows shift the anchor
+ * but keep next_touch_at null until their release paths re-arm them;
+ * stopped / completed rows are terminal and untouched.
  */
 async function rescheduleForInvoiceEdit(invoiceId, { previousDueDate, newDueDate } = {}) {
   const dayMs = 24 * 60 * 60 * 1000;
@@ -684,17 +726,25 @@ async function rescheduleForInvoiceEdit(invoiceId, { previousDueDate, newDueDate
   const deltaDays = Math.round((next.getTime() - prev.getTime()) / dayMs);
   if (!deltaDays) return;
 
+  // Paused / autopay-held sequences shift their anchor too — their release
+  // paths re-arm the CURRENT step themselves, but fireStep progression
+  // computes later steps from anchor_at, and a stale anchor would land those
+  // in the past and burst them on consecutive cron runs. Only an active
+  // sequence carries a scheduled next touch; held/paused rows keep
+  // next_touch_at null until released. Stopped/completed are terminal.
+  const RESCHEDULABLE_STATUSES = ['active', 'paused', 'autopay_hold'];
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
-  if (!seq || seq.status !== 'active') return;
+  if (!seq || !RESCHEDULABLE_STATUSES.includes(seq.status)) return;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
 
   const baseAnchor = seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
   const shiftedAnchor = new Date(new Date(baseAnchor).getTime() + deltaDays * dayMs);
-  await db('invoice_followup_sequences').where({ id: seq.id }).update({
-    anchor_at: shiftedAnchor,
-    next_touch_at: computeNextTouchAt(shiftedAnchor, seq.step_index),
-  });
+  const patch = { anchor_at: shiftedAnchor };
+  if (seq.status === 'active') {
+    patch.next_touch_at = computeNextTouchAt(shiftedAnchor, seq.step_index);
+  }
+  await db('invoice_followup_sequences').where({ id: seq.id }).update(patch);
 }
 
 async function stopSequence(invoiceId, { reason, adminId } = {}) {

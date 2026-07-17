@@ -2965,6 +2965,31 @@ const InvoiceService = {
       );
     }
 
+    // In-flight follow-up fence: a dun touch renders the invoice's amount,
+    // title, and pay link and sends externally without a transaction —
+    // fireStep stamps touch_claimed_at on the sequence row for the duration.
+    // Refuse edits while a fresh claim exists so the reminder the customer
+    // receives and the pay page it links can't diverge mid-send. Crashed
+    // senders self-heal past the 10-minute freshness window. Fail CLOSED on
+    // read errors, same as the payment-plan guard.
+    const touchClaimFreshCutoff = new Date(Date.now() - 10 * 60 * 1000);
+    let inFlightTouch = null;
+    try {
+      inFlightTouch = await db("invoice_followup_sequences")
+        .where({ invoice_id: id })
+        .where("touch_claimed_at", ">", touchClaimFreshCutoff)
+        .first("id");
+    } catch (err) {
+      throw new Error(
+        `Could not verify the follow-up send state — refusing to edit (${err.message})`,
+      );
+    }
+    if (inFlightTouch) {
+      throw new Error(
+        "A payment reminder for this invoice is sending right now — try again in a minute",
+      );
+    }
+
     // Applied-money fence for retotals (mirrors voidInvoice). A delivered
     // invoice can stay in sent/viewed/overdue with money already recorded
     // against it:
@@ -3169,13 +3194,29 @@ const InvoiceService = {
             .from("payment_plans")
             .whereRaw("payment_plans.invoice_id = invoices.id")
             .where("payment_plans.status", "active");
+        })
+        // In-flight-touch fence re-asserted at write time: a dun send that
+        // claimed the sequence between the guard read and this write must
+        // fail the edit closed, not race the reminder it's rendering.
+        .whereNotExists(function () {
+          this.select(db.raw("1"))
+            .from("invoice_followup_sequences")
+            .whereRaw("invoice_followup_sequences.invoice_id = invoices.id")
+            .where(
+              "invoice_followup_sequences.touch_claimed_at",
+              ">",
+              touchClaimFreshCutoff,
+            );
         });
-      // Retotals also re-assert the applied-money fence at write time so a
-      // partial payment or dispute recorded between the guard read and this
-      // write fails closed instead of rewriting collected money.
+      // Retotals also re-assert the applied-money fences at write time so a
+      // partial payment, dispute, or auto-applied account credit recorded
+      // between the guard read and this write fails closed instead of
+      // rewriting collected money (a dun's autoApplyAccountCreditIfEnabled
+      // can stamp credit_applied while the invoice stays sent).
       if (isRetotal) {
         editQuery = editQuery
           .whereNull("payment_recorded_at")
+          .whereRaw("COALESCE(credit_applied, 0) = 0")
           .whereNotExists(function () {
             this.select(db.raw("1"))
               .from("payments")
