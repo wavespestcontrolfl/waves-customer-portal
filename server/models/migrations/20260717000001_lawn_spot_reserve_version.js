@@ -28,9 +28,13 @@ const BUDGETS_AFTER = {
   bahia: { 4: 52, 6: 78, 9: 107, 12: 131 },
 };
 
+// pricing_changelog.version_from/to are varchar(10) and follow the short
+// engine-version convention (v4.6, per prod rows); rule changes keep the
+// same engine version. The long lawn pricingVersion stamps live in the
+// before/after JSON payloads instead.
 const CHANGELOG_IDENTITY = {
-  version_from: VERSION_FROM,
-  version_to: VERSION_TO,
+  version_from: 'v4.6',
+  version_to: 'v4.6',
   changed_by: 'claude-2026-07-17',
   category: 'rule',
   summary: 'Lawn material budgets now fund protocol spot-treatment reserves.',
@@ -72,8 +76,14 @@ exports.up = async function up(knex) {
       await knex('pricing_changelog').insert({
         ...CHANGELOG_IDENTITY,
         affected_services: JSON.stringify(['lawn_care']),
-        before_value: JSON.stringify({ lawn_material_budgets: BUDGETS_BEFORE }),
-        after_value: JSON.stringify({ lawn_material_budgets: BUDGETS_AFTER }),
+        before_value: JSON.stringify({
+          lawnPricingVersion: VERSION_FROM,
+          lawn_material_budgets: BUDGETS_BEFORE,
+        }),
+        after_value: JSON.stringify({
+          lawnPricingVersion: VERSION_TO,
+          lawn_material_budgets: BUDGETS_AFTER,
+        }),
         rationale:
           'Owner decision 2026-07-16: fund the protocol spot-treatment reserves (protocols.json conditional_cost — 1/4 of gated fungicide/insecticide apps, 1/8 of herbicide spot; OR-alternative branches fund the max-cost branch) in the lawn cost floor so the 35% collected-margin guarantee holds when spot demand materializes. Reserve deltas prorated to the sold cadence via the protocol tier flags (standard->bronze, enhanced->enhanced, premium->premium, basic prorates bronze). Floor-bound quotes move up to ~$9/application; market-bracket-priced quotes unchanged. PR #2812.',
       });
