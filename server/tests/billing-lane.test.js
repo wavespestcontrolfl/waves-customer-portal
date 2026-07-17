@@ -1,0 +1,136 @@
+const {
+  BILLING_MODES,
+  resolveBillingLane,
+  membershipDuesCoverVisit,
+  predictCompletionBilling,
+} = require('../services/billing-lane');
+
+describe('resolveBillingLane', () => {
+  test('explicit billing_mode always wins, whatever the legacy fields say', () => {
+    for (const mode of BILLING_MODES) {
+      expect(resolveBillingLane({ billing_mode: mode, waveguard_tier: 'Bronze', monthly_rate: 33.33 }))
+        .toEqual({ mode, source: 'explicit' });
+    }
+  });
+
+  test('NULL infers membership from tier + positive monthly rate', () => {
+    expect(resolveBillingLane({ billing_mode: null, waveguard_tier: 'Bronze', monthly_rate: 33.33 }))
+      .toEqual({ mode: 'monthly_membership', source: 'inferred' });
+  });
+
+  test('NULL without tier or without a rate infers per-visit', () => {
+    expect(resolveBillingLane({ billing_mode: null, waveguard_tier: null, monthly_rate: 46 }).mode).toBe('per_visit');
+    expect(resolveBillingLane({ billing_mode: null, waveguard_tier: 'Silver', monthly_rate: 0 }).mode).toBe('per_visit');
+    expect(resolveBillingLane({}).mode).toBe('per_visit');
+  });
+
+  test('an unknown mode string falls back to inference instead of being trusted', () => {
+    expect(resolveBillingLane({ billing_mode: 'subscription', waveguard_tier: 'Bronze', monthly_rate: 30 }))
+      .toEqual({ mode: 'monthly_membership', source: 'inferred' });
+  });
+});
+
+describe('membershipDuesCoverVisit — explicit lane authority', () => {
+  const member = {
+    visitIsPayerBilled: false,
+    perApplicationBilling: false,
+    annualPrepayBilling: false,
+    customerAutopayActive: true,
+    hasVisitPrice: true,
+    isRecurring: true,
+    waveguardTier: 'Bronze',
+    monthlyRate: 33.33,
+  };
+
+  test('an explicit NON-membership lane always defeats coverage — the two-lanes bug can never recur', () => {
+    for (const mode of ['per_visit', 'per_application', 'annual_prepay', 'one_time']) {
+      expect(membershipDuesCoverVisit({ ...member, billingMode: mode })).toBe(false);
+    }
+  });
+
+  test('explicit monthly_membership covers even without a tier on file', () => {
+    expect(membershipDuesCoverVisit({ ...member, billingMode: 'monthly_membership', waveguardTier: null })).toBe(true);
+  });
+
+  test('explicit membership still requires collected dues (rate) and active autopay', () => {
+    expect(membershipDuesCoverVisit({ ...member, billingMode: 'monthly_membership', monthlyRate: 0 })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, billingMode: 'monthly_membership', customerAutopayActive: false })).toBe(false);
+  });
+
+  test('NULL mode keeps the legacy inference exactly (tier required)', () => {
+    expect(membershipDuesCoverVisit({ ...member, billingMode: null })).toBe(true);
+    expect(membershipDuesCoverVisit({ ...member, billingMode: null, waveguardTier: null })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, billingMode: undefined })).toBe(true);
+  });
+
+  test('a priced one-off visit still bills its price in every membership shape', () => {
+    expect(membershipDuesCoverVisit({ ...member, isRecurring: false })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, billingMode: 'monthly_membership', isRecurring: false })).toBe(false);
+  });
+});
+
+describe('predictCompletionBilling', () => {
+  const memberBase = {
+    lane: 'monthly_membership',
+    billingMode: 'monthly_membership',
+    autopayActive: true,
+    estimatedPrice: null,
+    monthlyRate: 33.33,
+    perApplicationFee: null,
+    isRecurring: true,
+    isCallback: false,
+    payerBilled: false,
+    prepaidAmount: null,
+  };
+
+  test('membership recurring visit → covered, and a stamped price flags the conflict', () => {
+    expect(predictCompletionBilling(memberBase)).toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...memberBase, estimatedPrice: 100 }))
+      .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: true });
+  });
+
+  test('membership one-off priced visit → invoices the price', () => {
+    expect(predictCompletionBilling({ ...memberBase, isRecurring: false, estimatedPrice: 150 }))
+      .toEqual({ kind: 'invoice', amount: 150, conflictStampedPrice: false });
+  });
+
+  test('membership with dead autopay falls through to an invoice (monthly-rate fallback)', () => {
+    expect(predictCompletionBilling({ ...memberBase, autopayActive: false }))
+      .toEqual({ kind: 'invoice', amount: 33.33, conflictStampedPrice: false });
+  });
+
+  test('per-application: auto-charge with a live saved method, invoice without one', () => {
+    const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
+    expect(predictCompletionBilling(perApp)).toEqual({ kind: 'auto_charge', amount: 98, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perApp, autopayActive: false }))
+      .toEqual({ kind: 'invoice', amount: 98, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perApp, isCallback: true }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perApp, perApplicationFee: null }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+  });
+
+  test('payer-billed and prepaid visits short-circuit every lane', () => {
+    expect(predictCompletionBilling({ ...memberBase, payerBilled: true }).kind).toBe('payer');
+    expect(predictCompletionBilling({ ...memberBase, prepaidAmount: 120 }))
+      .toEqual({ kind: 'prepaid', amount: 120, conflictStampedPrice: false });
+  });
+
+  test('annual prepay lane reads as covered', () => {
+    expect(predictCompletionBilling({ ...memberBase, lane: 'annual_prepay', billingMode: 'annual_prepay' }).kind)
+      .toBe('covered_annual');
+  });
+
+  test('per-visit lane invoices the stamped price, callback bills nothing', () => {
+    const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null };
+    expect(predictCompletionBilling({ ...perVisit, estimatedPrice: 129 }))
+      .toEqual({ kind: 'invoice', amount: 129, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perVisit, isCallback: true }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+  });
+
+  test('inferred membership (NULL mode, tier+rate) predicts coverage like the completion path', () => {
+    expect(predictCompletionBilling({ ...memberBase, billingMode: null, estimatedPrice: 100 }))
+      .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: true });
+  });
+});

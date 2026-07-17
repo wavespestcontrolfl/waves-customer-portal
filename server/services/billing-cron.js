@@ -191,7 +191,10 @@ const BillingCron = {
         // (resetBillingModeAfterTermCancel), returning the customer to
         // per-visit (estimate-flow terms) or legacy monthly (manual
         // prepays). NULL/'monthly_membership' = legacy behavior unchanged.
-        if (['per_application', 'annual_prepay'].includes(customer.billing_mode)) {
+        // 'per_visit' and 'one_time' are explicit owner-set lanes (billing
+        // lane build, 2026-07-17): a customer classified into either must
+        // never be monthly-charged no matter what tier/rate fields linger.
+        if (['per_application', 'annual_prepay', 'per_visit', 'one_time'].includes(customer.billing_mode)) {
           await logAutopay(customer.id, 'skipped_billing_mode', {
             details: { billing_mode: customer.billing_mode },
           });

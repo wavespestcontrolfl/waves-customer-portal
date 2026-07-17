@@ -25,6 +25,7 @@ const { buildPlanForService, isDateInWindow } = require('../services/waveguard-p
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { membershipDuesCoverVisit, completionInvoiceAmount } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -4783,6 +4784,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       isRecurring: svc.is_recurring,
       waveguardTier: svc.cust_waveguard_tier,
       monthlyRate: svc.cust_monthly_rate,
+      billingMode: svc.cust_billing_mode,
     });
     // A priced recurring visit suppressed by membership coverage is logged +
     // parked for office review AFTER the invoice checks below — see the
@@ -8272,16 +8274,6 @@ function shouldCaptureApplicationConditions({
 // !hasVisitPrice, so a price-free autopay-covered visit is never billed here.
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 
-// Completion invoice amount precedence (extracted for unit testing).
-// Per-application customers bill the explicit visit price, else the
-// acceptance-stamped per_application_fee — NEVER the customer-level
-// monthly_rate: a multi-service accept intentionally leaves both the fee and
-// each row's estimated_price NULL (whole-plan fee on every row = overbill),
-// and monthly_rate IS that same whole-plan number, so falling back to it
-// re-opens the identical overbilling on every row (Codex round-2 P1). A
-// per-application row with no amount returns 0, the auto-invoice gate
-// declines it, and the visit is billed manually. Legacy (non-per-app) rows
-// keep the monthly_rate fallback the WaveGuard-membership flows depend on.
 function completionSavedCardFallbackPolicy({
   suppressAlternateCollection,
 }) {
@@ -8291,51 +8283,9 @@ function completionSavedCardFallbackPolicy({
   };
 }
 
-function completionInvoiceAmount({
-  estimatedPrice,
-  isCallback,
-  perApplicationBilling,
-  perApplicationFee,
-  monthlyRate,
-}) {
-  if (estimatedPrice != null && Number(estimatedPrice) > 0) return Number(estimatedPrice);
-  if (isCallback) return 0;
-  if (perApplicationBilling) {
-    return Number(perApplicationFee) > 0 ? Number(perApplicationFee) : 0;
-  }
-  return monthlyRate && Number(monthlyRate) > 0 ? Number(monthlyRate) : 0;
-}
-
-// The MONTHLY-MEMBERSHIP suppression ("the 8AM cron collects the dues, the
-// visit itself is free"). Never for a payer-billed visit — the AP invoice must
-// still be cut and sent to the payer. Never for a per-application customer:
-// their autopay card is HOW the per-visit charge collects, not a reason to
-// skip it. Never for annual_prepay — the 8AM cron never bills them (GUARD 3b),
-// so "dues cover the visit" would be a fiction; real coverage is the prepaid
-// stamps. Dues cover a RECURRING plan visit even when the booking flow stamped
-// a per-visit estimated_price on the row — cadence generators stamp display
-// prices routinely, and honoring the stamp here double-billed membership
-// customers (dues + a phantom per-visit invoice at completion). A priced
-// ONE-OFF visit (isRecurring=false: add-on treatment, WDO, special) still
-// bills its price; callback pricing stays with completionInvoiceAmount.
-function membershipDuesCoverVisit({
-  visitIsPayerBilled,
-  perApplicationBilling,
-  annualPrepayBilling,
-  customerAutopayActive,
-  hasVisitPrice,
-  isRecurring,
-  waveguardTier,
-  monthlyRate,
-}) {
-  return !visitIsPayerBilled
-    && !perApplicationBilling
-    && !annualPrepayBilling
-    && !!customerAutopayActive
-    && (!hasVisitPrice || !!isRecurring)
-    && !!waveguardTier
-    && Number(monthlyRate || 0) > 0;
-}
+// completionInvoiceAmount and membershipDuesCoverVisit moved to
+// services/billing-lane.js (imported at top) — the schedule payloads'
+// completion-billing prediction must share the exact same authority.
 
 function shouldAutoInvoiceCompletion({
   recapReviewOnly,
