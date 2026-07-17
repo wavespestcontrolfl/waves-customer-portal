@@ -36,7 +36,7 @@ const {
   WAVES_SUPPORT_PHONE_DISPLAY,
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
-const { stripInternalFindingKeys } = require('../project-types');
+const { stripInternalFindingKeys, redactInspectionFeeCues } = require('../project-types');
 
 // The emailed/archived FDACS PDF is a customer deliverable — it gets the
 // same internal-key strip + fee-cue scrub as the public /data payload, or a
@@ -778,8 +778,10 @@ async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress }) {
         page.drawText(`[Photo ${photoNum} unavailable]`, { x: MARGIN, y: imgBottom + imgBoxH / 2, size: 10, font, color: gray });
       }
 
-      // Caption under the image
-      const captionText = `Photo ${photoNum} - ${photo.caption || ''}`.trim();
+      // Caption under the image — technician free text, so it gets the same
+      // fee scrub as the findings this PDF prints (codex #2817). WDO is the
+      // fee-carrying type and this builder is WDO-only, so unconditional.
+      const captionText = `Photo ${photoNum} - ${redactInspectionFeeCues(photo.caption || '')}`.trim();
       const lines = wrapText(captionText, font, 9, contentW).slice(0, 2);
       let cy = imgBottom - 12;
       for (const ln of lines) {

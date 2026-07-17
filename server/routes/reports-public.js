@@ -9,7 +9,32 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { answerProjectReportQuestion } = require('../services/project-report-assistant');
-const { stripInternalFindingKeys, redactInspectionFeeCuesForType, projectTypeHasInternalFindingKeys } = require('../services/project-types');
+const {
+  stripInternalFindingKeys,
+  redactInspectionFeeCues,
+  containsInspectionFeeCue,
+  redactInspectionFeeCuesForType,
+  projectTypeHasInternalFindingKeys,
+} = require('../services/project-types');
+
+// A legacy archived FDACS PDF was rendered from RAW findings — if its
+// as-sent snapshot carries a literal fee disclosure, the S3 binary discloses
+// it and cannot be sanitized in place. Those filings are GATED: /data stops
+// advertising the PDF and /fdacs-pdf 404s, while the report page still
+// renders the (scrubbed) findings. The original legal archive stays intact
+// in S3; clean filings — the overwhelming case — stream unchanged
+// (codex #2817).
+function filingFindingsContainFeeCue(rawFindings) {
+  let parsed = rawFindings;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return false; } }
+  const walk = (value) => {
+    if (typeof value === 'string') return containsInspectionFeeCue(value);
+    if (Array.isArray(value)) return value.some(walk);
+    if (value && typeof value === 'object') return Object.values(value).some(walk);
+    return false;
+  };
+  return walk(parsed);
+}
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
@@ -504,6 +529,11 @@ router.get('/project/:token/data', async (req, res, next) => {
       }
     }
 
+    // Computed early: gates every free-text scrub on this route (finding
+    // values, recommendations, photo captions). Only a type carrying the
+    // internal fee field (WDO) gets text redacted.
+    const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
+
     const photos = await db('project_photos')
       .where({ project_id: project.id })
       .orderBy(['visit', 'sort_order', 'created_at']);
@@ -527,7 +557,10 @@ router.get('/project/:token/data', async (req, res, next) => {
           url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: CUSTOMER_DWELL_TTL_SECONDS });
         } catch { /* fall through — photo will render as missing */ }
       }
-      return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
+      // Captions are technician free text — same fee scrub as finding values
+      // (codex #2817: a caption quoting the fee rode the public JSON verbatim).
+      const caption = (typeCarriesFee && ph.caption) ? redactInspectionFeeCues(ph.caption) : ph.caption;
+      return { id: ph.id, category: ph.category, caption, visit: ph.visit, url };
     }));
 
     // The report labels this "Follow-up" / "your next visit", so it must be
@@ -562,7 +595,10 @@ router.get('/project/:token/data', async (req, res, next) => {
         viewerFindings = lastFiling.findings;
         if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
       }
-      fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket);
+      fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket)
+        // legacy filing archived with a raw fee disclosure — gated, see
+        // filingFindingsContainFeeCue
+        && !filingFindingsContainFeeCue(lastFiling?.findings);
     }
 
     // Internal/office-only finding keys must never ride the public JSON — the
@@ -570,9 +606,8 @@ router.get('/project/:token/data', async (req, res, next) => {
     // raw payload, so the strip is enforced at the egress point too (audit
     // 2026-07-16). The narrative fee (an inspection fee an old draft may have
     // baked into prose) is handled by the redactInspectionFeeCues guard on
-    // `recommendations` below. The value scrub is type-gated: only a type
-    // carrying the internal fee field (WDO) gets free text redacted.
-    const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
+    // `recommendations` below. The value scrub is type-gated via
+    // typeCarriesFee (computed above the photos block).
     viewerFindings = stripInternalFindingKeys(viewerFindings, { redactValues: typeCarriesFee });
 
     res.json({
@@ -706,6 +741,12 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
     const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
     if (!lastFiling?.s3_key || !config.s3?.bucket) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    // Same generic 404 as a missing archive: a legacy filing whose snapshot
+    // carries a raw fee disclosure is never served (the /data payload also
+    // stops advertising it — see filingFindingsContainFeeCue).
+    if (filingFindingsContainFeeCue(lastFiling.findings)) {
       return res.status(404).json({ error: 'Report not found' });
     }
     const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');

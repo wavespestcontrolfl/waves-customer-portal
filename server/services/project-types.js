@@ -1014,7 +1014,7 @@ const PROJECT_TYPE_KEYS = Object.keys(PROJECT_TYPES);
 // @waves/report-redaction — the client report surfaces
 // (client/src/lib/wdoReportFields.js) import the SAME module, so the admin
 // preview and the public page cannot drift from these guards.
-const { INTERNAL_FINDING_KEYS, redactInspectionFeeCues } = require('@waves/report-redaction');
+const { INTERNAL_FINDING_KEYS, redactInspectionFeeCues, containsInspectionFeeCue } = require('@waves/report-redaction');
 
 // Whether a project type's form carries any internal finding key (today:
 // inspection_fee, WDO only). The narrative/finding scrubs are gated on this —
@@ -1099,6 +1099,7 @@ module.exports = {
   INTERNAL_FINDING_KEYS,
   stripInternalFindingKeys,
   redactInspectionFeeCues,
+  containsInspectionFeeCue,
   redactInspectionFeeCuesForType,
   projectTypeHasInternalFindingKeys,
   projectTypeConfigHasInternalFindingKeys,

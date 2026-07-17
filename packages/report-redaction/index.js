@@ -46,9 +46,16 @@ const FEE_REACH_BREAKERS = [
 ].join('|');
 
 // Immediately after the cue, cost/charge/price/run read as the VERB stating
-// the fee's own amount ("Inspection fee costs $250", "fee runs $175") — the
-// one position where those words are a bridge, not a new money subject.
-const DIRECT_BRIDGE = '(?:\\s(?:costs?|charges?|prices?|runs?)\\b)?';
+// the fee's own amount ("Inspection fee costs $250", "fee will cost $250",
+// "fee generally runs $175", "fee has a cost of $250") — the one position
+// where those words are a bridge, not a new money subject. A short run of
+// modals/adverbs (and has/a/of for the nominal form) may precede the verb.
+const DIRECT_BRIDGE =
+  '(?:'
+  + '(?:\\s+(?:will|would|may|might|can|could|shall|typically|generally|usually|normally|currently|often|still|only|has|have|had|an?))*'
+  + '\\s+(?:costs?|charges?|prices?|runs?)\\b'
+  + '(?:\\s+of\\b)?'
+  + ')?';
 
 // Known abbreviations whose trailing period must not read as end-of-sentence
 // — "Inspection fee approx. $250" / "est. at $250" keep the cue's reach.
@@ -72,8 +79,15 @@ const AMOUNT_FIRST_SUBJECTS = [
   'prices?', 'costs?', 'charges?', 'values?', 'purchase', 'balance',
   'totals?', 'subtotal', 'deductibles?', 'discounts?', 'credits?',
   'estimates?', 'quotes?', 'repairs?', 're-?treatments?', 'treatments?',
-  'permits?', 'damages?',
+  'permits?', 'damages?', 'homes?', 'houses?', 'property', 'properties',
+  'escrow', 'deposits?',
 ].join('|');
+
+// "the $400,000 home" / "a $500 escrow deposit" — a determiner directly
+// before an amount marks it as a known amount of something ELSE being
+// referenced, never the fee being stated. The gap refuses to walk onto such
+// a determiner, so the cue aborts and the amount survives.
+const DETERMINED_AMOUNT = '\\b(?:the|this|that|an?)\\s+(?:\\$|USD\\b|US\\$|\\d)';
 
 // Amount forms the cue can disclose. A literal $ amount, a USD/US$-prefixed
 // amount, a "250 dollars" currency-word amount, or a bare number. The bare
@@ -127,7 +141,7 @@ const RANGE_CONTINUATION =
 
 const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
-  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?:${CONTAINER_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|[^.;!?\\n])){0,160}?)`
+  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${CONTAINER_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|[^.;!?\\n])){0,160}?)`
   + `(?:${AMOUNT_PATTERN})`
   + RANGE_CONTINUATION
   // (?![,.]?\d) forbids backtracking into a partial number ("$400" out of
@@ -148,7 +162,19 @@ function redactInspectionFeeCues(text) {
     .trim();
 }
 
+// Detection-only variant for gating decisions (e.g. whether a legacy
+// archived FDACS filing's snapshot carries a fee disclosure) — true when the
+// redactor WOULD remove something. Fresh non-global regex so .test() carries
+// no lastIndex state.
+const FEE_CUE_TEST_RE = new RegExp(FEE_CUE_RE.source, 'i');
+function containsInspectionFeeCue(text) {
+  const str = String(text || '');
+  if (!str) return false;
+  return FEE_CUE_TEST_RE.test(str);
+}
+
 module.exports = {
   INTERNAL_FINDING_KEYS,
   redactInspectionFeeCues,
+  containsInspectionFeeCue,
 };

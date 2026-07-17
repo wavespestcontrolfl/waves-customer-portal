@@ -161,6 +161,18 @@ describe('redactInspectionFeeCues', () => {
       .toBe('Inspection fee costs [fee removed].');
     expect(redactInspectionFeeCues('Inspection fee runs $175.'))
       .toBe('Inspection fee runs [fee removed].');
+    expect(redactInspectionFeeCues('Inspection fee will cost $250.'))
+      .toBe('Inspection fee will cost [fee removed].');
+    expect(redactInspectionFeeCues('Inspection fee generally costs $250.'))
+      .toBe('Inspection fee generally costs [fee removed].');
+    expect(redactInspectionFeeCues('Inspection fee has a cost of $250.'))
+      .toBe('Inspection fee has a cost of [fee removed].');
+  });
+  test('a determined amount belongs to something else — home/escrow prose survives', () => {
+    expect(redactInspectionFeeCues('Inspection fee covered by seller for the $400,000 home.'))
+      .toBe('Inspection fee covered by seller for the $400,000 home.');
+    expect(redactInspectionFeeCues('Inspection fee was paid from the $500 escrow deposit.'))
+      .toBe('Inspection fee was paid from the $500 escrow deposit.');
   });
   test('abbreviation periods do not end the cue reach', () => {
     expect(redactInspectionFeeCues('Inspection fee approx. $250'))

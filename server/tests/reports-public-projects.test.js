@@ -68,6 +68,83 @@ describe('public project reports', () => {
     db.fn.now.mockReturnValue('NOW');
   });
 
+  test('WDO: fee-bearing captions are scrubbed and a dirty legacy filing gates the PDF', async () => {
+    const wdoProjectRow = {
+      id: 'project-2',
+      customer_id: 'customer-1',
+      report_token: '0123456789abcdef0123456789abcdef',
+      report_viewed_at: 'earlier',
+      project_type: 'wdo_inspection',
+      status: 'sent',
+      title: 'WDO inspection',
+      first_name: 'Van',
+      last_name: 'Lee',
+      city: 'Bradenton',
+      state: 'FL',
+      findings: { wdo_finding: 'No visible signs of WDO observed' },
+      wdo_sent_filings: JSON.stringify([{
+        s3_key: 'wdo/filing.pdf',
+        findings: { comments: 'Inspection fee $250 collected on site.' },
+      }]),
+    };
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(wdoProjectRow) });
+    const photosRead = chain({
+      orderBy: jest.fn().mockResolvedValue([
+        { id: 'photo-1', category: 'damage', caption: 'Inspection fee $250 noted at panel', visit: 'primary', s3_key: 'k1' },
+      ]),
+    });
+    getSignedUrl.mockResolvedValueOnce('https://signed.example/p.jpg');
+    const projectQueries = [projectRead];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return photosRead;
+      if (table === 'service_records') return chain();
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      // photo caption is technician free text — scrubbed at the egress
+      expect(body.photos[0].caption).toBe('Inspection fee [fee removed] noted at panel');
+      // the archived binary carries the raw fee — never advertised...
+      expect(body.fdacsPdfAvailable).toBe(false);
+      // ...while the page's snapshot findings render scrubbed
+      expect(body.findings.comments).toBe('Inspection fee [fee removed] collected on site.');
+    });
+  });
+
+  test('WDO: /fdacs-pdf 404s a dirty legacy filing with the generic body', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-2',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        project_type: 'wdo_inspection',
+        status: 'sent',
+        wdo_sent_filings: JSON.stringify([{
+          s3_key: 'wdo/filing.pdf',
+          findings: { comments: 'Inspection fee $250 collected on site.' },
+        }]),
+      }),
+    });
+    const projectQueries = [projectRead];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'service_records') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/fdacs-pdf`);
+      const body = await res.json();
+      expect(res.status).toBe(404);
+      expect(body.error).toBe('Report not found');
+    });
+  });
+
   test('returns report data when one project photo cannot be signed', async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
