@@ -85,6 +85,20 @@ describe('expired default card', () => {
   });
 });
 
+describe('bank-account default method', () => {
+  it('never flags an ACH default as an expired card', async () => {
+    api.getCards.mockResolvedValue({
+      cards: [{ id: 'ba-1', isDefault: true, methodType: 'us_bank_account', bankName: 'Chase', bankLastFour: '6789', expMonth: null, expYear: null }],
+    });
+    api.getAutopay.mockResolvedValue({ state: 'active', next_charge_amount: 89, next_charge_date: `${THIS_YEAR + 1}-01-15` });
+
+    render(<BillingTab customer={customer} />);
+
+    expect(await screen.findByText(/auto pay is on|next charge/i)).toBeInTheDocument();
+    expect(screen.queryByText(/has expired/i)).not.toBeInTheDocument();
+  });
+});
+
 describe('treated lawn area', () => {
   it('shows the stored treated-lawn figure without subtracting beds', async () => {
     render(<PropertyTab customer={customer} />);

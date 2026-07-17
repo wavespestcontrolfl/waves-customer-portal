@@ -2223,6 +2223,9 @@ function ServicesTab() {
   const [searchTerm, setSearchTerm] = useState('');
   const [detailMap, setDetailMap] = useState({});
   const [totalServices, setTotalServices] = useState(null);
+  // Raw pagination cursor — counts rows RECEIVED, not rows kept after the
+  // boundary-row dedupe, so the next page never re-requests a seen row.
+  const [servicesOffset, setServicesOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
@@ -2237,6 +2240,7 @@ function ServicesTab() {
     api.getServices({ limit: SERVICES_PAGE_SIZE })
       .then(d => {
         setServices(d.services || []);
+        setServicesOffset((d.services || []).length);
         setTotalServices(Number.isFinite(d.total) ? d.total : null);
       })
       .catch(err => {
@@ -2251,15 +2255,17 @@ function ServicesTab() {
   const loadMoreServices = () => {
     if (loadingMore) return;
     setLoadingMore(true);
-    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: services.length })
+    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
       .then(d => {
         // The offset runs against a live newest-first query — a visit
         // completed between pages shifts the boundary and re-sends the last
-        // row of the previous page. Dedupe by id so it can't render twice.
+        // row of the previous page. Dedupe by id so it can't render twice,
+        // but advance the cursor by rows RECEIVED so paging never stalls.
         setServices(prev => {
           const seen = new Set(prev.map(s => s.id));
           return [...prev, ...(d.services || []).filter(s => !seen.has(s.id))];
         });
+        setServicesOffset(prev => prev + (d.services || []).length);
         if (Number.isFinite(d.total)) setTotalServices(d.total);
       })
       .catch(err => {
@@ -2268,7 +2274,7 @@ function ServicesTab() {
       })
       .finally(() => setLoadingMore(false));
   };
-  const hasMoreServices = totalServices != null && services.length < totalServices;
+  const hasMoreServices = totalServices != null && servicesOffset < totalServices;
 
   useEffect(() => {
     loadServices();
@@ -4300,6 +4306,10 @@ function BillingTab({ customer }) {
   // state: it cannot be charged.
   const cardExpiringSoon = (() => {
     if (!defaultCard) return null;
+    // Bank accounts (ACH) carry null expiry fields — they never expire and
+    // must not be flagged. Only real cards with expiry data participate.
+    if (defaultCard.methodType && defaultCard.methodType !== 'card') return null;
+    if (!defaultCard.expMonth || !defaultCard.expYear) return null;
     const now = new Date();
     // End of the last day of the expiry month (23:59:59, matching
     // useCustomerCards) — the card stays valid through month-end.
