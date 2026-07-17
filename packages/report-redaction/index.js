@@ -19,20 +19,20 @@
 const INTERNAL_FINDING_KEYS = ['inspection_fee'];
 
 // Words that END the inspection-fee cue's reach inside a clause. Two families:
-// - the fee was waived/comped — it has NO amount of its own, so whatever
+// - the fee was waived/comped/free — it has NO amount of its own, so whatever
 //   amount follows belongs to something else ("Inspection fee waived; repair
 //   $1,250" must keep the $1,250);
 // - a NEW money subject — its amount is legitimate customer-facing text
 //   ("Inspection fee noted, treatment estimate $900"; "Inspection fee paid
 //   separately, total due $400" keeps the $400 because "total" breaks).
 // NOT breakers: "due"/"service" (they bridge the cue to its own amount —
-// "inspection fee is due at time of service: $250" IS the fee) and
-// paid/collected/settled — a PAID fee still has its own amount ("Inspection
-// fee paid at closing: $250" is the fee and must redact); when the money
-// after a payment-state word belongs to something else, the money-subject
-// breakers below are what identify it.
+// "inspection fee is due at time of service: $250" IS the fee), and the
+// billing-state words paid/collected/settled/included/covered — a fee that
+// was paid or "included on invoice: $250" still has its own amount and must
+// redact; when the money after such a word belongs to something else, the
+// money-subject breakers are what identify it.
 const FEE_REACH_BREAKERS = [
-  'waiv\\w*', 'comped', 'complimentary', 'free', 'included', 'covered', 'no charge',
+  'waiv\\w*', 'comped', 'complimentary', 'free', 'no charge',
   'repairs?', 're-?treatments?', 'treatments?', 'permits?', 'damages?',
   'estimates?', 'quotes?', 'deductibles?', 'discounts?', 'credits?',
   'balance', 'totals?', 'subtotal', 'amount\\s+due',
@@ -55,7 +55,7 @@ const AMOUNT_PATTERN = [
   '\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
   '(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
   '\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?\\b',
-  '(?:\\b(?:is|was|of)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?)\\b)(?![:/\\-]?\\d)',
+  '(?:\\b(?:is|was|of)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b)(?![:/\\-]?\\d)',
 ].join('|');
 
 // Remove ONLY the literal "inspection fee" phrase + an amount from free text.

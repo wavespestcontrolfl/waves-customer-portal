@@ -881,6 +881,14 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
   const safeRawRecommendations = typeCarriesFee
     ? redactInspectionFeeCues(rawRecommendations)
     : rawRecommendations;
+  // Customer SMS/email/call text can quote the fee ("Is the inspection fee
+  // $250?") and the prompt asks the model to SUMMARIZE that concern — a
+  // paraphrase ("the quoted $250 charge") no longer carries the literal cue
+  // the write/egress scrubs key on, so the fee must be removed BEFORE the
+  // model sees it (codex #2817).
+  const safeCommunicationContext = typeCarriesFee
+    ? redactInspectionFeeCues(communicationContext)
+    : communicationContext;
   const findingsLines = Object.entries(stripInternalFindingKeys(findings, { redactValues: typeCarriesFee }) || {})
     .map(([k, v]) => [k, formatFindingForPrompt(v)])
     .filter(([, v]) => v.trim() !== '')
@@ -1020,7 +1028,7 @@ Attached photo review:
 ${photoLines || '[no photos attached]'}
 
 Recent customer communication context:
-${communicationContext || '[none provided]'}
+${safeCommunicationContext || '[none provided]'}
 
 ## OUTPUT FORMAT
 

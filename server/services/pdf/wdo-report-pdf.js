@@ -36,6 +36,18 @@ const {
   WAVES_SUPPORT_PHONE_DISPLAY,
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
+const { stripInternalFindingKeys } = require('../project-types');
+
+// The emailed/archived FDACS PDF is a customer deliverable — it gets the
+// same internal-key strip + fee-cue scrub as the public /data payload, or a
+// fee typed into the free-text comments prints into Section 5 even though
+// the web rendering hides it (codex #2817). WDO is the fee-carrying type, so
+// the value scrub is unconditional here. The FDACS-13645 form has no fee
+// field of its own, and the disclosure-of-interest statements in comments
+// don't carry amounts, so nothing the form REQUIRES is touched.
+function customerSafeFindings(rawFindings) {
+  return stripInternalFindingKeys(asObject(rawFindings)) || {};
+}
 
 const TEMPLATE_PATH = path.join(__dirname, '..', '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf');
 
@@ -491,7 +503,7 @@ function resolveApplicator({ project = {}, findings = {} }) {
  */
 async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride, signature, photos = [] } = {}) {
   if (!project) throw new Error('project required for WDO report PDF');
-  const findings = asObject(project.findings);
+  const findings = customerSafeFindings(project.findings);
   const resolved = resolveApplicator({ project, findings });
   const applicator = {
     name: clean(applicatorOverride?.name) || resolved.name,
@@ -785,6 +797,7 @@ module.exports = {
     splitCompanyAddress,
     resolveApplicator,
     buildTextValues,
+    customerSafeFindings,
     decodeImageInput,
     wrapText,
     sanitizeText,

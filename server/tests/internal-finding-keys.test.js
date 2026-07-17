@@ -133,6 +133,20 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('The inspection fee for the property at 123 Main Street is $250'))
       .toBe('The inspection fee for the property at 123 Main Street is [fee removed]');
   });
+  test('area measurements are never selected as the amount', () => {
+    expect(redactInspectionFeeCues('Inspection fee for a home of 2500 square feet is $250'))
+      .toBe('Inspection fee for a home of 2500 square feet is [fee removed]');
+    expect(redactInspectionFeeCues('Home of 2400 sq ft; inspection fee is 175.'))
+      .toBe('Home of 2400 sq ft; inspection fee [fee removed].');
+  });
+  test('an included/covered fee still redacts its own amount', () => {
+    expect(redactInspectionFeeCues('Inspection fee included on invoice: $250'))
+      .toBe('Inspection fee included on invoice: [fee removed]');
+    expect(redactInspectionFeeCues('Inspection fee is included in closing costs: $250'))
+      .toBe('Inspection fee is included in closing costs: [fee removed]');
+    expect(redactInspectionFeeCues('Inspection fee covered by seller: $250'))
+      .toBe('Inspection fee covered by seller: [fee removed]');
+  });
   test('redacts currency-word and bare-number amounts, not just $', () => {
     expect(redactInspectionFeeCues('Inspection fee is 250 dollars.'))
       .toBe('Inspection fee is [fee removed].');
