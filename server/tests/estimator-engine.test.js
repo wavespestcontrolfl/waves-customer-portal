@@ -499,6 +499,23 @@ describe('review fixes', () => {
     expect(idxPriv.sameStreetAddress('123 N Palm Ave', '123 North Palm Avenue')).toBe(true);
   });
 
+  test('street comparison preserves explicit apartment identities', () => {
+    expect(idxPriv.sameStreetAddress(
+      '123 Palm Ave, Apt A, Bradenton, FL 34209',
+      '123 Palm Avenue Apt A, Bradenton FL 34209',
+    )).toBe(true);
+    expect(idxPriv.sameStreetAddress(
+      '123 Palm Ave Apt A, Bradenton FL 34209',
+      '123 Palm Ave Apt B, Bradenton FL 34209',
+    )).toBe(false);
+    // A missing unit is not proof of a different property, so duplicate
+    // detection stays conservative when only one side carries it.
+    expect(idxPriv.sameStreetAddress(
+      '123 Palm Ave, Bradenton FL 34209',
+      '123 Palm Ave Apt A, Bradenton FL 34209',
+    )).toBe(true);
+  });
+
   test('composer adding locality to a bare street triggers a re-gather', () => {
     expect(idxPriv.addressAddsLocality('123 Palm Ave, Bradenton FL 34209', '123 Palm Ave')).toBe(true);
     expect(idxPriv.addressAddsLocality('123 Palm Ave', '123 Palm Ave, Bradenton FL')).toBe(false);

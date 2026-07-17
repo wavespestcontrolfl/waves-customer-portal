@@ -58,6 +58,7 @@ jest.mock('../routes/property-lookup-v2', () => ({ performPropertyLookup: jest.f
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
 
 const { executeEstimateTool, _private } = require('../services/intelligence-bar/estimate-tools');
+const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
 const { performPropertyLookup } = require('../routes/property-lookup-v2');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
@@ -864,7 +865,7 @@ describe('Agent Estimate property lookup safety', () => {
   });
 
   test('associates story and structure labels with their own neighboring numbers', async () => {
-    const quote = 'The property is a 2-story, 2,000-square-foot home';
+    const quote = 'The home has 2 stories and 2,000 square feet';
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       lead: {
         id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
@@ -924,7 +925,7 @@ describe('Agent Estimate property lookup safety', () => {
   });
 
   test('does not authenticate a negated categorical price driver', async () => {
-    const quote = 'The building is 2,000 square feet. This is not commercial; it is residential.';
+    const quote = "The building is 2,000 square feet. This isn't commercial; it is residential.";
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       lead: {
         id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
@@ -955,6 +956,41 @@ describe('Agent Estimate property lookup safety', () => {
     expect(result.lane_reasons).toEqual(expect.arrayContaining([
       'property type was used for pricing without a matching verified property fact',
       expect.stringMatching(/propertyType lacks a server-verified/i),
+    ]));
+  });
+
+  test('does not authenticate a positive pool-cage fact from compound negation', async () => {
+    const quote = 'The home is 2,000 square feet. The pool has no cage.';
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: {
+        id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+      calls: [], sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        homeSqFt: 2000,
+        poolCage: true,
+        services: { pest: { frequency: 'quarterly' } },
+      },
+      evidence: [{ source: 'quote_form', quote, decision: 'home size and pool cage' }],
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+        poolCage: { value: true, source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'pool cage presence was used for pricing without a matching verified property fact',
+      expect.stringMatching(/poolCage lacks a server-verified/i),
     ]));
   });
 
@@ -2216,6 +2252,120 @@ describe('Agent Estimate round-7 hardening', () => {
 
     expect(result.error).toMatch(/version/);
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('rejects the pre-slab legacy pricing compatibility payload', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { preSlabTermiticide: { legacyPayload: true } },
+    });
+
+    expect(result.error).toMatch(/legacyPayload/);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('accepts canonical commercial output for a requested base service', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      summary: {
+        recurringMonthlyAfterDiscount: 200,
+        recurringAnnualAfterDiscount: 2400,
+        oneTimeTotal: 0,
+      },
+      waveGuard: { tier: 'bronze' },
+      lineItems: [{
+        service: 'commercial_pest',
+        annualAfterDiscount: 2400,
+        monthlyAfterDiscount: 200,
+        costs: { annualCost: 1400 },
+        pricingConfidence: 'high',
+      }],
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        buildingSqFt: 2000,
+        propertyType: 'commercial',
+        services: { pest: { frequency: 'quarterly' } },
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.lines).toEqual([expect.objectContaining({ service: 'commercial_pest' })]);
+  });
+
+  test('binds lawn protocol and inventory review to the priced lawn track', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      summary: {
+        recurringMonthlyAfterDiscount: 75,
+        recurringAnnualAfterDiscount: 900,
+        oneTimeTotal: 0,
+      },
+      waveGuard: { tier: 'bronze' },
+      lineItems: [{
+        service: 'lawn_care',
+        annualAfterDiscount: 900,
+        monthlyAfterDiscount: 75,
+        costs: { annualCost: 500 },
+        pricingConfidence: 'high',
+      }],
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 2000, services: { lawn: { track: 'bermuda' } } },
+      protocolReview: [{
+        serviceKey: 'lawn', programKey: 'lawn', lawnTrack: 'st_augustine', visitCount: 12,
+      }],
+      inventoryReview: [{
+        serviceKey: 'lawn', productName: 'SpeedZone Southern', status: 'in_stock', onHand: 8,
+      }],
+    });
+
+    expect(result.lane_reasons).toContain(
+      'protocol review for lawn uses st_augustine instead of priced bermuda',
+    );
+    expect(result.inventoryReview).toEqual([
+      expect.objectContaining({ productName: 'SpeedZone Southern', protocolMatched: true }),
+    ]);
+  });
+
+  test('confirmed persistence rejects a second preview that drifted after approval', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const approvedPreview = await executeEstimateTool('create_agent_estimate_draft', INPUT);
+    const approvedPreviewFingerprint = agentEstimatePreviewFingerprint(approvedPreview);
+    mockGenerateEstimate.mockReturnValue({
+      ...ENGINE_RESULT,
+      summary: {
+        ...ENGINE_RESULT.summary,
+        recurringMonthlyAfterDiscount: 60,
+        recurringAnnualAfterDiscount: 720,
+      },
+      lineItems: [{
+        ...ENGINE_RESULT.lineItems[0],
+        annualAfterDiscount: 720,
+        monthlyAfterDiscount: 60,
+      }],
+    });
+
+    const result = await executeEstimateTool(
+      'create_agent_estimate_draft',
+      INPUT,
+      { confirmed: true, approvedPreviewFingerprint },
+    );
+
+    expect(result).toEqual(expect.objectContaining({ preview_changed: true }));
+    expect(result.error).toMatch(/changed after preview/i);
+    expect(writes).toEqual([]);
   });
 
   test('a mixed known/unknown address set keeps the account-wide duplicate block', async () => {

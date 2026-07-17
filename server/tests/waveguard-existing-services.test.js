@@ -14,11 +14,11 @@ const {
   toQualifyingKeys,
 } = require('../services/waveguard-existing-services');
 
-function fakeDb({ customer, scheduledRows = [] } = {}) {
+function fakeDb({ customer, scheduledRows = [], scheduledColumns = null } = {}) {
   const db = (table) => ({
     where: () => db(table),
     whereNotIn: () => db(table),
-    columnInfo: async () => ({ is_recurring: {}, estimated_price: {} }),
+    columnInfo: async () => scheduledColumns || ({ is_recurring: {}, estimated_price: {} }),
     first: async () => (table === 'customers' ? customer : null),
     select: async () => (table === 'scheduled_services' ? scheduledRows : []),
   });
@@ -84,5 +84,30 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
 
     expect(toQualifyingKeys('Quarterly Pest + Lawn')).toEqual(['pest_control', 'lawn_care']);
     expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual(['pest_control', 'lawn_care']);
+  });
+
+  test('active-service addresses retain apartment and unit identifiers', async () => {
+    const db = fakeDb({
+      customer: { id: 'c1', waveguard_tier: 'Bronze' },
+      scheduledColumns: {
+        is_recurring: {},
+        estimated_price: {},
+        service_address_line1: {},
+        service_address_line2: {},
+        service_address_city: {},
+        service_address_zip: {},
+      },
+      scheduledRows: [{
+        id: 'unit-a',
+        service_type: 'Quarterly Pest Control',
+        service_address_line1: '123 Palm Ave',
+        service_address_line2: 'Apt A',
+        service_address_city: 'Bradenton',
+        service_address_zip: '34209',
+      }],
+    });
+
+    const rows = await loadExistingRecurringQualifyingRows(db, 'c1');
+    expect(rows[0].effective_service_address).toBe('123 Palm Ave Apt A, Bradenton, 34209');
   });
 });

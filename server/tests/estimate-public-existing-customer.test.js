@@ -85,6 +85,22 @@ test('a monthly lawn floor re-anchors annual billing to the rounded monthly char
   expect(result.annual).toBe(640.08);
 });
 
+test('an annual-only lawn floor rounds its derived monthly charge upward', () => {
+  const result = clampLawnLadderEntry({
+    monthlyBase: null,
+    monthly: null,
+    annual: 600,
+    perTreatment: 66.67,
+    visits: 9,
+    manualDiscount: null,
+    marginFloorAnnual: 630.85,
+  });
+
+  expect(result.monthly).toBe(52.58);
+  expect(result.annual).toBe(630.85);
+  expect(result.monthly * 12).toBeGreaterThanOrEqual(result.annual);
+});
+
 test('a manual lawn discount cannot lower the accepted price below its cost-derived margin floor', () => {
   const result = clampLawnLadderEntry({
     monthlyBase: 60,

@@ -44,6 +44,7 @@ const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
+const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -365,24 +366,6 @@ function confirmationDisplayParams(toolName, params, preview) {
     open_questions: (params?.uncertainty || []).join('; ') || 'none',
     leadId: params?.leadId || null,
   };
-}
-
-function agentEstimatePreviewFingerprint(preview = {}) {
-  const money = preview.totals || {};
-  return JSON.stringify({
-    monthly: Number(money.monthly || 0),
-    annual: Number(money.annual || 0),
-    oneTime: Number(money.oneTime || 0),
-    lane: preview.lane || null,
-    laneReasons: preview.lane_reasons || [],
-    lines: preview.lines || [],
-    presentation: preview.presentation || null,
-    customerId: preview.customer_account?.customer_id || null,
-    customerRecognized: preview.customer_account?.recognized === true,
-    currentTier: preview.customer_account?.current_tier || null,
-    currentDiscountPct: Number(preview.customer_account?.current_discount_pct || 0),
-    existingServiceKeys: preview.customer_account?.existing_service_keys || [],
-  });
 }
 
 /**
@@ -1507,8 +1490,10 @@ router.post('/confirm-action', async (req, res, next) => {
     }
 
     const execParams = { ...action.params };
+    let approvedAgentEstimateFingerprint = null;
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL) {
       const approvedFingerprint = execParams._approvedPreviewFingerprint;
+      approvedAgentEstimateFingerprint = approvedFingerprint;
       delete execParams._approvedPreviewFingerprint;
       const livePreview = await executeToolByName(action.tool_name, execParams, null, {
         isAdmin: req.techRole === 'admin',
@@ -1536,6 +1521,9 @@ router.post('/confirm-action', async (req, res, next) => {
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: true,
+      ...(approvedAgentEstimateFingerprint
+        ? { approvedPreviewFingerprint: approvedAgentEstimateFingerprint }
+        : {}),
     });
     await PendingActions.recordResult(action.id, result);
 
@@ -1543,7 +1531,8 @@ router.post('/confirm-action', async (req, res, next) => {
       success: !result?.error,
     });
 
-    res.json({ success: !result?.error, tool: action.tool_name, result });
+    res.status(result?.preview_changed ? 409 : 200)
+      .json({ success: !result?.error, tool: action.tool_name, result });
   } catch (err) {
     logger.error('[intelligence-bar] confirm-action failed:', err);
     next(err);

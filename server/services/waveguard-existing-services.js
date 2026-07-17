@@ -103,6 +103,7 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   const hasStampedAddress = !!cols.service_address_line1;
   if (hasStampedAddress) {
     selectCols.push('service_address_line1');
+    if (cols.service_address_line2) selectCols.push('service_address_line2');
     if (cols.service_address_city) selectCols.push('service_address_city');
     if (cols.service_address_zip) selectCols.push('service_address_zip');
   }
@@ -117,7 +118,11 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   return rows.map((row) => ({
     ...row,
     effective_service_address: (hasStampedAddress && row.service_address_line1)
-      ? [row.service_address_line1, row.service_address_city, row.service_address_zip].filter(Boolean).join(', ')
+      ? [
+        [row.service_address_line1, row.service_address_line2].filter(Boolean).join(' '),
+        row.service_address_city,
+        row.service_address_zip,
+      ].filter(Boolean).join(', ')
       : null,
   }));
 }

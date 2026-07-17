@@ -32,7 +32,12 @@ const { performPropertyLookup } = require('../../routes/property-lookup-v2');
 const { buildAgentEstimateContext } = require('../agent-estimate-context');
 const { toQualifyingKey } = require('../waveguard-existing-services');
 const { computeMembershipContext, loadCurrentServiceSpendContext } = require('../estimate-membership-context');
-const { getProtocol, normalizeProtocolKey } = require('../protocol-reader');
+const {
+  getProtocol,
+  normalizeLawnTrack,
+  normalizeProtocolKey,
+} = require('../protocol-reader');
+const { agentEstimatePreviewFingerprint } = require('../agent-estimate-preview');
 const { executeProcurementTool } = require('./procurement-tools');
 
 const PROPERTY_FACT_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -487,8 +492,10 @@ function quoteMatchIsNegated(text, index, valueLength) {
   const phrase = quotePhraseAt(text, index, valueLength);
   const relativeStart = index - phrase.start;
   const before = phrase.text.slice(0, relativeStart);
+  const matched = phrase.text.slice(relativeStart, relativeStart + valueLength);
   const after = phrase.text.slice(relativeStart + valueLength);
-  return /(?:\bno|\bnot|\bwithout|\bnever)\s+(?:(?:a|an|the|any)\s+)?(?:[a-z'-]+\s+){0,2}$/i.test(before)
+  return /\b(?:no|not|without|never|isn['’]?t|wasn['’]?t|aren['’]?t|weren['’]?t)\b/i.test(matched)
+    || /(?:\bno|\bnot|\bwithout|\bnever|\bisn['’]?t|\bwasn['’]?t|\baren['’]?t|\bweren['’]?t)\s+(?:(?:a|an|the|any)\s+)?(?:[a-z'-]+\s+){0,2}$/i.test(before)
     || /(?:doesn['’]?t|does\s+not|do\s+not|hasn['’]?t|has\s+not)\s+(?:have|include)\s+(?:(?:a|an|the|any)\s+)?$/i.test(before)
     || /^\s*(?::|=|-)?\s*(?:is\s+)?(?:no|not|false|absent|none)\b/i.test(after);
 }
@@ -517,14 +524,37 @@ function quoteNumberMatchesFact(text, match, key, semanticPattern) {
   const numberStart = Number(match.index);
   const numberLength = match[0].length;
   const numberMatches = [...String(text || '').matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
-  const labelBelongsToNumber = (label) => {
+  const numberHint = (candidate) => {
+    const suffix = String(text || '').slice(
+      Number(candidate.index) + candidate[0].length,
+      Number(candidate.index) + candidate[0].length + 28,
+    );
+    if (/^\s*-?\s*(?:stor(?:y|ies)|floors?)\b/i.test(suffix)) return 'stories';
+    if (/^\s*-?\s*(?:square\s*(?:feet|foot)|sq\.?\s*ft|sqft|sf)\b/i.test(suffix)) return 'area';
+    if (/^\s*-?\s*bedrooms?\b/i.test(suffix)) return 'bedrooms';
+    if (/^\s*-?\s*(?:units?|apartments?)\b/i.test(suffix)) return 'units';
+    if (/^\s*-?\s*palms?\b/i.test(suffix)) return 'palms';
+    return null;
+  };
+  const numberCompatibleWithFamily = (candidate, family) => {
+    const hint = numberHint(candidate);
+    if (!hint) return true;
+    if (family === 'stories') return hint === 'stories';
+    if (family === 'bedrooms') return hint === 'bedrooms';
+    if (family === 'units') return hint === 'units';
+    if (family === 'palms') return hint === 'palms';
+    return !['stories', 'bedrooms', 'units', 'palms'].includes(hint);
+  };
+  const labelBelongsToNumber = (label, family) => {
     const currentDistance = distanceBetweenSpans(
       numberStart,
       numberLength,
       Number(label.index),
       label[0].length,
     );
-    const nearestDistance = numberMatches.reduce((nearest, candidate) => Math.min(
+    const compatibleNumbers = numberMatches.filter((candidate) => numberCompatibleWithFamily(candidate, family));
+    if (!numberCompatibleWithFamily(match, family) || !compatibleNumbers.length) return null;
+    const nearestDistance = compatibleNumbers.reduce((nearest, candidate) => Math.min(
       nearest,
       distanceBetweenSpans(
         Number(candidate.index),
@@ -538,7 +568,7 @@ function quoteNumberMatchesFact(text, match, key, semanticPattern) {
   const requestedFamily = factFamily(key);
   if (!requestedFamily) {
     return [...String(text || '').matchAll(globalPattern(semanticPattern))].some((label) => {
-      const distance = labelBelongsToNumber(label);
+      const distance = labelBelongsToNumber(label, null);
       return distance != null && distance <= 60;
     });
   }
@@ -546,7 +576,7 @@ function quoteNumberMatchesFact(text, match, key, semanticPattern) {
   for (const [family, pattern] of Object.entries(FACT_FAMILY_PATTERNS)) {
     pattern.lastIndex = 0;
     for (const label of String(text || '').matchAll(pattern)) {
-      const distance = labelBelongsToNumber(label);
+      const distance = labelBelongsToNumber(label, family);
       if (distance != null) distances.push({ family, distance });
     }
   }
@@ -581,7 +611,7 @@ function protocolContainsProduct(serviceKey, lawnTrack, productName) {
   return aliases.some((alias) => alias.length >= 5 && protocolText.includes(alias));
 }
 
-async function validateInventoryReviewRows(rows = [], protocolReview = []) {
+async function validateInventoryReviewRows(rows = [], protocolReview = [], authoritativeLawnTrack = null) {
   const validatedRows = [];
   const reasons = [];
   for (const row of rows) {
@@ -621,7 +651,10 @@ async function validateInventoryReviewRows(rows = [], protocolReview = []) {
     const review = protocolReview.find((candidate) => (
       String(candidate?.serviceKey || '').toLowerCase() === String(row?.serviceKey || '').toLowerCase()
     ));
-    const protocolMatch = protocolContainsProduct(row?.serviceKey, review?.lawnTrack, product.name);
+    const protocolTrack = normalizeProtocolKey(row?.serviceKey) === 'lawn'
+      ? authoritativeLawnTrack
+      : review?.lawnTrack;
+    const protocolMatch = protocolContainsProduct(row?.serviceKey, protocolTrack, product.name);
     verified.protocolMatched = protocolMatch === true;
     validatedRows.push(verified);
     if (protocolMatch === false) {
@@ -718,6 +751,7 @@ function extractStatusCode(err) {
 }
 
 const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
+  'allowingredientaliases',
   'allowwarrantyoverride',
   'customcontaineroz',
   'customdiscount',
@@ -732,6 +766,7 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'lawnlaborminutesbase',
   'lawnlaborminutesperk',
   'lawnmaterialcostperk',
+  'legacypayload',
   'manageroverride',
   'manualdiscount',
   'margindivisor',
@@ -844,6 +879,24 @@ function serviceTemplateKey(rawKey) {
     .replace(/[^a-zA-Z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .toLowerCase();
+}
+
+function agentCoverageServiceKey(rawKey) {
+  const key = serviceTemplateKey(rawKey);
+  return ({
+    commercial_pest: 'pest_control',
+    commercial_lawn: 'lawn_care',
+    commercial_tree_shrub: 'tree_shrub',
+    commercial_mosquito: 'mosquito',
+    commercial_termite_bait: 'termite_bait',
+    commercial_rodent_bait: 'rodent_bait',
+  })[key] || key;
+}
+
+function pricedLawnTrack(services = {}) {
+  const options = services.lawn || services.oneTimeLawn || services.lawnPestControl;
+  if (!options) return null;
+  return normalizeLawnTrack(options?.track || services.lawn?.track || 'st_augustine');
 }
 
 function presentationForServices(services = {}, engineResult = null) {
@@ -1603,9 +1656,9 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   }
 
   const lines = (engineResult.lineItems || []).map(compactAgentLine);
-  const emittedServiceKeys = new Set((engineResult.lineItems || []).map((line) => serviceTemplateKey(line?.service)));
+  const emittedServiceKeys = new Set((engineResult.lineItems || []).map((line) => agentCoverageServiceKey(line?.service)));
   const missingRequestedServices = Object.keys(input.engineInputs.services || {}).filter((rawKey) => {
-    const requestedKey = serviceTemplateKey(rawKey);
+    const requestedKey = agentCoverageServiceKey(rawKey);
     if (emittedServiceKeys.has(requestedKey)) return false;
     return !(requestedKey === 'lawn_pest_knockdown' && emittedServiceKeys.has('one_time_lawn'));
   });
@@ -1633,8 +1686,9 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const propertyFactEntries = Object.entries(propertyFacts);
   const protocolReview = Array.isArray(input.protocolReview) ? input.protocolReview : [];
   const inventoryReview = Array.isArray(input.inventoryReview) ? input.inventoryReview : [];
+  const authoritativeLawnTrack = pricedLawnTrack(input.engineInputs.services || {});
   const inventoryValidation = inventoryReview.length
-    ? await validateInventoryReviewRows(inventoryReview, protocolReview)
+    ? await validateInventoryReviewRows(inventoryReview, protocolReview, authoritativeLawnTrack)
     : { rows: [], reasons: [] };
 
   if (accountPricing.recognized) {
@@ -1999,6 +2053,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       });
       const expectedProgram = normalizeProtocolKey(row?.serviceKey);
       const suppliedProgram = normalizeProtocolKey(row?.programKey);
+      const reviewedLawnTrack = expectedProgram === 'lawn' ? normalizeLawnTrack(row?.lawnTrack) : null;
       const expectedVisitCount = Array.isArray(protocol?.protocol?.visits)
         ? protocol.protocol.visits.length
         : null;
@@ -2006,6 +2061,10 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
         laneReasons.push(`protocol review for ${row?.serviceKey || 'a selected service'} did not resolve to a server protocol`);
       } else if (!suppliedProgram || suppliedProgram !== expectedProgram) {
         laneReasons.push(`protocol review for ${row?.serviceKey || 'a selected service'} names the wrong program`);
+      } else if (expectedProgram === 'lawn'
+        && authoritativeLawnTrack
+        && reviewedLawnTrack !== authoritativeLawnTrack) {
+        laneReasons.push(`protocol review for ${row?.serviceKey || 'lawn'} uses ${reviewedLawnTrack || 'an invalid track'} instead of priced ${authoritativeLawnTrack}`);
       } else if (!Number.isFinite(Number(row?.visitCount))
         || Number(row.visitCount) <= 0
         || (expectedVisitCount != null && Number(row.visitCount) !== expectedVisitCount)) {
@@ -2427,6 +2486,15 @@ async function createAgentEstimateDraft(input, actionContext = {}) {
   };
   const preview = await computeAgentDraftPreview(anchoredInput, accountPricing);
   if (preview.error) return preview;
+
+  if (actionContext.confirmed === true
+    && actionContext.approvedPreviewFingerprint
+    && actionContext.approvedPreviewFingerprint !== agentEstimatePreviewFingerprint(preview)) {
+    return {
+      error: 'Agent Estimate pricing or customer context changed after preview. Build a new confirmation card before saving.',
+      preview_changed: true,
+    };
+  }
 
   if (accountPricing.customerId) {
     accountPricing.membershipSnapshot = await computeMembershipContext(db, {

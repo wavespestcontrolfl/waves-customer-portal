@@ -12648,7 +12648,7 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
   // the estimate's stored (pre-floor) monthly_total — without this, the row
   // could show a floored annual while still locking the old monthly charge.
   if (monthly == null && annualWasClamped) {
-    clampedMonthly = roundMonthly(clampedAnnual / 12);
+    clampedMonthly = Math.ceil((clampedAnnual / 12) * 100) / 100;
   }
   const clampedPerTreatment = (monthlyWasClamped || annualWasClamped) && clampedAnnual != null && visits
     ? roundMonthly(clampedAnnual / visits)
