@@ -28,15 +28,21 @@ router.get('/', async (req, res, next) => {
       .whereIn('product_id', products.map((p) => p.id))
       .select('product_id', 'service_type', 'is_primary');
 
+    // Map product_id -> { service_type -> is_primary } so a product can be a
+    // primary product for one service line and a secondary for another.
     const productServiceMap = {};
     for (const m of usageMappings) {
-      if (!productServiceMap[m.product_id]) productServiceMap[m.product_id] = new Set();
-      productServiceMap[m.product_id].add(m.service_type);
+      if (!productServiceMap[m.product_id]) productServiceMap[m.product_id] = {};
+      // If a duplicate (product, service_type) row exists, keep primary if any.
+      productServiceMap[m.product_id][m.service_type] =
+        productServiceMap[m.product_id][m.service_type] || Boolean(m.is_primary);
     }
 
     const serviceGroupMap = {};
     for (const p of products) {
-      const serviceTypes = productServiceMap[p.id] ? [...productServiceMap[p.id]] : ['General'];
+      const serviceTypes = productServiceMap[p.id]
+        ? Object.keys(productServiceMap[p.id])
+        : ['General'];
       for (const st of serviceTypes) {
         if (!serviceGroupMap[st]) {
           serviceGroupMap[st] = {
@@ -62,8 +68,16 @@ router.get('/', async (req, res, next) => {
           reentryText: p.reentry_text || null,
           labelUrl: p.label_url || null,
           sdsUrl: p.sds_url || null,
+          isPrimary: (productServiceMap[p.id] && productServiceMap[p.id][st]) || false,
         });
       }
+    }
+
+    // Within each service line, list primary products first, then alphabetical.
+    for (const group of Object.values(serviceGroupMap)) {
+      group.products.sort(
+        (a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0) || a.name.localeCompare(b.name)
+      );
     }
 
     const latestUpdate = products.reduce((max, p) => {
