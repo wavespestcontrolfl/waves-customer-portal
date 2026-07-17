@@ -937,3 +937,22 @@ describe('prevention/product guards — round-4 hardening (Codex findings)', () 
     expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
   });
 });
+
+describe('guards — round-5 polish (Codex findings)', () => {
+  test('product noun must be the OBJECT of the inventory verb', () => {
+    const ok = guardrails.evaluate({ body: 'Our team uses inspection notes to decide where bait should go.' }, {});
+    expect(ok.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+    const bad = guardrails.evaluate({ body: 'Our techs carry more than one bait on every ant call.' }, {});
+    expect(bad.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('"we don\'t promise" disclaimers are exempt', () => {
+    const r = guardrails.evaluate({ body: 'We don’t promise you will never see another ant.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('"ants will never come back" blocks', () => {
+    const r = guardrails.evaluate({ body: 'Our treatment means the ants will never come back.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+});

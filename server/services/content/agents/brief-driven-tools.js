@@ -230,33 +230,50 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         // try/catch: a miss here must not hide the blog_posts matches).
         let pendingAutonomous = [];
         try {
-          pendingAutonomous = await db('autonomous_runs')
+          const kwFilter = (qb) => {
+            qb.whereRaw("LOWER(draft_payload->'frontmatter'->>'title') LIKE ?", [`%${keyword.toLowerCase()}%`])
+              .orWhereRaw("LOWER(draft_payload->'frontmatter'->>'primary_keyword') LIKE ?", [`%${keyword.toLowerCase()}%`]);
+          };
+          const runColumns = [
+            'autonomous_runs.id',
+            'autonomous_runs.action_type',
+            'autonomous_runs.outcome',
+            'autonomous_runs.astro_pr_url',
+            db.raw("draft_payload->'frontmatter'->>'title' AS title"),
+            db.raw("draft_payload->'frontmatter'->>'primary_keyword' AS keyword"),
+            db.raw("draft_payload->'frontmatter'->>'slug' AS slug"),
+            db.raw("draft_payload->'frontmatter'->>'canonical' AS canonical"),
+          ];
+          // In-flight drafts: only runs whose queue row is STILL parked at
+          // the PR-pending review state — an operator dismiss/requeue moves
+          // the opportunity_queue row, not the old run, and such drafts will
+          // never publish (they must not suppress a replacement angle or get
+          // linked).
+          const inFlight = await db('autonomous_runs')
             .where({ 'autonomous_runs.outcome': 'completed_pending_review' })
-            // The run's outcome alone goes stale: an operator dismiss/requeue
-            // moves the opportunity_queue row, not the old run — such drafts
-            // will never publish and must not suppress a replacement angle or
-            // get linked. Only runs whose queue row is STILL parked at the
-            // PR-pending review state are live duplicate candidates.
             .join('opportunity_queue as oq', 'oq.id', 'autonomous_runs.opportunity_id')
             .where('oq.status', 'pending_review')
             .where('oq.skip_reason', 'astro_pr_pending_merge')
-            .where((qb) => {
-              qb.whereRaw("LOWER(draft_payload->'frontmatter'->>'title') LIKE ?", [`%${keyword.toLowerCase()}%`])
-                .orWhereRaw("LOWER(draft_payload->'frontmatter'->>'primary_keyword') LIKE ?", [`%${keyword.toLowerCase()}%`]);
-            })
-            .select(
-              'autonomous_runs.id',
-              'autonomous_runs.action_type',
-              'autonomous_runs.astro_pr_url',
-              db.raw("draft_payload->'frontmatter'->>'title' AS title"),
-              db.raw("draft_payload->'frontmatter'->>'primary_keyword' AS keyword"),
-              // The draft's future route — the writer is instructed to LINK a
-              // same-intent in-flight draft like a published page, which is
-              // impossible without its slug/canonical.
-              db.raw("draft_payload->'frontmatter'->>'slug' AS slug"),
-              db.raw("draft_payload->'frontmatter'->>'canonical' AS canonical"),
-            )
+            .where(kwFilter)
+            .select(runColumns)
             .limit(20);
+          // LIVE autonomous pages: they never get a blog_posts row either,
+          // and after finalizeMerged their queue row is done — they must
+          // stay visible to the overlap check forever, no queue-state join.
+          const published = await db('autonomous_runs')
+            .where({ 'autonomous_runs.outcome': 'completed_published' })
+            .where(kwFilter)
+            .select(runColumns)
+            .limit(20);
+          // Future/live route: the publisher normalizes flat slugs into
+          // /{category}/{slug}/ and mirrors the result into CANONICAL — the
+          // writer-emitted slug can be stale, so the linkable route derives
+          // from canonical first.
+          pendingAutonomous = [...inFlight, ...published].map((r) => {
+            let route = r.slug || null;
+            try { if (r.canonical) route = new URL(r.canonical).pathname; } catch (_) { /* keep slug */ }
+            return { ...r, route };
+          });
         } catch (pendingErr) {
           pendingAutonomous = [{ error: `autonomous_runs read failed: ${pendingErr.message}` }];
         }

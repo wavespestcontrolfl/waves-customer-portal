@@ -258,6 +258,15 @@ JSX component props like columns={[...]} are expected and render fine.
 - <PestEvidenceGrid /> — grid of "what the tech looks for" evidence cards. Use
   BARE for inspection / what-to-expect sections. Override:
   <PestEvidenceGrid title="..." items={[{ label, note }]} caption="..." />.
+- <BottomLineBox verdict="..." recommendation="..." /> — the one-paragraph
+  bottom line for decision posts: verdict = the direct answer, recommendation
+  = what the reader should do. Both props REQUIRED (plain strings); optional
+  confidence="high"|"moderate"|"situational". REQUIRED on every "decision"
+  post.
+- <HonestRejection audience="..." reason="..." /> — honestly tells a segment
+  of readers this service/plan is NOT for them and what to do instead. Both
+  props REQUIRED (plain strings). REQUIRED on "decision" and "comparison"
+  posts; strongly preferred on "protocol" posts.
 - <ComparisonTable columns={["What you get","Option A","Option B"]}
   rows={[{ label: "...", values: ["...","..."] }]} highlight={1} caption="..." />
   — side-by-side comparison (e.g. quarterly program vs one-time, DIY vs pro).

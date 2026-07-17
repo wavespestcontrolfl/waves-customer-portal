@@ -613,7 +613,10 @@ const INVENTORY_CLAIM_RES = [
   // team uses inspection notes"); it must be about a pesticide product.
   // Named brands/ingredients after these verbs are caught by the brand and
   // ingredient branches regardless.
-  new RegExp(`\\b(?:our|waves(?:'s?)?)\\s+(?:techs?|technicians?|team|pros?|crews?)\\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\\s+on|rely|relies|prefer|prefers|spray|sprays|trust|trusts)\\b[^.!?\\n]{0,80}\\b(?:${PRODUCT_NOUN_SRC}|baits?|gels?|products?|formulations?|chemicals?|materials?)\\b`, 'i'),
+  // The product noun must be the OBJECT of the verb (a few determiner/
+  // adjective words at most) — "carry more than one bait" blocks, while
+  // "use inspection notes to decide where bait should go" stays legal.
+  new RegExp(`\\b(?:our|waves(?:'s?)?)\\s+(?:techs?|technicians?|team|pros?|crews?)\\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\\s+on|rely|relies|prefer|prefers|spray|sprays|trust|trusts)\\b(?:\\s+on)?(?:\\s+[\\w'’-]+){0,3}?\\s+(?:${PRODUCT_NOUN_SRC}|baits?|gels?|products?|formulations?|chemicals?)\\b`, 'i'),
   // Anaphoric inventory claims — "what our techs carry", "which is what our
   // techs use" — always refer back to a just-named product; keep unconditional.
   /\bwhat\s+(?:our|the)\s+(?:techs?|technicians?|team|pros?)\s+(?:carry|carries|use|uses)\b/i,
@@ -691,8 +694,8 @@ const PEST_OBJ_SRC = "(?:ants?|pests?|bugs?|roaches|cockroaches|termites?|rodent
 const PREVENTION_PROMISE_SRCS = [
   // "prevents/keeps/stops <pest> from coming back / returning / getting in"
   `\\b(?:prevents?|keeps?|stops?)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+from\\s+(?:coming\\s+back|returning|re-?infest\\w*|ever\\s+\\w+|getting\\s+(?:back\\s+)?in(?:side)?\\b)`,
-  // "<pest> won't / will not come back or return"
-  `\\b${PEST_OBJ_SRC}\\s+(?:won'?t|will\\s+not|never)\\s+(?:come\\s+back|return|be\\s+back)`,
+  // "<pest> won't / will not / will never come back or return"
+  `\\b${PEST_OBJ_SRC}\\s+(?:won['’]?t|will\\s+not|will\\s+never|never)\\s+(?:come\\s+back|return|be\\s+back)`,
   // "never see/deal with another <pest>"
   `\\bnever\\s+(?:see|have|deal\\s+with|worry\\s+about)\\s+(?:another\\s+)?${PEST_OBJ_SRC}`,
   // guaranteed / promised elimination or 100% anything
@@ -720,7 +723,10 @@ const PREVENTION_PROMISE_RES = PREVENTION_PROMISE_SRCS.map((src) => new RegExp(s
 // Honest-disclaimer context: "no honest company will promise you'll never
 // see another ant" is the phrasing we WANT — a match preceded by a negated
 // promise is a disclaimer, not a claim.
-const NEGATED_PROMISE_CONTEXT_RE = /(?:no\s+(?:honest\s+)?(?:company|one|body|pro)|won'?t|will\s+not|cannot|can'?t|nobody\s+can)\s+(?:[\w'’]+\s+){0,3}?(?:promise|guarantee|tell\s+you)/i;
+// Apostrophes match BOTH straight and typographic forms — generated copy
+// routinely ships curly quotes (the pest-practices matcher was burned by
+// exactly this).
+const NEGATED_PROMISE_CONTEXT_RE = /(?:no\s+(?:honest\s+)?(?:company|one|body|pro)|won['’]?t|will\s+not|cannot|can['’]?t|nobody\s+can|don['’]?t|do\s+not|doesn['’]?t|does\s+not|never)\s+(?:[\w'’]+\s+){0,3}?(?:promise|guarantee|tell\s+you)/i;
 
 function preventionPromiseFinding(text) {
   const s = String(text || '');
