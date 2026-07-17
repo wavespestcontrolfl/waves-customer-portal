@@ -1701,6 +1701,130 @@ async function notifyPaymentSuccess(paymentIntent) {
 }
 
 /**
+ * Arm the billing-cron retry ladder for an async monthly-autopay bounce.
+ *
+ * ACH autopay charges record status 'processing' at initiation
+ * (services/stripe.js maps every non-succeeded PI to 'processing'), so
+ * processMonthlyBilling sees success and its synchronous catch — the only
+ * place that arms payments.retry_count / next_retry_at — never runs. When
+ * the bank return lands days later as payment_intent.payment_failed, this
+ * handler is the only place that knows the month is still uncollected.
+ * Arm the SAME ladder the cron's catch arms (first rung at
+ * RETRY_DELAYS_DAYS[0] days) so processPaymentRetries() picks the row up
+ * and applies its full suppression-guard set (already-collected, annual
+ * prepay coverage, billing-mode, autopay disabled/paused, pending prepay,
+ * ambiguous-outcome).
+ *
+ * Guards:
+ * - monthly_autopay PIs only (metadata stamped by chargeMonthly). Never
+ *   invoice-linked PIs: that lane reopens the invoice and dunning
+ *   collects, so arming here too would double-collect the same balance.
+ * - only rows still 'processing' when the bounce arrived (the async
+ *   success-at-initiation lane). Synchronously-failed rows were armed by
+ *   the cron's catch; touching them would reset a live ladder.
+ * - 3-attempt bound: each sweep rung mints a FRESH payments row and
+ *   supersedes the bounced original, so the ladder position is
+ *   reconstructed from the obligation month's prior failed attempts using
+ *   the sweep's own matcher shape (metadata billed_month first,
+ *   payment_date window + description marker as the legacy fallback). At
+ *   3+ prior attempts the ladder is exhausted — mirrors the sweep's
+ *   retry_count < 3 window; by then handleAchFailure's escalation has
+ *   suspended ACH and, with a card on file, repointed autopay at it.
+ */
+async function armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRow) {
+  const piId = paymentIntent.id;
+  if (paymentIntent.metadata?.type !== 'monthly_autopay') return;
+  if (!processingRow || processingRow.superseded_by_payment_id || processingRow.next_retry_at) return;
+
+  // Explicit invoice guard (belt over the metadata check): an
+  // invoice-linked PI re-collects through invoice reopen + dunning,
+  // never through this ladder.
+  const linkedInvoice = await db('invoices')
+    .where({ stripe_payment_intent_id: piId })
+    .first()
+    .catch(() => null);
+  if (linkedInvoice) {
+    logger.info(`[stripe-webhook] PI ${piId} is invoice-linked — invoice lane re-collects, not arming autopay retry`);
+    return;
+  }
+
+  let rowMeta = {};
+  try {
+    rowMeta = processingRow.metadata
+      ? (typeof processingRow.metadata === 'string' ? JSON.parse(processingRow.metadata) : processingRow.metadata)
+      : {};
+  } catch (e) { /* unparseable legacy metadata — fall through to payment_date */ }
+  // Month-of-obligation key (same driver-shape handling as billing-cron's
+  // monthKeyOf: DATE columns arrive as Date or 'YYYY-MM-DD' string).
+  const pd = processingRow.payment_date;
+  const pdIso = pd instanceof Date
+    ? (Number.isNaN(pd.getTime()) ? '' : pd.toISOString())
+    : String(pd || '');
+  const obligationMonth = rowMeta.billed_month
+    || (/^\d{4}-\d{2}/.test(pdIso) ? pdIso.slice(0, 7) : null);
+
+  // Ladder position = prior failed attempts for the same obligation month.
+  let priorAttempts = 0;
+  if (obligationMonth) {
+    const [obYear, obMonth] = obligationMonth.split('-').map(Number);
+    const obStart = `${obligationMonth}-01`;
+    const obLastDay = new Date(Date.UTC(obYear, obMonth, 0)).getUTCDate();
+    const obEnd = `${obligationMonth}-${String(obLastDay).padStart(2, '0')}`;
+    priorAttempts = Number((await db('payments')
+      .where({ customer_id: processingRow.customer_id, status: 'failed' })
+      .whereNot({ id: processingRow.id })
+      .where(function () {
+        this.whereRaw("metadata->>'billed_month' = ?", [obligationMonth])
+          .orWhere(function () {
+            this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+              .andWhere('payment_date', '>=', obStart)
+              .andWhere('payment_date', '<=', obEnd)
+              .andWhere('description', 'like', '%WaveGuard Monthly%');
+          });
+      })
+      .count('* as cnt')
+      .first())?.cnt || 0);
+  }
+
+  if (priorAttempts >= 3) {
+    logger.warn(`[stripe-webhook] Monthly autopay PI ${piId} bounced with ${priorAttempts} prior failed attempts for ${obligationMonth || 'unknown month'} — ladder exhausted, not re-arming`);
+    return;
+  }
+
+  // Lazy require: pulls only the cadence constant, keeping the cron
+  // machinery out of this module's load path.
+  const { RETRY_DELAYS_DAYS } = require('../services/billing-cron');
+  const retryAt = new Date();
+  retryAt.setDate(retryAt.getDate() + (RETRY_DELAYS_DAYS?.[0] ?? 2));
+
+  // whereNull guards make this idempotent under webhook redelivery and
+  // keep it from clobbering a ladder some other path armed first.
+  const armed = await db('payments')
+    .where({ id: processingRow.id })
+    .whereNull('superseded_by_payment_id')
+    .whereNull('next_retry_at')
+    .update({
+      retry_count: priorAttempts,
+      next_retry_at: retryAt.toISOString(),
+    });
+  if (armed > 0) {
+    const { logAutopay } = require('../services/autopay-log');
+    await logAutopay(processingRow.customer_id, 'charge_failed', {
+      amountCents: Math.round(parseFloat(processingRow.amount) * 100) || null,
+      paymentId: processingRow.id,
+      details: {
+        source: 'autopay_async_bounce',
+        stripe_payment_intent_id: piId,
+        billed_month: obligationMonth,
+        retry_count: priorAttempts,
+        next_retry_at: retryAt.toISOString(),
+      },
+    }).catch(() => {});
+    logger.info(`[stripe-webhook] Armed autopay retry for payment ${processingRow.id} (PI ${piId}) — rung ${priorAttempts}, next retry ${retryAt.toISOString()}`);
+  }
+}
+
+/**
  * payment_intent.payment_failed — Update to failed, log failure reason
  */
 async function handlePaymentIntentFailed(paymentIntent, eventId) {
@@ -1724,6 +1848,22 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
     : 'Payment could not be completed.';
 
   logger.warn(`[stripe-webhook] PaymentIntent failed: ${piId} — ${failureMessage}`);
+
+  // Captured BEFORE the failed flip below: the async-bounce arming path
+  // must distinguish a success-at-initiation row (ACH records
+  // 'processing' at initiation, so the monthly cron saw success) from a
+  // synchronously-failed charge whose ladder the cron's catch already
+  // armed — after the flip the two are indistinguishable.
+  const processingRowBeforeFailure = await db('payments')
+    .where({ stripe_payment_intent_id: piId, status: 'processing' })
+    .first();
+
+  // Arm re-collection for invoice-less monthly-autopay async bounces.
+  // Runs before the status flip so a throw later in this handler (which
+  // 500s the webhook for redelivery) can't strand the obligation: on
+  // redelivery the row is still 'processing' and this re-runs; once
+  // armed, the whereNull guards make it a no-op.
+  await armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRowBeforeFailure);
 
   // Terminal-status guard: Stripe doesn't guarantee event ordering, and
   // pay-page PIs are reused across attempts — a late-delivered
@@ -3027,12 +3167,24 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
             .where({ customer_id: customer.id, method_type: 'card' })
             .first();
           if (cardMethod) {
+            // Complete flag flip, mirroring the portal's autopay-method
+            // mirror (customer-autopay PUT): the chargeable-method
+            // predicate requires BOTH is_default AND autopay_enabled on
+            // one row, so flipping is_default alone left the customer
+            // with NO chargeable method — every later collection threw
+            // 'No Stripe autopay payment method on file'. Clear both
+            // flags on the non-selected rows, set both on the card, and
+            // repoint the customer-level autopay method at the card so
+            // portal/admin surfaces agree with what will be charged.
             await trx('payment_methods')
               .where({ customer_id: customer.id })
-              .update({ is_default: false });
+              .update({ is_default: false, autopay_enabled: false });
             await trx('payment_methods')
               .where({ id: cardMethod.id })
-              .update({ is_default: true });
+              .update({ is_default: true, autopay_enabled: true });
+            await trx('customers')
+              .where({ id: customer.id })
+              .update({ autopay_payment_method_id: cardMethod.id });
           }
           logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} — 3+ failures in 90 days`);
         } else if (recentFailures >= 2) {
@@ -3105,7 +3257,17 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
       logger.error(`[invoice-followups] handleAutopayFailure failed: ${e.message}`);
     }
   } catch (err) {
+    // Rethrow so the router records the error and returns 500 — the event
+    // stays unprocessed and Stripe redelivers. Swallowing here acked
+    // events whose escalation transaction failed (including its
+    // deliberate status-update rethrow), permanently dropping the
+    // failure-count bump. Redelivery is safe: the router's event-id claim
+    // dedupes, and the ach_failure_log event-id dedupe above makes the
+    // recount and SMS side effects replay-proof. Genuinely non-critical
+    // paths (SMS send, follow-up engine) keep their own inner catches and
+    // never reach here.
     logger.error(`[stripe-webhook] ACH failure handler error: ${err.message}`);
+    throw err;
   }
 }
 
@@ -4129,3 +4291,6 @@ module.exports._handleChargeRefunded = handleChargeRefunded;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
 module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
 module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucceededPaymentIntentIfSettled;
+module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
+module.exports._handleAchFailure = handleAchFailure;
+module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;

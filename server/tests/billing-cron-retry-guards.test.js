@@ -278,6 +278,31 @@ describe('processPaymentRetries — suppression guards', () => {
     );
   });
 
+  test('webhook-armed async ACH bounce row (retry_count 0, first rung) is picked up and re-charges its month', async () => {
+    // The stripe-webhook payment_failed handler arms exactly this shape for
+    // an invoice-less monthly ACH bounce: status failed, retry_count 0,
+    // next_retry_at set, billed_month stamped, no supersede. The sweep must
+    // treat it like any cron-armed rung — guards apply, then the charge
+    // keys on the rung (retry_count 0) and carries the obligation month.
+    mockFailedPayments = [monthlyFailedPayment({
+      retry_count: 0,
+      failure_reason: 'The customer\'s bank account could not be debited. (R01)',
+      stripe_payment_intent_id: 'pi_ach_bounce',
+    })];
+    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'processing', amount: '33.00', metadata: '{}' }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+
+    await BillingCron.processPaymentRetries();
+
+    expect(charge).toHaveBeenCalledWith(
+      'cust-1',
+      33,
+      expect.stringContaining('WaveGuard Monthly'),
+      expect.objectContaining({ type: 'monthly_autopay', billed_month: '2026-06' }),
+      'autopay_retry_pay-failed-1_0',
+    );
+  });
+
   test('legacy row without a stamp attributes the obligation by payment_date month', async () => {
     mockFailedPayments = [monthlyFailedPayment({
       payment_date: '2026-05-28',

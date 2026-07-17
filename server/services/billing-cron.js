@@ -1305,3 +1305,6 @@ const BillingCron = {
 };
 
 module.exports = BillingCron;
+// Exposed for the stripe-webhook async-bounce arming path, which mirrors the
+// synchronous catch's first-rung cadence (RETRY_DELAYS_DAYS[0]) exactly.
+module.exports.RETRY_DELAYS_DAYS = RETRY_DELAYS_DAYS;
