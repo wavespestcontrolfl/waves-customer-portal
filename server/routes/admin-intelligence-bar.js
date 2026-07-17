@@ -95,8 +95,9 @@ const STRIPE_OPS_TOOL_NAMES = new Set(STRIPE_OPS_TOOLS.map(t => t.name));
 const GITHUB_OPS_TOOL_NAMES = new Set(GITHUB_OPS_TOOLS.map(t => t.name));
 const STORE_OPS_TOOL_NAMES = new Set(STORE_OPS_TOOLS.map(t => t.name));
 const GROWTHBOOK_TOOL_NAMES = new Set(GROWTHBOOK_TOOLS.map(t => t.name));
-// Every infra module loads with the dashboard context and shares the
-// admin-only guard that OPS_TOOLS established.
+// Every infra module loads with EVERY admin context (any admin page can ask
+// about deploys, errors, or webhook health) and shares the admin-only guard
+// that OPS_TOOLS established — technician tokens never see or execute them.
 const INFRA_TOOLS = [
   ...OPS_TOOLS, ...SENTRY_OPS_TOOLS, ...CLOUDFLARE_OPS_TOOLS,
   ...TWILIO_OPS_TOOLS, ...STRIPE_OPS_TOOLS, ...GITHUB_OPS_TOOLS,
@@ -192,6 +193,9 @@ const PII_TOOL_NAMES = new Set([
   // them) — redact like the comms tools.
   'get_twilio_alerts',
   'get_twilio_failed_messages',
+  // PaymentIntent descriptions are app-written and can embed customer names
+  // or invoice references — redact like the other billing-adjacent tools.
+  'get_stripe_payment_intents',
   // GrowthBook feature rules expose raw targeting `condition` predicates,
   // which are arbitrary attribute strings that can embed customer emails or
   // user identifiers — keep them out of query telemetry.
@@ -236,6 +240,13 @@ function sanitizeQueryImages(images) {
   return out;
 }
 
+// PII-tool results (customer names in SMS threads, email bodies, payment
+// descriptions, …) enter conversationHistory just like image-derived text
+// does: a follow-up turn can echo the name with no tool call at all, so the
+// taint must survive the round-trip through the client the same way the
+// image taint does.
+const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
   return conversationHistory.some((message) => {
@@ -245,23 +256,30 @@ function hasImageTaintedHistory(conversationHistory) {
   });
 }
 
+function hasPiiTaintedHistory(conversationHistory) {
+  if (!Array.isArray(conversationHistory)) return false;
+  return conversationHistory.some((message) => (
+    message && typeof message.content === 'string' && message.content.includes(PII_TAINT_MARKER)
+  ));
+}
+
 function stripInternalHistoryMarkers(message) {
   if (!message || typeof message.content !== 'string') return message;
   return {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER)
+      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER && line.trim() !== PII_TAINT_MARKER)
       .join('\n')
       .trim(),
   };
 }
 
-function markImageTaintedContent(content, imageTainted) {
-  if (!imageTainted || typeof content !== 'string' || content.includes(IMAGE_TAINT_MARKER)) {
+function appendTaintMarker(content, tainted, marker) {
+  if (!tainted || typeof content !== 'string' || content.includes(marker)) {
     return content;
   }
-  return `${content}\n${IMAGE_TAINT_MARKER}`;
+  return `${content}\n${marker}`;
 }
 
 // Build the current-turn user message. Plain string when no images and no
@@ -528,22 +546,7 @@ ANALYSIS STYLE:
 - Flag anything that's significantly better or worse than expected
 - Be opinionated: "This is strong" or "This needs attention" — the operator wants your read, not just data
 - When showing revenue, always include both the dollar amount and the trend direction
-- Round to whole dollars for readability ($1,234 not $1,234.56)
-
-INFRASTRUCTURE (all READ-ONLY):
-The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; code lives on GitHub.
-- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
-- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
-- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
-- Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
-- Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed). Business revenue questions use the revenue tools, not these.
-- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
-- App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
-- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
-- Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) = healthy.
-- Combine infra with business data when useful ("did we miss calls while the server was erroring?")
-- If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
-- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`,
+- Round to whole dollars for readability ($1,234 not $1,234.56)`,
 
   seo: `
 SEO & CONTENT ENGINE CONTEXT:
@@ -928,7 +931,30 @@ RESPONSE STYLE:
 - For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute payouts from the query flow.`,
 };
 
+// Guidance for the infra tool modules. These tools load on EVERY admin
+// context (getToolsForContext), so this block is appended for every admin
+// request rather than living inside one context prompt. Tech and non-admin
+// requests never load the tools, so their prompts must not describe them.
+const INFRA_PROMPT = `INFRASTRUCTURE (all READ-ONLY):
+The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; code lives on GitHub.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
+- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
+- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
+- Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
+- Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed), get_stripe_payment_intents (live payment attempts — the ONLY view of incomplete/abandoned drafts, which never reach the local database; requires_capture = card hold awaiting capture, not a draft). COMPLETED revenue questions use the revenue tools, not these.
+- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
+- App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
+- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
+- Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) = healthy.
+- Combine infra with business data when useful ("did we miss calls while the server was erroring?")
+- If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
+- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
+
 function getToolsForContext(context, isAdmin = false) {
+  // Tech portal stays isolated — no base, no infra, tech-tools only.
+  if (context === 'tech') {
+    return TECH_TOOLS;
+  }
   // Email tools mirror the requireAdmin /api/admin/email surface — never
   // offer them to technician tokens. ADMIN_ONLY_TOOL_NAMES blocks execution
   // regardless; this keeps them out of the model's tool list too.
@@ -936,40 +962,47 @@ function getToolsForContext(context, isAdmin = false) {
   if (context === 'agent_estimate') {
     return AGENT_ESTIMATE_TOOLS;
   }
+  // Infra reads (Railway/Sentry/Cloudflare/Twilio/Stripe/GitHub/stores/
+  // GrowthBook) are context-independent — deploys break and webhooks fail no
+  // matter which page the operator is on. Admin-only: the /query loop and
+  // /execute both refuse them for technician tokens, so non-admin lists must
+  // not offer them either. Appended LAST so each context's own tools stay a
+  // stable prompt-cache prefix.
+  const infra = isAdmin ? INFRA_TOOLS : [];
   if (context === 'schedule' || context === 'dispatch') {
-    return [...base, ...SCHEDULE_TOOLS];
+    return [...base, ...SCHEDULE_TOOLS, ...infra];
   }
   if (context === 'dashboard') {
-    return [...base, ...DASHBOARD_TOOLS, ...INFRA_TOOLS];
+    return [...base, ...DASHBOARD_TOOLS, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...base, ...SEO_QUERY_TOOLS];
+    return [...base, ...SEO_QUERY_TOOLS, ...infra];
   }
   if (context === 'procurement' || context === 'inventory') {
-    return [...base, ...PROCUREMENT_TOOLS];
+    return [...base, ...PROCUREMENT_TOOLS, ...infra];
   }
   if (context === 'revenue') {
-    return [...base, ...REVENUE_TOOLS];
+    return [...base, ...REVENUE_TOOLS, ...infra];
   }
   if (context === 'reviews') {
-    return [...base, ...REVIEW_TOOLS];
+    return [...base, ...REVIEW_TOOLS, ...infra];
   }
   if (context === 'comms') {
     // Full comms set already includes the read tools — don't double-load
-    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : [])];
+    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : []), ...infra];
   }
   if (context === 'tax') {
-    return [...base, ...TAX_TOOLS];
+    return [...base, ...TAX_TOOLS, ...infra];
   }
   if (context === 'leads') {
-    return [...base, ...LEADS_TOOLS];
+    return [...base, ...LEADS_TOOLS, ...infra];
   }
   if (context === 'email') {
     // Full email set already includes the shared subset — don't double-load
-    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS] : base;
+    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
-    return [...base, ...BANKING_QUERY_TOOLS];
+    return [...base, ...BANKING_QUERY_TOOLS, ...infra];
   }
   if (context === 'estimates') {
     // create_agent_estimate_draft's trust boundary (feature gate + forced UI
@@ -977,12 +1010,9 @@ function getToolsForContext(context, isAdmin = false) {
     // from the ordinary estimates bar it would either never surface its
     // Confirm card (UI-confirm gate off) or surface one that /confirm-action
     // rejects (user flag off) — so it is not offered here at all.
-    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS.filter((tool) => tool.name !== AGENT_ESTIMATE_WRITE_TOOL)];
+    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS.filter((tool) => tool.name !== AGENT_ESTIMATE_WRITE_TOOL), ...infra];
   }
-  if (context === 'tech') {
-    return TECH_TOOLS;
-  }
-  return base;
+  return [...base, ...infra];
 }
 
 // techContext is only set for tech portal calls
@@ -1112,6 +1142,7 @@ router.post('/query', async (req, res, next) => {
     const { prompt, conversationHistory = [], context, pageData } = req.body;
     const images = sanitizeQueryImages(req.body.images);
     const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
+    const piiTaintedHistory = hasPiiTaintedHistory(conversationHistory);
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -1139,6 +1170,15 @@ router.post('/query', async (req, res, next) => {
     let systemPrompt = SYSTEM_PROMPT;
     if (context && CONTEXT_PROMPTS[context]) {
       systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
+    }
+    // Infra tools load on every admin context (getToolsForContext), so their
+    // guidance rides along for every admin request. The tech and
+    // agent_estimate contexts don't load them (isolated toolsets) and
+    // non-admin requests never get the tools, so those prompts must not
+    // describe them — the branch also keeps the admin and non-admin prefixes
+    // separately cacheable.
+    if (context !== 'tech' && context !== 'agent_estimate' && req.techRole === 'admin') {
+      systemPrompt += '\n\n' + INFRA_PROMPT;
     }
     if (context === 'agent_estimate') {
       systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
@@ -1330,18 +1370,21 @@ For create_customer, the route-optimization writes, and the inventory stock writ
     // Log the query for analytics. tool_calls stores names + field keys only;
     // prompt/response are additionally redacted when a PII-bearing tool ran
     // (prompts carry typed customer contact details, responses echo SMS
-    // bodies) OR when the conversation is image-tainted — the current turn has
-    // attachments, or an earlier image turn is still in the window and its
-    // OCR-derived answer can be echoed by a follow-up that carries no images
-    // itself. Either way Claude can surface a customer's name/address/phone
-    // with no tool call at all.
+    // bodies), when an earlier PII-tool turn is still in the history window
+    // (its answer can be echoed by a follow-up with no tool call), OR when
+    // the conversation is image-tainted — the current turn has attachments,
+    // or an earlier image turn is still in the window and its OCR-derived
+    // answer can be echoed by a follow-up that carries no images itself.
+    // Either way Claude can surface a customer's name/address/phone with no
+    // tool call at all.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
-    const redactPii = usedPiiTool || imageTainted || context === 'agent_estimate';
+    const piiTainted = usedPiiTool || piiTaintedHistory;
+    const redactPii = piiTainted || imageTainted || context === 'agent_estimate';
     const redactNote = context === 'agent_estimate'
       ? '[redacted — Agent Estimate lead context]'
-      : usedPiiTool
-      ? '[redacted — PII-bearing tools used]'
-      : '[redacted — image attachment may contain PII]';
+      : piiTainted
+        ? '[redacted — PII-bearing tools used]'
+        : '[redacted — image attachment may contain PII]';
     try {
       await db('intelligence_bar_queries').insert({
         prompt: redactPii ? redactNote : prompt,
@@ -1364,19 +1407,33 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       ...(uiConfirmActive ? { pendingActions: pendingProposals } : {}),
       // Return conversation history for multi-turn. Attached images are not
       // round-tripped (a text marker stands in) — keeps follow-up payloads
-      // small and image bytes out of the stored history.
+      // small and image bytes out of the stored history. Image and PII taint
+      // markers ride on the stored turns so follow-ups stay redacted; both
+      // are stripped before the history reaches the model.
       conversationHistory: [
         ...conversationHistory.slice(-8),
         {
           role: 'user',
-          content: markImageTaintedContent(
-            images.length
-              ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
-              : prompt,
-            imageTainted,
+          content: appendTaintMarker(
+            appendTaintMarker(
+              images.length
+                ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+                : prompt,
+              imageTainted,
+              IMAGE_TAINT_MARKER,
+            ),
+            piiTainted,
+            PII_TAINT_MARKER,
           ),
         },
-        { role: 'assistant', content: markImageTaintedContent(finalResponse, imageTainted) },
+        {
+          role: 'assistant',
+          content: appendTaintMarker(
+            appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
+            piiTainted,
+            PII_TAINT_MARKER,
+          ),
+        },
       ],
     });
 
