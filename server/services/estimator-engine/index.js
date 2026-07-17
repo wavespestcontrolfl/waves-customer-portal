@@ -56,9 +56,16 @@ function addressFromContext(context) {
         .filter(Boolean).join(', ');
     }
     const currentLead = context.leadIsForThisCall ? context.lead : null;
-    const city = currentLead?.city || trusted?.city || context.lead?.city || null;
-    const zip = currentLead?.zip || trusted?.zip || context.lead?.zip || null;
-    const stateZip = [city ? 'FL' : null, zip].filter(Boolean).join(' ');
+    // City and ZIP must come from the SAME record — borrowing a city from
+    // one source and a ZIP from another can compose a locality that exists
+    // nowhere ("other property's city, this property's ZIP") and geocode the
+    // wrong parcel. Take the first source that has any locality and use only
+    // its fields.
+    const locality = [currentLead, trusted, context.lead]
+      .find((src) => src && (src.city || src.zip)) || null;
+    const city = locality?.city || null;
+    const zip = locality?.zip || null;
+    const stateZip = [city || zip ? 'FL' : null, zip].filter(Boolean).join(' ');
     return [sa.street_line_1, city, stateZip].filter(Boolean).join(', ');
   }
   const leadAddress = context.lead?.address

@@ -24,7 +24,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { generateEstimate } = require('../pricing-engine');
 const {
-  blockIfAutomatedEstimateDuplicate,
+  automatedDuplicateBlock,
+  listOpenEstimatesByPhone,
   withAutomatedEstimatePhoneLock,
 } = require('../estimate-automation-duplicates');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
@@ -169,6 +170,37 @@ function deriveTotals(engineResult) {
 // Recent estimates with overlapping service interest: a drafted monthly far
 // outside the band of what comparable estimates actually went out at is a
 // review flag, not a blocker.
+
+// Canonical search term per engine service key. service_interest is a
+// free-form label ("Quarterly Pest Control", "Pest Control", …) — filtering
+// on the composed label's own words misses canonical rows and silently
+// skips the band on a below-threshold sample. The alias is the stable word
+// every variant of that service's label contains.
+const SERVICE_COMPS_ALIASES = {
+  pest: 'pest',
+  oneTimePest: 'pest',
+  lawn: 'lawn',
+  oneTimeLawn: 'lawn',
+  lawnPestControl: 'lawn pest',
+  treeShrub: 'tree',
+  mosquito: 'mosquito',
+  oneTimeMosquito: 'mosquito',
+  termite: 'termite',
+  flea: 'flea',
+  bedBug: 'bed bug',
+  rodentBait: 'rodent',
+  stinging: 'sting',
+};
+
+// Single-service drafts (bundles never reach the band) filter on the
+// service key's canonical alias, never the free-form composed label — a
+// label like "Quarterly Pest Control" would only match itself, not the
+// canonical "Pest Control" rows the band exists to compare against.
+function compsSearchTerm(serviceKeys, serviceInterestLabel) {
+  const alias = serviceKeys.length === 1 ? SERVICE_COMPS_ALIASES[serviceKeys[0]] : null;
+  return alias || String(serviceInterestLabel || '').split(/[+,]/)[0].trim();
+}
+
 async function compsBand({ serviceInterestLabel, category, monthlyTotal, serviceKeys = [] }) {
   if (!positive(monthlyTotal)) return null;
   // Multi-service bundles have no honest single-service comparison set —
@@ -188,8 +220,8 @@ async function compsBand({ serviceInterestLabel, category, monthlyTotal, service
       .orderBy('created_at', 'desc')
       .limit(50);
     if (category) q = q.where('category', category);
-    const firstWord = String(serviceInterestLabel || '').split(/[+,]/)[0].trim();
-    if (firstWord) q = q.whereILike('service_interest', `%${firstWord}%`);
+    const term = compsSearchTerm(serviceKeys, serviceInterestLabel);
+    if (term) q = q.whereILike('service_interest', `%${term}%`);
     const rows = await q;
     const values = rows.map((r) => Number(r.monthly_total)).filter((v) => v > 0).sort((a, b) => a - b);
     if (values.length < COMPS_MIN_SAMPLES) {
@@ -394,6 +426,18 @@ function normalizeWaveGuardTier(tier) {
   return WAVEGUARD_TIER_LABELS[String(tier || '').toLowerCase()] || null;
 }
 
+// Which of the phone's open estimates (newest first) genuinely duplicates
+// this draft. Every open row must clear the address comparison — an older
+// same-property estimate would otherwise hide behind a newer
+// different-property one. Unknown addresses (either side) block
+// conservatively; with no drafted address at all, the newest open estimate
+// blocks as before.
+function conflictingOpenEstimate(openEstimates, intentAddress) {
+  if (!openEstimates.length) return null;
+  if (!intentAddress) return openEstimates[0];
+  return openEstimates.find((row) => !row.address || sameStreetAddress(row.address, intentAddress)) || null;
+}
+
 // ── Draft row ─────────────────────────────────────────────────
 async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [] }) {
   const token = crypto.randomBytes(16).toString('hex');
@@ -420,27 +464,21 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   const { priorQualifyingServices: _nestedPrior, ...storedEngineInputs } = engineInput || {};
 
   const creationResult = await withAutomatedEstimatePhoneLock(customerPhone, async (trx) => {
-    let duplicateBlock = await blockIfAutomatedEstimateDuplicate(customerPhone, { database: trx });
-    // The duplicate guard is phone-only: a caller with several properties on
-    // one number would have their SECOND property's draft suppressed by the
-    // first property's open estimate. When both addresses are known and
-    // street-differ, this is a different quote — let it through. Unknown
-    // addresses keep the conservative block.
-    if (duplicateBlock?.existingEstimateId && intent.address) {
-      try {
-        const existingRow = await trx('estimates')
-          .select('address')
-          .where({ id: duplicateBlock.existingEstimateId })
-          .first();
-        if (existingRow?.address && !sameStreetAddress(existingRow.address, intent.address)) {
-          logger.info('[estimator-engine] duplicate guard bypassed — open estimate is for a different property');
-          duplicateBlock = null;
-        }
-      } catch (dupErr) {
-        logger.warn(`[estimator-engine] duplicate address compare failed (keeping block): ${dupErr.message}`);
-      }
+    // The base duplicate guard is phone-only: a caller with several
+    // properties on one number would have their SECOND property's draft
+    // suppressed by the first property's open estimate. The bypass must
+    // clear against EVERY open estimate on the phone, not just the newest —
+    // an older open estimate for the SAME property would otherwise be
+    // shadowed by a newer different-property one and let a true duplicate
+    // through. Only when every open estimate has a known, street-different
+    // address is this a different quote; an unknown address on either side
+    // keeps the conservative block.
+    const openEstimates = await listOpenEstimatesByPhone(customerPhone, { database: trx });
+    if (openEstimates.length) {
+      const conflicting = conflictingOpenEstimate(openEstimates, intent.address);
+      if (conflicting) return { duplicateBlock: automatedDuplicateBlock(conflicting) };
+      logger.info('[estimator-engine] duplicate guard bypassed — all open estimates are for different properties');
     }
-    if (duplicateBlock) return { duplicateBlock };
 
     const [estimate] = await trx('estimates').insert({
       estimate_data: JSON.stringify({
@@ -449,8 +487,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         agentDraft: true,
         // Mirror of leads.estimate_id — send/view/accept advancement falls
         // back to phone/email matching without it, which deliberately no-ops
-        // when multiple open leads share the contact.
-        ...(context?.lead?.id ? { lead_id: context.lead.id } : {}),
+        // when multiple open leads share the contact. Only a lead this call
+        // created or touched may be linked — a stale phone-matched lead
+        // (leadIsForThisCall === false) did not originate this quote and
+        // linking it would advance the wrong pipeline record.
+        ...(context?.lead?.id && context?.leadIsForThisCall ? { lead_id: context.lead.id } : {}),
         // Existing-customer marker the accept path reads to waive the $99
         // WaveGuard setup fee (shouldIncludeWaveGuardSetupFeeForRecurring
         // keys off membershipSnapshot.isExistingCustomer).
@@ -507,8 +548,10 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 
     // Link the originating lead to the draft (same transaction) so the
     // send/view/accept pipeline advances THIS lead instead of falling back
-    // to shared-contact matching.
-    if (context?.lead?.id) {
+    // to shared-contact matching. Same leadIsForThisCall gate as the
+    // metadata mirror above — a stale phone-history lead must not be
+    // mutated as if it originated this call.
+    if (context?.lead?.id && context?.leadIsForThisCall) {
       try {
         await trx('leads').where({ id: context.lead.id }).update({ estimate_id: estimate.id });
       } catch (linkErr) {
@@ -537,5 +580,5 @@ module.exports = {
   calibrationWarnings,
   classifyLane,
   createDraftEstimate,
-  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes },
+  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES },
 };

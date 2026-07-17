@@ -739,4 +739,58 @@ describe('review fixes', () => {
     };
     expect(idxPriv.addressFromContext(context)).toBeNull();
   });
+
+  test('duplicate guard clears against EVERY open estimate, not just the newest', () => {
+    const open = [
+      { id: 2, address: '456 Other Property Rd', created_at: '2026-07-16' }, // newest, different property
+      { id: 1, address: '123 Example St', created_at: '2026-07-01' }, // older, SAME property
+    ];
+    const hit = draftPriv.conflictingOpenEstimate(open, '123 Example St, Testville, FL 34200');
+    expect(hit?.id).toBe(1);
+  });
+
+  test('duplicate guard bypasses only when all open estimates street-differ', () => {
+    const open = [
+      { id: 2, address: '456 Other Property Rd' },
+      { id: 1, address: '789 Third Property Ln' },
+    ];
+    expect(draftPriv.conflictingOpenEstimate(open, '123 Example St')).toBeNull();
+    // An address-less open row can't be proven different — conservative block.
+    expect(draftPriv.conflictingOpenEstimate([...open, { id: 3, address: null }], '123 Example St')?.id).toBe(3);
+    // No drafted address at all — the newest open estimate blocks as before.
+    expect(draftPriv.conflictingOpenEstimate(open, null)?.id).toBe(2);
+    expect(draftPriv.conflictingOpenEstimate([], '123 Example St')).toBeNull();
+  });
+
+  test('comps filter uses the canonical service alias, not the composed label', () => {
+    expect(draftPriv.compsSearchTerm(['pest'], 'Quarterly Pest Control')).toBe('pest');
+    expect(draftPriv.compsSearchTerm(['bedBug'], 'Bed Bug Heat Treatment (3 rooms)')).toBe('bed bug');
+    // Bundles never reach the filter, but the label fallback must survive.
+    expect(draftPriv.compsSearchTerm([], 'Quarterly Pest Control + Lawn')).toBe('Quarterly Pest Control');
+  });
+
+  test('every composable service key has a comps alias', () => {
+    const { ALLOWED_SERVICE_KEYS } = require('../services/estimator-engine/intent-schema');
+    for (const key of ALLOWED_SERVICE_KEYS) {
+      expect(draftPriv.SERVICE_COMPS_ALIASES[key]).toBeTruthy();
+    }
+  });
+
+  test('street-only locality borrows city and ZIP from one record, never mixed', () => {
+    const context = {
+      extraction: { property: { service_address: { street_line_1: '123 Example St' } } },
+      isExistingCustomer: true,
+      customerPhoneAmbiguous: false,
+      // Profile has only a ZIP; this call's lead has only a city — the
+      // composed locality must not become "Leadville, FL 34999".
+      customer: { address_line1: '10 Current Home Rd', city: null, state: 'FL', zip: '34999' },
+      lead: { address: null, city: 'Leadville', zip: null },
+      leadIsForThisCall: true,
+    };
+    expect(idxPriv.addressFromContext(context)).toBe('123 Example St, Leadville, FL');
+    // Stale lead (not this call's) — profile is the first trusted locality
+    // source, and both fields come from it alone.
+    context.leadIsForThisCall = false;
+    expect(idxPriv.addressFromContext(context)).toBe('123 Example St, FL 34999');
+  });
 });
