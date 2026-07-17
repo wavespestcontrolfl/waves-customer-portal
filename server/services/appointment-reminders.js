@@ -908,17 +908,21 @@ const AppointmentReminders = {
     // a seed can collide with another service's reminder on the same date. Merge
     // the label into the existing row and insert THIS one fully suppressed (all
     // flags sent) so checkAndSendReminders() never sends two texts for one slot.
-    // Only a real OWNER counts (non-suppressed row whose live service the cron
-    // will send for) — a 'rescheduled' pending-rebook placeholder or terminal
-    // row parked on the slot must not swallow the new registration, or the
-    // real appointment would get no notifications at all.
+    // Only a real OWNER counts (non-suppressed row the cron will deliver
+    // for) — a 'rescheduled' pending-rebook placeholder or terminal row
+    // parked on the slot must not swallow the new registration, or the
+    // real appointment would get no notifications at all. Unlinked legacy
+    // rows (NULL scheduled_service_id) DO own: the cron skips its
+    // live-status guard for them, so they send.
     const sameAppointment = await conn('appointment_reminders')
       .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false, suppressed_by_sibling: false })
-      .whereExists(function ownerServiceSendable() {
-        this.select(1)
-          .from('scheduled_services')
-          .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
-          .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']);
+      .andWhere(function ownerDeliverable() {
+        this.whereNull('scheduled_service_id').orWhereExists(function ownerServiceSendable() {
+          this.select(1)
+            .from('scheduled_services')
+            .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']);
+        });
       })
       .orderBy([
         { column: 'reminder_72h_sent', order: 'asc' },
@@ -1026,14 +1030,17 @@ const AppointmentReminders = {
 
         // Owner-only dedup — see registerVisitReminderInTx: a suppressed
         // sibling or a cron-blocked ('rescheduled'/terminal) placeholder
-        // parked on the slot must not swallow this registration.
+        // parked on the slot must not swallow this registration, while an
+        // unlinked legacy row (which the cron delivers for) still owns.
         const sameAppointment = await trx('appointment_reminders')
           .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false, suppressed_by_sibling: false })
-          .whereExists(function ownerServiceSendable() {
-            this.select(1)
-              .from('scheduled_services')
-              .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
-              .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']);
+          .andWhere(function ownerDeliverable() {
+            this.whereNull('scheduled_service_id').orWhereExists(function ownerServiceSendable() {
+              this.select(1)
+                .from('scheduled_services')
+                .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
+                .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']);
+            });
           })
           .orderBy([
             { column: 'reminder_72h_sent', order: 'asc' },

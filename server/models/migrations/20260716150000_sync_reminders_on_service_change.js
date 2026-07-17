@@ -80,14 +80,17 @@ BEGIN
          -- Carry forward the departing owner's window state: its reminders
          -- were rendered with the merged slot label, so a window it already
          -- delivered (or covered) is delivered for the sibling too —
-         -- re-arming it would duplicate the text. Beyond that, past-or-due
-         -- times close the window (a flag left false on a past appointment
-         -- keeps the row in every cron scan forever).
+         -- re-arming it would duplicate the text. An otherwise-unsent 72h
+         -- window stays ARMED while still reachable — the cron delivers it
+         -- in the (24.25h, 72.25h] band — and is closed only below 24.25
+         -- hours, where an armed flag could never fire and would just keep
+         -- the row in every cron scan forever. Same rule for the 24h window
+         -- at its own boundary (appointment already past).
          reminder_72h_sent = p_owner_72h_sent
-                             OR (arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes'),
+                             OR (arp.appointment_time <= NOW() + INTERVAL '24 hours 15 minutes'),
          reminder_72h_sent_at = CASE
            WHEN p_owner_72h_sent THEN COALESCE(p_owner_72h_sent_at, NOW())
-           WHEN arp.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
+           WHEN arp.appointment_time <= NOW() + INTERVAL '24 hours 15 minutes' THEN NOW()
            ELSE NULL END,
          reminder_24h_sent = p_owner_24h_sent OR (arp.appointment_time <= NOW()),
          reminder_24h_sent_at = CASE
@@ -112,13 +115,14 @@ BEGIN
      AND NOT EXISTS (
            SELECT 1
              FROM appointment_reminders ar3
-             JOIN scheduled_services ss3 ON ss3.id = ar3.scheduled_service_id
+             LEFT JOIN scheduled_services ss3 ON ss3.id = ar3.scheduled_service_id
             WHERE ar3.customer_id = p_customer_id
               AND ar3.appointment_time = p_slot_time
               AND ar3.cancelled = false
               AND ar3.suppressed_by_sibling = false
-              AND ar3.scheduled_service_id <> p_departing_service_id
-              AND ss3.status IN ${SENDABLE_SERVICE});
+              AND (ar3.scheduled_service_id IS NULL
+                   OR (ar3.scheduled_service_id <> p_departing_service_id
+                       AND ss3.status IN ${SENDABLE_SERVICE})));
 END;
 $$ LANGUAGE plpgsql;
 `;
@@ -251,19 +255,23 @@ BEGIN
     END IF;
 
     -- Arrival: does an active owner already hold the destination slot?
-    -- Only a non-suppressed row whose live service is sendable counts —
-    -- 'rescheduled' pending-rebook markers and terminal rows are skipped by
-    -- the cron and must not swallow the incoming row's reminders.
+    -- Only a non-suppressed row the cron will deliver for counts: either a
+    -- row whose live service is sendable, or an unlinked legacy row (NULL
+    -- scheduled_service_id — the cron skips its live-status guard for
+    -- those, so they send). 'rescheduled' pending-rebook markers and
+    -- terminal rows are skipped by the cron and must not swallow the
+    -- incoming row's reminders.
     owner_exists := EXISTS (
       SELECT 1
         FROM appointment_reminders ar2
-        JOIN scheduled_services ss2 ON ss2.id = ar2.scheduled_service_id
+        LEFT JOIN scheduled_services ss2 ON ss2.id = ar2.scheduled_service_id
        WHERE ar2.customer_id = NEW.customer_id
          AND ar2.appointment_time = new_appt_time
          AND ar2.cancelled = false
          AND ar2.suppressed_by_sibling = false
-         AND ar2.scheduled_service_id <> NEW.id
-         AND ss2.status IN ${SENDABLE_SERVICE});
+         AND (ar2.scheduled_service_id IS NULL
+              OR (ar2.scheduled_service_id <> NEW.id
+                  AND ss2.status IN ${SENDABLE_SERVICE})));
 
     -- Window flags:
     --   owner_exists            -> fully suppressed under the slot owner.
@@ -448,14 +456,17 @@ exports.up = async function up(knex) {
        AND EXISTS (
              SELECT 1
                FROM appointment_reminders keep
-               JOIN scheduled_services ssk ON ssk.id = keep.scheduled_service_id
+               LEFT JOIN scheduled_services ssk ON ssk.id = keep.scheduled_service_id
               WHERE keep.customer_id = dup.customer_id
                 AND keep.id <> dup.id
                 AND keep.cancelled = false
                 AND keep.suppressed_by_sibling = false
-                AND ssk.status IN ${SENDABLE_SERVICE}
-                AND ssk.scheduled_date = ssd.scheduled_date
-                AND COALESCE(ssk.window_start, TIME '08:00') = COALESCE(ssd.window_start, TIME '08:00')
+                -- Post-heal (pass 3) every linked future row's
+                -- appointment_time matches its live slot, so slot equality
+                -- via appointment_time also admits unlinked legacy rows,
+                -- which the cron delivers for (no live-status guard).
+                AND keep.appointment_time = dup.appointment_time
+                AND (keep.scheduled_service_id IS NULL OR ssk.status IN ${SENDABLE_SERVICE})
                 AND (keep.created_at < dup.created_at
                      OR (keep.created_at = dup.created_at AND keep.id < dup.id)))
   `);
@@ -467,9 +478,12 @@ exports.up = async function up(knex) {
   await knex.raw(`
     UPDATE appointment_reminders p
        SET suppressed_by_sibling = false,
-           reminder_72h_sent = (p.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes'),
+           -- An unsent 72h window stays armed while the cron can still
+           -- deliver it (down to 24.25h out); below that it can never fire
+           -- and is closed so the row doesn't scan forever.
+           reminder_72h_sent = (p.appointment_time <= NOW() + INTERVAL '24 hours 15 minutes'),
            reminder_72h_sent_at = CASE
-             WHEN p.appointment_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
+             WHEN p.appointment_time <= NOW() + INTERVAL '24 hours 15 minutes' THEN NOW()
              ELSE NULL END,
            reminder_24h_sent = (p.appointment_time <= NOW()),
            reminder_24h_sent_at = CASE WHEN p.appointment_time <= NOW() THEN NOW() ELSE NULL END,
@@ -485,12 +499,12 @@ exports.up = async function up(knex) {
        AND NOT EXISTS (
              SELECT 1
                FROM appointment_reminders own
-               JOIN scheduled_services sso ON sso.id = own.scheduled_service_id
+               LEFT JOIN scheduled_services sso ON sso.id = own.scheduled_service_id
               WHERE own.customer_id = p.customer_id
                 AND own.appointment_time = p.appointment_time
                 AND own.cancelled = false
                 AND own.suppressed_by_sibling = false
-                AND sso.status IN ${SENDABLE_SERVICE})
+                AND (own.scheduled_service_id IS NULL OR sso.status IN ${SENDABLE_SERVICE}))
        AND p.id = (
              SELECT p2.id
                FROM appointment_reminders p2
