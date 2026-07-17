@@ -307,6 +307,57 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(String(global.fetch.mock.calls[2][0])).toContain('/v1/payment_intents/pi_old_retry');
   });
 
+  test('retry sweep runs for status:succeeded too — an older intent can fail in-window then succeed', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const now = Math.floor(Date.now() / 1000);
+    const oldCreated = now - 45 * 24 * 3600;
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [{
+          id: 'evt_fail_3',
+          type: 'payment_intent.payment_failed',
+          created: now - 600,
+          data: { object: { id: 'pi_recovered', object: 'payment_intent', status: 'requires_payment_method' } },
+        }],
+      }))
+      // Live state: the retried intent has since SUCCEEDED
+      .mockResolvedValueOnce(jsonResponse({
+        id: 'pi_recovered', status: 'succeeded', amount: 3333, currency: 'usd',
+        created: oldCreated, payment_method_types: ['card'],
+      }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'succeeded' });
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents.map(p => p.id)).toEqual(['pi_recovered']);
+    expect(result.payment_intents[0].created_before_window).toBe(true);
+  });
+
+  test('a failed retry lookup clears scan_exhaustive and is counted, never thrown', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const now = Math.floor(Date.now() / 1000);
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [{
+          id: 'evt_fail_4',
+          type: 'payment_intent.payment_failed',
+          created: now - 600,
+          data: { object: { id: 'pi_unreachable', object: 'payment_intent', status: 'requires_payment_method' } },
+        }],
+      }))
+      // Live re-fetch fails — the candidate could not be evaluated
+      .mockResolvedValueOnce(jsonResponse({}, 500));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete' });
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents).toEqual([]);
+    expect(result.retry_lookup_failures).toBe(1);
+    expect(result.scan_exhaustive).toBe(false);
+  });
+
   test('retry sweep never re-fetches intents the creation-window scan already covered', async () => {
     process.env.STRIPE_SECRET_KEY = 'sk_test_1';
     const now = Math.floor(Date.now() / 1000);

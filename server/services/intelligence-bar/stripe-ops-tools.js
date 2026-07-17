@@ -283,12 +283,14 @@ async function getStripePaymentIntents(input) {
   // flows), so a failed attempt today on an intent created before the
   // window would be invisible to the scan above. Sweep failed-attempt
   // events in the same window and re-fetch the LIVE intent for any id the
-  // scan didn't cover (event snapshots go stale — the intent may have
-  // succeeded since); the same filters apply. Pointless for
-  // status:succeeded, which no failed attempt can satisfy.
+  // scan didn't cover (event snapshots go stale); the same filters apply to
+  // the live state. Runs for every status filter — an older intent can fail
+  // inside the window and be succeeded (or canceled) by now, and its live
+  // state is what the filter sees.
   let retrySweepExhaustive = true;
   let retryLookupsDropped = 0;
-  if (statusFilter !== 'succeeded') {
+  let retryLookupFailures = 0;
+  {
     const retryCandidates = [];
     let eventsAfter = null;
     let eventPages = 0;
@@ -310,15 +312,24 @@ async function getStripePaymentIntents(input) {
     }
     retrySweepExhaustive = !moreEvents;
     retryLookupsDropped = Math.max(0, retryCandidates.length - RETRY_LOOKUP_CAP);
-    for (const id of retryCandidates.slice(0, RETRY_LOOKUP_CAP)) {
-      try {
-        const pi = await stripeGet(`/v1/payment_intents/${id}`);
-        // Only present because an attempt failed inside the window — flag
-        // when the intent itself predates it.
-        considerIntent(pi, pi.created < createdGte ? { created_before_window: true } : undefined);
-      } catch (err) {
-        logger.warn(`[intelligence-bar:stripe-ops] Retry-sweep lookup ${id} failed: ${err.message}`);
+    // Concurrent lookups bound the whole phase to ~one request timeout
+    // instead of cap × timeout when Stripe degrades. Results are folded in
+    // candidate order so output stays deterministic.
+    const lookups = await Promise.allSettled(
+      retryCandidates.slice(0, RETRY_LOOKUP_CAP).map(id => stripeGet(`/v1/payment_intents/${id}`)),
+    );
+    for (const lookup of lookups) {
+      if (lookup.status !== 'fulfilled') {
+        // An unevaluated candidate means the window may hold more than
+        // shown — reported via retry_lookup_failures and scan_exhaustive.
+        retryLookupFailures += 1;
+        logger.warn(`[intelligence-bar:stripe-ops] Retry-sweep lookup failed: ${lookup.reason && lookup.reason.message}`);
+        continue;
       }
+      const pi = lookup.value;
+      // Only present because an attempt failed inside the window — flag
+      // when the intent itself predates it.
+      considerIntent(pi, pi.created < createdGte ? { created_before_window: true } : undefined);
     }
   }
 
@@ -329,9 +340,12 @@ async function getStripePaymentIntents(input) {
     payment_intents: matched,
     total_matched: matchedSeen,
     total_scanned: scanned,
-    // Pending pages, matches beyond the display cap, or a truncated retry
-    // sweep all mean the window may hold more than shown.
-    scan_exhaustive: !morePages && matchedSeen === matched.length && retrySweepExhaustive && retryLookupsDropped === 0,
+    retry_lookup_failures: retryLookupFailures,
+    // Pending pages, matches beyond the display cap, a truncated retry
+    // sweep, or a failed lookup all mean the window may hold more than
+    // shown.
+    scan_exhaustive: !morePages && matchedSeen === matched.length
+      && retrySweepExhaustive && retryLookupsDropped === 0 && retryLookupFailures === 0,
     note: 'Live Stripe data; amounts are dollars. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft. created_before_window marks an older intent surfaced by a failed attempt inside the window.',
   };
 }
