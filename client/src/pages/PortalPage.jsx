@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
@@ -12998,6 +12999,26 @@ export default function PortalPage() {
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
   const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest);
+  // Tab navigation writes the URL and back/forward adopts it, so a refresh
+  // returns to the same tab (the deep-link parser above already reads
+  // ?tab=) and the browser Back button walks portal tabs instead of
+  // leaving the app.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const syncTabUrl = (id) => {
+    const target = id === 'dashboard' ? '/' : `/?tab=${id}`;
+    if (window.location.pathname + window.location.search !== target) navigate(target);
+  };
+  // Back/forward: adopt the tab the URL names. A no-op when the navigation
+  // came from switchTab (state already matches). Legacy targets map like
+  // the initial parser; the request overlay is never reopened from history.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const t = params.get('tab');
+    const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+    const urlTab = t === 'schedule' || t === 'services' ? 'visits' : (t && allowed.includes(t) ? t : 'dashboard');
+    setActiveTab(prev => (prev === urlTab ? prev : urlTab));
+  }, [location.search]);
   // Translates legacy 'schedule' / 'services' / 'request' targets into
   // their consolidated surfaces (Visits sub-tabs, request overlay) so
   // existing call-sites route correctly without rewriting each one.
@@ -13005,14 +13026,16 @@ export default function PortalPage() {
     // Plain nav clears any pending row focus so Plan doesn't keep
     // re-expanding a row the customer already closed.
     setPlanFocusService(null);
-    if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); return; }
-    if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); return; }
+    if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); syncTabUrl('visits'); return; }
+    if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); syncTabUrl('visits'); return; }
     if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
+    syncTabUrl(id);
   };
   const openPlanService = (svcId) => {
     setPlanFocusService(svcId);
     setActiveTab('plan');
+    syncTabUrl('plan');
   };
   const headerNavItems = [...PRIMARY_TABS, ...MORE_TABS];
   const headerNavButton = (tab) => {
@@ -13107,6 +13130,7 @@ export default function PortalPage() {
     setSwitchingPropertyId(null);
     if (switched) {
       setActiveTab('dashboard');
+      syncTabUrl('dashboard');
       setVisitsSubTab('upcoming');
       setShowMenu(false);
       setShowMoreSheet(false);
