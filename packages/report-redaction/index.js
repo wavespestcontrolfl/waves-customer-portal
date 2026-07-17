@@ -200,14 +200,31 @@ const PRE_CUE_RE = new RegExp(
   'gi',
 );
 
+// When the cue is directly preceded by an amount (or by the marker the
+// pre-cue pass just wrote), that amount IS the fee — the forward scan must
+// not fire and consume a later unrelated amount ("The $250 inspection fee
+// was collected at closing with $400 held in escrow" keeps the $400).
+const PRE_OWNED_CUE_RE = /(?:\$\s?\d[\d,]*(?:\.\d{1,2})?|\d\s?dollars?|\[fee removed\])\s+(?:[\w\-]+\s+){0,2}$/i;
+
 function redactInspectionFeeCues(text) {
   const str = String(text || '');
   if (!str) return str;
+  // Fee-free text passes through BYTE-IDENTICAL — the whitespace cleanup
+  // below must never run on text with nothing to redact, or it would alter
+  // prose (and shift wdoContentHash, falsely staling signatures) for
+  // strings that merely contain doubled spaces.
+  if (!containsInspectionFeeCue(str)) return str;
   return str
+    // pre-cue first, so a forward match can recognize a cue whose amount
+    // was already consumed (see PRE_OWNED_CUE_RE)
+    .replace(PRE_CUE_RE, (m, amount, rest) => `[fee removed]${rest}`)
     // mid can be empty when the amount form consumed its own introducer
     // ("inspection fee: 250") — keep a space so the marker doesn't fuse.
-    .replace(FEE_CUE_RE, (m, cue, mid) => `${cue}${mid || ' '}[fee removed]`)
-    .replace(PRE_CUE_RE, (m, amount, rest) => `[fee removed]${rest}`)
+    .replace(FEE_CUE_RE, (m, cue, mid, offset, whole) => {
+      const before = whole.slice(Math.max(0, offset - 60), offset);
+      if (PRE_OWNED_CUE_RE.test(before)) return m;
+      return `${cue}${mid || ' '}[fee removed]`;
+    })
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/[ \t]+\n/g, '\n')
     .trim();

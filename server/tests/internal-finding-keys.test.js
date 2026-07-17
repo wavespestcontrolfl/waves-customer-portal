@@ -202,6 +202,16 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee\n\n$250 deposit due'))
       .toBe('Inspection fee\n\n$250 deposit due');
   });
+  test('a pre-cue fee never triggers a forward match on a later amount', () => {
+    expect(redactInspectionFeeCues('The $250 inspection fee was collected at closing with $400 held in escrow.'))
+      .toBe('The [fee removed] inspection fee was collected at closing with $400 held in escrow.');
+  });
+  test('fee-free text passes through byte-identical — hash stability', () => {
+    expect(redactInspectionFeeCues('No evidence.  Accessible areas only.'))
+      .toBe('No evidence.  Accessible areas only.');
+    expect(redactInspectionFeeCues('  padded fee-free text  '))
+      .toBe('  padded fee-free text  ');
+  });
   test('an amount BEFORE the cue redacts; a distant amount does not', () => {
     expect(redactInspectionFeeCues('The $250 inspection fee was collected at closing.'))
       .toBe('The [fee removed] inspection fee was collected at closing.');
