@@ -30,15 +30,17 @@ router.get('/', async (req, res, next) => {
 
     // Map product_id -> { service_type -> is_primary } so a product can be a
     // primary product for one service line and a secondary for another.
-    const productServiceMap = {};
+    // Null-prototype maps so an admin-entered service_type like "constructor"
+    // or "toString" can't collide with an inherited Object.prototype key.
+    const productServiceMap = Object.create(null);
     for (const m of usageMappings) {
-      if (!productServiceMap[m.product_id]) productServiceMap[m.product_id] = {};
+      if (!productServiceMap[m.product_id]) productServiceMap[m.product_id] = Object.create(null);
       // If a duplicate (product, service_type) row exists, keep primary if any.
       productServiceMap[m.product_id][m.service_type] =
         productServiceMap[m.product_id][m.service_type] || Boolean(m.is_primary);
     }
 
-    const serviceGroupMap = {};
+    const serviceGroupMap = Object.create(null);
     for (const p of products) {
       const serviceTypes = productServiceMap[p.id]
         ? Object.keys(productServiceMap[p.id])

@@ -17,10 +17,8 @@
  *    enriches it during the approval pass. Publishing the rest is the owner's
  *    one-step flip to approved_for_public + public.
  * Rows match by exact name. down() is a non-destructive no-op (additive seed;
- * prior NULLs are not restorable; provenance tagged via label_source_note).
+ * prior NULLs are not restorable).
  */
-const SEED_NOTE = 'products-safety-enrichment 2026-07-17 (label-verified)';
-
 const PRODUCTS = [
   {
     "name": "Demand CS",
@@ -297,22 +295,6 @@ const PRODUCTS = [
     "sds_url": "https://www.domyown.com/msds/Trelona_Compressed_Termite_Bait_SDS_2025.pdf"
   },
   {
-    "name": "Advance Termite Bait Station",
-    "signal_word": "CAUTION",
-    "formulation": "In-ground bait station",
-    "reentry_text": "Bait is sealed inside in-ground stations installed around the structure and inspected on a schedule; never applied as a spray.",
-    "target_pests": [
-      "Subterranean termites"
-    ],
-    "application_zones": [
-      "In-ground stations around structure"
-    ],
-    "public_summary": "An in-ground termite monitoring and baiting system installed around the home and checked on a schedule for activity.",
-    "pet_kid_guidance_text": "A growth regulator sealed inside a buried station, with no treated surface in your living space.",
-    "label_url": "https://www3.epa.gov/pesticides/chem_search/ppls/000499-00500-20220221.pdf",
-    "sds_url": "https://www.domyown.com/msds/Termite%20MSDS%2003202012.pdf"
-  },
-  {
     "name": "HexPro Termite Monitoring Baiting System",
     "signal_word": null,
     "formulation": "In-ground monitoring station",
@@ -417,7 +399,7 @@ const PRODUCTS = [
     "public_summary": "A slow-release briquet of Bti, a naturally occurring soil bacterium that targets mosquito larvae in standing water and is selective to them.",
     "pet_kid_guidance_text": "A selective biological larvicide. Its label expressly allows use in animal watering troughs and fish habitats; only finished human drinking water is off-limits.",
     "label_url": "https://summitchemical.com/wp-content/uploads/2021/01/110-12-SPECIMEN_DUNKS.pdf",
-    "sds_url": "https://cdn.shopify.com/s/files/1/0123/3082/7840/files/Summit_Mosquito_Dunks_BTI_Briquets_SDS_6218-73.pdf"
+    "sds_url": null
   },
   {
     "name": "Acelepryn Xtra",
@@ -465,7 +447,7 @@ const PRODUCTS = [
     "name": "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide",
     "signal_word": "CAUTION",
     "formulation": "Flowable liquid (4FL)",
-    "reentry_text": "No re-entry until the dust has settled and the turf or soil is dry.",
+    "reentry_text": "No re-entry to treated turf until the spray has dried and the turf or soil is dry.",
     "target_pests": [
       "Crabgrass (pre-emergent)",
       "Poa annua",
@@ -731,7 +713,6 @@ exports.up = async function up(knex) {
       application_zones: knex.raw('COALESCE(application_zones, ?::jsonb)', [JSON.stringify(p.application_zones || [])]),
       label_url: knex.raw('COALESCE(label_url, ?)', [p.label_url]),
       sds_url: knex.raw('COALESCE(sds_url, ?)', [p.sds_url]),
-      label_source_note: knex.raw('COALESCE(label_source_note, ?)', [SEED_NOTE]),
       updated_at: knex.fn.now(),
     });
   }
@@ -739,5 +720,5 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   // Non-destructive: additive data-enrichment seed. Prior NULLs are not
-  // restorable; seeded rows remain identifiable via label_source_note.
+  // restorable.
 };
