@@ -434,6 +434,7 @@ describe('Agent Estimate draft tool', () => {
     const { database, writes } = makeDatabase({ estimate: existing });
     mockDb.mockImplementation(database);
     mockDb.transaction.mockImplementation(async (callback) => callback(database));
+    mockTransactionDb = database;
 
     const result = await executeEstimateTool('create_agent_estimate_draft', {
       ...INPUT,
@@ -727,6 +728,7 @@ describe('Agent Estimate draft tool', () => {
     const { database, writes } = makeDatabase({ estimate: existing });
     mockDb.mockImplementation(database);
     mockDb.transaction.mockImplementation(async (callback) => callback(database));
+    mockTransactionDb = database;
 
     const result = await executeEstimateTool('create_agent_estimate_draft', {
       ...INPUT,
@@ -2455,6 +2457,68 @@ describe('Agent Estimate round-6 hardening', () => {
     expect(stored.proposalDelivery).toBeUndefined();
     expect(stored.proposalInvalidated?.reason).toMatch(/pricing was revised/i);
     expect(stored.estimatorEngine.origin).toBe('manual_agent');
+  });
+
+  test('a revision serializes on the same phone advisory lock as creation', async () => {
+    const existing = {
+      id: 'estimate-old',
+      token: 'old-token',
+      status: 'draft',
+      source: 'estimator_engine',
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-1',
+        engineInputs: INPUT.engineInputs,
+        engineResult: ENGINE_RESULT,
+        estimatorEngine: { origin: 'manual_agent' },
+      }),
+    };
+    const { database, writes } = makeDatabase({ estimate: existing, estimateRows: [] });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      estimateId: existing.id,
+    }, { confirmed: true });
+
+    expect(result.success).toBe(true);
+    expect(mockWithPhoneLock).toHaveBeenCalledWith(INPUT.customerPhone, expect.any(Function));
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'update')).toBeTruthy();
+  });
+
+  test('a revision whose lead phone was removed rebuilds instead of updating under a stale lock', async () => {
+    const existing = {
+      id: 'estimate-old',
+      token: 'old-token',
+      status: 'draft',
+      source: 'estimator_engine',
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-1',
+        engineInputs: INPUT.engineInputs,
+        engineResult: ENGINE_RESULT,
+        estimatorEngine: { origin: 'manual_agent' },
+      }),
+    };
+    const initialLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      phone: '9415550100', email: 'road@example.com',
+    };
+    const { database, writes } = makeDatabase({
+      estimate: existing,
+      estimateRows: [],
+      lead: initialLead,
+      lockedLead: { ...initialLead, phone: null },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      estimateId: existing.id,
+    }, { confirmed: true });
+
+    expect(result.error).toMatch(/phone changed after the confirmation card was built/i);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'update')).toBeUndefined();
   });
 });
 

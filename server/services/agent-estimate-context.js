@@ -192,7 +192,7 @@ async function resolveCustomer(lead, extraction, phoneKey) {
   return {
     customer: match.ambiguous ? null : match.customer,
     ambiguous: match.ambiguous === true,
-    unavailable: false,
+    unavailable: match.unavailable === true,
   };
 }
 
@@ -236,7 +236,7 @@ async function buildAgentEstimateContext(leadId) {
   const {
     customer,
     ambiguous: customerAmbiguous,
-    unavailable: linkedCustomerUnavailable,
+    unavailable: customerLookupUnavailable,
   } = await resolveCustomer(lead, leadCall?.extraction || null, phoneKey);
   // Phone-scoped history fails closed on BOTH suppression signals: another
   // lead on the number (sharedPhone) or multiple customer rows on the number
@@ -295,10 +295,16 @@ async function buildAgentEstimateContext(leadId) {
     current_services: customerSpend.currentServices,
     current_spend_per_visit_total: customerSpend.currentSpendPerVisitTotal,
     service_context_unavailable: serviceContextUnavailable,
-  } : linkedCustomerUnavailable ? {
+  } : customerLookupUnavailable ? {
+    // A lookup FAILURE (missing linked row or an errored phone query) is not
+    // a no-match — an existing member could be hiding behind it. recognized
+    // + service_context_unavailable makes the pricing paths refuse instead
+    // of quoting a possible member as a new prospect.
     recognized: true,
-    customer_id: lead.customer_id,
-    match_method: 'linked_customer_id_unavailable',
+    customer_id: lead.customer_id || null,
+    match_method: lead.customer_id
+      ? 'linked_customer_id_unavailable'
+      : 'phone_lookup_unavailable',
     active_plan: false,
     current_tier: null,
     current_discount_pct: 0,

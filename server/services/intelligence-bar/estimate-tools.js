@@ -2460,7 +2460,8 @@ function duplicateBlockResult(duplicateBlock) {
 }
 
 async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing = accountPricingFromContext()) {
-  return db.transaction(async (trx) => {
+  const phone = input.customerPhone || null;
+  const revise = async (trx) => {
     // Lock the lead row and revalidate its open status INSIDE the revision
     // transaction — the pre-transaction check goes stale while context
     // loading, repricing, and membership queries run, and another operator
@@ -2485,6 +2486,14 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     const reanchored = anchorAgentEstimateContact(input, leadCheck.lead);
     if (reanchored.error) return reanchored;
     const lockedInput = reanchored.input;
+    // Same rule as persistNewAgentDraft: the advisory lock (or the decision
+    // to run without one) was keyed on the pre-transaction phone, so if the
+    // re-anchored phone differs, the duplicate recheck below would run
+    // against a number this revision holds no lock for.
+    if (String(lockedInput.customerPhone || '').replace(/\D/g, '')
+      !== String(phone || '').replace(/\D/g, '')) {
+      return { error: 'The selected lead phone changed after the confirmation card was built. Refresh and rebuild the confirmation.' };
+    }
     const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
     if (!estimate) return { error: 'Agent Estimate draft not found' };
     if (estimate.status !== 'draft' || estimate.source !== 'estimator_engine') {
@@ -2542,7 +2551,16 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     if (!updated) return { error: 'Draft changed while revising; refresh and try again' };
     await trx('leads').where({ id: input.leadId }).update({ estimate_id: updated.id });
     return { estimate: updated, revised: true };
-  });
+  };
+
+  // A revision rewrites the stored phone and address, so its duplicate
+  // recheck must serialize with concurrent confirmations on the same
+  // 10-digit key exactly like persistNewAgentDraft; email-only drafts fall
+  // back to the lead-row lock inside our own transaction.
+  if (String(phone || '').replace(/\D/g, '').length >= 10) {
+    return withAutomatedEstimatePhoneLock(phone, revise);
+  }
+  return db.transaction(revise);
 }
 
 async function persistNewAgentDraft(input, preview, actionContext, accountPricing = accountPricingFromContext()) {

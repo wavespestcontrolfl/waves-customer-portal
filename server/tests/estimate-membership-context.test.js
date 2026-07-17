@@ -115,6 +115,28 @@ describe('computeMembershipContext', () => {
     expect(spend.currentServices.map((service) => service.key).sort()).toEqual(['palm_injection', 'rodent_bait']);
   });
 
+  test('palm- and rodent-led names keep canonical precedence in component keys', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'palm1', service_type: 'Palm Tree Injections', scheduled_date: '2099-01-05', estimated_price: 60 },
+        { id: 'rod1', service_type: 'Rodent Pest Control', scheduled_date: '2099-02-05', estimated_price: 45 },
+        { id: 'combo1', service_type: 'Pest & Rodent Control', scheduled_date: '2099-03-05', estimated_price: 120 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Mirrors toQualifyingKeys precedence: "Palm Tree Injections" is the palm
+    // service (a tree_shrub component would wrongly block adding Tree &
+    // Shrub); a rodent-led name is the rodent service, never pest coverage;
+    // only the pest-primary combined label keeps pest_control.
+    const byKey = Object.fromEntries(spend.currentServices.map((service) => [service.key, service]));
+    expect(Object.keys(byKey).sort()).toEqual(['palm_injection', 'pest_control', 'rodent_bait']);
+    expect(byKey.palm_injection.keys).toEqual(['palm_injection']);
+    expect(byKey.rodent_bait.keys).toEqual(['rodent_bait']);
+    expect(byKey.pest_control.keys).toEqual(['pest_control']);
+  });
+
   test('combined service components retain only their own property addresses', async () => {
     const database = fakeDb();
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1', {
@@ -269,6 +291,72 @@ describe('computeMembershipContext', () => {
     expect(pest.contracts).toHaveLength(2);
     expect(pest).toMatchObject({ currentPerVisit: 215, spendSource: 'scheduled_estimate' });
     expect(spend.currentSpendPerVisitTotal).toBe(215);
+  });
+
+  test('a unitless stamp never bridges two explicit units, regardless of row order', async () => {
+    const unit101 = {
+      id: 'u1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-01-05',
+      estimated_price: 120, effective_service_address: '500 Gulf Blvd Unit 101, Venice, 34285',
+    };
+    const unit102 = {
+      id: 'u2', service_type: 'Quarterly Pest Control', scheduled_date: '2099-02-05',
+      estimated_price: 95, effective_service_address: '500 Gulf Blvd Unit 102, Venice, 34285',
+    };
+    const unitless = {
+      id: 'u3', service_type: 'Quarterly Pest Control', scheduled_date: '2099-03-05',
+      estimated_price: 110, effective_service_address: '500 Gulf Blvd, Venice, 34285',
+    };
+
+    const results = [];
+    for (const existingRows of [[unitless, unit101, unit102], [unit101, unit102, unitless]]) {
+      const spend = await loadCurrentServiceSpendContext(fakeDb(), 'cust-1', { existingRows });
+      results.push(spend.currentServices.find((service) => service.key === 'pest_control'));
+    }
+
+    for (const pest of results) {
+      // Units 101 and 102 are proven-distinct contracts; the ambiguous
+      // unitless stamp folds into an existing unit group instead of bridging
+      // the two into one or minting a third contract.
+      expect(pest.contracts).toHaveLength(2);
+      expect(pest.contracts.map((contract) => contract.serviceAddress).sort()).toEqual([
+        '500 Gulf Blvd Unit 101, Venice, 34285',
+        '500 Gulf Blvd Unit 102, Venice, 34285',
+      ]);
+      expect(pest.currentPerVisit).toBe(215);
+      expect(pest.activeScheduledVisits).toBe(3);
+    }
+    // Same contract set and spend no matter which row the DB returned first.
+    // serviceAddresses / componentServiceAddresses are set-semantics metadata
+    // that follows raw row order, so they're sorted before comparing.
+    const normalized = results.map((service) => ({
+      ...service,
+      serviceAddresses: [...service.serviceAddresses].sort(),
+      componentServiceAddresses: Object.fromEntries(
+        Object.entries(service.componentServiceAddresses)
+          .map(([component, addresses]) => [component, [...addresses].sort()]),
+      ),
+    }));
+    expect(normalized[0]).toEqual(normalized[1]);
+  });
+
+  test('two unitless stamps of the same street remain one contract', async () => {
+    const spend = await loadCurrentServiceSpendContext(fakeDb(), 'cust-1', {
+      existingRows: [
+        {
+          id: 'v1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-01-05',
+          estimated_price: 120, effective_service_address: '500 Gulf Blvd, Venice, 34285',
+        },
+        {
+          id: 'v2', service_type: 'Quarterly Pest Control', scheduled_date: '2099-04-05',
+          estimated_price: 120, effective_service_address: '500 Gulf Blvd, Venice, 34285',
+        },
+      ],
+    });
+
+    const pest = spend.currentServices.find((service) => service.key === 'pest_control');
+    expect(pest.contracts).toHaveLength(1);
+    expect(pest).toMatchObject({ currentPerVisit: 120, activeScheduledVisits: 2 });
+    expect(spend.currentSpendPerVisitTotal).toBe(120);
   });
 
   test('mixed stamped/unstamped rows collapse to one contract rather than double-counting', async () => {

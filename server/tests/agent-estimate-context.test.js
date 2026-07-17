@@ -187,6 +187,48 @@ describe('ambiguous customer phone suppression', () => {
   });
 });
 
+describe('phone customer lookup failure', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockContextLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      first_name: 'Pat', last_name: 'Member', phone: '9415550100',
+      email: null, address: '1 St', city: 'Bradenton', zip: '34208',
+      twilio_call_sid: null, transcript_summary: null, extracted_data: null,
+      status: 'new',
+    };
+    mockContextCallRows = [];
+    mockContextOtherLeads = [];
+  });
+
+  test('an errored customers query fails closed instead of pricing as a new prospect', async () => {
+    // loadCustomerByPhone's catch path — a DOWN query, not a no-match.
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false, unavailable: true });
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.customer_profile).toBeNull();
+    expect(context.customer_account).toEqual(expect.objectContaining({
+      recognized: true,
+      customer_id: null,
+      match_method: 'phone_lookup_unavailable',
+      service_context_unavailable: true,
+    }));
+    expect(context.customer_account.existing_service_keys).toEqual([]);
+  });
+
+  test('a genuine no-match still prices as a new prospect', async () => {
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.customer_profile).toBeNull();
+    expect(context.customer_account.recognized).toBe(false);
+    expect(context.customer_account.match_method).toBeNull();
+    expect(context.customer_account.service_context_unavailable).toBeUndefined();
+  });
+});
+
 describe('suppressed-caller sentinel phones', () => {
   beforeEach(() => {
     jest.clearAllMocks();

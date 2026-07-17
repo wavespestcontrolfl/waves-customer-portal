@@ -31,6 +31,11 @@
 
 const logger = require('./logger');
 const { sameStreetAddress } = require('./estimator-engine/address-compare');
+const {
+  parseRawAddress,
+  splitStreetLineUnit,
+  unitLineValueKey,
+} = require('../utils/address-normalizer');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
 const {
   toQualifyingKey,
@@ -50,6 +55,23 @@ const SERVICE_LABEL = {
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
+// Precedence guards MIRRORED from waveguard-existing-services.toQualifyingKeys
+// (which follows detectServiceLine / the recurring-appointment-seeder): a
+// rodent-led name ("Rodent Pest Control", "Rodent Bait Stations") is the
+// rodent service, never pest coverage — only a pest-primary combined label
+// ("Pest & Rodent Control") keeps pest — and a palm token ("Palm Tree
+// Injections") names the palm service over tree/shrub wording. \bpalms?\b
+// never matches "palmetto", so palmetto-bug pest names pass through. Keep
+// these in lockstep with that file; an independent token scan here mis-keys
+// the component keys that feed the duplicate-service checks.
+function isRodentLedName(text) {
+  return /\b(rodent|rats?|mouse|mice)\b/.test(text) && !/\bpest\b.*\brodent\b/.test(text);
+}
+
+function isPalmName(text) {
+  return /\bpalms?\b/.test(text);
+}
+
 function accountServiceKey(raw) {
   const qualifying = toQualifyingKey(raw);
   if (qualifying) return qualifying;
@@ -63,15 +85,15 @@ function accountServiceKey(raw) {
   // (turf → lawn_care, monitoring → termite_bait, stations → rodent_bait).
   const s = String(raw || '').toLowerCase();
   if (s.includes('commercial')) {
-    if (s.includes('pest')) return 'commercial_pest_control';
+    if (s.includes('pest') && !isRodentLedName(s)) return 'commercial_pest_control';
     if (s.includes('lawn') || s.includes('turf')) return 'commercial_lawn_care';
-    if (s.includes('tree') || s.includes('shrub')) return 'commercial_tree_shrub';
+    if (!isPalmName(s) && (s.includes('tree') || s.includes('shrub'))) return 'commercial_tree_shrub';
     if (s.includes('mosquito')) return 'commercial_mosquito';
     if (s.includes('termite')) return 'commercial_termite_bait';
     if (s.includes('rodent')) return 'commercial_rodent_bait';
   } else {
-    if (s.includes('rodent') && s.includes('bait')) return 'rodent_bait';
-    if (s.includes('palm')) return 'palm_injection';
+    if (isRodentLedName(s)) return 'rodent_bait';
+    if (isPalmName(s)) return 'palm_injection';
   }
   return String(raw || '')
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
@@ -85,13 +107,15 @@ function accountServiceKeys(raw) {
   const commercial = text.includes('commercial');
   const keys = new Set();
   const add = (key) => keys.add(commercial ? `commercial_${key}` : key);
-  if (text.includes('pest')) add('pest_control');
+  const rodentService = isRodentLedName(text);
+  const palmService = isPalmName(text);
+  if (text.includes('pest') && !rodentService) add('pest_control');
   if (text.includes('lawn') || text.includes('turf')) add('lawn_care');
-  if (text.includes('tree') || text.includes('shrub')) add('tree_shrub');
+  if (!palmService && (text.includes('tree') || text.includes('shrub'))) add('tree_shrub');
   if (text.includes('mosquito')) add('mosquito');
   if (text.includes('termite')) add('termite_bait');
-  if (text.includes('rodent') && text.includes('bait')) add('rodent_bait');
-  if (text.includes('palm')) add('palm_injection');
+  if (rodentService) add('rodent_bait');
+  if (palmService) add('palm_injection');
   if (!keys.size) keys.add(accountServiceKey(raw));
   return [...keys].filter(Boolean);
 }
@@ -314,6 +338,14 @@ async function loadLastPaidSpendByKey(database, customerId) {
   return spend;
 }
 
+// Explicit unit identity of a stamped address (null when none), extracted
+// with the same primitives sameStreetAddress uses internally so the two can
+// never disagree about what counts as a unit.
+function stampedUnitKey(address) {
+  const line = parseRawAddress(String(address || '')).line1 || String(address || '').split(',')[0];
+  return unitLineValueKey(splitStreetLineUnit(line).unit) || null;
+}
+
 // Staff-facing account snapshot used before pricing an expansion estimate.
 // It says what the customer actively buys and what they currently spend per
 // application. Paid invoice history is authoritative; the scheduled-service
@@ -374,22 +406,51 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     // Clustered with the canonical street/unit comparator, never raw string
     // equality — '123 Main Street' vs '123 Main St' (or a stamp corrected
     // between generated visits) is formatting drift on ONE contract and must
-    // not add its price once per spelling, while two explicit different units
-    // at the same street are separate contracts. Each group keeps its first
-    // row's raw stamp for display.
-    const contractGroups = [];
-    for (const row of serviceRows) {
-      const group = propertySplit
-        ? contractGroups.find((candidate) => sameStreetAddress(candidate.address, row.effective_service_address))
-        : contractGroups[0];
-      if (group) {
-        group.rows.push(row);
-      } else {
-        contractGroups.push({
-          address: propertySplit ? row.effective_service_address : null,
-          rows: [row],
-        });
+    // not add its price once per spelling, while two explicit different
+    // units at the same street are separate contracts. Deterministic in two
+    // phases regardless of DB row order (the source query has none): rows
+    // are processed in a canonical sort and explicit-unit rows cluster FIRST
+    // on exact street+unit identity, then unitless rows attach.
+    // sameStreetAddress treats a missing unit as matching any unit, so a
+    // unitless stamp seen first would otherwise swallow Unit 101 AND Unit
+    // 102 into one group — proven-distinct units must never merge. A
+    // unitless row matching explicit-unit groups folds into the first
+    // (canonical-order) match: an ambiguous stamp is treated as a sloppy
+    // stamp of an EXISTING unit contract, never minted as an extra contract,
+    // so spend is never double-counted; the residual understatement (it
+    // could be a genuine additional contract) is deterministic and
+    // conservative. Each group keeps its first row's raw stamp for display.
+    let contractGroups;
+    if (propertySplit) {
+      const orderedRows = [...serviceRows].sort((a, b) => (
+        String(a.effective_service_address).localeCompare(String(b.effective_service_address))
+        || String(a.id).localeCompare(String(b.id))
+      ));
+      const unitGroups = [];
+      const unitlessRows = [];
+      for (const row of orderedRows) {
+        if (!stampedUnitKey(row.effective_service_address)) {
+          unitlessRows.push(row);
+          continue;
+        }
+        const group = unitGroups.find((candidate) => sameStreetAddress(candidate.address, row.effective_service_address));
+        if (group) group.rows.push(row);
+        else unitGroups.push({ address: row.effective_service_address, rows: [row] });
       }
+      const unitlessGroups = [];
+      for (const row of unitlessRows) {
+        const unitMatch = unitGroups.find((candidate) => sameStreetAddress(candidate.address, row.effective_service_address));
+        if (unitMatch) {
+          unitMatch.rows.push(row);
+          continue;
+        }
+        const group = unitlessGroups.find((candidate) => sameStreetAddress(candidate.address, row.effective_service_address));
+        if (group) group.rows.push(row);
+        else unitlessGroups.push({ address: row.effective_service_address, rows: [row] });
+      }
+      contractGroups = [...unitGroups, ...unitlessGroups];
+    } else {
+      contractGroups = [{ address: null, rows: serviceRows }];
     }
     const contracts = contractGroups.map(({ address, rows: contractRows }) => {
       const scheduled = contractRows.find((row) => Number(row.estimated_price) > 0);

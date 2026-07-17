@@ -82,7 +82,10 @@ async function loadCustomerByPhone(phone, extraction) {
     return pickCustomerMatch(rows, extraction);
   } catch (err) {
     logger.warn(`[estimator-engine] customer load failed: ${err.message}`);
-    return { customer: null, ambiguous: false };
+    // A failed query is NOT a no-match — an existing member could be hiding
+    // behind the error, so callers that gate member pricing on this result
+    // must be able to fail closed instead of quoting them as a new prospect.
+    return { customer: null, ambiguous: false, unavailable: true };
   }
 }
 

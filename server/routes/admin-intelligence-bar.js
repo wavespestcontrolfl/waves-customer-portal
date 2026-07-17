@@ -1558,10 +1558,18 @@ router.post('/cancel-action', async (req, res, next) => {
 
 // ─── QUICK ACTIONS (pre-built prompts for common tasks) ─────────
 
-router.get('/quick-actions', async (req, res) => {
+router.get('/quick-actions', async (req, res, next) => {
   const { context } = req.query;
-  if (context === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
-    return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+  // The flag lookup is this handler's only awaited call; Express 4 does not
+  // forward a rejected handler promise, so an uncaught DB error here would
+  // become an unhandled rejection instead of a 500.
+  try {
+    if (context === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+    }
+  } catch (err) {
+    logger.error('[intelligence-bar] quick-actions flag lookup failed:', err);
+    return next(err);
   }
   if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
     return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
