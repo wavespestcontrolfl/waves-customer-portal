@@ -931,6 +931,10 @@ const AppointmentReminders = {
           reminder_24h_sent: true,
           reminder_24h_sent_at: now,
           cancelled: false,
+          // Durable marker — sibling suppression must be distinguishable from
+          // genuinely delivered reminders (the DB sync trigger's departure
+          // promotion only re-arms marked rows).
+          suppressed_by_sibling: true,
           ...createdAtOverride,
         })
         .returning('*');
@@ -1033,6 +1037,8 @@ const AppointmentReminders = {
             reminder_72h_sent_at: now,
             reminder_24h_sent: true,
             reminder_24h_sent_at: now,
+            // Durable marker — see registerVisitReminderInTx.
+            suppressed_by_sibling: true,
           }).returning('*');
 
           return {
@@ -1709,9 +1715,12 @@ const AppointmentReminders = {
           // newer overlapping reschedule: if another invocation has since
           // moved the row to a different time (and possibly marked its own
           // notice sent), this re-arm no-ops instead of re-opening the 72h
-          // window for a slot this attempt no longer owns.
+          // window for a slot this attempt no longer owns. Also skip rows
+          // the DB sync trigger suppressed as slot siblings — the slot's
+          // owner carries the reminders; re-arming a suppressed row would
+          // double-text the customer.
           await db('appointment_reminders')
-            .where({ id: record.id, appointment_time: newApptTime })
+            .where({ id: record.id, appointment_time: newApptTime, suppressed_by_sibling: false })
             .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() })
             .catch((rearmErr) => logger.error(`[appt-remind] 72h re-arm after failed notice failed: ${rearmErr.message}`));
         }
@@ -1733,11 +1742,15 @@ const AppointmentReminders = {
 
       const records = await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
-        .select('id', 'appointment_time');
+        .select('id', 'appointment_time', 'suppressed_by_sibling');
 
       const now = new Date();
       let updated = 0;
       for (const record of records || []) {
+        // A sibling-suppressed row must stay fully suppressed — recomputing
+        // its flags from the appointment time would put it back in the cron's
+        // send set alongside the slot's owner (duplicate reminders).
+        if (record.suppressed_by_sibling) continue;
         const { alreadyInside72hWindow, alreadyInside24hWindow } = reminderFlagsCoveredByNotice(record.appointment_time, now);
         await db('appointment_reminders')
           .where({ id: record.id })
