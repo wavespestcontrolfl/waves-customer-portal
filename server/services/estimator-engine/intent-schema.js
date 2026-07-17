@@ -88,6 +88,11 @@ const SERVICE_OPTION_SCHEMAS = {
       prepStatus: { enum: ['ready', 'partial', 'poor', 'refused'] },
       occupancyType: { enum: ['singleFamily', 'apartment', 'hotel', 'studentHousing'] },
     },
+    // priceBedBugTreatment THROWS without any of these — a partial intent
+    // (e.g. method only) validated fine but red-laned every eligible call
+    // at pricing time. Required forces the composer to establish them on
+    // the call or skip with a reason.
+    required: ['method', 'rooms', 'severity', 'prepStatus', 'occupancyType'],
     additionalProperties: false,
   },
   rodentBait: { type: 'object', additionalProperties: false, properties: {} },
@@ -103,6 +108,11 @@ const SERVICE_OPTION_SCHEMAS = {
       // that policy.
       removal: { enum: ['NONE', 'SMALL', 'LARGE', 'HONEYCOMB'] },
     },
+    // The stinging pricer silently DEFAULTS a missing species/tier/removal
+    // (paper wasp, tier 2, no removal) — an incomplete intent green-laned a
+    // guessed price instead of skipping. Required forces the composer to
+    // state what the call established or skip with a reason.
+    required: ['species', 'tier', 'removal'],
     additionalProperties: false,
   },
 };

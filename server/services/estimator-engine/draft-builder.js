@@ -26,6 +26,7 @@ const { generateEstimate } = require('../pricing-engine');
 const {
   automatedDuplicateBlock,
   listOpenEstimatesByPhone,
+  phoneLookupValues,
   withAutomatedEstimatePhoneLock,
 } = require('../estimate-automation-duplicates');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
@@ -75,6 +76,13 @@ function lineRequiresReview(line = {}) {
 // driveway for pest (retired from pest pricing on main by #2794 — wiring
 // them here would add money that vanishes at merge). treeDensity still
 // flows top-level for the tree & shrub pricer's density-estimate fallback.
+// Enriched merge fields carry literal 'UNKNOWN' when neither records nor
+// vision resolved them — that must stay OFF the engine input.
+function knownEnrichedValue(value) {
+  const v = String(value || '').trim();
+  return v && v.toUpperCase() !== 'UNKNOWN' ? v : null;
+}
+
 function lookupFeatureModifiers(enriched) {
   if (!enriched) return null;
   const up = (v) => String(v || '').toUpperCase();
@@ -150,6 +158,28 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     ...(featureModifiers ? { features: featureModifiers } : {}),
     ...(!isCommercial && lookupEnriched?.treeDensity
       ? { treeDensity: lookupEnriched.treeDensity }
+      : {}),
+    // Structural facts deriveModifiers() prices from: home age (pest $/app),
+    // construction + foundation (termite/WDO), roof type (rodent). UNKNOWN
+    // merges stay off the input so the engine's own defaults apply.
+    ...(!isCommercial && positive(lookupEnriched?.yearBuilt)
+      ? { yearBuilt: Number(lookupEnriched.yearBuilt) }
+      : {}),
+    ...(!isCommercial && knownEnrichedValue(lookupEnriched?.constructionMaterial)
+      ? { constructionMaterial: lookupEnriched.constructionMaterial }
+      : {}),
+    ...(!isCommercial && knownEnrichedValue(lookupEnriched?.foundationType)
+      ? { foundationType: lookupEnriched.foundationType }
+      : {}),
+    ...(!isCommercial && knownEnrichedValue(lookupEnriched?.roofType)
+      ? { roofType: lookupEnriched.roofType }
+      : {}),
+    // The lookup grades water severity beyond the profile's coarse scale
+    // (POND_ON_PROPERTY 1.75 vs profile ceiling 1.35) — its precomputed
+    // mosquitoWaterMult must override the boolean-derived 1.20, or the
+    // highest-pressure waterfront mosquito drafts underprice.
+    ...(!isCommercial && Number(lookupEnriched?.modifiers?.mosquitoWaterMult) > 1
+      ? { modifierOverrides: { mosquitoWaterMult: Number(lookupEnriched.modifiers.mosquitoWaterMult) } }
       : {}),
     stories: positive(propertyFacts?.stories) || 1,
     // Provenance the story-sensitive pricers key their review reasons off —
@@ -507,7 +537,43 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // combined-tier discount after the membership lapsed.
   const { priorQualifyingServices: _nestedPrior, ...storedEngineInputs } = engineInput || {};
 
-  const creationResult = await withAutomatedEstimatePhoneLock(customerPhone, async (trx) => {
+  // Serialization: the phone advisory lock covers callers with a usable
+  // number. WITHOUT one, withAutomatedEstimatePhoneLock degrades to a bare
+  // (lock-less, transaction-less) callback — two overlapping runs of the
+  // same call (forced reprocess while the first composer is in flight)
+  // would both see no draft and insert twice. Fall back to a CALL-scoped
+  // advisory lock with an in-lock recheck for this call's existing draft.
+  const runSerialized = (callback) => {
+    if (phoneLookupValues(customerPhone).last10) {
+      return withAutomatedEstimatePhoneLock(customerPhone, callback);
+    }
+    if (!call?.id) return callback(db);
+    return db.transaction(async (trx) => {
+      await trx.raw(
+        'select pg_advisory_xact_lock(hashtext(?), hashtext(?))',
+        ['estimator_engine_call', String(call.id)]
+      );
+      const existingForCall = await trx('estimates')
+        .select('id', 'status')
+        .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
+        .whereNull('archived_at')
+        .first();
+      if (existingForCall) {
+        return {
+          duplicateBlock: {
+            blocked: true,
+            reason: 'duplicate_call_draft',
+            existingEstimateId: existingForCall.id,
+            existingStatus: existingForCall.status || null,
+            message: 'A draft for this call already exists — a concurrent run created it first.',
+          },
+        };
+      }
+      return callback(trx);
+    });
+  };
+
+  const creationResult = await runSerialized(async (trx) => {
     // The base duplicate guard is phone-only: a caller with several
     // properties on one number would have their SECOND property's draft
     // suppressed by the first property's open estimate. The bypass must
@@ -563,7 +629,15 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       address: intent.address,
       customer_name: intent.customer_name || 'Unknown caller',
       customer_phone: customerPhone,
-      customer_email: intent.customer_email || null,
+      // NEVER the composer's verbatim email: the call processor QUARANTINES
+      // ambiguous dictated addresses (demotes them from extracted.email
+      // before any send path), but the composer reads the pre-quarantine
+      // audit copy in ai_extraction_enriched — persisting it verbatim would
+      // put a misheard address on a sendable draft. Only post-quarantine
+      // sources are trusted: this call's lead, then the unambiguous profile.
+      customer_email: (context?.leadIsForThisCall && context?.lead?.email)
+        || (!context?.customerPhoneAmbiguous && context?.customer?.email)
+        || null,
       // A confident profile match rides the draft — snapshot revalidation
       // (reconcileFrozenMembershipSnapshot) returns early without it, and
       // downstream accept/convert links need it. Ambiguous matches stay null.

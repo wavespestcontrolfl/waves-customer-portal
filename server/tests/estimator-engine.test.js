@@ -787,6 +787,50 @@ describe('review fixes', () => {
     expect(validateIntent(chemical).valid).toBe(true);
   });
 
+  test('specialty services require the facts their pricers require', () => {
+    // bedBug: priceBedBugTreatment throws without rooms/severity/prep/occupancy —
+    // a method-only intent must fail validation, not red-lane at pricing.
+    const partialBedBug = { ...baseIntent(), services: { bedBug: { method: 'CHEMICAL' } }, service_interest_label: 'Bed Bug Treatment' };
+    expect(validateIntent(partialBedBug).valid).toBe(false);
+    // stinging: the pricer silently DEFAULTS missing species/tier/removal —
+    // an incomplete intent must not green-lane a guessed price.
+    const partialStinging = { ...baseIntent(), services: { stinging: { species: 'PAPER_WASP' } }, service_interest_label: 'Wasp Treatment' };
+    expect(validateIntent(partialStinging).valid).toBe(false);
+    const fullStinging = { ...baseIntent(), services: { stinging: { species: 'PAPER_WASP', tier: 2, removal: 'SMALL' } }, service_interest_label: 'Wasp Treatment' };
+    expect(validateIntent(fullStinging).valid).toBe(true);
+  });
+
+  test('structural lookup facts and the graduated water multiplier reach the engine input', () => {
+    const facts = {
+      home: { value: 1800, source: SQFT_SOURCES.COUNTY_ASSESSED },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    };
+    const enriched = {
+      yearBuilt: 1978,
+      constructionMaterial: 'WOOD_FRAME',
+      foundationType: 'UNKNOWN',
+      roofType: 'TILE',
+      modifiers: { mosquitoWaterMult: 1.75 },
+    };
+    const input = buildEngineInput({ intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched });
+    expect(input.yearBuilt).toBe(1978);
+    expect(input.constructionMaterial).toBe('WOOD_FRAME');
+    // UNKNOWN merges stay off the input — the engine's own defaults apply.
+    expect(input.foundationType).toBeUndefined();
+    expect(input.roofType).toBe('TILE');
+    // The lookup's graduated water severity overrides the profile scale's
+    // boolean-derived 1.20 ceiling for waterfront mosquito pricing.
+    expect(input.modifierOverrides).toEqual({ mosquitoWaterMult: 1.75 });
+    // Baseline water (<=1) never rides as an override.
+    const dry = buildEngineInput({
+      intent: baseIntent(),
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: { modifiers: { mosquitoWaterMult: 1.0 } },
+    });
+    expect(dry.modifierOverrides).toBeUndefined();
+  });
+
   test('lookup feature modifiers map to the pest pricing vocabulary from one record', () => {
     const features = draftPriv.lookupFeatureModifiers({
       pool: 'YES', poolCage: 'YES', poolCageSize: 'LARGE',
