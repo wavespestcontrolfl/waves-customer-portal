@@ -15,6 +15,8 @@ const {
   hasMembership,
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
+  projectIsExplicitlyNoCharge,
+  projectReportPaymentIsHeld,
   projectFollowupSuggestion,
   projectReviewedForPortalAttachment,
   serviceRecordMatchesScheduledService,
@@ -162,6 +164,16 @@ describe('project completion helpers', () => {
       scheduledService: { is_callback: true, estimated_price: '75.00' },
       customer: { monthly_rate: '99.00' },
     })).toBe(75);
+    // WDO pricing comes from the filing, not a legacy appointment row. Blank
+    // uses the mandatory flat default; a tech-entered override wins.
+    expect(projectCompletionInvoiceAmount({
+      project: { project_type: 'wdo_inspection', findings: { inspection_fee: '' } },
+      scheduledService: { estimated_price: '' },
+    })).toBe(250);
+    expect(projectCompletionInvoiceAmount({
+      project: { project_type: 'wdo_inspection', findings: { inspection_fee: '$187.50' } },
+      scheduledService: { estimated_price: '250.00' },
+    })).toBe(187.5);
     expect(prepaidCoversAmount({ prepaid_amount: '350.00' }, 350)).toBe(true);
     expect(prepaidCoversAmount({ prepaid_amount: '100.00' }, 350)).toBe(false);
     // annual-prepay stamps are governed by annualPrepayCoversVisit, NOT the amount:
@@ -169,6 +181,27 @@ describe('project completion helpers', () => {
     expect(prepaidCoversAmount({ prepaid_amount: '350.00', prepaid_method: 'annual_prepay_invoice' }, 350)).toBe(false);
     // other out-of-band methods still covered numerically.
     expect(prepaidCoversAmount({ prepaid_amount: '350.00', prepaid_method: 'cash' }, 350)).toBe(true);
+  });
+
+  test('recognizes only an explicit zero WDO fee as no-charge', () => {
+    expect(projectIsExplicitlyNoCharge({
+      project_type: 'wdo_inspection',
+      findings: { inspection_fee: '$0.00 — comped' },
+    })).toBe(true);
+    expect(projectIsExplicitlyNoCharge({
+      project_type: 'wdo_inspection',
+      findings: { inspection_fee: '' },
+    })).toBe(false);
+    expect(projectIsExplicitlyNoCharge({
+      project_type: 'pre_treatment_termite_certificate',
+      findings: { inspection_fee: '0' },
+    })).toBe(false);
+  });
+
+  test('treats held and releasing reports as portal-hidden payment holds', () => {
+    expect(projectReportPaymentIsHeld({ report_hold_status: 'held' })).toBe(true);
+    expect(projectReportPaymentIsHeld({ report_hold_status: 'releasing' })).toBe(true);
+    expect(projectReportPaymentIsHeld({ report_hold_status: 'released' })).toBe(false);
   });
 
   test('project follow-up suggestion uses profile policy and default interval', () => {
@@ -589,6 +622,40 @@ describe('resolveProjectCompletionBilling — annual-prepay term-link coverage',
       knex: knexNoExistingInvoice(),
     });
     expect(result).toMatchObject({ required: true, resolved: false, reason: 'invoice_required', amount: 55 });
+  });
+
+  test('explicit-zero WDO closes as no-charge even when the linked visit still has a price', async () => {
+    const result = await resolveBilling({
+      project: {
+        project_type: 'wdo_inspection',
+        findings: JSON.stringify({ inspection_fee: '0' }),
+      },
+      scheduledService: { id: 'ss-comped', estimated_price: '250.00' },
+      customer: { monthly_rate: '99.00' },
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toEqual({ required: false, resolved: true, amount: 0, reason: 'wdo_no_charge' });
+    expect(coversVisit).not.toHaveBeenCalled();
+    expect(payerResolve).not.toHaveBeenCalled();
+  });
+
+  test('blank-fee WDO requires the default $250 invoice even when its linked visit is unpriced', async () => {
+    coversVisit.mockResolvedValue(false);
+    const result = await resolveBilling({
+      project: {
+        project_type: 'wdo_inspection',
+        findings: JSON.stringify({ inspection_fee: '' }),
+      },
+      scheduledService: { id: 'ss-unpriced-wdo', estimated_price: '', create_invoice_on_complete: false },
+      customer: {},
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toMatchObject({
+      required: true,
+      resolved: false,
+      amount: 250,
+      reason: 'invoice_required',
+    });
   });
 
   test('other-method prepayment (cash) still covered via the numeric gate', async () => {

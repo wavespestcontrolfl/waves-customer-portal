@@ -2103,6 +2103,61 @@ const StripeService = {
   // =========================================================================
 
   /**
+   * Quote the exact saved-method collection amount without mutating credit or
+   * the invoice. The charge path recomputes this under its invoice lock and
+   * compares the caller's expected total before Stripe sees a request.
+   */
+  async quoteInvoiceSavedCardCharge(invoiceId, paymentMethodId) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+
+    const invoice = await db('invoices').where({ id: invoiceId }).first();
+    if (!invoice) throw new Error('Invoice not found');
+    assertInvoiceCollectible(invoice.status);
+    if (invoice.payer_id) {
+      throw new Error('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+    }
+
+    const card = await db('payment_methods').where({ id: paymentMethodId }).first();
+    if (!card) throw new Error('Payment method not found');
+    if (card.customer_id !== invoice.customer_id) {
+      throw new Error('Payment method does not belong to invoice customer');
+    }
+    if (!card.stripe_payment_method_id) throw new Error('Payment method has no Stripe id');
+
+    let funding = card.card_funding || null;
+    if (card.method_type === 'card' && !funding) {
+      const stripeMethod = await stripe.paymentMethods.retrieve(card.stripe_payment_method_id);
+      funding = stripeMethod.card?.funding || funding;
+    }
+
+    let projectedCreditApplied = Number(invoice.credit_applied) || 0;
+    if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
+      const { getBalance, computeApplication } = require('./customer-credit');
+      const balance = await getBalance(invoice.customer_id);
+      const projection = computeApplication({
+        total: invoice.total,
+        creditApplied: projectedCreditApplied,
+        balance: balance || 0,
+      });
+      projectedCreditApplied = projection.newCreditApplied;
+    }
+    const projectedAmountDue = Math.max(0, Math.round(
+      ((Number(invoice.total) || 0) - projectedCreditApplied) * 100,
+    ) / 100);
+    const chargeInfo = computeChargeAmount(projectedAmountDue, card.method_type, { funding });
+    return {
+      base: chargeInfo.baseCents / 100,
+      surcharge: chargeInfo.surchargeCents / 100,
+      total: chargeInfo.totalCents / 100,
+      rateBps: chargeInfo.rateBps,
+      funding,
+      projectedCreditApplied,
+      coveredByCredit: chargeInfo.totalCents === 0,
+    };
+  },
+
+  /**
    * Charge a specific payment_methods row against an open invoice.
    * Used by the admin MobilePaymentSheet "Card on File" flow when the
    * tech wants to collect from a card the customer already consented
@@ -2122,7 +2177,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2215,6 +2270,7 @@ const StripeService = {
         // concurrent request before our lock is never attributed to this attempt.
         chargeOriginalCreditApplied = Number(lockedInvoice.credit_applied) || 0;
         chargeCreditAppliedTotal = chargeOriginalCreditApplied;
+        let stalePaymentIntentToCancel = null;
         if (lockedInvoice.stripe_payment_intent_id) {
           const activePayment = await trx('payments')
             .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
@@ -2230,7 +2286,12 @@ const StripeService = {
               throw new Error('Invoice has a different active payment');
             }
             if (activeIntent.status !== 'canceled') {
-              await stripe.paymentIntents.cancel(activeIntent.id);
+              // Do not mutate Stripe yet. Account-credit application below can
+              // change the quoted total (including fully covering it), and a
+              // stale expectedTotal must fail while this existing pay-session
+              // PI is still intact. Cancellation happens only after the exact
+              // locked-in total passes the quote check.
+              stalePaymentIntentToCancel = activeIntent;
             }
           }
         }
@@ -2258,6 +2319,12 @@ const StripeService = {
             ((chargeCreditAppliedTotal - chargeOriginalCreditApplied) * 100),
           ) / 100;
           if (!(invoiceAmountDue(lockedInvoice) > 0)) {
+            if (expectedTotal != null && Math.round(Number(expectedTotal) * 100) !== 0) {
+              throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
+            }
+            if (stalePaymentIntentToCancel) {
+              await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
+            }
             // Fully covered by account credit. COMMIT the credit draw-down +
             // prepaid transition (return, don't throw — a throw would roll back
             // the apply AND the PI clearing, stranding the invoice) and skip the
@@ -2291,6 +2358,12 @@ const StripeService = {
         base = invBaseCents / 100;
         surcharge = invSurchargeCents / 100;
         total = invTotalCents / 100;
+        if (expectedTotal != null && Math.round(Number(expectedTotal) * 100) !== invTotalCents) {
+          throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
+        }
+        if (stalePaymentIntentToCancel) {
+          await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
+        }
 
         const invSurchargeDetails = buildSurchargeAmountDetails(invSurchargeCents);
 

@@ -8,6 +8,7 @@ const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-c
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
 const { createAlertOnce } = require('./dispatch-alerts');
+const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspection-fee');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
@@ -112,7 +113,13 @@ function positiveMoney(value) {
   return Number.isFinite(amount) && amount > 0 ? amount : 0;
 }
 
-function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {} } = {}) {
+function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {}, project = null } = {}) {
+  // WDO owns a flat/default inspection fee independent of legacy appointment
+  // pricing. This shares the canonical resolver with invoice creation so a
+  // blank fee bills $250, a custom fee wins, and an explicit zero stays comped.
+  if (project?.project_type === 'wdo_inspection') {
+    return resolveWdoInspectionFee(parseJsonObject(project.findings));
+  }
   const estimated = positiveMoney(scheduledService.estimated_price);
   if (estimated > 0) return estimated;
   // Callbacks (re-services, e.g. pest_re_service / lawn_re_service) are free
@@ -125,6 +132,16 @@ function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {} }
     return positiveMoney(customer.monthly_rate ?? scheduledService.monthly_rate);
   }
   return 0;
+}
+
+function projectIsExplicitlyNoCharge(project = {}) {
+  if (!project || project.project_type !== 'wdo_inspection') return false;
+  const findings = parseJsonObject(project.findings);
+  return wdoFeeIsExplicitZero(findings.inspection_fee);
+}
+
+function projectReportPaymentIsHeld(project = {}) {
+  return ['held', 'releasing'].includes(String(project?.report_hold_status || '').toLowerCase());
 }
 
 function prepaidCoversAmount(scheduledService = {}, amount = 0) {
@@ -173,9 +190,17 @@ async function resolveProjectCompletionBilling({
   scheduledService,
   serviceRecord = null,
   customer = {},
+  project = null,
   knex = db,
 } = {}) {
-  const invoiceAmount = projectCompletionInvoiceAmount({ scheduledService, customer });
+  // The WDO filing owns its one-time inspection price. An explicit $0 is a
+  // deliberate comp/no-charge statement (distinct from a blank fee, which
+  // uses the default), so the linked visit's stale scheduled price or monthly
+  // fallback must not reintroduce a closeout bill after report-only delivery.
+  if (projectIsExplicitlyNoCharge(project)) {
+    return { required: false, resolved: true, amount: 0, reason: 'wdo_no_charge' };
+  }
+  const invoiceAmount = projectCompletionInvoiceAmount({ scheduledService, customer, project });
   if (!(invoiceAmount > 0)) {
     return { required: false, resolved: true, amount: 0, reason: 'not_billable' };
   }
@@ -600,8 +625,11 @@ async function completeProjectBackedService({
     const recurringCustomer = await isRecurringCustomer(customer, trx);
     const portalAllowedByPolicy = shouldAttachProjectToPortal({ profile, customer, recurringCustomer });
     const portalReviewed = projectReviewedForPortalAttachment(project);
-    const portalAttached = portalAllowedByPolicy && portalReviewed;
-    const portalAttachReason = portalAttached
+    const paymentHeld = projectReportPaymentIsHeld(project);
+    const portalAttached = !paymentHeld && portalAllowedByPolicy && portalReviewed;
+    const portalAttachReason = paymentHeld
+      ? 'report_payment_held'
+      : portalAttached
       ? 'policy_allowed'
       : portalAllowedByPolicy && !portalReviewed
         ? 'report_not_sent'
@@ -631,6 +659,7 @@ async function completeProjectBackedService({
       scheduledService,
       serviceRecord,
       customer,
+      project,
       knex: trx,
     });
     if (billing.required && !billing.resolved) {
@@ -850,8 +879,11 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
     ? shouldAttachProjectToPortal({ profile, customer, recurringCustomer })
     : false;
   const portalReviewed = projectReviewedForPortalAttachment(project);
-  const portalAttached = portalAllowedByPolicy && portalReviewed;
-  const portalReason = portalAttached
+  const paymentHeld = projectReportPaymentIsHeld(project);
+  const portalAttached = !paymentHeld && portalAllowedByPolicy && portalReviewed;
+  const portalReason = paymentHeld
+    ? 'report_payment_held'
+    : portalAttached
     ? 'policy_allowed'
     : portalAllowedByPolicy && !portalReviewed
       ? 'report_not_sent'
@@ -879,6 +911,7 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
       scheduledService,
       serviceRecord,
       customer,
+      project,
       knex,
     })
     : {
@@ -1000,6 +1033,8 @@ module.exports = {
   pickExistingColumns,
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
+  projectIsExplicitlyNoCharge,
+  projectReportPaymentIsHeld,
   projectFollowupSuggestion,
   projectReviewedForPortalAttachment,
   resolveProjectCompletionBilling,
