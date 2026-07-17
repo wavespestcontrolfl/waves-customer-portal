@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
-import { useAuth } from '../hooks/useAuth';
+import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import api from '../utils/api';
@@ -48,6 +48,9 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   let abs = url;
   try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
+  // api.fetchRaw, not raw fetch: it attaches the Bearer token and rotates the
+  // refresh session on 401, so downloads still work after the 15-minute
+  // access-token lifetime in an idle-open portal.
   const r = await api.fetchRaw(abs);
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   const blob = await r.blob();
@@ -69,6 +72,7 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
 async function fetchAuthedPdfBlob(url) {
   let abs = url;
   try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
+  // api.fetchRaw, not raw fetch — see downloadAuthedPdf above.
   const r = await api.fetchRaw(abs);
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   const contentType = r.headers.get('content-type') || '';
@@ -173,7 +177,7 @@ const WAVES_AI_TABS = {
   },
 };
 
-function WavesAiBar({ tab, onAsk, compact = false }) {
+function WavesAiBar({ tab, onAsk }) {
   const [question, setQuestion] = useState('');
   const { placeholder, pills } = WAVES_AI_TABS[tab] || WAVES_AI_TABS.dashboard;
   const submit = () => {
@@ -185,11 +189,11 @@ function WavesAiBar({ tab, onAsk, compact = false }) {
   return (
     <section data-glass="card" aria-label="Ask Waves AI" style={{
       ...PORTAL_CARD_STYLE,
-      padding: compact ? 12 : 14,
-      marginBottom: compact ? 12 : 16,
+      padding: 14,
+      marginBottom: 16,
     }}>
       <div style={{
-        fontSize: 14,
+        fontSize: 12,
         fontWeight: 850,
         color: B.glassNavy,
         textTransform: 'uppercase',
@@ -212,7 +216,7 @@ function WavesAiBar({ tab, onAsk, compact = false }) {
           style={{
             flex: 1,
             minWidth: 0,
-            minHeight: 44,
+            minHeight: 40,
             padding: '9px 12px',
             borderRadius: 10,
             border: `1px solid ${PORTAL_SHELL.borderStrong}`,
@@ -224,7 +228,7 @@ function WavesAiBar({ tab, onAsk, compact = false }) {
         />
         <button type="button" onClick={submit} disabled={!question.trim()} data-glass-accent="" style={{
           ...PORTAL_PRIMARY_ACTION,
-          minHeight: 44,
+          minHeight: 40,
           padding: '9px 16px',
           position: 'relative',
           opacity: question.trim() ? 1 : 0.6,
@@ -232,16 +236,15 @@ function WavesAiBar({ tab, onAsk, compact = false }) {
           Ask
         </button>
       </div>
-      {!compact && <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
         {pills.map((pill) => (
           <button key={pill} type="button" onClick={() => onAsk(pill)} data-glass-accent="" style={{
-            padding: '8px 11px',
-            minHeight: 44,
+            padding: '6px 11px',
             borderRadius: 999,
             border: `1px solid ${PORTAL_SHELL.border}`,
             background: PORTAL_SHELL.surface,
             color: PORTAL_SHELL.text,
-            fontSize: 14,
+            fontSize: 12,
             fontWeight: 800,
             fontFamily: FONTS.body,
             cursor: 'pointer',
@@ -249,7 +252,7 @@ function WavesAiBar({ tab, onAsk, compact = false }) {
             {pill}
           </button>
         ))}
-      </div>}
+      </div>
     </section>
   );
 }
@@ -354,7 +357,6 @@ const PORTAL_SHELL = {
 
 const PORTAL_BUTTON_BASE = {
   ...BUTTON_BASE,
-  minHeight: 44,
   letterSpacing: 0,
 };
 
@@ -387,8 +389,8 @@ function ShellCloseButton({ onClick, label = 'Close' }) {
       onClick={onClick}
       aria-label={label}
       style={{
-        width: 44,
-        height: 44,
+        width: 36,
+        height: 36,
         borderRadius: 8,
         border: `1px solid ${PORTAL_SHELL.borderStrong}`,
         background: PORTAL_SHELL.surface,
@@ -455,7 +457,7 @@ function PortalStatePanel({
       {eyebrow && (
         <div style={{
           marginTop: 14,
-          fontSize: 14,
+          fontSize: 12,
           fontWeight: 850,
           color: PORTAL_SHELL.muted,
           textTransform: 'uppercase',
@@ -621,7 +623,7 @@ function BeforeAfterSlider({ beforeAfter }) {
             BEFORE {beforeDate ? `— ${fmtDate(beforeDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.before?.overallScore != null && (
-            <div style={{ color: B.yellow, fontSize: 14, fontWeight: 700, marginTop: 2 }}>
+            <div style={{ color: B.yellow, fontSize: 12, fontWeight: 700, marginTop: 2 }}>
               Score: {beforeAfter.before.overallScore}%
             </div>
           )}
@@ -645,7 +647,7 @@ function BeforeAfterSlider({ beforeAfter }) {
             AFTER {afterDate ? `— ${fmtDate(afterDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.after?.overallScore != null && (
-            <div style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700, marginTop: 2 }}>
+            <div style={{ color: B.glassNavy, fontSize: 12, fontWeight: 700, marginTop: 2 }}>
               Score: {beforeAfter.after.overallScore}%
             </div>
           )}
@@ -705,7 +707,7 @@ function ScoreRing({ score, size = 90, stroke = 7, label }) {
         <div style={{ fontSize: size * 0.28, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1 }}>
           {score || 0}
         </div>
-        {label && <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2, fontWeight: 600 }}>{label}</div>}
+        {label && <div style={{ fontSize: 9, color: PORTAL_SHELL.muted, marginTop: 2, fontWeight: 600 }}>{label}</div>}
       </div>
     </div>
   );
@@ -787,14 +789,14 @@ function PhotoGallery({ photos }) {
             {p.isBest && (
               <div style={{
                 position: 'absolute', top: 6, left: 6, background: B.teal, color: '#fff',
-                fontSize: 14, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+                fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
               }}>BEST</div>
             )}
             {p.type && p.type !== 'general' && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
                 background: 'linear-gradient(transparent, rgba(0,0,0,0.6))',
-                color: '#fff', fontSize: 14, fontWeight: 600, padding: '12px 8px 6px',
+                color: '#fff', fontSize: 10, fontWeight: 600, padding: '12px 8px 6px',
                 textTransform: 'capitalize',
               }}>
                 {p.type.replace(/_/g, ' ')}
@@ -809,7 +811,7 @@ function PhotoGallery({ photos }) {
         <div style={{
           marginTop: 8, padding: '10px 14px', background: `${B.teal}08`,
           borderRadius: 10, border: `1px solid ${B.teal}15`,
-          display: 'flex', gap: 16, fontSize: 14,
+          display: 'flex', gap: 16, fontSize: 12,
         }}>
           {visiblePhotos[selected].scores.turfDensity != null && (
             <div><span style={{ color: PORTAL_SHELL.muted }}>Density:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.turfDensity}%</span></div>
@@ -841,7 +843,7 @@ function PortalMowingHeight({ mowing }) {
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{
-        fontSize: 14, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+        fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
         marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0,
       }}>
         Mowing height
@@ -909,17 +911,17 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
             Lawn Health Progress
           </div>
           {scores.aiSummary ? (
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.5, marginTop: 4 }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, lineHeight: 1.5, marginTop: 4 }}>
               {scores.aiSummary}
             </div>
           ) : (
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 4 }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 4 }}>
               Your lawn's journey since starting the program.
             </div>
           )}
           {overallDelta !== 0 && (
             <div style={{
-              display: 'inline-block', marginTop: 6, fontSize: 14, fontWeight: 700,
+              display: 'inline-block', marginTop: 6, fontSize: 12, fontWeight: 700,
               color: overallDelta > 0 ? B.green : B.red,
               background: overallDelta > 0 ? `${B.green}12` : `${B.red}12`,
               padding: '3px 8px', borderRadius: 6,
@@ -934,7 +936,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {photos?.length > 0 && (
         <div style={{ marginBottom: 16 }}>
           <div style={{
-            fontSize: 14, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+            fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
             marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0,
           }}>
             Latest Visit — {scores.assessmentDate ? fmtDate(scores.assessmentDate, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'}
@@ -955,18 +957,18 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
           return (
             <div key={m.key}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
-                <span style={{ fontSize: 14, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.body }}>{m.label}</span>
-                <span style={{ fontSize: 14, fontFamily: FONTS.ui }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.body }}>{m.label}</span>
+                <span style={{ fontSize: 12, fontFamily: FONTS.ui }}>
                   <span style={{ fontWeight: 700, color: current >= 75 ? B.green : current >= 50 ? B.orange : B.red }}>{current}%</span>
                   {delta !== 0 && (
                     <span style={{
-                      fontSize: 14, marginLeft: 6, fontWeight: 700,
+                      fontSize: 10, marginLeft: 6, fontWeight: 700,
                       color: delta > 0 ? B.green : B.red,
                     }}>
                       {delta > 0 ? '+' : ''}{delta}
                     </span>
                   )}
-                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 14, marginLeft: 4 }}>from {initial}%</span>
+                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 10, marginLeft: 4 }}>from {initial}%</span>
                 </span>
               </div>
               <div style={{
@@ -1005,10 +1007,10 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               textAlign: 'left',
             }}
           >
-            <div style={{ fontSize: 14, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0 }}>
               Progress Over Time ({trend.length} visits)
             </div>
-            <span style={{ fontSize: 14, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
+            <span style={{ fontSize: 12, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
           </button>
           {showTrend && (
             <div style={{
@@ -1016,7 +1018,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               border: `1px solid ${B.teal}12`,
             }}>
               <TrendSparkline trend={trend} height={70} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 14, color: PORTAL_SHELL.muted }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: PORTAL_SHELL.muted }}>
                 <span>{fmtDate(trend[0].date, { month: 'short', year: '2-digit' })}</span>
                 <span>{fmtDate(trend[trend.length - 1].date, { month: 'short', year: '2-digit' })}</span>
               </div>
@@ -1033,7 +1035,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               padding: '12px 16px', borderRadius: 8,
               background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
             }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.teal, marginBottom: 4 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>
                 Between-Visit Tip
               </div>
               <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
@@ -1046,7 +1048,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               marginTop: 8, padding: '12px 16px', borderRadius: 8,
               background: `${B.green}08`, border: `1px solid ${B.green}20`,
             }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginBottom: 4 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: B.glassNavy, marginBottom: 4 }}>
                 Next Visit Focus
               </div>
               <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
@@ -1063,7 +1065,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
           marginTop: 16, padding: '12px 16px', borderRadius: 8,
           background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
         }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
           <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
             Next visit we'll focus on strengthening turf density and applying preventive fungicide.
           </div>
@@ -1074,14 +1076,14 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {beforeAfter && (
         <div style={{ marginTop: 18 }}>
           <div style={{
-            fontSize: 14, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
+            fontSize: 12, fontWeight: 700, color: B.grayDark, fontFamily: FONTS.heading,
             marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0,
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
             <span>Before &amp; After</span>
             {beforeAfter.improvement?.overall != null && beforeAfter.improvement.overall > 0 && (
               <span style={{
-                fontSize: 14, fontWeight: 700, color: B.glassNavy,
+                fontSize: 12, fontWeight: 700, color: B.glassNavy,
                 background: `${B.green}12`, padding: '2px 8px', borderRadius: 6,
               }}>
                 +{beforeAfter.improvement.overall} pts improvement
@@ -1090,7 +1092,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
           </div>
           <BeforeAfterSlider beforeAfter={beforeAfter} />
           {beforeAfter.improvement?.daysSinceStart > 0 && (
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 6, textAlign: 'center' }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 6, textAlign: 'center' }}>
               {beforeAfter.improvement.daysSinceStart} days of progress
             </div>
           )}
@@ -1127,12 +1129,12 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
             {neighborBenchmark.percentile.includes('top 25') ? '' : neighborBenchmark.percentile.includes('top 50') ? '⭐' : ''}
           </div>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: B.navy }}>
               {neighborBenchmark.percentile === 'top 25%' ? 'Top 25% in your area!'
                 : neighborBenchmark.percentile === 'top 50%' ? 'Above average for your area'
                 : 'Growing toward the neighborhood average'}
             </div>
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2, lineHeight: 1.4 }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2, lineHeight: 1.4 }}>
               Your score of {neighborBenchmark.customerScore}% vs {neighborBenchmark.neighborhoodAvg}% neighborhood avg
               {neighborBenchmark.customerCount > 5 && ` across ${neighborBenchmark.customerCount} properties`}
             </div>
@@ -1143,7 +1145,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {/* Seasonal context — FAWN weather powered */}
       <div style={{
         marginTop: 10, padding: '10px 12px', borderRadius: 8,
-        background: `${B.wavesBlue}08`, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.5,
+        background: `${B.wavesBlue}08`, fontSize: 12, color: PORTAL_SHELL.muted, lineHeight: 1.5,
       }}>
         {seasonalContext ? (
           <>
@@ -1166,7 +1168,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
         <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {seasonalContext.pressureSignals.filter(s => s.level === 'high' || s.level === 'regulatory').slice(0, 3).map((s, i) => (
             <span key={i} style={{
-              fontSize: 14, padding: '3px 8px', borderRadius: 6,
+              fontSize: 10, padding: '3px 8px', borderRadius: 6,
               background: s.level === 'regulatory' ? `${B.red}15` : `${B.orange}15`,
               color: s.level === 'regulatory' ? B.red : B.orange,
               fontWeight: 600,
@@ -1298,7 +1300,7 @@ function SharePostButton({ url, title }) {
         aria-expanded={open}
         style={{
           border: 'none', background: 'none', padding: 0, cursor: 'pointer',
-          fontSize: 14, fontWeight: 800, fontFamily: FONTS.heading,
+          fontSize: 12, fontWeight: 800, fontFamily: FONTS.heading,
           color: open ? B.wavesBlue : PORTAL_SHELL.muted, whiteSpace: 'nowrap',
         }}
       >
@@ -1327,7 +1329,7 @@ function SharePostButton({ url, title }) {
               style={{
                 display: 'flex', alignItems: 'center', gap: 10, width: '100%',
                 border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left',
-                padding: '10px 12px', minHeight: 44, borderRadius: 8,
+                padding: '10px 12px', minHeight: 42, borderRadius: 8,
                 fontSize: 14, fontWeight: 800, color: B.glassNavy, fontFamily: FONTS.heading,
               }}
             >
@@ -1421,7 +1423,7 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
             </a>
             <div style={{ padding: compact ? '8px 10px 10px' : '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: compact ? 5 : 6, flex: 1 }}>
               {formatPostDate(post.date) && (
-                <div style={{ fontSize: 14, color: PORTAL_SHELL.muted }}>
+                <div style={{ fontSize: 12, color: PORTAL_SHELL.muted }}>
                   {formatPostDate(post.date)}
                 </div>
               )}
@@ -1442,7 +1444,7 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
                   href={post.url}
                   target={post.external ? '_blank' : undefined}
                   rel={post.external ? 'noopener noreferrer' : undefined}
-                  style={{ fontSize: 14, fontWeight: 800, color: B.wavesBlue, fontFamily: FONTS.heading, textDecoration: 'none' }}
+                  style={{ fontSize: 12, fontWeight: 800, color: B.wavesBlue, fontFamily: FONTS.heading, textDecoration: 'none' }}
                 >
                   {ctaLabel} →
                 </a>
@@ -1465,8 +1467,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
-  const [billingMode, setBillingMode] = useState(null);
-  const [billingModeStatus, setBillingModeStatus] = useState('loading');
   const [lastService, setLastService] = useState(null);
   const [lastServiceStatus, setLastServiceStatus] = useState('loading');
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
@@ -1533,18 +1533,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         console.error(err);
         setBalanceStatus('error');
       });
-    api.getAutopay()
-      .then(d => {
-        // A successful response with a null mode is the legacy monthly mode.
-        // A failed request is kept distinct so Home never guesses at the
-        // customer's billing contract.
-        setBillingMode(d?.billing_mode || 'monthly');
-        setBillingModeStatus('ready');
-      })
-      .catch(err => {
-        console.error(err);
-        setBillingModeStatus('error');
-      });
     api.getServices({ limit: 1 })
       .then(d => {
         setLastService(d.services?.[0] || null);
@@ -1568,10 +1556,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         ...d.stats,
         // Server-authoritative figures so the dashboard never disagrees with the Refer tab.
         totalEarned: d.totalEarned != null ? Number(d.totalEarned) / 100 : 0, // dollars
-        rewardPerReferral: d.rewardPerReferral == null ? null : Number(d.rewardPerReferral),
+        rewardPerReferral: Number(d.rewardPerReferral) || 25,
       });
       setReferralStatsStatus('ready');
     }).catch(err => {
+      // Decorative here (the $ figure on the Refer quick action) — fall back
+      // to the standard $25 below rather than hiding the action.
       console.error(err);
       setReferralStatsStatus('error');
     });
@@ -1628,18 +1618,16 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
 
   const handleSatFeedback = async () => {
     setSatSubmitting(true);
-    setSatError('');
     try {
       await api.submitSatisfaction({
         serviceRecordId: pendingSatisfaction.id,
         rating: satRating,
         feedbackText: satFeedback,
       });
-      setSatPhase('thanks');
-    } catch (err) {
-      console.error(err);
-      setSatError('We could not save your note. Please try again.');
+    } catch {
+      // Rating is already recorded; feedback is supplemental.
     }
+    setSatPhase('thanks');
     setSatSubmitting(false);
   };
 
@@ -1721,14 +1709,14 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
     customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
   ].filter(Boolean).join(' · ');
-  const referralReward = referralStatsStatus === 'ready' && Number.isFinite(referralStats?.rewardPerReferral)
-    ? `$${referralStats.rewardPerReferral} credit`
-    : 'View details';
+  const referralReward = referralStatsStatus === 'ready'
+    ? (Number(referralStats?.rewardPerReferral) || 25)
+    : 25; // loading/error: standard reward until the server figure lands
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
-    { icon: 'gift', label: 'Refer', sub: referralReward, action: () => onSwitchTab?.('refer') },
+    { icon: 'gift', label: 'Refer', sub: `$${referralReward} credit`, action: () => onSwitchTab?.('refer') },
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1750,7 +1738,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                     background: PORTAL_SHELL.soft,
                     border: `1px solid ${PORTAL_SHELL.softBorder}`,
                     color: B.glassNavy,
-                    fontSize: 14,
+                    fontSize: 12,
                     fontWeight: 850,
                     fontFamily: FONTS.heading,
                   }}>
@@ -1767,7 +1755,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   background: annualPrepay.status === 'payment_pending' ? '#FFF7ED' : '#F0FDF4',
                   border: `1px solid ${annualPrepay.status === 'payment_pending' ? '#FED7AA' : '#BBF7D0'}`,
                   color: annualPrepay.status === 'payment_pending' ? '#9A3412' : B.glassNavy,
-                  fontSize: 14,
+                  fontSize: 12,
                   fontWeight: 850,
                   fontFamily: FONTS.heading,
                 }}>
@@ -1803,7 +1791,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             textAlign: 'left',
             fontFamily: FONTS.body,
           }}>
-            <div style={{ fontSize: 14, color: balanceReady ? (hasBalance ? '#9A3412' : B.glassNavy) : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: balanceReady ? (hasBalance ? '#9A3412' : B.glassNavy) : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>
               {balanceLabel}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 800, color: B.glassNavy }}>
@@ -1816,8 +1804,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           {quickActions.map((item) => (
             <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
               <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
-              <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
-              {!compact && <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{item.sub}</div>}
+              <div style={{ fontSize: compact ? 12 : 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
+              {!compact && <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>}
             </button>
           ))}
         </div>
@@ -1847,7 +1835,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
                   return (
                     <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
-                      minWidth: 0, height: 44, borderRadius: 8, border: 'none',
+                      minWidth: 0, height: 38, borderRadius: 8, border: 'none',
                       background: active ? color : GLASS_SUBTLE,
                       color: active ? '#fff' : B.grayMid,
                       fontWeight: 800, cursor: satSubmitting ? 'wait' : 'pointer',
@@ -1898,11 +1886,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.glassNavy,
                 color: '#fff', boxShadow: 'none', borderRadius: 8,
               }}>{satSubmitting ? 'Sending...' : 'Send feedback'}</button>
-              {satError && (
-                <div role="alert" style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 10 }}>
-                  {satError}
-                </div>
-              )}
             </div>
           )}
           {satPhase === 'thanks' && (
@@ -1936,7 +1919,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 <div style={{ fontSize: 34, fontWeight: 850, color: B.glassNavy, lineHeight: 1 }}>
                   {daysUntilNextService}
                 </div>
-                <div style={{ marginTop: 4, fontSize: 14, color: muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>days</div>
+                <div style={{ marginTop: 4, fontSize: 12, color: muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>days</div>
               </div>
             )}
           </div>
@@ -2003,21 +1986,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                     value: annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid',
                     sub: annualPrepayLine || tierDiscountSub,
                   }
-                : billingModeStatus === 'ready'
-                  ? {
-                      label: 'Plan billing',
-                      value: billingMode === 'per_application'
-                        ? 'Per application'
-                        : billingMode === 'annual_prepay'
-                          ? 'Prepaid'
-                          : customer.monthlyRate ? `${fmtMoney(customer.monthlyRate)}/mo` : 'Rate unavailable',
-                      sub: tierDiscountSub,
-                    }
-                  : {
-                      label: 'Plan billing',
-                      value: billingModeStatus === 'loading' ? 'Checking…' : 'Unavailable',
-                      sub: billingModeStatus === 'error' ? 'View Billing for details' : tierDiscountSub,
-                    },
+                : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
               {
                 label: 'Services YTD',
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
@@ -2030,7 +1999,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
               <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'baseline', borderBottom: '1px solid #E7E2D7', paddingBottom: 10 }}>
                 <div>
                   <div style={{ fontSize: 14, color: muted }}>{item.label}</div>
-                  <div style={{ fontSize: 14, color: '#475569', marginTop: 1 }}>{item.sub}</div>
+                  <div style={{ fontSize: 12, color: '#475569', marginTop: 1 }}>{item.sub}</div>
                 </div>
                 <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy }}>{item.value}</div>
               </div>
@@ -2071,7 +2040,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 </div>
               </div>
             </div>
-            <span style={{ borderRadius: 8, background: '#ECFDF5', color: B.glassNavy, border: '1px solid #BBF7D0', fontSize: 14, fontWeight: 850, padding: '5px 9px' }}>Completed</span>
+            <span style={{ borderRadius: 8, background: '#ECFDF5', color: B.glassNavy, border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 850, padding: '5px 9px' }}>Completed</span>
           </div>
           {(lastService.notes || lastService.technician_notes) ? (
             <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
@@ -2232,19 +2201,15 @@ function ServicesTab() {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
-  const [totalServices, setTotalServices] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
   const [photoMap, setPhotoMap] = useState({});
-  const [detailStatus, setDetailStatus] = useState({});
   const [lightbox, setLightbox] = useState(null);
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
-  const lightboxDialogRef = useModalFocus(!!lightbox, () => setLightbox(null));
   const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
     (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
   );
@@ -2252,12 +2217,8 @@ function ServicesTab() {
   const loadServices = useCallback(() => {
     setLoading(true);
     setLoadError('');
-    api.getServices({ limit: 50, offset: 0 })
-      .then(d => {
-        const rows = d.services || [];
-        setServices(rows);
-        setTotalServices(Number(d.total ?? rows.length));
-      })
+    api.getServices({ limit: 100 })
+      .then(d => { setServices(d.services || []); })
       .catch(err => {
         console.error(err);
         setLoadError(err?.message || 'Could not load service history.');
@@ -2269,42 +2230,13 @@ function ServicesTab() {
     loadServices();
   }, [loadServices]);
 
-  const loadServiceDetail = (svc) => {
-    setDetailStatus(prev => ({ ...prev, [svc.id]: 'loading' }));
-    api.getService(svc.id)
-      .then(d => {
-        setServices(prev => prev.map(row => row.id === svc.id
-          ? { ...row, ...d, ...(d.measurements || {}) }
-          : row));
-        setPhotoMap(prev => ({ ...prev, [svc.id]: d.photos || [] }));
-        setDetailStatus(prev => ({ ...prev, [svc.id]: 'ready' }));
-      })
-      .catch(err => {
-        console.error('Failed to load service detail', err);
-        setDetailStatus(prev => ({ ...prev, [svc.id]: 'error' }));
-      });
-  };
-
   const toggleExpand = (svc) => {
     const next = expanded === svc.id ? null : svc.id;
     setExpanded(next);
-    if (next && !detailStatus[svc.id]) {
-      loadServiceDetail(svc);
-    }
-  };
-
-  const loadMoreServices = async () => {
-    if (loadingMore || services.length >= totalServices) return;
-    setLoadingMore(true);
-    try {
-      const d = await api.getServices({ limit: 50, offset: services.length });
-      const rows = d.services || [];
-      setServices(prev => [...prev, ...rows.filter(row => !prev.some(existing => existing.id === row.id))]);
-      setTotalServices(Number(d.total ?? totalServices));
-    } catch (err) {
-      showCustomerAlert(err?.message || 'Could not load more visits. Please try again.');
-    } finally {
-      setLoadingMore(false);
+    if (next && svc.hasPhotos && !photoMap[svc.id]) {
+      api.getService(svc.id)
+        .then(d => setPhotoMap(prev => ({ ...prev, [svc.id]: d.photos || [] })))
+        .catch(err => console.error('Failed to load service photos', err));
     }
   };
 
@@ -2334,7 +2266,7 @@ function ServicesTab() {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 40,
     position: 'relative',
   };
 
@@ -2387,10 +2319,16 @@ function ServicesTab() {
     };
     const st = styles[status] || styles.Completed;
     return (
-      <span style={{ fontSize: 14, padding: '5px 9px', borderRadius: 8, background: st.bg, color: st.color, border: `1px solid ${st.border}`, fontWeight: 850, whiteSpace: 'nowrap' }}>
+      <span style={{ fontSize: 12, padding: '5px 9px', borderRadius: 8, background: st.bg, color: st.color, border: `1px solid ${st.border}`, fontWeight: 850, whiteSpace: 'nowrap' }}>
         {status}
       </span>
     );
+  };
+
+  const aftercareTips = {
+    'Lawn Care': 'Avoid mowing for 48 hours. Greening expected in 7-10 days.',
+    'Pest Control': 'Keep windows closed for 2 hours. Normal insect activity may increase temporarily.',
+    'Mosquito': 'Barrier effective for 21 days. Avoid watering treated foliage for 24 hours.',
   };
 
   // --- Filtering ---
@@ -2428,23 +2366,37 @@ function ServicesTab() {
   });
   const sortedMonths = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
 
+  // --- Visit numbering --- single pass: assign visit number, then fill totals via map lookup.
+  const visitCounts = {};
+  const sortedAll = [...services].sort((a, b) => parseDate(a.date) - parseDate(b.date));
+  const visitKeys = new Array(sortedAll.length);
+  sortedAll.forEach((s, idx) => {
+    const cat = classifyType(s.type);
+    const yr = parseDate(s.date).getFullYear();
+    const k = `${cat}-${yr}`;
+    visitKeys[idx] = k;
+    visitCounts[k] = (visitCounts[k] || 0) + 1;
+    s._visitNum = visitCounts[k];
+  });
+  sortedAll.forEach((s, idx) => { s._visitTotal = visitCounts[visitKeys[idx]]; });
+
   // --- Available years ---
   const years = [...new Set(services.map(s => parseDate(s.date).getFullYear()))].sort((a, b) => b - a);
 
-  const thSt = { padding: '10px 12px', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted, textAlign: 'left', borderBottom: '1px solid #E7E2D7', background: subtle };
-  const tdSt = { padding: '11px 12px', fontSize: 14, color: B.glassNavy, borderBottom: '1px solid #EEF2F7', verticalAlign: 'top' };
+  const thSt = { padding: '9px 10px', fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted, textAlign: 'left', borderBottom: '1px solid #E7E2D7', background: subtle };
+  const tdSt = { padding: '10px', fontSize: 12, color: B.glassNavy, borderBottom: '1px solid #EEF2F7', verticalAlign: 'top' };
 
   const pillStyle = (active) => ({
     padding: '7px 12px',
     borderRadius: 8,
     border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
     cursor: 'pointer',
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: 850,
     fontFamily: FONTS.heading,
     background: active ? '#F8FCFE' : '#fff',
     color: active ? B.glassNavy : muted,
-    minHeight: 44,
+    minHeight: 34,
   });
 
   const typeOptions = ['All', 'Pest Control', 'Lawn Care', 'Mosquito', 'Other'];
@@ -2468,7 +2420,7 @@ function ServicesTab() {
           ].map((stat) => (
             <div key={stat.label} style={{ padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', minHeight: 70 }}>
               <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, lineHeight: 1.1 }}>{stat.val}</div>
-              <div style={{ marginTop: 5, fontSize: 14, color: muted, fontWeight: 800 }}>{stat.label}</div>
+              <div style={{ marginTop: 5, fontSize: 12, color: muted, fontWeight: 800 }}>{stat.label}</div>
             </div>
           ))}
         </div>
@@ -2503,7 +2455,6 @@ function ServicesTab() {
                 fontFamily: FONTS.body,
                 color: B.glassNavy,
                 background: '#fff',
-                minHeight: 44,
                 minWidth: compact ? '100%' : 180,
                 flex: compact ? '1 1 100%' : '0 1 220px',
               }}
@@ -2550,6 +2501,8 @@ function ServicesTab() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {monthServices.map(s => {
                 const status = getStatus(s);
+                const cat = classifyType(s.type);
+                const tip = aftercareTips[cat];
                 return (
                   <div key={s.id} style={{
                     ...card,
@@ -2557,11 +2510,7 @@ function ServicesTab() {
                     border: `1px solid ${expanded === s.id ? '#BFDBFE' : '#E7E2D7'}`,
                   }}>
                     {/* Header — always visible */}
-                    <button
-                      type="button"
-                      onClick={() => toggleExpand(s)}
-                      aria-expanded={expanded === s.id}
-                      aria-controls={`service-detail-${s.id}`}
+                    <button type="button" onClick={() => toggleExpand(s)}
                       style={{ width: '100%', padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, flexWrap: compact ? 'wrap' : 'nowrap', border: 'none', background: '#fff', textAlign: 'left', fontFamily: FONTS.body }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: '1 1 280px' }}>
                         <div style={{
@@ -2574,13 +2523,14 @@ function ServicesTab() {
                           <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, lineHeight: 1 }}>
                             {parseDate(s.date).getDate()}
                           </div>
-                          <div style={{ fontSize: 14, fontWeight: 850, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
+                          <div style={{ fontSize: 10, fontWeight: 850, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
                             {parseDate(s.date).toLocaleDateString('en-US', { month: 'short' })}
                           </div>
                         </div>
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, lineHeight: 1.25 }}>
                             {s.type}
+                            {s._visitNum && <span style={{ fontSize: 12, fontWeight: 600, color: PORTAL_SHELL.muted, marginLeft: 6 }}>#{s._visitNum}{s._visitTotal ? ` of ${s._visitTotal}` : ''}</span>}
                           </div>
                           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
                             {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
@@ -2596,7 +2546,7 @@ function ServicesTab() {
 
                     {/* Expanded detail — full service inspection report */}
                     {expanded === s.id && (
-                      <div id={`service-detail-${s.id}`} style={{ borderTop: '1px solid #E7E2D7' }}>
+                      <div style={{ borderTop: '1px solid #E7E2D7' }}>
 
                         {/* Technician Notes — speech bubble at top */}
                         {s.notes && (
@@ -2605,7 +2555,7 @@ function ServicesTab() {
                               padding: '12px 14px', borderRadius: 8,
                               background: subtle, border: '1px solid #E7E2D7',
                             }}>
-                              <div style={{ fontSize: 14, fontWeight: 850, color: muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0 }}>
+                              <div style={{ fontSize: 12, fontWeight: 850, color: muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0 }}>
                                 {s.technician || 'Technician'} says:
                               </div>
                               <div style={{ fontSize: 15, color: B.glassNavy, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.notes}</div>
@@ -2618,11 +2568,11 @@ function ServicesTab() {
                           <div style={{ padding: '0 18px 0', marginTop: -4 }}>
                             <div style={{
                               padding: '9px 12px', borderRadius: 8, background: '#F8FCFE',
-                              border: '1px solid #BFDBFE', fontSize: 14, color: B.glassNavy,
+                              border: '1px solid #BFDBFE', fontSize: 12, color: B.glassNavy,
                               fontWeight: 800, display: 'flex', alignItems: 'center', gap: 6,
                               marginBottom: 10,
                             }}>
-                              <Icon name="refresh" size={16} strokeWidth={1.75} /> Callback visit
+                              <Icon name="refresh" size={16} strokeWidth={1.75} /> Callback — included with your WaveGuard Gold
                             </div>
                           </div>
                         )}
@@ -2637,7 +2587,7 @@ function ServicesTab() {
                             { label: 'Status', value: status },
                           ].map((item, i) => (
                             <div key={i} style={{ padding: 12, borderRadius: 8, border: '1px solid #E7E2D7', background: '#fff' }}>
-                              <div style={{ fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted }}>{item.label}</div>
+                              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: muted }}>{item.label}</div>
                               <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, marginTop: 4, wordBreak: 'break-word' }}>{item.value || 'N/A'}</div>
                             </div>
                           ))}
@@ -2661,7 +2611,7 @@ function ServicesTab() {
                           <div style={{ padding: '14px 18px', borderBottom: '1px solid #E7E2D7' }}>
                             <div style={{ ...sectionTitle, marginBottom: 10 }}>Products Applied</div>
                             <div style={{ overflowX: 'auto', border: '1px solid #E7E2D7', borderRadius: 8 }}>
-                              <table style={{ width: '100%', minWidth: 620, borderCollapse: 'collapse' }}>
+                              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                                 <thead>
                                   <tr>
                                     <th style={thSt}>Product</th>
@@ -2675,19 +2625,27 @@ function ServicesTab() {
                                     <tr key={`${s.id}-${p.product_name || ''}-${p.active_ingredient || ''}-${i}`}>
                                       <td style={{ ...tdSt, fontWeight: 600 }}>
                                         {p.product_name}
-                                        {p.product_category && <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, textTransform: 'capitalize', marginTop: 2 }}>{p.product_category}</div>}
+                                        {p.product_category && <div style={{ fontSize: 10, color: PORTAL_SHELL.muted, textTransform: 'capitalize', marginTop: 1 }}>{p.product_category}</div>}
                                       </td>
-                                      <td style={{ ...tdSt, fontSize: 14, color: B.grayDark }}>
+                                      <td style={{ ...tdSt, fontSize: 12, color: B.grayDark }}>
                                         {p.active_ingredient || '—'}
-                                        {p.moa_group && <div style={{ fontSize: 14, color: PORTAL_SHELL.muted }}>{p.moa_group}</div>}
+                                        {p.moa_group && <div style={{ fontSize: 10, color: PORTAL_SHELL.muted }}>{p.moa_group}</div>}
                                       </td>
-                                      <td style={{ ...tdSt, fontSize: 14 }}>{p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—'}</td>
-                                      <td style={{ ...tdSt, fontSize: 14 }}>{p.total_amount ? `${p.total_amount} ${p.amount_unit || ''}` : '—'}</td>
+                                      <td style={{ ...tdSt, fontSize: 12 }}>{p.application_rate ? `${p.application_rate} ${p.rate_unit || ''}` : '—'}</td>
+                                      <td style={{ ...tdSt, fontSize: 12 }}>{p.total_amount ? `${p.total_amount} ${p.amount_unit || ''}` : '—'}</td>
                                     </tr>
                                   ))}
                                 </tbody>
                               </table>
                             </div>
+                          </div>
+                        )}
+
+                        {/* What's Next — aftercare tips */}
+                        {tip && (
+                          <div style={{ padding: '14px 18px', background: '#F0FDF4', borderBottom: '1px solid #BBF7D0' }}>
+                            <div style={{ ...sectionTitle, color: B.glassNavy, marginBottom: 6 }}>What's Next</div>
+                            <div style={{ fontSize: 14, color: B.glassNavy, lineHeight: 1.6 }}>{tip}</div>
                           </div>
                         )}
 
@@ -2697,16 +2655,7 @@ function ServicesTab() {
                             <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                               <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
-                            {detailStatus[s.id] === 'error' ? (
-                              <div>
-                                <PortalInlineState
-                                  icon="warning"
-                                  title="Photos unavailable"
-                                  message="We could not load this visit's photos or product details."
-                                />
-                                <button type="button" onClick={() => loadServiceDetail(s)} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, marginTop: 8 }}>Try Again</button>
-                              </div>
-                            ) : !photoMap[s.id] ? (
+                            {!photoMap[s.id] ? (
                               <PortalInlineState
                                 icon="camera"
                                 title="Loading photos"
@@ -2721,42 +2670,38 @@ function ServicesTab() {
                             ) : (
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 8 }}>
                                 {photoMap[s.id].map((p) => (
-                                  <button type="button" key={p.id}
+                                  <div key={p.id}
                                     onClick={() => setLightbox(p)}
-                                    aria-label={`Open ${p.caption || p.type || 'service photo'}`}
                                     style={{
                                       position: 'relative', cursor: 'pointer', borderRadius: 8, overflow: 'hidden',
                                       border: '1px solid #E7E2D7', aspectRatio: '1 / 1', background: subtle,
-                                      padding: 0,
                                     }}>
                                     <img src={p.url} alt={p.caption || p.type || 'service photo'}
                                       style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                                     {p.type && (
                                       <div style={{
                                         position: 'absolute', top: 4, left: 4, padding: '2px 6px', borderRadius: 6,
-                                        background: 'rgba(0,0,0,0.72)', color: B.white, fontSize: 14, fontWeight: 700,
+                                        background: 'rgba(0,0,0,0.6)', color: B.white, fontSize: 9, fontWeight: 700,
                                         textTransform: 'uppercase', letterSpacing: 0,
                                       }}>{p.type}</div>
                                     )}
-                                  </button>
+                                  </div>
                                 ))}
                               </div>
                             )}
                           </div>
                         )}
 
-                        {/* Only show service-specific precautions returned with
-                            the record; a generic treatment warning is not
-                            correct for inspections, traps, or untreated visits. */}
-                        {s.precautions && <div style={{ padding: '12px 18px', background: '#FFFBEB', borderBottom: '1px solid #FDE68A' }}>
-                          <div style={{ fontSize: 14, color: '#92400E', lineHeight: 1.5, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                            <Icon name="warning" size={16} strokeWidth={1.75} /> {s.precautions}
+                        {/* Precautions */}
+                        <div style={{ padding: '12px 18px', background: '#FFFBEB', borderBottom: '1px solid #FDE68A' }}>
+                          <div style={{ fontSize: 12, color: '#92400E', lineHeight: 1.5, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                            <Icon name="warning" size={16} strokeWidth={1.75} /> Keep people and pets away from treated surfaces until dry. Do not contact treated surfaces until dry. For questions about products applied, contact us at (941) 297-5749.
                           </div>
-                        </div>}
+                        </div>
 
                         {/* Footer with report access */}
                         <div style={{ padding: '12px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                          <div style={{ fontSize: 14, color: muted }}>
+                          <div style={{ fontSize: 12, color: muted }}>
                             {s.isProjectCompletion
                               ? (s.reportUrl ? 'Project report attached to your portal' : 'Project report available through the secure link sent by Waves')
                               : 'Report generated automatically from service data'}
@@ -2780,7 +2725,7 @@ function ServicesTab() {
                                       pdfUrl: s.isProjectCompletion ? null : s.reportPdfUrl,
                                     }, s.reportUrl)}
                                     style={{
-                                      ...primaryButton, padding: '7px 12px', fontSize: 14,
+                                      ...primaryButton, padding: '7px 12px', fontSize: 12,
                                       borderRadius: 8, cursor: 'pointer',
                                     }}
                                   >
@@ -2792,7 +2737,7 @@ function ServicesTab() {
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     data-glass-accent="" style={{
-                                      ...primaryButton, padding: '7px 12px', fontSize: 14,
+                                      ...primaryButton, padding: '7px 12px', fontSize: 12,
                                       textDecoration: 'none',
                                       borderRadius: 8,
                                     }}
@@ -2825,7 +2770,7 @@ function ServicesTab() {
                                     });
                                   }}
                                   style={{
-                                    ...primaryButton, padding: '7px 12px', fontSize: 14,
+                                    ...primaryButton, padding: '7px 12px', fontSize: 12,
                                     borderRadius: 8, cursor: 'pointer',
                                   }}
                                 >
@@ -2833,7 +2778,7 @@ function ServicesTab() {
                                 </button>
                               )
                             )}
-                            <div style={{ fontSize: 14, color: muted }}>Waves Pest Control · (941) 297-5749</div>
+                            <div style={{ fontSize: 12, color: muted }}>Waves Pest Control · (941) 297-5749</div>
                           </div>
                         </div>
                       </div>
@@ -2845,16 +2790,6 @@ function ServicesTab() {
           </div>
         );
       })}
-      {services.length < totalServices && (
-        <button
-          type="button"
-          onClick={loadMoreServices}
-          disabled={loadingMore}
-          style={{ ...PORTAL_SECONDARY_ACTION, alignSelf: 'center', minHeight: 44, padding: '10px 18px', opacity: loadingMore ? 0.65 : 1 }}
-        >
-          {loadingMore ? 'Loading…' : `Load more visits (${services.length} of ${totalServices})`}
-        </button>
-      )}
       {preview && (
         <DocumentPreviewOverlay
           preview={preview}
@@ -2868,8 +2803,8 @@ function ServicesTab() {
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 9999,
             display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, cursor: 'pointer',
           }}>
-          <div ref={lightboxDialogRef} role="dialog" aria-modal="true" aria-label="Service photo viewer" data-glass="modal" onClick={(e) => e.stopPropagation()}
-            style={{ '--glass-modal-radius': '10px', position: 'relative', maxWidth: '95vw', maxHeight: '95vh', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, background: 'transparent', border: 'none' }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ position: 'relative', maxWidth: '95vw', maxHeight: '95vh', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
             <img src={lightbox.url} alt={lightbox.caption || 'service photo'}
               style={{ maxWidth: '95vw', maxHeight: '85vh', objectFit: 'contain', borderRadius: 10, background: '#000' }} />
             {(lightbox.caption || lightbox.type) && (
@@ -2878,9 +2813,9 @@ function ServicesTab() {
                 {lightbox.caption}
               </div>
             )}
-            <button type="button" aria-label="Close service photo" onClick={() => setLightbox(null)}
+            <button onClick={() => setLightbox(null)}
               style={{
-                position: 'absolute', top: -10, right: -10, width: 44, height: 44, borderRadius: '50%',
+                position: 'absolute', top: -10, right: -10, width: 36, height: 36, borderRadius: '50%',
                 border: 'none', background: B.white, color: B.navy, fontSize: 18, fontWeight: 700, cursor: 'pointer',
               }}>×</button>
           </div>
@@ -2893,6 +2828,45 @@ function ServicesTab() {
 // =========================================================================
 // SCHEDULE TAB
 // =========================================================================
+
+// Treatment descriptions mapped by service type keyword
+const SCHEDULE_TREATMENT_DESCRIPTIONS = {
+  'Pest': [
+    'Interior + exterior perimeter spray — general pest barrier',
+    'Quarterly pest barrier renewal — interior baseboards + exterior foundation',
+    'Seasonal pest inspection + preventive barrier treatment',
+    'Full perimeter re-treatment + targeted interior applications',
+  ],
+  'Lawn': [
+    'Spring green-up fertilizer + pre-emergent weed control',
+    'Broadleaf weed treatment + slow-release nitrogen application',
+    'Summer fertilizer + chinch bug preventive',
+    'Fall fertilizer blend + winterizer prep',
+    'Iron supplement + micro-nutrient foliar spray',
+    'Weed management + turf health assessment',
+  ],
+  'Mosquito': [
+    'Perimeter mist treatment — breeding site reduction + barrier spray',
+    'Monthly barrier spray — foliage, fence lines, standing water areas',
+    'Barrier re-application + larvicide in standing water zones',
+  ],
+  'Rodent': [
+    'Bait station inspection + replenishment — exterior perimeter',
+    'Rodent exclusion check + bait rotation',
+  ],
+  'Termite': [
+    'Annual termite inspection + monitoring station check',
+    'Sentricon station monitoring + bait replenishment',
+  ],
+};
+
+function getScheduleVisitDescription(serviceType, visitNumber) {
+  const num = visitNumber || 1;
+  const key = Object.keys(SCHEDULE_TREATMENT_DESCRIPTIONS).find(k => (serviceType || '').toLowerCase().includes(k.toLowerCase()));
+  if (!key) return 'Scheduled service visit — inspection + treatment';
+  const descs = SCHEDULE_TREATMENT_DESCRIPTIONS[key];
+  return descs[(num - 1) % descs.length];
+}
 
 function formatPhoneDisplay(phone) {
   if (!phone) return '';
@@ -2938,7 +2912,6 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const [prefs, setPrefs] = useState(null);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
-  const [prefsError, setPrefsError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
@@ -2948,19 +2921,19 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const loadSchedule = useCallback(() => {
     setLoading(true);
     setLoadError('');
-    Promise.allSettled([
+    Promise.all([
       api.getSchedule(90),
       api.getNotificationPrefs(),
-      api.getPropertyNotificationPrefs(),
-    ]).then(([scheduleResult, prefsResult, propertyPrefsResult]) => {
-      if (scheduleResult.status === 'rejected') throw scheduleResult.reason;
-      setUpcoming(scheduleResult.value?.upcoming || []);
-      setPrefsError(prefsResult.status === 'rejected');
-      setPrefs(prefsResult.status === 'fulfilled' ? prefsResult.value : null);
-      setPropertyPrefsError(propertyPrefsResult.status === 'rejected');
-      setPropertyPrefs(propertyPrefsResult.status === 'fulfilled'
-        ? (propertyPrefsResult.value?.properties || [])
-        : []);
+      api.getPropertyNotificationPrefs()
+        .then(data => ({ data, failed: false }))
+        .catch(() => ({ data: null, failed: true })),
+    ]).then(([schedData, prefsData, propertyPrefsData]) => {
+      setUpcoming(schedData.upcoming || []);
+      setPrefs(prefsData);
+      setPropertyPrefsError(propertyPrefsData.failed);
+      if (propertyPrefsData.data) {
+        setPropertyPrefs(propertyPrefsData.data.properties || []);
+      }
     }).catch(err => {
       console.error(err);
       setLoadError(err?.message || 'Could not load your schedule.');
@@ -3182,7 +3155,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 40,
     position: 'relative',
   };
   const secondaryButton = {
@@ -3223,7 +3196,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
   // Compute time-awareness for each service
   const now = new Date();
-  const enriched = upcoming.map((s) => {
+  const enriched = upcoming.map((s, idx) => {
     const svcDate = parseDate(s.date);
     const diffHrs = (svcDate - now) / (1000 * 60 * 60);
     // ET-calendar-day math, not rolling hours: a 46-hours-out visit is
@@ -3234,7 +3207,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     const isSoon = isTomorrow;
     const isFuture = dayDiff != null && dayDiff > 1;
     const daysUntil = dayDiff == null ? 0 : Math.max(0, dayDiff);
-    return { ...s, svcDate, diffHrs, isToday, isTomorrow, isSoon, isFuture, daysUntil };
+    const visitNum = s.visitNumber || (idx + 1);
+    const description = getScheduleVisitDescription(s.serviceType, visitNum);
+    return { ...s, svcDate, diffHrs, isToday, isTomorrow, isSoon, isFuture, daysUntil, visitNum, description };
   });
 
   // Split completed visits from upcoming
@@ -3244,6 +3219,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     .sort((a, b) => new Date(b.date) - new Date(a.date))
     .slice(0, 2);
   const upcomingOnly = enriched.filter(s => s.diffHrs > -24 && s.status !== 'completed');
+
+  // Empty state season info
+  const currentMonth = now.getMonth();
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const nextQuarterIdx = [3, 3, 3, 6, 6, 6, 9, 9, 9, 0, 0, 0][currentMonth];
+  const nextQuarterName = monthNames[nextQuarterIdx > currentMonth ? nextQuarterIdx : (currentMonth + 3) % 12];
+  const mosquitoResumes = (currentMonth >= 3 && currentMonth <= 9) ? null : 'April';
 
   // Pulsing dot animation
   const pulsingDotCss = `@keyframes schedPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
@@ -3256,10 +3238,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     if (s.windowStart) return null;
     const prefTime = customer?.preferredTimeWindow;
     return (
-      <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
+      <div style={{ fontSize: 12, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
         {prefTime
-          ? `Preferred window on file: ${prefTime.toLowerCase()}`
-          : 'We will let you know when a time window is assigned.'}
+          ? `We'll aim for your preferred ${prefTime.toLowerCase()} window`
+          : "We'll confirm your time window 72 hours before this visit"}
       </div>
     );
   };
@@ -3273,7 +3255,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           flex: compact ? undefined : 1,
           padding: compact ? '7px 12px' : '10px 14px',
           borderRadius: 8, background: '#F0FDF4',
-          color: B.glassNavy, border: '1px solid #BBF7D0', fontSize: 14, fontWeight: 850, textAlign: 'center',
+          color: B.glassNavy, border: '1px solid #BBF7D0', fontSize: 12, fontWeight: 850, textAlign: 'center',
           display: 'inline-flex', alignItems: 'center', gap: 4,
         }}>
           <Icon name="check" size={16} strokeWidth={1.75} /> Confirmed{ts ? ` ${formatConfirmTs(ts)}` : ''}
@@ -3284,7 +3266,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     return (
       <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" style={{
         ...primaryButton, padding: compact ? '7px 12px' : '10px 14px', flex: compact ? undefined : 1,
-        fontSize: 14,
+        fontSize: 12,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
       }}>{busy ? 'Confirming...' : 'Confirm'}</button>
     );
@@ -3320,7 +3302,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               <Icon name={isGreen ? 'truck' : isOrange ? 'clock' : 'calendar'} size={18} strokeWidth={1.9} />
             </span>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: toneColor }}>
+              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: toneColor }}>
                 {isGreen ? 'Service Today' : isOrange ? 'Service Tomorrow' : 'Next Up'}
               </div>
               <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, fontFamily: FONTS.heading, color: B.glassNavy }}>
@@ -3331,7 +3313,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           {!isGreen && (
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 24, fontWeight: 850, fontFamily: FONTS.ui, color: B.glassNavy }}>{s.daysUntil}</div>
-              <div style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 850 }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
+              <div style={{ fontSize: 12, color: muted, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 850 }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
             </div>
           )}
         </div>
@@ -3342,6 +3324,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
           </div>
 
+          {/* Service description */}
+          <div style={{
+            fontSize: 14, color: B.glassNavy, marginTop: 10,
+            padding: '10px 12px', borderRadius: 8,
+            background: subtle, border: '1px solid #E7E2D7',
+          }}>
+            Visit #{s.visitNum} — {s.description}
+          </div>
           {renderTimeTBD(s)}
 
           {/* Communication Timeline */}
@@ -3350,27 +3340,27 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             background: subtle, border: '1px solid #E7E2D7',
           }}>
             <div style={{ ...sectionTitle, marginBottom: 8 }}>
-              Visit updates
+              You'll hear from us
             </div>
-              {[
-                { enabled: !!prefs && prefs.serviceReminder72h !== false, icon: 'smartphone', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Enabled for 3 days before your visit' },
-                { enabled: !!prefs && prefs.serviceReminder24h !== false, icon: 'smartphone', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Enabled for the day before your visit' },
-                { enabled: !!prefs && prefs.techEnRoute !== false, icon: 'truck', label: 'Tech en route', time: 'Enabled when your technician starts driving', active: s.isToday },
-                { icon: 'checkCircle', label: 'Service report', time: 'Available after completed service data is processed' },
-              ].filter((step) => step.enabled !== false).map((step, i, steps) => (
+            {[
+              { enabled: prefs?.serviceReminder72h !== false, icon: 'smartphone', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
+              { enabled: prefs?.serviceReminder24h !== false, icon: 'smartphone', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
+              { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival - live GPS', done: false, active: s.isToday },
+              { icon: 'checkCircle', label: 'Service complete report', time: 'Products used + tech notes delivered using your saved contact preferences', done: false },
+            ].filter((step) => step.enabled !== false).map((step, i, steps) => (
               <div key={step.label} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < steps.length - 1 ? 8 : 0 }}>
                 <div style={{
                   width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
-                  background: step.active ? '#FFF7ED' : '#fff',
+                  background: step.done ? '#F0FDF4' : step.active ? '#FFF7ED' : '#fff',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: step.active ? B.orange : muted,
-                  border: `1px solid ${step.active ? '#FED7AA' : '#E7E2D7'}`,
+                  color: step.done ? B.green : step.active ? B.orange : muted,
+                  border: `1px solid ${step.done ? '#BBF7D0' : step.active ? '#FED7AA' : '#E7E2D7'}`,
                 }}><Icon name={step.icon} size={12} strokeWidth={2} /></div>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 850, color: step.active ? B.orange : B.glassNavy }}>
-                    {step.label}
+                  <div style={{ fontSize: 12, fontWeight: 850, color: step.done ? B.green : step.active ? B.orange : B.glassNavy }}>
+                    {step.label} {step.done && ''}
                   </div>
-                  <div style={{ fontSize: 14, color: muted }}>{step.time}</div>
+                  <div style={{ fontSize: 12, color: muted }}>{step.time}</div>
                 </div>
               </div>
             ))}
@@ -3381,7 +3371,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             {renderConfirmBtn(s, false)}
             <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
               ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
-              fontSize: 14, position: 'relative',
+              fontSize: 12, position: 'relative',
             }}>Reschedule</a>
           </div>
         </div>
@@ -3405,7 +3395,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui, lineHeight: 1 }}>
           {s.svcDate.getDate()}
         </div>
-        <div style={{ fontSize: 14, fontWeight: 850, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
+        <div style={{ fontSize: 10, fontWeight: 850, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
           {s.svcDate.toLocaleDateString('en-US', { month: 'short' })}
         </div>
       </div>
@@ -3414,13 +3404,16 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
           {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
         </div>
+        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          Visit #{s.visitNum} — {s.description}
+        </div>
         {renderTimeTBD(s)}
         <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 14, color: muted, fontWeight: 800 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
+          <span style={{ fontSize: 12, color: muted, fontWeight: 800 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
           {renderConfirmBtn(s, true)}
           <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
             ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
-            fontSize: 14, position: 'relative',
+            fontSize: 12, position: 'relative',
           }}>Reschedule</a>
         </div>
       </div>
@@ -3442,7 +3435,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               Appointment timing, confirmation status, reminders, and reschedule options.
             </div>
           </div>
-          <button type="button" onClick={onRequestVisit} data-glass-accent="" style={{ ...primaryButton, minHeight: 44, flexShrink: 0 }}>
+          <button type="button" onClick={onRequestVisit} data-glass-accent="" style={{ ...primaryButton, minHeight: 40, flexShrink: 0 }}>
             Request Visit
           </button>
         </div>
@@ -3454,7 +3447,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           icon="leaf"
           eyebrow="Upcoming Visits"
           title="No upcoming services scheduled"
-          message="There are no appointments on the schedule right now. Request a visit or contact Waves if you expected to see one."
+          message={`Your next quarterly pest treatment will be in ${nextQuarterName}.${mosquitoResumes ? ` Mosquito service resumes in ${mosquitoResumes}.` : ''}`}
           actionLabel="Request a Visit"
           onAction={onRequestVisit}
           actionStyle={primaryButton}
@@ -3488,11 +3481,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                     <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{s.serviceType}</div>
-                    <div style={{ fontSize: 14, color: muted }}>
+                    <div style={{ fontSize: 12, color: muted }}>
                       {sDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                     </div>
                   </div>
-                  <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
+                  <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
                     {s.technician}{s.productsApplied ? ` · ${s.productsApplied}` : ''}
                   </div>
                 </div>
@@ -3522,7 +3515,6 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     background: allEmail ? B.glassNavy : '#fff',
                     color: allEmail ? '#fff' : B.glassNavy,
                     fontSize: 14, fontWeight: 800, cursor: 'pointer',
-                    minHeight: 44,
                     display: 'inline-flex', alignItems: 'center', gap: 6,
                   }}
                 >
@@ -3531,8 +3523,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 </button>
               );
             })() : (
-              <div style={{ marginTop: 8, fontSize: 14, color: muted }}>
-                Contact Waves to add an email address for notification delivery.
+              <div style={{ marginTop: 8, fontSize: 12, color: muted }}>
+                Add an email to your profile to receive notifications by email.
               </div>
             )}
           </div>
@@ -3575,9 +3567,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     </span>
                     <div>
                       <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>{p.label}</div>
-                      <div style={{ fontSize: 14, color: muted }}>{p.desc}</div>
+                      <div style={{ fontSize: 12, color: muted }}>{p.desc}</div>
                       {p.locked && (
-                        <div style={{ fontSize: 14, color: B.orange, marginTop: 2, fontWeight: 800 }}>Required for service coordination</div>
+                        <div style={{ fontSize: 12, color: B.orange, marginTop: 2, fontWeight: 800 }}>Required for service coordination</div>
                       )}
                     </div>
                   </div>
@@ -3595,8 +3587,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         disabled={!selectable || !!prefsLocked[p.channelKey]}
                         aria-label={`Delivery method for ${p.label}`}
                         style={{
-                          fontSize: 14, fontWeight: 800, color: B.glassNavy,
-                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px', minHeight: 44,
+                          fontSize: 12, fontWeight: 800, color: B.glassNavy,
+                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
                           background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                           cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                         }}
@@ -3616,7 +3608,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       disabled={p.locked}
                       onClick={p.locked ? undefined : () => handleToggle(p.key)}
                       style={{
-                          width: 44, height: 44, borderRadius: 22, border: 'none', padding: 0,
+                        width: 44, height: 24, borderRadius: 12, border: 'none', padding: 0,
                         cursor: p.locked ? 'default' : 'pointer',
                         // Gold = on, light blue = off (owner directive 2026-07-06)
                         background: isOn ? B.yellow : `${B.wavesBlue}55`,
@@ -3625,13 +3617,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       }}
                     >
                       <span style={{
-                        position: 'absolute', top: 12, width: 20, height: 20,
+                        position: 'absolute', top: 2, width: 20, height: 20,
                         borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
                         left: isOn ? 22 : 2, transition: 'left 0.3s',
                       }} />
                     </button>
                     {p.locked && (
-                      <span style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
+                      <span style={{ fontSize: 10, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
                   </div>
                 </div>
@@ -3639,14 +3631,6 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               });
             })()}
           </div>
-        </section>
-      )}
-
-      {prefsError && (
-        <section role="alert" data-glass="card" style={{ ...card, padding: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Reminder settings couldn&rsquo;t be loaded</div>
-          <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Your schedule is still available. Try again before changing notification delivery.</div>
-          <button type="button" onClick={loadSchedule} style={{ ...secondaryButton, marginTop: 10 }}>Try again</button>
         </section>
       )}
 
@@ -3704,11 +3688,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 10 }}>
                     <div>
                       <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{label}</div>
-                      <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>{address || 'No address on file'}</div>
+                      <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{address || 'No address on file'}</div>
                     </div>
                     {property.id === customer.id && multiProperty && (
                       <span style={{
-                        fontSize: 14, fontWeight: 850, color: B.glassNavy,
+                        fontSize: 10, fontWeight: 850, color: B.wavesBlue,
                         background: '#fff', border: `1px solid ${B.wavesBlue}22`,
                         borderRadius: 8, padding: '4px 8px', whiteSpace: 'nowrap',
                       }}>Current</span>
@@ -3738,21 +3722,15 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             }}
                           >
                             {option.label}
-                            <div style={{ fontSize: 14, marginTop: 2, color: on ? B.green : muted }}>{on ? 'On' : 'Off'}</div>
+                            <div style={{ fontSize: 12, marginTop: 2, color: on ? B.green : muted }}>{on ? 'On' : 'Off'}</div>
                           </button>
                         );
                       })}
                     </div>
                   )}
-                  <form
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      handlePropertyContactSave(property.id);
-                    }}
-                    style={multiProperty
-                      ? { marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }
-                      : undefined}
-                  >
+                  <div style={multiProperty
+                    ? { marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }
+                    : undefined}>
                     {(multiProperty || contacts.length > 1) && (
                       <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, marginBottom: 8 }}>
                         On-location contacts{contacts.length > 1 ? ` (${contacts.length} of ${MAX_PROPERTY_CONTACTS})` : ''}
@@ -3762,13 +3740,13 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       <div key={idx} style={{ marginBottom: 10 }}>
                         {contacts.length > 1 && (
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                            <div style={{ fontSize: 14, fontWeight: 850, color: muted, textTransform: 'uppercase' }}>Contact {idx + 1}</div>
+                            <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase' }}>Contact {idx + 1}</div>
                             <button
                               type="button"
                               onClick={() => handlePropertyContactRemove(property.id, idx)}
                               style={{
-                                border: 'none', background: 'none', cursor: 'pointer', padding: '8px 4px', minHeight: 44,
-                                fontSize: 14, fontWeight: 850, color: B.orange, fontFamily: FONTS.body,
+                                border: 'none', background: 'none', cursor: 'pointer', padding: '2px 4px',
+                                fontSize: 12, fontWeight: 850, color: B.orange, fontFamily: FONTS.body,
                               }}
                             >
                               Remove
@@ -3776,67 +3754,39 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                           </div>
                         )}
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
-                          <label htmlFor={`property-${property.id}-contact-${idx}-first-name`} style={{ fontSize: 14, fontWeight: 800, color: muted }}>
-                            First name
-                            <input
-                              id={`property-${property.id}-contact-${idx}-first-name`}
-                              name={`contact-${idx}-first-name`}
-                              value={contact.firstName || ''}
-                              onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
-                              placeholder="First name"
-                              autoComplete="given-name"
-                              autoCapitalize="words"
-                              maxLength={50}
-                              style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 5, minHeight: 44, padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
-                            />
-                          </label>
-                          <label htmlFor={`property-${property.id}-contact-${idx}-last-name`} style={{ fontSize: 14, fontWeight: 800, color: muted }}>
-                            Last name
-                            <input
-                              id={`property-${property.id}-contact-${idx}-last-name`}
-                              name={`contact-${idx}-last-name`}
-                              value={contact.lastName || ''}
-                              onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
-                              placeholder="Last name"
-                              autoComplete="family-name"
-                              autoCapitalize="words"
-                              maxLength={50}
-                              style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 5, minHeight: 44, padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
-                            />
-                          </label>
+                          <input
+                            value={contact.firstName || ''}
+                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'firstName', e.target.value)}
+                            placeholder="First name"
+                            autoCapitalize="words"
+                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
+                          />
+                          <input
+                            value={contact.lastName || ''}
+                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'lastName', e.target.value)}
+                            placeholder="Last name"
+                            autoCapitalize="words"
+                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
+                          />
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
-                          <label htmlFor={`property-${property.id}-contact-${idx}-phone`} style={{ fontSize: 14, fontWeight: 800, color: muted }}>
-                            Phone number
-                            <input
-                              id={`property-${property.id}-contact-${idx}-phone`}
-                              name={`contact-${idx}-phone`}
-                              value={contact.phone || ''}
-                              onChange={(e) => handlePropertyContactChange(property.id, idx, 'phone', e.target.value)}
-                              placeholder="(941) 555-0123"
-                              type="tel"
-                              inputMode="tel"
-                              autoComplete="tel"
-                              maxLength={20}
-                              style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 5, minHeight: 44, padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
-                            />
-                          </label>
-                          <label htmlFor={`property-${property.id}-contact-${idx}-email`} style={{ fontSize: 14, fontWeight: 800, color: muted }}>
-                            Email address
-                            <input
-                              id={`property-${property.id}-contact-${idx}-email`}
-                              name={`contact-${idx}-email`}
-                              value={contact.email || ''}
-                              onChange={(e) => handlePropertyContactChange(property.id, idx, 'email', e.target.value)}
-                              placeholder="name@example.com"
-                              type="email"
-                              inputMode="email"
-                              autoComplete="email"
-                              autoCapitalize="none"
-                              maxLength={150}
-                              style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 5, minHeight: 44, padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
-                            />
-                          </label>
+                          <input
+                            value={contact.phone || ''}
+                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'phone', e.target.value)}
+                            placeholder="Phone number"
+                            type="tel"
+                            inputMode="tel"
+                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
+                          />
+                          <input
+                            value={contact.email || ''}
+                            onChange={(e) => handlePropertyContactChange(property.id, idx, 'email', e.target.value)}
+                            placeholder="Email address"
+                            type="email"
+                            inputMode="email"
+                            autoCapitalize="none"
+                            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0', fontSize: 14, color: B.glassNavy, fontFamily: FONTS.body }}
+                          />
                         </div>
                       </div>
                     ))}
@@ -3845,7 +3795,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         type="button"
                         onClick={() => handlePropertyContactAdd(property.id)}
                         style={{
-                          border: `1px dashed ${B.wavesBlue}`, borderRadius: 8, padding: '8px 12px', minHeight: 44,
+                          border: `1px dashed ${B.wavesBlue}`, borderRadius: 8, padding: '8px 12px',
                           background: 'none', cursor: 'pointer', marginBottom: 10,
                           fontSize: 14, fontWeight: 850, color: B.wavesBlue, fontFamily: FONTS.body,
                         }}
@@ -3858,12 +3808,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Me too” to send those texts to you as well.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
-                        type="submit"
+                        type="button"
+                        onClick={() => handlePropertyContactSave(property.id)}
                         disabled={!!prefsLocked[contactLockKey]}
                         style={{
                           ...PORTAL_BUTTON_BASE,
                           padding: '9px 14px',
-                          minHeight: 44,
                           background: B.glassNavy,
                           color: '#fff',
                           fontSize: 14,
@@ -3876,7 +3826,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         {prefsLocked[contactLockKey] ? 'Saving...' : contacts.length > 1 ? 'Save contacts' : 'Save contact'}
                       </button>
                     </div>
-                  </form>
+                  </div>
                 </div>
               );
             })}
@@ -3890,48 +3840,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 // =========================================================================
 // BILLING TAB
 // =========================================================================
-const BILLING_HISTORY_PAGE_SIZE = 100;
-
-async function loadCompletePaymentHistory() {
-  const payments = [];
-  let cursor = 0;
-  let expectedTotal = null;
-  let metadataPresent = false;
-
-  for (;;) {
-    const page = await api.getPayments(BILLING_HISTORY_PAGE_SIZE, cursor);
-    const rows = Array.isArray(page?.payments) ? page.payments : [];
-    payments.push(...rows);
-
-    if (Number.isFinite(Number(page?.total))) {
-      expectedTotal = Math.max(0, Number(page.total));
-      metadataPresent = true;
-    }
-    if (typeof page?.hasMore === 'boolean') metadataPresent = true;
-
-    const hasMore = typeof page?.hasMore === 'boolean'
-      ? page.hasMore
-      : expectedTotal != null
-        ? payments.length < expectedTotal
-        : false;
-
-    if (!hasMore) {
-      const complete = expectedTotal == null || payments.length >= expectedTotal;
-      return { payments, total: expectedTotal ?? payments.length, complete: metadataPresent ? complete : rows.length < BILLING_HISTORY_PAGE_SIZE };
-    }
-    const nextCursor = page?.nextCursor;
-    if (nextCursor == null || String(nextCursor) === String(cursor)) {
-      throw new Error('Payment history pagination did not advance.');
-    }
-    cursor = nextCursor;
-  }
-}
-
 function BillingTab({ customer }) {
   const portalGlass = usePortalGlass();
   const [payments, setPayments] = useState([]);
-  const [paymentHistoryTotal, setPaymentHistoryTotal] = useState(0);
-  const [paymentHistoryComplete, setPaymentHistoryComplete] = useState(true);
   const [balance, setBalance] = useState(null);
   const [cards, setCards] = useState([]);
   const [autopay, setAutopay] = useState(null);
@@ -3974,16 +3885,26 @@ function BillingTab({ customer }) {
   const cardMountRef = useRef(null);
   const processedSetupReturnRef = useRef(false);
 
-  const refreshCards = () => api.getCards().then(d => {
-    setCards(d.cards || []);
-    return d.cards || [];
-  });
+  const refreshCards = () => api.getCards().then(d => setCards(d.cards || [])).catch(console.error);
 
   const loadBilling = useCallback(() => {
     setLoading(true);
     setLoadError('');
+    // /api/billing pages at ≤100 rows — follow the cursor to the end so the
+    // year filters and paid totals below see the customer's full history.
+    const loadAllPayments = async () => {
+      const payments = [];
+      let cursor = 0;
+      for (let page = 0; page < 50; page += 1) {
+        const d = await api.getPayments(100, cursor);
+        payments.push(...(d.payments || []));
+        if (!d.hasMore || d.nextCursor == null) break;
+        cursor = d.nextCursor;
+      }
+      return { payments };
+    };
     Promise.all([
-      loadCompletePaymentHistory(),
+      loadAllPayments(),
       api.getBalance(),
       api.getCards(),
       api.getNotificationPrefs().catch(() => null),
@@ -3993,10 +3914,7 @@ function BillingTab({ customer }) {
         // `|| []` (same as loadSchedule): a shape-drifted 200 must not put
         // undefined where payments.filter/cards.map render — the Billing tab
         // has no error boundary and would white-screen.
-        setPayments(payData.payments || []);
-        setPaymentHistoryTotal(Number(payData.total || 0));
-        setPaymentHistoryComplete(payData.complete !== false);
-        setBalance(balData); setCards(cardData.cards || []);
+        setPayments(payData.payments || []); setBalance(balData); setCards(cardData.cards || []);
         setAutopay(autopayData);
         setBillingPrefsLoadError(!prefsData);
         if (prefsData) {
@@ -4223,7 +4141,7 @@ function BillingTab({ customer }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 40,
     position: 'relative',
   };
   const secondaryButton = {
@@ -4308,31 +4226,28 @@ function BillingTab({ customer }) {
   const lastPaymentFailed = balance?.lastPaymentFailed || false;
   const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
+  const tier = activeTierName ? TIER[tierName] : null;
   const monthlyRate = customer?.monthlyRate || 0;
+  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
+  const discount = activeTierName ? (TIER_DISCOUNTS[tierName] || 0) : 0;
 
-  // Card expiry check — expired methods take precedence over every healthy
-  // Auto Pay assertion. Bank accounts do not have card expiry fields.
-  const cardExpiry = (() => {
-    if (!defaultCard || isBankMethod(defaultCard.methodType) || !defaultCard.expYear || !defaultCard.expMonth) return null;
+  // Card expiry check — within 60 days
+  const cardExpiringSoon = (() => {
+    if (!defaultCard) return null;
     const now = new Date();
     const expDate = new Date(defaultCard.expYear, defaultCard.expMonth, 0); // last day of exp month
     const diffMs = expDate - now;
     const diffDays = Math.ceil(diffMs / 86400000);
-    if (diffDays <= 0) return { state: 'expired', last4: methodLast4(defaultCard), months: 0 };
     if (diffDays > 0 && diffDays <= 60) {
       const months = Math.ceil(diffDays / 30);
-      return { state: 'expiring', last4: methodLast4(defaultCard), months };
+      return { last4: defaultCard.lastFour, months };
     }
     return null;
   })();
-  const cardExpired = cardExpiry?.state === 'expired';
-  const cardExpiringSoon = cardExpiry?.state === 'expiring' ? cardExpiry : null;
 
   // Banner state: red (failed) > amber (expiring) > green (all good)
   const bannerState = lastPaymentFailed
     ? 'failed'
-    : cardExpired
-      ? 'expired'
     : cardExpiringSoon
       ? 'expiring'
       : autopayState === 'active'
@@ -4348,12 +4263,6 @@ function BillingTab({ customer }) {
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: 'Payment failed - update your payment method',
       detail: 'Your last payment could not be processed. Update your card to avoid service interruption.',
-    },
-    expired: {
-      bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
-      badge: 'Card expired', titleColor: B.red, subtitleColor: B.grayDark,
-      title: `Card ending in ${cardExpiry?.last4 || ''} has expired`,
-      detail: 'Replace this payment method. Auto Pay cannot be shown as healthy while its default card is expired.',
     },
     expiring: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'warning',
@@ -4436,18 +4345,13 @@ function BillingTab({ customer }) {
 
   // Year-to-date summary
   const currentYear = parseDate(etDateString()).getFullYear();
-  const netPaymentAmount = (payment) => {
-    if (payment.status === 'refunded') return 0;
-    return Math.max(0, Number(payment.amount || 0) - Number(payment.refundAmount || 0));
-  };
   const ytdPayments = payments.filter(p => {
     const yr = parseDate(p.date).getFullYear();
     return yr === currentYear && p.status === 'paid';
   });
-  const ytdTotal = ytdPayments.reduce((sum, p) => sum + netPaymentAmount(p), 0);
-  const ytdRecurring = ytdPayments.filter(p => p.type === 'recurring').reduce((sum, p) => sum + netPaymentAmount(p), 0);
-  const ytdOneTime = ytdPayments.filter(p => p.type === 'one_time').reduce((sum, p) => sum + netPaymentAmount(p), 0);
-  const paymentHistoryMayBeTruncated = !paymentHistoryComplete;
+  const ytdTotal = ytdPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+  const ytdRecurring = ytdPayments.filter(p => p.type === 'recurring').reduce((sum, p) => sum + (p.amount || 0), 0);
+  const ytdOneTime = ytdPayments.filter(p => p.type === 'one_time').reduce((sum, p) => sum + (p.amount || 0), 0);
   const paymentYears = Array.from(new Set([
     currentYear,
     ...payments.map(p => parseDate(p.date).getFullYear()).filter(Number.isFinite),
@@ -4473,14 +4377,20 @@ function BillingTab({ customer }) {
     ? Number(customer.accountCredit)
     : credits.reduce((sum, c) => sum + (c.amount || 0), 0);
 
+  // WaveGuard membership — services & upsell. The old dollar "savings"
+  // figures (static catalog basePrice × 12 × discount) were fabricated
+  // annual totals — the card now speaks in the tier's real percentage
+  // (owner 2026-07-11: no per-year totals, no invented per-service rates).
+  const includedServices = SERVICE_CATALOG.slice(0, numServices);
+
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
   const balanceTone = currentBalance > 0 ? B.orange : B.glassNavy;
   const autopayLabel = bannerConfig.badge;
   const defaultMethodLabel = methodLabel(defaultCard);
   const historyDescription = filteredPayments.length === payments.length
-    ? `Showing ${payments.length}${paymentHistoryComplete ? '' : ` of ${paymentHistoryTotal || 'an unknown number of'}`} payment record${payments.length === 1 ? '' : 's'}`
-    : `Showing ${filteredPayments.length} of ${payments.length} loaded record${payments.length === 1 ? '' : 's'}`;
+    ? `${payments.length} total payment${payments.length === 1 ? '' : 's'}`
+    : `${filteredPayments.length} of ${payments.length} payment${payments.length === 1 ? '' : 's'}`;
 
   // Segmented filter helper
   const PillFilter = ({ options, value, onChange }) => (
@@ -4496,11 +4406,11 @@ function BillingTab({ customer }) {
             border: `1px solid ${value === opt ? B.wavesBlue : '#D8D0C0'}`,
             background: value === opt ? '#F8FCFE' : '#fff',
             color: value === opt ? B.glassNavy : muted,
-            fontSize: 14,
+            fontSize: 12,
             fontWeight: 800,
             cursor: 'pointer',
             fontFamily: FONTS.heading,
-            minHeight: 44,
+            minHeight: 34,
           }}
         >
           {opt}
@@ -4565,7 +4475,7 @@ function BillingTab({ customer }) {
               background: PORTAL_SHELL.soft,
               border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.glassNavy,
-              fontSize: 14,
+              fontSize: 12,
               fontWeight: 850,
             }}>
               <Icon name="card" size={14} strokeWidth={2} />
@@ -4593,13 +4503,13 @@ function BillingTab({ customer }) {
             border: `1px solid ${currentBalance > 0 ? `${B.orange}33` : '#BBF7D0'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 14, color: balanceTone, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: balanceTone, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               {balanceState}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.glassNavy }}>
               {money(currentBalance)}
             </div>
-            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
           </div>
@@ -4623,7 +4533,7 @@ function BillingTab({ customer }) {
               value: perApplicationBilling ? 'Per application' : annualPrepayBilling ? 'Prepaid' : money(monthlyRate),
               sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan'),
             },
-            { label: `${currentYear} paid${paymentHistoryMayBeTruncated ? ' (loaded)' : ''}`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
+            { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
           ].map((item) => (
             <div key={item.label} style={{
               border: '1px solid #E7E2D7',
@@ -4632,9 +4542,9 @@ function BillingTab({ customer }) {
               padding: 14,
               minHeight: 74,
             }}>
-              <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
               <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 16, fontWeight: 850, lineHeight: 1.15 }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 14 }}>{item.sub}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
             </div>
           ))}
         </div>
@@ -4667,7 +4577,7 @@ function BillingTab({ customer }) {
           <Icon name={bannerConfig.icon} size={18} strokeWidth={2} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, color: bannerConfig.titleColor, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <div style={{ fontSize: 12, color: bannerConfig.titleColor, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
             {bannerConfig.badge}
           </div>
           <div style={{ marginTop: 3, fontSize: 15, fontWeight: 850, color: B.glassNavy, lineHeight: 1.3 }}>
@@ -4680,16 +4590,7 @@ function BillingTab({ customer }) {
       </div>
       )}
 
-      {cardExpired && autopayState === 'active' ? (
-        <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}>Auto Pay</div>
-          <div style={{ marginTop: 6, fontSize: 18, fontWeight: 850, color: B.glassNavy }}>Replace the expired default card</div>
-          <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.5 }}>Your saved Auto Pay setting has not been changed, but this card is no longer a valid payment method.</div>
-          <button type="button" onClick={handleAddCard} style={{ ...primaryButton, marginTop: 12 }}>Add payment method</button>
-        </section>
-      ) : (
-        <AutopayCard key={autopayRefreshKey} onStateChange={setAutopay} />
-      )}
+      <AutopayCard key={autopayRefreshKey} onStateChange={setAutopay} />
 
       <div data-glass="card" style={{
         ...card,
@@ -4697,7 +4598,7 @@ function BillingTab({ customer }) {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div>
-            <div style={sectionTitle}>Plan Billing</div>
+            <div style={sectionTitle}>Plan Charges</div>
             <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
@@ -4712,9 +4613,38 @@ function BillingTab({ customer }) {
             fontFamily: FONTS.ui,
           }}>{perApplicationBilling ? 'Billed per application' : annualPrepayBilling ? 'Prepaid for the year' : `${money(monthlyRate)}/mo`}</span>
         </div>
-        <div style={{ marginTop: 14, padding: '11px 12px', background: subtle, border: '1px solid #E7E2D7', borderRadius: 8, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-          This section shows the billing mode recorded on your account. Your signed service agreement is the authority for contracted services, visit cadence, and coverage.
+        <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
+          {/* Service rows list what the plan covers — no per-service price
+              chips: those figures came from the static catalog × tier
+              discount, not the customer's real billing (owner 2026-07-11:
+              no fabricated /mo rates). */}
+          {includedServices.map(svc => (
+            <div key={svc.id} style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: subtle,
+              border: '1px solid #E7E2D7',
+              fontSize: 14,
+              color: B.grayDark,
+            }}>
+              <Icon name={svc.icon} size={16} strokeWidth={1.8} style={{ color: B.glassNavy }} />
+              <span style={{ minWidth: 0, flex: 1 }}>{svc.name}</span>
+            </div>
+          ))}
         </div>
+        {discount > 0 && (
+          <div style={{ marginTop: 12, padding: '10px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>
+            Saving {Math.round(discount * 100)}% on every service with your {tierName} bundle
+          </div>
+        )}
+        {activeTierName && tierName !== 'Platinum' && (TIER_DISCOUNTS.Platinum || 0) > discount && (
+          <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
+            Platinum bumps that to {Math.round((TIER_DISCOUNTS.Platinum || 0.20) * 100)}% off every service.
+          </div>
+        )}
       </div>
 
       <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
@@ -4753,44 +4683,44 @@ function BillingTab({ customer }) {
                 width: 48, height: 32, borderRadius: 6,
                 background: B.glassNavy,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: '#fff', fontSize: 14, fontWeight: 800, letterSpacing: 0, fontFamily: FONTS.ui,
+                color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 0, fontFamily: FONTS.ui,
               }}>{(c.brand || (isBankMethod(c.methodType) ? 'BANK' : 'CARD')).toUpperCase().slice(0, 6)}</div>
             )}
             <div style={{ flex: 1, minWidth: 180 }}>
               <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{methodLabel(c)}</div>
-              {c.expMonth && <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
-              {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>{c.bankName}</div>}
+              {c.expMonth && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
+              {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
               {isBankMethod(c.methodType) && c.achStatus === 'pending_verification' && (
-                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, marginTop: 2 }}>
+                <div style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, marginTop: 2 }}>
                   Verification pending — watch for two small deposits.
                   {' '}
                   <button
                     type="button"
                     onClick={() => handleResumeBankVerification(c.id)}
-                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 14, fontWeight: 850, color: B.glassNavy, textDecoration: 'underline' }}
+                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 850, color: B.glassNavy, textDecoration: 'underline' }}
                   >
                     Confirm deposits
                   </button>
                 </div>
               )}
               {isBankMethod(c.methodType) && c.achStatus === 'verification_failed' && (
-                <div style={{ fontSize: 14, fontWeight: 850, color: B.red, marginTop: 2 }}>
+                <div style={{ fontSize: 12, fontWeight: 850, color: B.red, marginTop: 2 }}>
                   Verification failed — remove this account and add it again
                 </div>
               )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap', flex: compact ? '1 1 100%' : '0 0 auto' }}>
               {c.isDefault ? (
-                <span data-glass-accent="" style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, background: '#FFF7E0', padding: '7px 12px', borderRadius: 10, border: '1px solid #F4C548', position: 'relative' }}>Default</span>
+                <span data-glass-accent="" style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, background: '#FFF7E0', padding: '7px 12px', borderRadius: 10, border: '1px solid #F4C548', position: 'relative' }}>Default</span>
               ) : (isBankMethod(c.methodType) && ['pending_verification', 'verification_failed'].includes(c.achStatus)) ? (
                 // Server refuses a pending/failed bank as default
                 // (set-default carries Auto Pay) — don't offer the
                 // dead-end button.
                 null
               ) : (
-                <button type="button" onClick={() => handleSetDefault(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, position: 'relative' }}>Set default</button>
+                <button type="button" onClick={() => handleSetDefault(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Set default</button>
               )}
-              <button type="button" onClick={() => handleRemoveCard(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, position: 'relative' }}>Remove</button>
+              <button type="button" onClick={() => handleRemoveCard(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Remove</button>
             </div>
           </div>
         ))}
@@ -4832,7 +4762,6 @@ function BillingTab({ customer }) {
           zIndex: 9999, padding: 20,
         }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
           <div ref={addCardDialogRef} role="dialog" aria-modal="true" aria-label="Add payment method" data-glass="modal" style={{
-            '--glass-modal-radius': '8px',
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
             maxHeight: '100%', boxSizing: 'border-box', overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
             boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
@@ -4842,7 +4771,7 @@ function BillingTab({ customer }) {
               <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>Add Payment Method</div>
               <button type="button" aria-label="Close" onClick={() => { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; }} style={{
                 background: 'transparent', border: 'none', cursor: 'pointer', color: muted, lineHeight: 1,
-                width: 44, height: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               }}><Icon name="close" size={20} strokeWidth={2} /></button>
             </div>
             <div ref={cardMountRef} style={{ minHeight: 120, marginBottom: 16 }} />
@@ -4872,7 +4801,7 @@ function BillingTab({ customer }) {
               opacity: stripeLoading ? 0.6 : 1,
               cursor: stripeLoading || !stripeReady ? 'not-allowed' : 'pointer',
             }}>{stripeLoading ? 'Saving...' : (addMethodType === 'us_bank_account' ? 'Save Bank Account' : 'Save Card')}</button>
-            <div style={{ fontSize: 14, color: muted, marginTop: 10, textAlign: 'center' }}>
+            <div style={{ fontSize: 12, color: muted, marginTop: 10, textAlign: 'center' }}>
               Secured by Stripe. We never store your {addMethodType === 'us_bank_account' ? 'bank' : 'card'} details directly.
             </div>
           </div>
@@ -4907,7 +4836,7 @@ function BillingTab({ customer }) {
             { label: 'Promo Credits', items: promoCredits, icon: 'party' },
           ].filter(g => g.items.length > 0).map(group => (
             <div key={group.label} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 14, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Icon name={group.icon} size={12} strokeWidth={2} /> {group.label}
               </div>
               {group.items.map((cr, i) => (
@@ -4928,27 +4857,22 @@ function BillingTab({ customer }) {
       )}
 
       <div data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}>{currentYear} {paymentHistoryMayBeTruncated ? 'Loaded ' : ''}Summary</div>
+        <div style={sectionTitle}>{currentYear} Summary</div>
         <div style={{ marginTop: 8, fontSize: 28, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
           {money(ytdTotal)}
         </div>
         <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
           Across {ytdPayments.length} payment{ytdPayments.length !== 1 ? 's' : ''}
         </div>
-        {paymentHistoryMayBeTruncated && (
-          <div role="note" style={{ marginTop: 8, color: B.orange, fontSize: 14, lineHeight: 1.4 }}>
-            This account has more history than this screen can load at once, so these totals cover the loaded records only.
-          </div>
-        )}
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 10, marginTop: 14 }}>
           <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-            <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>
+            <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
             </div>
             <div style={{ marginTop: 5, color: B.glassNavy, fontSize: 18, fontWeight: 850 }}>{money(ytdRecurring)}</div>
           </div>
           <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-            <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>One-time services</div>
+            <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>One-time services</div>
             <div style={{ marginTop: 5, color: B.glassNavy, fontSize: 18, fontWeight: 850 }}>{money(ytdOneTime)}</div>
           </div>
         </div>
@@ -4964,11 +4888,11 @@ function BillingTab({ customer }) {
 
         <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 14, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Year</span>
+            <span style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Year</span>
             <PillFilter options={[...paymentYears, 'All']} value={yearFilter} onChange={setYearFilter} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 14, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Type</span>
+            <span style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Type</span>
             <PillFilter options={['All', 'Recurring', 'One-Time']} value={typeFilter} onChange={setTypeFilter} />
           </div>
         </div>
@@ -4989,7 +4913,7 @@ function BillingTab({ customer }) {
           }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{p.description}</div>
-              <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
+              <div style={{ fontSize: 12, color: muted, marginTop: 3 }}>
                 {parseDate(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 {p.lastFour && ` - ${p.cardBrand || 'Card'} ending in ${p.lastFour}`}
               </div>
@@ -4999,18 +4923,12 @@ function BillingTab({ customer }) {
                   handleAddCard();
                 }} style={{
                   marginTop: 8, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
-                  background: '#fff', color: B.red, fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                  background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
                 }}>Update Payment Method</button>
-              )}
-              {Number(p.refundAmount || 0) > 0 && (
-                <div style={{ marginTop: 5, fontSize: 14, color: muted }}>
-                  Original {money(p.amount)} · Refunded {money(p.refundAmount)}
-                </div>
               )}
             </div>
             <div style={{ textAlign: 'right', flexShrink: 0 }}>
-              <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>{money(netPaymentAmount(p))}</div>
-              {Number(p.refundAmount || 0) > 0 && <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Net paid</div>}
+              <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>{money(p.amount)}</div>
               <span style={{
                 display: 'inline-flex',
                 marginTop: 5,
@@ -5040,7 +4958,7 @@ function BillingTab({ customer }) {
 
         {!billingPrefsLoadError && <>
         <div style={{ marginBottom: 14 }}>
-          <label htmlFor="portal-billing-email" style={{ fontSize: 14, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
             Billing recipient email
           </label>
           <input
@@ -5058,10 +4976,10 @@ function BillingTab({ customer }) {
             style={{
               width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0',
               fontSize: 14, fontFamily: FONTS.body, color: B.glassNavy, background: '#fff',
-              boxSizing: 'border-box', minHeight: 44,
+              boxSizing: 'border-box',
             }}
           />
-          <div style={{ marginTop: 5, color: muted, fontSize: 14 }}>Optional - invoices and receipts can go here instead of the account email.</div>
+          <div style={{ marginTop: 5, color: muted, fontSize: 12 }}>Optional - invoices and receipts can go here instead of the account email.</div>
         </div>
 
         <div style={{
@@ -5070,7 +4988,7 @@ function BillingTab({ customer }) {
         }}>
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Billing reminder texts</div>
-            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Get text reminders for upcoming or overdue billing items.</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get text reminders for upcoming or overdue billing items.</div>
           </div>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
@@ -5082,8 +5000,8 @@ function BillingTab({ customer }) {
                 disabled={!selectable}
                 aria-label="Delivery method for billing reminders"
                 style={{
-                  fontSize: 14, fontWeight: 800, color: B.glassNavy,
-                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px', minHeight: 44,
+                  fontSize: 12, fontWeight: 800, color: B.glassNavy,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
                   background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                 }}
@@ -5097,14 +5015,14 @@ function BillingTab({ customer }) {
             onClick={() => setBillingSmsEnabled(!billingSmsEnabled)}
             aria-label={`Billing reminder texts ${billingSmsEnabled ? 'enabled' : 'disabled'}`}
             style={{
-              width: 48, height: 44, borderRadius: 22, border: 'none', cursor: 'pointer',
+              width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
               background: billingSmsEnabled ? B.yellow : `${B.wavesBlue}55`,
               position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
             }}
           >
             <div style={{
               width: 22, height: 22, borderRadius: 11, background: '#fff',
-              position: 'absolute', top: 11,
+              position: 'absolute', top: 5,
               left: billingSmsEnabled ? 24 : 2,
               transition: 'left 0.2s ease',
               boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
@@ -5118,7 +5036,7 @@ function BillingTab({ customer }) {
         }}>
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Payment confirmation texts</div>
-            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
           </div>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
@@ -5130,8 +5048,8 @@ function BillingTab({ customer }) {
                 disabled={!selectable}
                 aria-label="Delivery method for payment confirmations"
                 style={{
-                  fontSize: 14, fontWeight: 800, color: B.glassNavy,
-                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px', minHeight: 44,
+                  fontSize: 12, fontWeight: 800, color: B.glassNavy,
+                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '5px 8px',
                   background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
                 }}
@@ -5145,14 +5063,14 @@ function BillingTab({ customer }) {
             onClick={() => setPaymentSmsEnabled(!paymentSmsEnabled)}
             aria-label={`Payment confirmation texts ${paymentSmsEnabled ? 'enabled' : 'disabled'}`}
             style={{
-              width: 48, height: 44, borderRadius: 22, border: 'none', cursor: 'pointer',
+              width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
               background: paymentSmsEnabled ? B.yellow : `${B.wavesBlue}55`,
               position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
             }}
           >
             <div style={{
               width: 22, height: 22, borderRadius: 11, background: '#fff',
-              position: 'absolute', top: 11,
+              position: 'absolute', top: 5,
               left: paymentSmsEnabled ? 24 : 2,
               transition: 'left 0.2s ease',
               boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
@@ -5183,7 +5101,7 @@ function BillingTab({ customer }) {
 // MY PROPERTY TAB — access codes, pets, scheduling, irrigation, HOA
 // =========================================================================
 function PropertySection({ title, icon = 'document', summary, defaultOpen, children, aside }) {
-  const [open, setOpen] = useState(defaultOpen === true);
+  const [open, setOpen] = useState(defaultOpen !== false);
   return (
     <section data-glass="card" style={{
       background: B.white,
@@ -5245,7 +5163,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
   const inputLabel = label || placeholder || 'Secure field';
   return (
     <div>
-      {label && <label style={{ fontSize: 14, fontWeight: 850, color: '#475569', marginBottom: 6, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
+      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#475569', marginBottom: 6, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
       <div style={{ position: 'relative' }}>
         <input
           type={show ? 'text' : 'password'}
@@ -5262,7 +5180,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
           className="waves-focus-ring"
           style={{
             width: '100%',
-            padding: '10px 52px 10px 12px',
+            padding: '10px 42px 10px 12px',
             borderRadius: 8,
             border: '1px solid #D8D0C0',
             fontSize: 14,
@@ -5270,15 +5188,14 @@ function PasswordField({ value, onChange, placeholder, label }) {
             color: B.glassNavy,
             boxSizing: 'border-box',
             background: '#fff',
-            minHeight: 44,
           }}
           onFocus={e => e.target.style.borderColor = B.wavesBlue}
           onBlur={e => e.target.style.borderColor = '#D8D0C0'}
         />
         <button type="button" onClick={() => setShow(!show)} aria-label={show ? `Hide ${inputLabel}` : `Show ${inputLabel}`} style={{
-          position: 'absolute', right: 2, top: '50%', transform: 'translateY(-50%)',
+          position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
           background: 'transparent', border: 'none', cursor: 'pointer',
-          color: '#475569', padding: 4, width: 44, height: 44,
+          color: '#475569', padding: 4, width: 32, height: 32,
         }}><Icon name={show ? 'eyeOff' : 'eye'} size={18} strokeWidth={2} /></button>
       </div>
     </div>
@@ -5300,7 +5217,7 @@ function PillSelector({ options, value, onChange, multiple = false }) {
         return (
           <button key={o.value} type="button" onClick={() => handleClick(o.value)} aria-pressed={active} style={{
             ...PORTAL_BUTTON_BASE,
-            minHeight: 44,
+            minHeight: 36,
             padding: '8px 12px',
             fontSize: 14,
             borderRadius: 8,
@@ -5321,13 +5238,13 @@ function NumberStepper({ value, onChange, min = 0, max = 99, label = 'Value' }) 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <button type="button" onClick={() => onChange(Math.max(min, v - 1))} aria-label={`Decrease ${label}`} style={{
-        width: 44, height: 44, borderRadius: 8, border: '1px solid #D8D0C0',
+        width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.glassNavy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="minus" size={16} strokeWidth={2} /></button>
       <span style={{ fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui, minWidth: 28, textAlign: 'center' }}>{v}</span>
       <button type="button" onClick={() => onChange(Math.min(max, v + 1))} aria-label={`Increase ${label}`} style={{
-        width: 44, height: 44, borderRadius: 8, border: '1px solid #D8D0C0',
+        width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.glassNavy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="plus" size={16} strokeWidth={2} /></button>
@@ -5346,7 +5263,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
       disabled={disabled}
       style={{
         width: 50,
-        height: 44,
+        height: 30,
         borderRadius: 999,
         border: 'none',
         cursor: disabled ? 'wait' : 'pointer',
@@ -5359,7 +5276,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
     >
       <span style={{
         position: 'absolute',
-        top: 11,
+        top: 4,
         left: checked ? 24 : 4,
         width: 22,
         height: 22,
@@ -5380,22 +5297,12 @@ function ServicePrefsSection() {
   const [prefs, setPrefs] = useState(null);
   const [busy, setBusy] = useState(null); // which key is currently saving
   const [error, setError] = useState(null);
-  const [loadError, setLoadError] = useState('');
-
-  const loadPreferences = useCallback(() => {
-    setLoadError('');
-    setPrefs(null);
-    api.getServicePreferences()
-      .then((d) => {
-        if (!d?.preferences) throw new Error('Service preferences were not returned.');
-        setPrefs(d.preferences);
-      })
-      .catch((err) => setLoadError(err?.message || 'Could not load service preferences.'));
-  }, []);
 
   useEffect(() => {
-    loadPreferences();
-  }, [loadPreferences]);
+    api.getServicePreferences()
+      .then((d) => setPrefs(d.preferences || { interior_spray: true, exterior_sweep: true }))
+      .catch(() => setPrefs({ interior_spray: true, exterior_sweep: true }));
+  }, []);
 
   async function toggle(key) {
     if (!prefs) return;
@@ -5407,7 +5314,7 @@ function ServicePrefsSection() {
     try {
       const d = await api.updateServicePreferences({ [key]: nextVal });
       if (d && d.preferences) setPrefs(d.preferences);
-    } catch {
+    } catch (e) {
       setPrefs(prev);
       setError('Could not save. Please try again.');
     } finally {
@@ -5415,20 +5322,7 @@ function ServicePrefsSection() {
     }
   }
 
-  if (!prefs) {
-    return (
-      <PropertySection title="Service preferences" icon="wrench" summary={loadError ? 'Preferences unavailable' : 'Loading preferences'}>
-        {loadError ? (
-          <>
-            <PortalInlineState icon="warning" tone="danger" title="Unable to load preferences" message="We could not verify your current service preferences, so no setting has been assumed." />
-            <button type="button" onClick={loadPreferences} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, marginTop: 10 }}>Try Again</button>
-          </>
-        ) : (
-          <PortalInlineState icon="wrench" title="Loading preferences" message="Checking the instructions attached to your recurring service." />
-        )}
-      </PropertySection>
-    );
-  }
+  if (!prefs) return null;
 
   const rows = [
     { key: 'interior_spray', icon: 'home', title: 'Interior spraying', desc: 'Treat inside the home on each visit. Turn off for exterior-only service.' },
@@ -5484,10 +5378,17 @@ function ServicePrefsSection() {
           </div>
         );
       })}
-      {error && <div style={{ fontSize: 14, color: B.red || '#c8102e', marginTop: 8 }}>{error}</div>}
+      {error && <div style={{ fontSize: 12, color: B.red || '#c8102e', marginTop: 8 }}>{error}</div>}
     </PropertySection>
   );
 }
+
+// In-flight property-preference PUTs. Property switch and logout await these
+// alongside the waves:property-switching waiters, so a save started by the
+// tab-away unmount flush below — after the tab's event listener is gone —
+// still settles under the token of the property it describes before any
+// token swap.
+const inFlightPropertyPrefSaves = new Set();
 
 function PropertyTab({ customer }) {
   const portalGlass = usePortalGlass();
@@ -5496,128 +5397,72 @@ function PropertyTab({ customer }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved' | 'error'
-  const [navigationFlushing, setNavigationFlushing] = useState(false);
   const debounceRef = useRef(null);
   const pendingRef = useRef({});
   const lastSavedRef = useRef(null);
-  const retryPayloadRef = useRef({});
-  const saveChainRef = useRef(Promise.resolve());
-  const saveGenerationRef = useRef(0);
-  const mountedRef = useRef(true);
-  const navigationFlushRef = useRef(false);
-  const statusTimerRef = useRef(null);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      saveGenerationRef.current += 1;
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-      pendingRef.current = {};
-      retryPayloadRef.current = {};
-      // Never start a write from cleanup. Another browser tab may already
-      // have adopted a different property's token, so an unscoped final save
-      // could apply these values to the wrong property. Portal navigation and
-      // the in-app property switch explicitly dispatch and await the scoped
-      // flush event below before this component is unmounted.
-    };
-  }, []);
+  const saveQueueRef = useRef(Promise.resolve());
+  // Identity these edits belong to. The whole portal tree remounts on any
+  // property/customer change, so capturing once at mount is sufficient.
+  const editsCustomerIdRef = useRef(customer?.id);
 
   const loadPropertyPreferences = useCallback(() => {
-    const generation = saveGenerationRef.current;
     setLoading(true);
     setLoadError('');
     api.getPropertyPreferences()
-      .then(d => {
-        if (!mountedRef.current || generation !== saveGenerationRef.current) return;
-        setPrefs(d.preferences);
-        lastSavedRef.current = d.preferences;
-        setLoading(false);
-      })
+      .then(d => { setPrefs(d.preferences); lastSavedRef.current = d.preferences; setLoading(false); })
       .catch(err => {
-        if (!mountedRef.current || generation !== saveGenerationRef.current) return;
         setLoadError(err?.message || 'Could not load property preferences.');
         setLoading(false);
       });
-  }, [customer.id]);
+  }, []);
 
   useEffect(() => {
     loadPropertyPreferences();
   }, [loadPropertyPreferences]);
 
-  const queuePendingSave = useCallback((explicitPayload = null) => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = null;
-    const captured = explicitPayload || { ...pendingRef.current };
-    if (!explicitPayload) {
-      pendingRef.current = {};
+  // Save any pending debounced edits NOW, with the current property's token.
+  // A rejected save re-queues the fields so nothing is silently dropped.
+  // Every PUT this starts is tracked in inFlightPropertyPrefSaves until it
+  // settles, so switch/logout can await saves whose component is gone.
+  // Saves chain through saveQueueRef so overlapping flushes reach the server
+  // in edit order — a slow older PUT can't land after (and overwrite) a newer
+  // value, and lastSavedRef only ever advances. The payload is read at
+  // execution time, not enqueue time, so fields re-queued by a failed save
+  // merge UNDER any newer edits instead of resurrecting stale values.
+  const flushAllPendingSaves = useCallback(() => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
     }
-    const generation = saveGenerationRef.current;
-    const customerId = customer.id;
-    const save = saveChainRef.current.catch(() => {}).then(async () => {
-      if (!mountedRef.current || generation !== saveGenerationRef.current || customer.id !== customerId) return;
-      // A failed earlier write is folded into the next queued write. Newer
-      // values win, so quick edits cannot be overwritten by an older request.
-      const toSave = { ...retryPayloadRef.current, ...captured };
-      retryPayloadRef.current = {};
-      if (Object.keys(toSave).length === 0) return;
-      setSaveStatus('saving');
-      try {
-        const result = await api.updatePropertyPreferences(toSave);
-        if (!mountedRef.current || generation !== saveGenerationRef.current || customer.id !== customerId) return;
-        if (result && result.preferences) {
-          lastSavedRef.current = result.preferences;
+    const save = saveQueueRef.current
+      .catch(() => {}) // a failed earlier save must not block later ones
+      .then(async () => {
+        // The token can be swapped out from under a queued save — a property
+        // switch in ANOTHER tab adopts the new token (useAuth storage
+        // handler) before this tab's portal unmounts and the cleanup flush
+        // below runs. Never write this property's fields under a different
+        // identity: drop the edits instead. A null decode (missing token) is
+        // allowed through — without a valid token the PUT fails auth
+        // server-side, so it can't cross-write either.
+        const tokenId = tokenCustomerId(api.token);
+        if (tokenId !== null && tokenId !== editsCustomerIdRef.current) return;
+        const toSave = { ...pendingRef.current };
+        if (!Object.keys(toSave).length) return;
+        pendingRef.current = {};
+        try {
+          const result = await api.updatePropertyPreferences(toSave);
+          if (result && result.preferences) lastSavedRef.current = result.preferences;
+        } catch (err) {
+          pendingRef.current = { ...toSave, ...pendingRef.current };
+          throw err;
         }
-        setSaveStatus('saved');
-        if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-        statusTimerRef.current = setTimeout(() => {
-          if (mountedRef.current && generation === saveGenerationRef.current) {
-            setSaveStatus(prev => (prev === 'saved' ? null : prev));
-          }
-        }, 2000);
-      } catch (err) {
-        console.error('[PropertyTab] save failed', err);
-        if (mountedRef.current && generation === saveGenerationRef.current && customer.id === customerId) {
-          retryPayloadRef.current = { ...toSave, ...retryPayloadRef.current };
-          setSaveStatus('error');
-        }
-        throw err;
-      }
-    });
-    saveChainRef.current = save;
+      });
+    saveQueueRef.current = save;
+    inFlightPropertyPrefSaves.add(save);
+    const untrack = () => inFlightPropertyPrefSaves.delete(save);
+    save.then(untrack, untrack);
     return save;
-  }, [customer.id]);
-
-  const flushAllPendingSaves = useCallback(async () => {
-    navigationFlushRef.current = true;
-    if (mountedRef.current) setNavigationFlushing(true);
-    try {
-      for (;;) {
-        const queuedSave = queuePendingSave();
-        await queuedSave;
-        if (!mountedRef.current) return;
-        // An edit can arrive while the network request above is in flight.
-        // Keep draining until no newer debounce, retry payload, or chained
-        // request remains; only then may navigation unmount this property.
-        if (Object.keys(pendingRef.current).length === 0
-          && Object.keys(retryPayloadRef.current).length === 0
-          && saveChainRef.current === queuedSave) break;
-      }
-    } catch (err) {
-      navigationFlushRef.current = false;
-      if (mountedRef.current) setNavigationFlushing(false);
-      throw err;
-    }
-
-    // Let the awaiting navigation commit its tab/property change first. If
-    // that navigation later fails and this tab remains mounted, controls are
-    // restored on the next task without opening an edit-after-flush gap.
-    setTimeout(() => {
-      navigationFlushRef.current = false;
-      if (mountedRef.current) setNavigationFlushing(false);
-    }, 0);
-  }, [queuePendingSave]);
+  }, []);
 
   const updateField = useCallback((field, value) => {
     setPrefs(prev => ({ ...prev, [field]: value }));
@@ -5627,20 +5472,43 @@ function PropertyTab({ customer }) {
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      queuePendingSave().catch(() => {});
+      setSaveStatus('saving');
+      flushAllPendingSaves()
+        .then(() => {
+          setSaveStatus('saved');
+          setTimeout(() => setSaveStatus(prev => (prev === 'saved' ? null : prev)), 2000);
+        })
+        .catch((err) => {
+          console.error('[PropertyTab] save failed', err);
+          // Revert optimistic UI to last confirmed server state so the user
+          // isn't misled into thinking gate codes / pet info persisted.
+          if (lastSavedRef.current) {
+            setPrefs(lastSavedRef.current);
+          }
+          setSaveStatus('error');
+        });
     }, 1000);
-  }, [queuePendingSave]);
+  }, [flushAllPendingSaves]);
 
-  // Property switching waits for this tab's queued writes before replacing
-  // the customer token. This prevents a delayed gate/pet update from being
-  // applied to whichever property becomes active next.
+  // The 1s debounce above survives this tab's unmount, but switching
+  // properties swaps the access token first — a delayed PUT would then write
+  // THIS property's gate/pet details into the newly selected account. The
+  // shell dispatches this event before switching so edits flush while the
+  // token still belongs to the property they describe. Tab navigation
+  // unmounts this tab and removes the listener while the debounce may still
+  // be pending — the cleanup flushes too, so the PUT leaves immediately with
+  // this property's token and stays awaitable via inFlightPropertyPrefSaves.
   useEffect(() => {
     const flushBeforeSwitch = (event) => {
       const pendingSave = flushAllPendingSaves();
       if (Array.isArray(event?.detail?.waiters)) event.detail.waiters.push(pendingSave);
+      else pendingSave.catch(() => {});
     };
     window.addEventListener('waves:property-switching', flushBeforeSwitch);
-    return () => window.removeEventListener('waves:property-switching', flushBeforeSwitch);
+    return () => {
+      window.removeEventListener('waves:property-switching', flushBeforeSwitch);
+      flushAllPendingSaves().catch(() => {});
+    };
   }, [flushAllPendingSaves]);
 
   const card = {
@@ -5661,7 +5529,7 @@ function PropertyTab({ customer }) {
     fontFamily: FONTS.heading,
   };
   const labelStyle = {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: 850,
     color: muted,
     marginBottom: 6,
@@ -5679,7 +5547,6 @@ function PropertyTab({ customer }) {
     color: B.glassNavy,
     boxSizing: 'border-box',
     background: '#fff',
-    minHeight: 44,
   };
   const fieldGrid = {
     display: 'grid',
@@ -5805,9 +5672,11 @@ function PropertyTab({ customer }) {
   };
   const fullAddress = formatPropertyAddress(customer);
   const cleanTurf = (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '').trim() || 'Not set';
-  const hasLawnCare = !!String(customer.property?.lawnType || '').trim();
+  const tierHasLawnCare = ['Silver', 'Gold', 'Platinum'].includes(String(customer.tier || ''));
+  const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim();
   const homeSqFt = Number(customer.property?.propertySqFt || 0);
-  const lawnSqFt = Number(customer.property?.lawnSqFt || 0);
+  const bedSqFt = Number(customer.property?.bedSqFt || 0);
+  const treatedSqFt = homeSqFt ? Math.max(0, homeSqFt - bedSqFt) : 0;
   const accessReady = [
     prefs.neighborhoodGateCode,
     prefs.propertyGateCode,
@@ -5841,28 +5710,9 @@ function PropertyTab({ customer }) {
   const saveColor = saveStatus === 'error' ? B.red : saveStatus === 'saved' ? B.green : B.glassNavy;
 
   return (
-    <div
-      aria-busy={navigationFlushing ? 'true' : undefined}
-      onKeyDownCapture={(event) => {
-        if (!navigationFlushRef.current) return;
-        event.preventDefault();
-        event.stopPropagation();
-      }}
-      style={{ display: 'flex', flexDirection: 'column', gap: 16, position: 'relative' }}
-    >
-      {navigationFlushing && (
-        <div role="status" aria-live="polite" style={{
-          position: 'absolute', inset: 0, zIndex: 40,
-          background: 'rgba(255,255,255,0.72)',
-          backdropFilter: 'blur(2px)', WebkitBackdropFilter: 'blur(2px)',
-          display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-          paddingTop: 24, pointerEvents: 'auto', cursor: 'wait',
-        }}>
-          <span style={{ minHeight: 44, padding: '10px 14px', borderRadius: 8, background: B.glassNavy, color: '#fff', fontSize: 14, fontWeight: 850, display: 'inline-flex', alignItems: 'center' }}>Saving property changes...</span>
-        </div>
-      )}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, position: 'relative' }}>
       {saveStatus && (
-        <div role={saveStatus === 'error' ? 'alert' : 'status'} aria-live="polite" style={{
+        <div style={{
           padding: '12px 14px',
           borderRadius: 8,
           border: `1px solid ${saveStatus === 'error' ? `${B.red}33` : '#BBF7D0'}`,
@@ -5871,12 +5721,7 @@ function PropertyTab({ customer }) {
           fontSize: 14,
           fontWeight: 800,
         }}>
-          {saveStatus === 'saving' ? 'Saving property details...' : saveStatus === 'error' ? 'Could not save. Your edits are still on screen.' : 'Property details saved.'}
-          {saveStatus === 'error' && (
-            <button type="button" onClick={() => queuePendingSave().catch(() => {})} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, marginLeft: 12 }}>
-              Try Again
-            </button>
-          )}
+          {saveStatus === 'saving' ? 'Saving property details...' : saveStatus === 'error' ? 'Could not save. Please check your connection and try again.' : 'Property details saved.'}
         </div>
       )}
 
@@ -5902,7 +5747,7 @@ function PropertyTab({ customer }) {
                 borderRadius: 999,
                 background: '#F8FCFE',
                 color: B.glassNavy,
-                fontSize: 14,
+                fontSize: 12,
                 fontWeight: 850,
               }}>
                 <Icon name="house" size={14} strokeWidth={2} />
@@ -5935,7 +5780,7 @@ function PropertyTab({ customer }) {
               <div style={{ marginTop: 3, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
                 {saveText}
               </div>
-              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+              <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
                 {updatedAt || 'Ready for updates'}
               </div>
             </div>
@@ -5950,7 +5795,7 @@ function PropertyTab({ customer }) {
             {[
               { label: 'Turf', value: cleanTurf, sub: 'Lawn profile' },
               { label: 'Home', value: sqft(homeSqFt), sub: 'Property size' },
-              { label: 'Lawn', value: sqft(lawnSqFt), sub: 'Turf area on file' },
+              { label: 'Treated Area', value: treatedSqFt ? sqft(treatedSqFt) : sqft(homeSqFt), sub: 'Estimated service area' },
               { label: 'Lot', value: sqft(customer.property?.lotSqFt), sub: 'Parcel size' },
             ].map((item) => (
               <div key={item.label} style={{
@@ -5961,7 +5806,7 @@ function PropertyTab({ customer }) {
                 minHeight: 78,
                 boxSizing: 'border-box',
               }}>
-                <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>{item.label}</div>
+                <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
                 <div style={{
                   marginTop: 6,
                   color: B.glassNavy,
@@ -5973,7 +5818,7 @@ function PropertyTab({ customer }) {
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                 }}>{item.value}</div>
-                <div style={{ marginTop: 3, color: muted, fontSize: 14 }}>{item.sub}</div>
+                <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
               </div>
             ))}
           </div>
@@ -5986,7 +5831,7 @@ function PropertyTab({ customer }) {
         title="Access"
         icon="key"
         summary={accessReady ? 'Technician access details are on file.' : 'Add gate or parking details before the next visit.'}
-        aside={<span style={{ fontSize: 14, fontWeight: 850, color: accessReady ? B.green : muted }}>{accessReady ? 'Ready' : 'Needs details'}</span>}
+        aside={<span style={{ fontSize: 12, fontWeight: 850, color: accessReady ? B.green : muted }}>{accessReady ? 'Ready' : 'Needs details'}</span>}
       >
         <div style={fieldGrid}>
           <PasswordField
@@ -6019,9 +5864,9 @@ function PropertyTab({ customer }) {
           <label style={labelStyle}>Parking Notes</label>
           {textArea('parkingNotes', 'e.g., Park in driveway, HOA enforces no street parking')}
         </div>
-        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'flex-start', color: muted, fontSize: 14, lineHeight: 1.45 }}>
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'flex-start', color: muted, fontSize: 12, lineHeight: 1.45 }}>
           <Icon name="lock" size={15} strokeWidth={2} style={{ marginTop: 1 }} />
-          <span>Access instructions are stored with this property so the service team can prepare for your visit.</span>
+          <span>Access codes are only shown to the assigned technician on service day.</span>
         </div>
       </PropertySection>
 
@@ -6174,7 +6019,7 @@ function PropertyTab({ customer }) {
               {hasLawnCare && irrigationInchesInput()}
             </div>
             {hasLawnCare && (
-              <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+              <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
                 Enter the estimated total irrigation applied to the lawn each week. Most St. Augustine lawns are evaluated against about 1 inch per week, adjusted for rainfall and site conditions.
               </div>
             )}
@@ -6219,7 +6064,7 @@ function PropertyTab({ customer }) {
                     { value: 'rotor', label: 'Rotor' },
                   ]}
                 />
-                <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
                   Select all that apply — many properties mix spray, drip, and rotor zones.
                 </div>
               </div>
@@ -6416,7 +6261,7 @@ function WeatherPestWidget({ customer, nextService }) {
             borderRadius: 999,
             background: '#F8FCFE',
             color: B.glassNavy,
-            fontSize: 14,
+            fontSize: 12,
             fontWeight: 850,
           }}>
             <Icon name="sun" size={14} strokeWidth={2} />
@@ -6440,7 +6285,7 @@ function WeatherPestWidget({ customer, nextService }) {
           <div style={{ fontSize: 40, lineHeight: 1, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
             {weather.temp}°
           </div>
-          <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
+          <div style={{ marginTop: 4, fontSize: 12, color: muted }}>
             Tonight {weather.nightTemp}° · {weather.humidity}% humidity
           </div>
         </div>
@@ -6468,7 +6313,7 @@ function WeatherPestWidget({ customer, nextService }) {
                   <Icon name={p.icon} size={15} strokeWidth={2} /> {p.label}
                 </span>
                 <span style={{
-                  fontSize: 14, fontWeight: 800, letterSpacing: 0,
+                  fontSize: 12, fontWeight: 800, letterSpacing: 0,
                   padding: '3px 7px', borderRadius: 8,
                   background: `${p.color}33`, color: p.color,
                 }}>{p.level}</span>
@@ -6481,7 +6326,7 @@ function WeatherPestWidget({ customer, nextService }) {
                 }} />
               </div>
               {action && (
-                <div style={{ fontSize: 14, color: muted, marginTop: 8, lineHeight: 1.45 }}>
+                <div style={{ fontSize: 12, color: muted, marginTop: 8, lineHeight: 1.45 }}>
                   {action}
                 </div>
               )}
@@ -6533,7 +6378,7 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
   }, []);
 
   if (loading) return (
-    <div style={{ padding: 20, textAlign: 'center', color: PORTAL_SHELL.muted, fontSize: 14 }}>Loading {title.toLowerCase()}...</div>
+    <div style={{ padding: 20, textAlign: 'center', color: PORTAL_SHELL.muted, fontSize: 12 }}>Loading {title.toLowerCase()}...</div>
   );
   if (!posts.length) return null;
 
@@ -6554,11 +6399,11 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
             }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, lineHeight: 1.4 }}>{p.title}</div>
               {p.description && (
-                <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
                   {p.description}{p.description.length >= 200 ? '...' : ''}
                 </div>
               )}
-              <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 6 }}>
+              <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 6 }}>
                 {pubDate && !isNaN(pubDate) ? pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
                 {p.category ? ` · ${p.category}` : ''}
               </div>
@@ -6669,7 +6514,7 @@ function ContentCard({ post, large, compact }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 7, flexWrap: 'wrap' }}>
             <span style={{
-              fontSize: 14,
+              fontSize: 12,
               fontWeight: 850,
               padding: '4px 7px',
               borderRadius: 8,
@@ -6683,7 +6528,7 @@ function ContentCard({ post, large, compact }) {
               {sourceLabel}
             </span>
             {pubDate && !isNaN(pubDate) && (
-              <span style={{ fontSize: 14, color: '#475569' }}>
+              <span style={{ fontSize: 12, color: '#475569' }}>
                 {pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               </span>
             )}
@@ -6710,7 +6555,7 @@ function ContentCard({ post, large, compact }) {
               WebkitBoxOrient: 'vertical',
             }}>{post.description}</div>
           )}
-          <div style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, fontWeight: 850, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          <div style={{ marginTop: 10, fontSize: 12, color: B.glassNavy, fontWeight: 850, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
             Read article
           </div>
         </div>
@@ -6733,50 +6578,17 @@ function LearnTab({ customer }) {
   const [faqSearch, setFaqSearch] = useState('');
   const [showAllPosts, setShowAllPosts] = useState(false);
   const [nextService, setNextService] = useState(null);
-  const [learnLoadState, setLearnLoadState] = useState('loading');
-  const [learnFailures, setLearnFailures] = useState([]);
-
-  const loadLearnContent = useCallback(async () => {
-    setLearnLoadState('loading');
-    setLearnFailures([]);
-    setAlerts([]);
-    setBlogPosts([]);
-    setNewsletterPosts([]);
-    setExpertPosts([]);
-    setLocalNews([]);
-    setFaq([]);
-    setMonthlyTip(null);
-    setNextService(null);
-    const resources = [
-      ['alerts', api.getAlerts(), (d) => setAlerts(d.alerts || [])],
-      ['blog', api.getBlogPosts(), (d) => setBlogPosts(d.posts || [])],
-      ['newsletter', api.getNewsletterPosts(), (d) => setNewsletterPosts(d.posts || [])],
-      ['expert sources', api.getExpertPosts(), (d) => setExpertPosts(d.posts || [])],
-      ['local news', api.getLocalNews(), (d) => setLocalNews(d.posts || [])],
-      ['FAQ', api.getFaq(), (d) => setFaq(d.categories || [])],
-      ['monthly tip', api.getMonthlyTip(), (d) => setMonthlyTip(d || null)],
-      ['next visit context', api.getNextService(), (d) => setNextService(d.next || null)],
-    ];
-    const results = await Promise.allSettled(resources.map(([, request]) => request));
-    const failures = [];
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled') resources[index][2](result.value);
-      else failures.push(resources[index][0]);
-    });
-    setLearnFailures(failures);
-    setLearnLoadState(failures.length === resources.length ? 'error' : failures.length ? 'partial' : 'ready');
-  }, []);
 
   useEffect(() => {
-    loadLearnContent();
-  }, [loadLearnContent]);
-
-  if (learnLoadState === 'loading') {
-    return <PortalStatePanel icon="bulb" eyebrow="Learn" title="Loading the learning center" message="Fetching current Waves articles, alerts, tips, and service answers." />;
-  }
-  if (learnLoadState === 'error') {
-    return <PortalStatePanel icon="warning" tone="danger" eyebrow="Learn" title="Learning center unavailable" message="We could not load the current articles and guidance." actionLabel="Try Again" onAction={loadLearnContent} />;
-  }
+    api.getAlerts().then(d => setAlerts(d.alerts || [])).catch(() => {});
+    api.getBlogPosts().then(d => setBlogPosts(d.posts || [])).catch(() => {});
+    api.getNewsletterPosts().then(d => setNewsletterPosts(d.posts || [])).catch(() => {});
+    api.getExpertPosts().then(d => setExpertPosts(d.posts || [])).catch(() => {});
+    api.getLocalNews().then(d => setLocalNews(d.posts || [])).catch(() => {});
+    api.getFaq().then(d => setFaq(d.categories || [])).catch(() => {});
+    api.getMonthlyTip().then(setMonthlyTip).catch(() => {});
+    api.getNextService().then(d => setNextService(d.next || null)).catch(() => {});
+  }, []);
 
   const card = {
     background: B.white,
@@ -6831,13 +6643,13 @@ function LearnTab({ customer }) {
     .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
   const latestContent = allContent[0];
   const totalFaqQuestions = faq.reduce((sum, cat) => sum + (cat.questions?.length || 0), 0);
-  const resourceFailed = (resource) => learnFailures.includes(resource);
-  const contentResourceKeys = ['blog', 'newsletter', 'expert sources', 'local news'];
-  const anyContentResourceFailed = contentResourceKeys.some(resourceFailed);
-  const allContentResourcesFailed = contentResourceKeys.every(resourceFailed);
 
   const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
+  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
+  const customerServiceNames = SERVICE_CATALOG
+    .slice(0, numServices)
+    .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
 
   const filteredFaq = faqSearch.trim()
     ? faq.map(cat => ({
@@ -6848,7 +6660,13 @@ function LearnTab({ customer }) {
       })).filter(cat => cat.questions.length > 0)
     : faq;
 
-  const personalizeFaqAnswer = (answer) => answer;
+  const personalizeFaqAnswer = (answer) => {
+    if (!answer || !activeTierName) return answer;
+    return answer
+      .replace(/your (plan|membership|tier)/gi, `your WaveGuard ${tierName}`)
+      .replace(/unlimited callbacks/gi, `unlimited callbacks (included with WaveGuard ${tierName})`)
+      .replace(/callback guarantee/gi, `callback guarantee (${tierName} benefit)`);
+  };
 
   const faqIconFor = (category = '') => {
     const text = category.toLowerCase();
@@ -6860,22 +6678,18 @@ function LearnTab({ customer }) {
     return 'bulb';
   };
 
-  const renderFeedSection = (title, icon, posts, emptyText, resourceKey) => (
+  const renderFeedSection = (title, icon, posts, emptyText) => (
     <section data-glass="card" style={{ ...card, padding: 18, minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <span style={iconTile}><Icon name={icon} size={18} strokeWidth={2} /></span>
           <div>
             <div style={sectionTitle}>{title}</div>
-            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-              {resourceFailed(resourceKey) ? 'Unavailable' : `${posts.length} item${posts.length === 1 ? '' : 's'}`}
-            </div>
+            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{posts.length} item{posts.length === 1 ? '' : 's'}</div>
           </div>
         </div>
       </div>
-      {resourceFailed(resourceKey) ? (
-        <PortalInlineState icon="warning" tone="danger" title={`${title} unavailable`} message="This feed could not be loaded. Try again from the notice above." />
-      ) : posts.length ? (
+      {posts.length ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {posts.slice(0, 4).map((p, i) => (
             <ContentCard key={`${title}-${i}`} post={p} compact={compact} />
@@ -6895,15 +6709,6 @@ function LearnTab({ customer }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {learnLoadState === 'partial' && (
-        <section role="alert" data-glass="card" style={{ ...card, padding: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Some learning content is unavailable</div>
-          <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
-            Could not load {learnFailures.join(', ')}. The content shown below loaded successfully.
-          </div>
-          <button type="button" onClick={loadLearnContent} style={{ ...secondaryButton, minHeight: 44, marginTop: 10 }}>Try Again</button>
-        </section>
-      )}
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 320px' }}>
@@ -6916,7 +6721,7 @@ function LearnTab({ customer }) {
               background: PORTAL_SHELL.soft,
               border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.glassNavy,
-              fontSize: 14,
+              fontSize: 12,
               fontWeight: 850,
             }}>
               <Icon name="bulb" size={14} strokeWidth={2} />
@@ -6950,9 +6755,9 @@ function LearnTab({ customer }) {
             <div style={{ marginTop: 3, fontSize: 22, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
-            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
               {activeTierName
-                ? 'See My Plan and your agreements for active service coverage.'
+                ? `${numServices} included service${numServices === 1 ? '' : 's'} in your guidance.`
                 : 'Plan-specific guidance appears after activation.'}
             </div>
           </div>
@@ -6965,13 +6770,13 @@ function LearnTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Blog Posts', value: resourceFailed('blog') ? 'Unavailable' : sortedBlogPosts.length, sub: resourceFailed('blog') ? 'Could not load' : 'wavespestcontrol.com' },
-            { label: 'Expert Sources', value: resourceFailed('expert sources') ? 'Unavailable' : expertPosts.length, sub: resourceFailed('expert sources') ? 'Could not load' : 'UF/IFAS and references' },
-            { label: 'FAQ Answers', value: resourceFailed('FAQ') ? 'Unavailable' : totalFaqQuestions, sub: resourceFailed('FAQ') ? 'Could not load' : 'Service and lawn topics' },
+            { label: 'Blog Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
+            { label: 'Expert Sources', value: expertPosts.length, sub: 'UF/IFAS and references' },
+            { label: 'FAQ Answers', value: totalFaqQuestions, sub: 'Service and lawn topics' },
             {
-              label: anyContentResourceFailed ? 'Latest loaded' : 'Latest',
-              value: allContentResourcesFailed ? 'Unavailable' : latestDate && !isNaN(latestDate) ? latestDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'None',
-              sub: allContentResourcesFailed ? 'Could not load' : latestContent?.title || 'No articles loaded yet',
+              label: 'Latest',
+              value: latestDate && !isNaN(latestDate) ? latestDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'None',
+              sub: latestContent?.title || 'No articles loaded yet',
             },
           ].map(item => (
             <div key={item.label} style={{
@@ -6983,7 +6788,7 @@ function LearnTab({ customer }) {
               minWidth: 0,
               boxSizing: 'border-box',
             }}>
-              <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
               <div style={{
                 marginTop: 6,
                 color: B.glassNavy,
@@ -6995,7 +6800,7 @@ function LearnTab({ customer }) {
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
               }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 14, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {item.sub}
               </div>
             </div>
@@ -7003,7 +6808,7 @@ function LearnTab({ customer }) {
         </div>
       </section>
 
-      <WeatherPestWidget customer={customer} nextService={resourceFailed('next visit context') ? undefined : nextService} />
+      <WeatherPestWidget customer={customer} nextService={nextService} />
 
       {alerts.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 18 }}>
@@ -7055,6 +6860,20 @@ function LearnTab({ customer }) {
               <div style={{ marginTop: 7, fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
                 {monthlyTip.tip}
               </div>
+              {customerServiceNames.length > 0 && (
+                <div style={{
+                  marginTop: 12,
+                  padding: 12,
+                  borderRadius: 8,
+                  background: subtle,
+                  border: '1px solid #E7E2D7',
+                  fontSize: 14,
+                  color: muted,
+                  lineHeight: 1.45,
+                }}>
+                  Your {tierName} plan includes {customerServiceNames.join(', ')}.
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -7066,9 +6885,7 @@ function LearnTab({ customer }) {
             <span style={iconTile}><Icon name="waves" size={18} strokeWidth={2} /></span>
             <div>
               <div style={sectionTitle}>Waves Pest Control Blog</div>
-              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                {resourceFailed('blog') ? 'Blog feed unavailable' : `${sortedBlogPosts.length} article${sortedBlogPosts.length === 1 ? '' : 's'} from wavespestcontrol.com`}
-              </div>
+              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{sortedBlogPosts.length} article{sortedBlogPosts.length === 1 ? '' : 's'} from wavespestcontrol.com</div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -7083,9 +6900,7 @@ function LearnTab({ customer }) {
           </div>
         </div>
 
-        {resourceFailed('blog') ? (
-          <PortalInlineState icon="warning" tone="danger" title="Blog unavailable" message="Latest Waves articles could not be loaded. Try again from the notice above." />
-        ) : visibleBlogPosts.length > 0 ? (
+        {visibleBlogPosts.length > 0 ? (
           <div style={{
             display: 'grid',
             gridTemplateColumns: compact || visibleBlogPosts.length < 2 ? '1fr' : 'minmax(0, 1.15fr) minmax(280px, 0.85fr)',
@@ -7112,23 +6927,18 @@ function LearnTab({ customer }) {
             (owner 2026-07-09). */}
       </section>
 
-      {renderFeedSection('Waves Newsletter', 'newspaper', sortedNewsletterPosts, 'Waves newsletter issues will appear here.', 'newsletter')}
+      {renderFeedSection('Waves Newsletter', 'newspaper', sortedNewsletterPosts, 'Waves newsletter issues will appear here.')}
 
       <div style={{
         display: 'grid',
         gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))',
         gap: 16,
       }}>
-        {renderFeedSection('From the Experts', 'leaf', expertPosts, 'Expert pest and lawn references will appear here.', 'expert sources')}
-        {renderFeedSection('Local Suncoast News', 'map', localNews, 'Local Suncoast updates will appear here.', 'local news')}
+        {renderFeedSection('From the Experts', 'leaf', expertPosts, 'Expert pest and lawn references will appear here.')}
+        {renderFeedSection('Local Suncoast News', 'map', localNews, 'Local Suncoast updates will appear here.')}
       </div>
 
-      {resourceFailed('FAQ') && (
-        <section data-glass="card" style={{ ...card, padding: 18 }}>
-          <PortalInlineState icon="warning" tone="danger" title="FAQ unavailable" message="Service and lawn answers could not be loaded. Try again from the notice above." />
-        </section>
-      )}
-      {!resourceFailed('FAQ') && (filteredFaq.length > 0 || faqSearch.trim()) && (
+      {(filteredFaq.length > 0 || faqSearch.trim()) && (
         <section data-glass="card" style={{ ...card, padding: 18 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -7169,7 +6979,6 @@ function LearnTab({ customer }) {
                 fontFamily: FONTS.body,
                 color: B.glassNavy,
                 boxSizing: 'border-box',
-                minHeight: 44,
               }}
               onFocus={e => e.target.style.borderColor = B.wavesBlue}
               onBlur={e => e.target.style.borderColor = '#D8D0C0'}
@@ -7229,6 +7038,19 @@ function LearnTab({ customer }) {
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.65, marginTop: 10 }}>
                           {personalizeFaqAnswer(q.a)}
                         </div>
+                        {activeTierName && (q.a?.toLowerCase().includes('callback') || q.a?.toLowerCase().includes('guarantee')) && (
+                          <div style={{
+                            marginTop: 10,
+                            padding: '9px 11px',
+                            borderRadius: 8,
+                            background: `${B.green}10`,
+                            fontSize: 12,
+                            color: B.glassNavy,
+                            fontWeight: 850,
+                          }}>
+                            As a {tierName} member, you have unlimited callbacks between services.
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -7317,7 +7139,36 @@ function resolveActiveTierName(customer = {}) {
   return null;
 }
 
+const TIER_SERVICE_NAMES = {
+  Bronze: ['Quarterly Pest Control'],
+  Silver: ['Quarterly Pest Control', 'Lawn Care Program'],
+  Gold: ['Quarterly Pest Control', 'Lawn Care Program', 'Mosquito Barrier Treatment'],
+  Platinum: ['Quarterly Pest Control', 'Lawn Care Program', 'Mosquito Barrier Treatment', 'Tree & Shrub Program'],
+};
+
+// Coverage details for each included service
+const SERVICE_COVERAGE = {
+  pest_control: { summary: 'Unlimited callbacks within 30 days. Interior re-treatment included.', details: ['Interior + exterior perimeter treatment', 'Granular bait band around foundation', 'Bait station monitoring', 'Cobweb sweep on all eaves', 'Free callback if pests return within 30 days'] },
+  lawn_care: { summary: 'Fertilization, weed control, fungicide. Callbacks for breakthrough weeds.', details: ['Custom fertilization for your turf type', 'Pre-emergent and post-emergent weed control', 'Fungicide treatments as needed', 'Soil testing and thatch monitoring', 'Callback for breakthrough weeds between visits'] },
+  mosquito: { summary: 'Barrier treatments Apr-Oct. Re-spray within 14 days of heavy rain.', details: ['Monthly perimeter barrier spray (Apr-Oct)', 'Standing water treatment with larvicide', 'Foliage and shrub line application', 'Free re-spray within 14 days of heavy rain', 'Event spray available on request'] },
+  tree_shrub: { summary: 'Deep root feeding, insect & disease treatment, palm injections.', details: ['Deep root fertilization', 'Insect and disease treatment', 'Palm trunk injections (Arborjet)', 'Seasonal monitoring and reporting'] },
+  termite: { summary: 'Bait station installation and monitoring with damage warranty.', details: ['Bait station installation around perimeter', 'Quarterly monitoring inspections', 'Damage warranty (Premier tier)', 'Annual re-certification report'] },
+  rodent_bait: { summary: 'Exterior bait stations inspected and replenished on every visit.', details: ['Exterior rodent bait station inspection', 'Bait replenishment and rotation', 'Exclusion check around entry points'] },
+};
+
+// Service schedule months for calendar view
+const SERVICE_SCHEDULE_MONTHS = {
+  pest_control: [0, 3, 6, 9],        // Jan, Apr, Jul, Oct (quarterly)
+  lawn_care: [0, 2, 5, 8],            // Jan, Mar, Jun, Sep (4x/year)
+  mosquito: [1, 2, 3, 4, 5, 6, 7, 8, 9], // Feb-Oct (seasonal 9-visit program)
+  tree_shrub: [1, 4, 7, 10],          // Feb, May, Aug, Nov
+  termite: [0, 3, 6, 9],              // Quarterly
+};
+
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Hidden badge types (engagement-tracking ones we don't show)
+const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer', 'feedback_champion'];
 
 function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secondaryButton, onExploreTiers }) {
   const [prompt, setPrompt] = useState("I'm interested in adding lawn care");
@@ -7388,7 +7239,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                 type="button"
                 onClick={onExploreTiers}
                 data-glass-accent=""
-                style={{ ...secondaryButton, padding: '8px 10px', fontSize: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, position: 'relative' }}
+                style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, position: 'relative' }}
               >
                 Explore WaveGuard tiers
               </button>
@@ -7402,7 +7253,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     border: '1px solid #CFE7F5',
                     background: '#F8FCFE',
                     color: B.glassNavy,
-                    fontSize: 14,
+                    fontSize: 12,
                     fontWeight: 800,
                   }}>
                     {service}
@@ -7432,7 +7283,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
             className="waves-focus-ring"
             style={{
               width: '100%',
-              minHeight: 44,
+              minHeight: 42,
               borderRadius: 8,
               border: '1px solid #D8D0C0',
               padding: '10px 12px 10px 38px',
@@ -7445,7 +7296,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
         </div>
         <button type="submit" disabled={loading} data-glass-accent="" style={{
           ...primaryButton,
-          minHeight: 44,
+          minHeight: 42,
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -7463,7 +7314,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
             key={chip.label}
             type="button"
             onClick={() => runPricing(chip.prompt)}
-            style={{ ...secondaryButton, padding: '8px 10px', fontSize: 14, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            style={{ ...secondaryButton, padding: '8px 10px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             <Icon name={chip.icon} size={14} strokeWidth={1.8} />
             {chip.label}
@@ -7490,7 +7341,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           }}>
             <strong style={{ color: B.glassNavy }}>{result.ok ? 'WAVES AI:' : 'Review needed:'}</strong> {result.message}
             {result.property?.homeSqFt || result.property?.lotSqFt ? (
-              <div style={{ marginTop: 6, color: '#475569', fontSize: 14 }}>
+              <div style={{ marginTop: 6, color: '#475569', fontSize: 12 }}>
                 Property basis: {[
                   result.property.homeSqFt ? `${Number(result.property.homeSqFt).toLocaleString()} sq ft home` : null,
                   result.property.lotSqFt ? `${Number(result.property.lotSqFt).toLocaleString()} sq ft lot` : null,
@@ -7503,7 +7354,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           {options.length > 0 && (
             <>
               <label style={{ display: 'grid', gap: 6 }}>
-                <span style={{ fontSize: 14, color: '#475569', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
+                <span style={{ fontSize: 12, color: '#475569', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
                 <select
                   value={selected?.id || ''}
                   onChange={(e) => {
@@ -7512,7 +7363,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                   }}
                   style={{
                     width: '100%',
-                    minHeight: 44,
+                    minHeight: 42,
                     borderRadius: 8,
                     border: '1px solid #D8D0C0',
                     background: '#fff',
@@ -7548,7 +7399,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 850, lineHeight: 1 }}>
                         {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? `${money(selected.monthly)}/mo` : money(selected.oneTime || selected.dueAtStart)}
                       </div>
-                      <div style={{ marginTop: 4, color: '#475569', fontSize: 14 }}>
+                      <div style={{ marginTop: 4, color: '#475569', fontSize: 12 }}>
                         {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
                       </div>
                     </div>
@@ -7617,15 +7468,74 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   );
 }
 
-function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, onClose }) {
+function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, secondaryButton, onClose }) {
   // Rendered only while open — lock the page behind the modal.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
-  const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : null;
+  const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : 'Bronze';
+  const currentIdx = Math.max(0, TIER_ORDER.indexOf(currentTier));
+  const nextTier = TIER_ORDER[Math.min(TIER_ORDER.length - 1, currentIdx + 1)] || currentTier;
+  const [selectedTier, setSelectedTier] = useState(nextTier);
+  const [result, setResult] = useState(null);
+  const [selectedId, setSelectedId] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [requesting, setRequesting] = useState(false);
+  const [requested, setRequested] = useState(false);
 
-  const chooseService = () => {
-    onClose();
-    window.requestAnimationFrame(() => document.getElementById('portal-waves-ai-pricing')?.focus());
+  const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  const targetIdx = Math.max(0, TIER_ORDER.indexOf(selectedTier));
+  const canPriceTier = targetIdx > currentIdx;
+  const targetServices = TIER_SERVICE_NAMES[selectedTier] || [];
+  const currentServices = TIER_SERVICE_NAMES[currentTier] || [];
+  const addedServices = SERVICE_CATALOG
+    .slice(TIER_SERVICES[currentTier] || 1, TIER_SERVICES[selectedTier] || 1)
+    .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
+  const options = result?.options || [];
+  const selected = options.find(option => option.id === selectedId) || options[0] || null;
+
+  const formatList = (items) => {
+    if (items.length <= 1) return items[0] || '';
+    if (items.length === 2) return `${items[0]} and ${items[1]}`;
+    return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+  };
+
+  const promptForTier = () => {
+    const added = formatList(addedServices.map(name => name.toLowerCase()));
+    return added
+      ? `I'm interested in upgrading to WaveGuard ${selectedTier} by adding ${added}`
+      : `I want to review WaveGuard ${selectedTier} pricing`;
+  };
+
+  const runPricing = async () => {
+    if (!canPriceTier || loading) return;
+    setLoading(true);
+    setError('');
+    setRequested(false);
+    try {
+      const data = await api.queryCustomerPricing(promptForTier(), selectedTier);
+      setResult(data);
+      setSelectedId(data?.options?.[0]?.id || '');
+    } catch (err) {
+      setError(err.message || 'Tier pricing unavailable.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitRequest = async () => {
+    if (requesting) return;
+    setRequesting(true);
+    try {
+      const subject = selected?.requestSubject || `Review WaveGuard ${selectedTier} plan`;
+      const description = selected?.requestDescription || `Customer selected WaveGuard ${selectedTier} in the portal tier explorer.`;
+      await api.createRequest?.({ category: 'upgrade', subject, description });
+      setRequested(true);
+    } catch (err) {
+      showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+    } finally {
+      setRequesting(false);
+    }
   };
 
   return (
@@ -7645,7 +7555,6 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, o
       }}
     >
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Explore WaveGuard tiers" data-glass="modal" style={{
-        '--glass-modal-radius': compact ? '8px 8px 0 0' : '8px',
         position: 'relative',
         width: '100%',
         maxWidth: 860,
@@ -7660,14 +7569,14 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, o
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               WaveGuard tiers
             </div>
             <div style={{ marginTop: 5, color: B.glassNavy, fontSize: compact ? 22 : 26, fontWeight: 850, fontFamily: FONTS.heading, lineHeight: 1.15 }}>
               Explore plan upgrades
             </div>
             <div style={{ marginTop: 5, color: B.grayDark, fontSize: 14, lineHeight: 1.5 }}>
-              Tiers are earned by the number of qualifying active services on your account. They do not prescribe a fixed service bundle.
+              Select a tier, then WAVES AI prices it from this property's profile and current services.
             </div>
           </div>
           <ShellCloseButton onClick={onClose} label="Close tier explorer" />
@@ -7683,11 +7592,21 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, o
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
             <div>
-              <div style={{ color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current plan</div>
-              <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 18, fontWeight: 850 }}>{currentTier ? `WaveGuard ${currentTier}` : 'No active plan'}</div>
+              <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current plan</div>
+              <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 18, fontWeight: 850 }}>WaveGuard {currentTier}</div>
             </div>
-            <div style={{ color: PORTAL_SHELL.muted, fontSize: 14, lineHeight: 1.45, maxWidth: 480 }}>
-              Your agreements and scheduled services are the source of truth for what is active today.
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: compact ? 'flex-start' : 'flex-end' }}>
+              {currentServices.map(service => (
+                <span key={service} style={{
+                  padding: '5px 8px',
+                  borderRadius: 8,
+                  border: '1px solid #CFE7F5',
+                  background: '#F8FCFE',
+                  color: B.glassNavy,
+                  fontSize: 12,
+                  fontWeight: 800,
+                }}>{service.replace(/ Program| Barrier Treatment/g, '')}</span>
+              ))}
             </div>
           </div>
         </section>
@@ -7700,32 +7619,47 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, o
         }}>
           {TIER_ORDER.map(tierName => {
             const isCurrent = tierName === currentTier;
+            const isSelected = tierName === selectedTier;
             const disc = TIER_DISCOUNTS[tierName] || 0;
             return (
-              <section
+              <button
                 key={tierName}
+                type="button"
+                onClick={() => {
+                  setSelectedTier(tierName);
+                  setResult(null);
+                  setSelectedId('');
+                  setError('');
+                  setRequested(false);
+                }}
+                aria-pressed={isSelected}
                 style={{
                   textAlign: 'left',
-                  border: `1px solid ${isCurrent ? B.wavesBlue : PORTAL_SHELL.border}`,
+                  border: `1px solid ${isSelected ? B.wavesBlue : PORTAL_SHELL.border}`,
                   borderRadius: 8,
-                  background: isCurrent ? '#F8FCFE' : PORTAL_SHELL.surface,
+                  background: isSelected ? '#F8FCFE' : PORTAL_SHELL.surface,
                   padding: 13,
+                  cursor: 'pointer',
                   fontFamily: FONTS.body,
-                  minHeight: 112,
+                  minHeight: 142,
                 }}
               >
                 <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
                   <span style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>WaveGuard {tierName}</span>
-                  {isCurrent && <span style={{ color: B.glassNavy, fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
+                  {isCurrent && <span style={{ color: B.glassNavy, fontSize: 10, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
                 </span>
-                <span style={{ display: 'block', marginTop: 6, color: disc > 0 ? B.green : PORTAL_SHELL.muted, fontSize: 14, fontWeight: 850 }}>
+                <span style={{ display: 'block', marginTop: 6, color: disc > 0 ? B.green : PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850 }}>
                   {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'Base plan'}
                 </span>
-                <span style={{ display: 'flex', gap: 6, marginTop: 10, color: B.grayDark, fontSize: 14, lineHeight: 1.35 }}>
-                  <Icon name="check" size={14} strokeWidth={2} style={{ color: B.glassNavy, marginTop: 1 }} />
-                  <span>{TIER_SERVICES[tierName]} qualifying service{TIER_SERVICES[tierName] === 1 ? '' : 's'}</span>
+                <span style={{ display: 'grid', gap: 5, marginTop: 10 }}>
+                  {(TIER_SERVICE_NAMES[tierName] || []).map(service => (
+                    <span key={service} style={{ display: 'flex', gap: 6, color: B.grayDark, fontSize: 12, lineHeight: 1.35 }}>
+                      <Icon name="check" size={13} strokeWidth={2} style={{ color: B.glassNavy, marginTop: 1 }} />
+                      <span>{service.replace(/ Program| Barrier Treatment/g, '')}</span>
+                    </span>
+                  ))}
                 </span>
-              </section>
+              </button>
             );
           })}
         </div>
@@ -7740,25 +7674,160 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, o
           display: 'grid',
           gap: 12,
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
             <div>
-              <div style={{ color: B.glassNavy, fontSize: 16, fontWeight: 850 }}>Choose the service you want</div>
+              <div style={{ color: B.glassNavy, fontSize: 16, fontWeight: 850 }}>Selected: WaveGuard {selectedTier}</div>
               <div style={{ marginTop: 3, color: PORTAL_SHELL.muted, fontSize: 14 }}>
-                WAVES AI can price an actual service for this property. Your tier updates only after a qualifying service becomes active.
+                {canPriceTier
+                  ? `Adds ${formatList(addedServices)}.`
+                  : selectedTier === currentTier
+                    ? 'This is your current tier.'
+                    : 'Lower-tier changes need a manual account review.'}
               </div>
             </div>
-            <button type="button" onClick={chooseService} data-glass-accent="" style={{
-              ...primaryButton,
-              minHeight: 44,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-            }}>
-              <Icon name="sparkles" size={15} strokeWidth={2} />
-              Choose a service to price
-            </button>
+            {canPriceTier ? (
+              <button type="button" onClick={runPricing} disabled={loading} data-glass-accent="" style={{
+                ...primaryButton,
+                minHeight: 40,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                opacity: loading ? 0.65 : 1,
+                cursor: loading ? 'wait' : 'pointer',
+              }}>
+                <Icon name="brain" size={15} strokeWidth={2} />
+                {loading ? 'Pricing...' : 'Check My Price'}
+              </button>
+            ) : (
+              <button type="button" onClick={submitRequest} disabled={requesting || requested} style={{
+                ...secondaryButton,
+                minHeight: 40,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+              }}>
+                <Icon name={requested ? 'check' : 'message'} size={15} strokeWidth={2} />
+                {requested ? 'Review request sent' : 'Request Plan Review'}
+              </button>
+            )}
           </div>
+
+          {error && <PortalInlineState icon="warning" tone="danger" title="Pricing unavailable" message={error} />}
+
+          {result && !error && (
+            <div style={{ display: 'grid', gap: 12 }}>
+              <div style={{
+                border: `1px solid ${result.ok ? '#BFDBFE' : '#FED7AA'}`,
+                borderRadius: 8,
+                background: result.ok ? '#F8FBFF' : '#FFF7ED',
+                padding: 12,
+                color: B.grayDark,
+                fontSize: 14,
+                lineHeight: 1.5,
+              }}>
+                <strong style={{ color: B.glassNavy }}>{result.ok ? 'WAVES AI:' : 'Review needed:'}</strong> {result.message}
+              </div>
+
+              {options.length > 0 ? (
+                <>
+                  <label style={{ display: 'grid', gap: 6 }}>
+                    <span style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
+                    <select
+                      value={selected?.id || ''}
+                      onChange={(e) => {
+                        setSelectedId(e.target.value);
+                        setRequested(false);
+                      }}
+                      style={{
+                        width: '100%',
+                        minHeight: 42,
+                        borderRadius: 8,
+                        border: '1px solid #D8D0C0',
+                        background: '#fff',
+                        color: B.glassNavy,
+                        padding: '9px 12px',
+                        fontSize: 14,
+                        fontFamily: FONTS.body,
+                      }}
+                    >
+                      {options.map(option => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ` - ${money(option.monthly)}/mo` : ` - ${money(option.oneTime || option.dueAtStart)}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {selected && (
+                    <div style={{ border: '1px solid #E7E2D7', borderRadius: 8, background: '#fff', padding: 14, display: 'grid', gap: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                        <div>
+                          <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 850 }}>{selected.label}</div>
+                          <div style={{ marginTop: 3, color: PORTAL_SHELL.muted, fontSize: 14, lineHeight: 1.45 }}>{selected.cadence}</div>
+                        </div>
+                        <div style={{ textAlign: compact ? 'left' : 'right' }}>
+                          <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 850, lineHeight: 1 }}>
+                            {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? `${money(selected.monthly)}/mo` : money(selected.oneTime || selected.dueAtStart)}
+                          </div>
+                          <div style={{ marginTop: 4, color: PORTAL_SHELL.muted, fontSize: 12 }}>
+                            {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+                        {[
+                          // No combined plan-monthly tiles (owner 2026-07-11).
+                          selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
+                        ].filter(Boolean).map(item => (
+                          <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
+                            <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
+                            <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {selected.notes?.length ? (
+                        <div style={{ color: B.orange, fontSize: 14, lineHeight: 1.45 }}>{selected.notes[0]}</div>
+                      ) : null}
+
+                      {requested ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.glassNavy, fontSize: 14, fontWeight: 850 }}>
+                          <Icon name="check" size={15} strokeWidth={2} /> Request sent
+                        </span>
+                      ) : (
+                        <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" style={{
+                          ...primaryButton,
+                          width: compact ? '100%' : 'fit-content',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          opacity: requesting ? 0.65 : 1,
+                          cursor: requesting ? 'wait' : 'pointer',
+                        }}>
+                          <Icon name="upgrade" size={15} strokeWidth={2} />
+                          {requesting ? 'Sending...' : 'Request This Tier'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <button type="button" onClick={submitRequest} disabled={requesting || requested} style={{
+                  ...secondaryButton,
+                  width: compact ? '100%' : 'fit-content',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}>
+                  <Icon name={requested ? 'check' : 'message'} size={15} strokeWidth={2} />
+                  {requested ? 'Review request sent' : 'Request Manual Review'}
+                </button>
+              )}
+            </div>
+          )}
         </section>
       </div>
     </div>
@@ -7833,24 +7902,6 @@ function PlanStationMap({ map }) {
   );
 }
 
-async function loadCompletePlanServiceHistory() {
-  const limit = 100;
-  const services = [];
-  let offset = 0;
-
-  for (;;) {
-    const page = await api.getServices({ limit, offset });
-    const rows = Array.isArray(page?.services) ? page.services : [];
-    services.push(...rows);
-    const total = Number.isFinite(Number(page?.total)) ? Math.max(0, Number(page.total)) : null;
-
-    if (total != null && services.length >= total) return services;
-    if (total == null && rows.length < limit) return services;
-    if (rows.length === 0) throw new Error('Service history pagination did not advance.');
-    offset += rows.length;
-  }
-}
-
 function MyPlanTab({ customer, focusService }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
@@ -7860,7 +7911,6 @@ function MyPlanTab({ customer, focusService }) {
   const [nextService, setNextService] = useState(null);
   const [upcomingServices, setUpcomingServices] = useState([]);
   const [serviceHistory, setServiceHistory] = useState([]);
-  const [serviceHistoryStatus, setServiceHistoryStatus] = useState('loading');
   const [showPauseForm, setShowPauseForm] = useState(false);
   const [showCancelForm, setShowCancelForm] = useState(false);
   const [pauseDuration, setPauseDuration] = useState('1');
@@ -7878,7 +7928,6 @@ function MyPlanTab({ customer, focusService }) {
   // must not present a "$X per month" plan rate — same source of truth as
   // the Billing tab's AutopayCard.
   const [billingMode, setBillingMode] = useState(null);
-  const [billingModeStatus, setBillingModeStatus] = useState('loading');
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
@@ -7886,21 +7935,19 @@ function MyPlanTab({ customer, focusService }) {
 
   const loadPlan = useCallback(() => {
     setPlanStatus('loading');
-    setServiceHistoryStatus('loading');
     Promise.all([
       api.getNextService(),
       api.getSchedule(365),
       // Completed-service history is optional context. Keep the current plan
       // usable when that focused endpoint is temporarily unavailable.
-      loadCompletePlanServiceHistory().then((services) => ({ services, status: 'ready' })).catch((err) => {
+      api.getServices({ limit: 50 }).catch((err) => {
         console.error(err);
-        return { services: [], status: 'error' };
+        return { services: [] };
       }),
-    ]).then(([nextData, scheduleData, historyData]) => {
+    ]).then(([nextData, scheduleData, servicesData]) => {
       setNextService(nextData.next || null);
       setUpcomingServices(scheduleData.upcoming || []);
-      setServiceHistory(historyData.services || []);
-      setServiceHistoryStatus(historyData.status);
+      setServiceHistory(servicesData.services || []);
       setPlanStatus('ready');
     }).catch((err) => {
       console.error(err);
@@ -7910,15 +7957,7 @@ function MyPlanTab({ customer, focusService }) {
 
   useEffect(() => {
     loadPlan();
-    api.getAutopay()
-      .then(d => {
-        setBillingMode(d?.billing_mode || 'monthly');
-        setBillingModeStatus('ready');
-      })
-      .catch(err => {
-        console.error(err);
-        setBillingModeStatus('error');
-      });
+    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
   }, [loadPlan]);
 
@@ -7944,9 +7983,12 @@ function MyPlanTab({ customer, focusService }) {
   const activeTierName = resolveActiveTierName(customer);
   const tier = activeTierName ? TIER[activeTierName] : null;
   const tierName = activeTierName || 'No Plan';
+  const tierIdx = activeTierName ? TIER_ORDER.indexOf(activeTierName) : -1;
+  const discount = activeTierName ? (TIER_DISCOUNTS[activeTierName] || 0) : 0;
   const memberMonths = customer.memberSince
     ? Math.max(1, Math.round((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)))
     : 0;
+  const tierServiceLimit = activeTierName ? (TIER_SERVICES[activeTierName] || 1) : 0;
 
   const detectCatalogServiceId = (service) => {
     for (const svc of SERVICE_CATALOG) {
@@ -7979,10 +8021,22 @@ function MyPlanTab({ customer, focusService }) {
   };
   [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
 
-  // Only render recurring service families evidenced by an actual upcoming
-  // schedule row. A tier name is not a service bundle: padding this list from
-  // a static catalog previously stated coverage the account may not own.
-  const includedServiceIds = detectedServiceIds;
+  // For a tier'd member, the included-services list reflects the tier ENTITLEMENT, not
+  // just the rows that happen to be on the visible schedule: surface detected recurring
+  // coverage first, then pad with tier-default catalog services so a Gold/Platinum member
+  // with only a partial future schedule still shows the full count, savings, and copy.
+  // Non-tier customers only ever show what was actually detected (no entitlement padding).
+  let includedServiceIds;
+  if (activeTierName) {
+    includedServiceIds = [...detectedServiceIds];
+    for (const svc of SERVICE_CATALOG) {
+      if (includedServiceIds.length >= tierServiceLimit) break;
+      if (!includedServiceIds.includes(svc.id)) includedServiceIds.push(svc.id);
+    }
+    includedServiceIds = includedServiceIds.slice(0, tierServiceLimit);
+  } else {
+    includedServiceIds = detectedServiceIds;
+  }
   const includedServices = includedServiceIds
     .map(id => SERVICE_CATALOG.find(svc => svc.id === id))
     .filter(Boolean);
@@ -8010,21 +8064,18 @@ function MyPlanTab({ customer, focusService }) {
   const planBillingLabel = !activeTierName
     ? 'No active plan'
     : (annualPrepayLabel || 'Active plan');
-  const perApplicationBilled = billingModeStatus === 'ready' && billingMode === 'per_application';
+  const perApplicationBilled = billingMode === 'per_application';
   const planBillingValue = !activeTierName
     ? '—'
-    : billingModeStatus === 'error'
-      ? 'Unavailable'
-      : billingModeStatus === 'loading'
-        ? 'Checking…'
-        : (annualPrepay
+    : (annualPrepay
       ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
       : (perApplicationBilled ? 'Per application' : formatPortalMoney(monthlyRate)));
   const planBillingSub = !activeTierName
     ? 'No WaveGuard plan on file'
-    : billingModeStatus === 'error'
-      ? 'Billing mode could not be loaded'
-      : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : 'per month'));
+    : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : 'per month'));
+
+  // Build bundled services one-liner
+  const bundleSummary = includedServices.map(s => s.name.replace(/ Program| Barrier Treatment| Control/g, '').replace('Quarterly ', '')).join(' + ');
 
   // Build plan history timeline from member data
   const planTimeline = [];
@@ -8131,10 +8182,34 @@ function MyPlanTab({ customer, focusService }) {
       .sort((a, b) => parseDate(a.date) - parseDate(b.date));
   };
 
+  const getScheduledMonthsForService = (svcId) => {
+    const actualMonths = MONTH_LABELS
+      .map((_, monthIndex) => (getCalendarEventsForMonth(svcId, monthIndex).length > 0 ? monthIndex : null))
+      .filter(monthIndex => monthIndex !== null);
+
+    const fallbackMonths = SERVICE_SCHEDULE_MONTHS[svcId] || [];
+    const memberSinceDate = customer.memberSince ? parseDate(customer.memberSince) : null;
+    const cadenceMonths = (memberSinceDate && !isNaN(memberSinceDate) && memberSinceDate.getFullYear() === currentYear)
+      ? fallbackMonths.filter(monthIndex => monthIndex >= memberSinceDate.getMonth())
+      : fallbackMonths;
+
+    // Overlay actual events on the expected plan cadence rather than replacing it, so a
+    // member with only a partially-seeded schedule (e.g. one upcoming quarterly visit)
+    // still shows all planned cadence months, not just the seeded one.
+    return Array.from(new Set([...cadenceMonths, ...actualMonths])).sort((a, b) => a - b);
+  };
+
   const getCalendarDetail = (svc, monthIndex, statusLabel) => {
     const events = getCalendarEventsForMonth(svc.id, monthIndex);
     const event = events[0];
-    if (!event) return null;
+    if (!event) {
+      return {
+        date: `${MONTH_LABELS[monthIndex]} ${currentYear}`,
+        time: statusLabel === 'Completed' ? 'Completed visit' : 'Scheduling soon',
+        type: svc.name,
+        status: statusLabel,
+      };
+    }
     return {
       date: calendarDate(event.date),
       time: calendarTime(event),
@@ -8143,6 +8218,7 @@ function MyPlanTab({ customer, focusService }) {
     };
   };
 
+  const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const nextDate = nextService ? parseDate(nextService.date) : null;
   const nextVisitLabel = nextDate && !isNaN(nextDate)
     ? nextDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
@@ -8177,7 +8253,7 @@ function MyPlanTab({ customer, focusService }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 40,
     position: 'relative',
   };
   const secondaryButton = {
@@ -8195,13 +8271,13 @@ function MyPlanTab({ customer, focusService }) {
     background: 'transparent',
     color: muted,
     cursor: 'pointer',
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: 700,
     fontFamily: FONTS.body,
     textDecoration: 'underline',
     textUnderlineOffset: 3,
     padding: '8px 10px',
-    minHeight: 44,
+    minHeight: 36,
   };
   const iconName = (name) => (typeof name === 'string' && /^[a-z]/i.test(name) ? name : 'shield');
 
@@ -8230,7 +8306,7 @@ function MyPlanTab({ customer, focusService }) {
               display: 'inline-flex', alignItems: 'center', gap: 8,
               padding: '5px 10px', borderRadius: 999,
               background: tier ? `${tier.color}18` : '#F8FCFE',
-              color: B.glassNavy, fontSize: 14, fontWeight: 850,
+              color: B.glassNavy, fontSize: 12, fontWeight: 850,
             }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
@@ -8249,7 +8325,7 @@ function MyPlanTab({ customer, focusService }) {
                   recurring service on the schedule — "no recurring plan"
                   would contradict the row rendered below (codex P2). */}
               {activeTierName
-                ? `${numServices} recurring service ${numServices === 1 ? 'family is' : 'families are'} currently visible on your schedule`
+                ? `${bundleSummary || 'Recurring service'} - ${numServices} service${numServices > 1 ? 's' : ''} bundled`
                 : displayedServices.length
                   ? `${displayedServices.length} recurring service${displayedServices.length > 1 ? 's' : ''} on your schedule - no WaveGuard plan`
                   : 'No recurring plan on file'}
@@ -8263,24 +8339,27 @@ function MyPlanTab({ customer, focusService }) {
             border: `1px solid ${activeTierName ? '#BBF7D0' : '#E2E8F0'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 14, color: activeTierName ? B.glassNavy : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: activeTierName ? B.glassNavy : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               {planBillingLabel}
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.glassNavy }}>
               {planBillingValue}
             </div>
-            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{planBillingSub}</div>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{planBillingSub}</div>
           </div>
         </div>
 
         <div style={{
           display: 'grid',
-          gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(auto-fit, minmax(180px, 1fr))',
+          gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)',
           gap: 10,
           marginTop: 22,
         }}>
           {[
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
+            // 0% is not a perk — hide the discount tile entirely at zero
+            // (eyeball 07-12 finding 6).
+            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: hasRodentBait ? 'off every plan service' : 'off every service' },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
           ].filter(Boolean).map((item) => (
             <div key={item.label} style={{
@@ -8290,9 +8369,9 @@ function MyPlanTab({ customer, focusService }) {
               padding: 14,
               minHeight: 74,
             }}>
-              <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
               <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 18, fontWeight: 850, lineHeight: 1.1 }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 14 }}>{item.sub}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
             </div>
           ))}
         </div>
@@ -8307,20 +8386,24 @@ function MyPlanTab({ customer, focusService }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
             <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7' }}>
-              <div style={sectionTitle}>Scheduled Services</div>
+              <div style={sectionTitle}>Included Services</div>
               <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>
-                {displayedServices.length
-                  ? `${displayedServices.length} recurring service ${displayedServices.length === 1 ? 'family' : 'families'} found on your schedule`
-                  : 'No recurring schedule rows are currently available'}
+                {activeTierName
+                  ? `${tierName} covers ${numServices} recurring service${numServices > 1 ? 's' : ''}`
+                  : displayedServices.length
+                    ? `${displayedServices.length} recurring service${displayedServices.length > 1 ? 's' : ''} on your schedule`
+                    : 'No recurring services on file'}
               </div>
-              <div style={{ marginTop: 5, color: muted, fontSize: 14, lineHeight: 1.5 }}>This is schedule history, not a statement of contract coverage. Your signed agreement remains authoritative.</div>
             </div>
 
             <div>
               {displayedServices.map((svc, index) => {
-                const serviceEvents = MONTH_LABELS.flatMap((_, monthIndex) => getCalendarEventsForMonth(svc.id, monthIndex));
-                const totalVisits = serviceEvents.length;
-                const completedVisits = serviceEvents.filter(event => event.source === 'completed').length;
+                const completedMonths = getCompletedMonths(svc.id);
+                const scheduleMonths = getScheduledMonthsForService(svc.id);
+                const totalVisits = scheduleMonths.length;
+                const completedVisits = scheduleMonths.filter(m => completedMonths.has(m)).length;
+                const progress = totalVisits > 0 ? Math.round((completedVisits / totalVisits) * 100) : 0;
+                const coverage = SERVICE_COVERAGE[svc.id];
                 const expanded = expandedService === svc.id;
                 return (
                   <div key={svc.id} style={{
@@ -8358,19 +8441,13 @@ function MyPlanTab({ customer, focusService }) {
                           </span>
                           <span style={{ minWidth: 0 }}>
                             <span style={{ display: 'block', fontSize: 16, fontWeight: 850, color: B.glassNavy }}>{svc.name}</span>
-                            <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>
-                              {serviceHistoryStatus !== 'ready'
-                                ? 'Completed visit totals unavailable'
-                                : totalVisits
-                                  ? `${totalVisits} recorded or scheduled in ${currentYear}`
-                                  : 'No dated visits this year'}
-                            </span>
+                            <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
                             {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
                               const avg = Math.round(lawnHealth.scores.overallScore);
                               const initialAvg = Math.round(lawnHealth.initialScores.overallScore);
                               const improving = avg >= initialAvg;
                               return (
-                                <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: improving ? B.green : B.orange, fontWeight: 800 }}>
+                                <span style={{ display: 'block', marginTop: 3, fontSize: 12, color: improving ? B.green : B.orange, fontWeight: 800 }}>
                                   Lawn health {avg}% {improving ? `(up from ${initialAvg}%)` : `(from ${initialAvg}%)`}
                                 </span>
                               );
@@ -8378,14 +8455,63 @@ function MyPlanTab({ customer, focusService }) {
                           </span>
                         </div>
                         <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                          {serviceHistoryStatus === 'ready' && <div style={{ fontSize: 14, color: muted }}>{completedVisits} completed</div>}
+                          {/* "applications" not "visits" — matches the "4 Apps"
+                              frequency label beside it (owner rule 07-12:
+                              per-application wording everywhere). */}
+                          <div style={{ fontSize: 12, color: muted }}>{completedVisits}/{totalVisits || 0} applications</div>
+                          {/* Percentage framing only — the old $/yr figures were
+                              static catalog basePrice math, not real billing
+                              (owner 2026-07-11: no per-year totals). Rodent bait
+                              is billed separately from the plan, so the member
+                              rate must not be claimed on its row. */}
+                          {discount > 0 && svc.id !== 'rodent_bait' ? (
+                            <div style={{ marginTop: 4, fontSize: 14, color: B.green, fontWeight: 850 }}>
+                              {Math.round(discount * 100)}% member rate
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     </button>
 
+                    <div style={{ marginTop: 12, height: 5, borderRadius: 999, background: '#E8EEF5', overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%',
+                        width: `${Math.max(0, Math.min(100, progress))}%`,
+                        borderRadius: 999,
+                        background: B.wavesBlue,
+                      }} />
+                    </div>
+
                     {expanded && (
                       <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
-                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>Visit dates and completed records below are loaded from your account. Products and treatment scope appear on the individual completed service report.</div>
+                        <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>{svc.description}</div>
+                        {coverage && (
+                          <div style={{ marginTop: 12, padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7' }}>
+                            <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>{coverage.summary}</div>
+                            <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+                              {coverage.details.map((detail) => (
+                                <div key={detail} style={{ display: 'flex', gap: 8, color: B.grayDark, fontSize: 14, lineHeight: 1.45 }}>
+                                  <Icon name="check" size={14} strokeWidth={2} style={{ color: B.glassNavy, marginTop: 2 }} />
+                                  <span>{detail}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {svc.products?.length ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 12 }}>
+                            {svc.products.map((product) => (
+                              <span key={product} style={{
+                                padding: '4px 9px',
+                                borderRadius: 999,
+                                background: '#F8FCFE',
+                                color: B.glassNavy,
+                                fontSize: 12,
+                                fontWeight: 700,
+                              }}>{product}</span>
+                            ))}
+                          </div>
+                        ) : null}
                         {/* Lawn health detail moved here from the home page
                             (owner 2026-07-15). hasLawnCare guards it — a
                             tier-entitlement padded lawn row without real
@@ -8481,15 +8607,9 @@ function MyPlanTab({ customer, focusService }) {
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
-            {serviceHistoryStatus !== 'ready' && (
-              <PortalInlineState
-                icon="warning"
-                title="Completed visit history unavailable"
-                message="Scheduled visits are still shown above. The yearly calendar will return when complete visit history can be loaded."
-              />
-            )}
-            {serviceHistoryStatus === 'ready' && <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
+            <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {displayedServices.map((svc) => {
+                const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
                   <div key={svc.id} style={{
@@ -8502,18 +8622,17 @@ function MyPlanTab({ customer, focusService }) {
                       <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
                       <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </div>
-                    <div style={{ overflowX: 'auto', paddingBottom: 2 }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(40px, 1fr))', gap: 2, minWidth: 520 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 2 }}>
                       {MONTH_LABELS.map((month, mi) => {
                         const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
-                        const isScheduled = hasActualEvent;
+                        const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
                         const isCompleted = completedMonths.has(mi);
                         const isCurrentMonth = mi === currentMonth;
-                        const isFilled = isCompleted || (isCurrentMonth && isScheduled);
-                        const fill = isCompleted ? B.green : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? 'rgba(255,255,255,0.85)' : 'transparent';
+                        const isOverdue = isScheduled && !isCompleted && mi < currentMonth;
+                        const isFilled = isCompleted || isOverdue || (isCurrentMonth && isScheduled);
+                        const fill = isCompleted ? B.green : isOverdue ? B.orange : isCurrentMonth && isScheduled ? B.wavesBlue : isScheduled ? 'rgba(255,255,255,0.85)' : 'transparent';
                         const border = isFilled ? 'rgba(255,255,255,0.55)' : isScheduled ? 'rgba(4,57,94,0.35)' : 'rgba(4,57,94,0.14)';
-                        const actualEvent = getCalendarEventsForMonth(svc.id, mi)[0];
-                        const statusLabel = isCompleted ? 'Completed' : (actualEvent?.status || 'Scheduled');
+                        const statusLabel = isCompleted ? 'Completed' : isOverdue ? 'Pending or missed' : isCurrentMonth && isScheduled ? 'This month' : isScheduled ? 'Scheduled' : 'No service';
                         const detail = isScheduled ? getCalendarDetail(svc, mi, statusLabel) : null;
                         const tooltipKey = `${svc.id}-${mi}`;
                         const isHovered = isScheduled && hoveredCalendarItem === tooltipKey;
@@ -8529,7 +8648,7 @@ function MyPlanTab({ customer, focusService }) {
                               aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
                               style={{
                                 width: '100%',
-                                height: 44,
+                                height: 26,
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
@@ -8564,7 +8683,7 @@ function MyPlanTab({ customer, focusService }) {
                                 left: mi > 8 ? 'auto' : '50%',
                                 right: mi > 8 ? 0 : 'auto',
                                 transform: mi > 8 ? 'none' : 'translateX(-50%)',
-                                width: 'min(220px, calc(100vw - 64px))',
+                                width: 190,
                                 padding: 10,
                                 borderRadius: 8,
                                 background: B.glassNavy,
@@ -8573,8 +8692,8 @@ function MyPlanTab({ customer, focusService }) {
                                 textAlign: 'left',
                                 pointerEvents: 'none',
                               }}>
-                                <div style={{ fontSize: 14, fontWeight: 850, lineHeight: 1.25 }}>{detail.type}</div>
-                                <div style={{ marginTop: 6, display: 'grid', gap: 3, fontSize: 14, color: 'rgba(255,255,255,0.86)', lineHeight: 1.35 }}>
+                                <div style={{ fontSize: 12, fontWeight: 850, lineHeight: 1.25 }}>{detail.type}</div>
+                                <div style={{ marginTop: 6, display: 'grid', gap: 3, fontSize: 12, color: 'rgba(255,255,255,0.86)', lineHeight: 1.35 }}>
                                   <span>Date: {detail.date}</span>
                                   <span>Time: {detail.time}</span>
                                   <span>Status: {detail.status}</span>
@@ -8582,7 +8701,7 @@ function MyPlanTab({ customer, focusService }) {
                               </div>
                             )}
                             <div style={{
-                              fontSize: 14,
+                              fontSize: 10,
                               fontWeight: isCurrentMonth ? 800 : 600,
                               letterSpacing: '0.02em',
                               color: isCurrentMonth ? B.wavesBlue : 'rgba(4,57,94,0.5)',
@@ -8591,12 +8710,55 @@ function MyPlanTab({ customer, focusService }) {
                         );
                       })}
                     </div>
-                    </div>
                   </div>
                 );
               })}
-            </div>}
+            </div>
           </section>
+
+          {/* 0% is not a savings pitch — the card only renders when the tier
+              actually discounts (eyeball 07-12 finding 5). */}
+          {discount > 0 && (
+            <section data-glass="card" style={{ ...card, padding: 20 }}>
+              <div style={sectionTitle}>Savings</div>
+              {/* Percentage only — the old dollar figure ($/yr from static
+                  catalog basePrice × 12) was fabricated, and per-year totals
+                  are banned customer-facing (owner 2026-07-11). */}
+              <div style={{ marginTop: 8, color: B.glassNavy, fontSize: 34, fontWeight: 850, lineHeight: 1 }}>
+                {Math.round(discount * 100)}% off
+              </div>
+              <div style={{ marginTop: 6, color: muted, fontSize: 14, lineHeight: 1.5 }}>
+                {/* Rodent bait is billed separately — "every application"
+                    must not claim the bundle rate for its visits when its
+                    row is on this page (codex P2). */}
+                {hasRodentBait
+                  ? `Your ${tierName} bundle rate, applied to every plan application. Rodent bait stations are billed separately.`
+                  : `Your ${tierName} bundle rate, applied to every application.`}
+              </div>
+            </section>
+          )}
+
+          {tier && (
+            <section data-glass="card" style={{ ...card, padding: 20 }}>
+              <div style={sectionTitle}>Loyalty</div>
+              <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+                {[
+                  // Renewal-credit bullet removed: it promised a tenure-
+                  // prorated dollar figure no server system grants (F-015).
+                  tierIdx < TIER_ORDER.length - 1 && {
+                    text: `${money(tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25)} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
+                    icon: 'upgrade',
+                  },
+                  tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },
+                ].filter(Boolean).map((item) => (
+                  <div key={item.text} style={{ display: 'flex', gap: 9, color: B.grayDark, fontSize: 14, lineHeight: 1.45 }}>
+                    <Icon name={item.icon} size={16} strokeWidth={1.8} style={{ color: B.glassNavy, marginTop: 1 }} />
+                    <span>{item.text}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Plan History</div>
@@ -8605,7 +8767,7 @@ function MyPlanTab({ customer, focusService }) {
                 <div key={`${event.label}-${event.date}`} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                   <span style={{ width: 8, height: 8, borderRadius: 999, background: B.wavesBlue, marginTop: 6, flexShrink: 0 }} />
                   <span>
-                    <span style={{ display: 'block', color: muted, fontSize: 14, fontWeight: 700 }}>
+                    <span style={{ display: 'block', color: muted, fontSize: 12, fontWeight: 700 }}>
                       {!isNaN(event.date) ? event.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : 'Date unavailable'}
                     </span>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2, color: B.glassNavy, fontSize: 14, fontWeight: 800 }}>
@@ -8618,7 +8780,7 @@ function MyPlanTab({ customer, focusService }) {
                 <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                   <span style={{ width: 10, height: 10, borderRadius: 999, background: B.green, marginTop: 5, flexShrink: 0 }} />
                   <span>
-                    <span style={{ display: 'block', color: muted, fontSize: 14, fontWeight: 700 }}>Now</span>
+                    <span style={{ display: 'block', color: muted, fontSize: 12, fontWeight: 700 }}>Now</span>
                     <span style={{ display: 'block', marginTop: 2, color: B.glassNavy, fontSize: 14, fontWeight: 850 }}>
                       Active - WaveGuard {tierName}
                     </span>
@@ -8641,7 +8803,7 @@ function MyPlanTab({ customer, focusService }) {
               <div style={{ marginTop: 14 }}>
                 <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Pause My Plan</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
-                  Send a pause request for review. Waves will confirm the effective dates and any billing impact before the pause begins.
+                  We will hold services and billing while your spot stays reserved.
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                   {['1', '2'].map(d => (
@@ -8651,7 +8813,6 @@ function MyPlanTab({ customer, focusService }) {
                       color: pauseDuration === d ? B.glassNavy : B.grayDark,
                       borderRadius: 8,
                       padding: '8px 12px',
-                      minHeight: 44,
                       cursor: 'pointer',
                       fontSize: 14,
                       fontWeight: 800,
@@ -8676,7 +8837,6 @@ function MyPlanTab({ customer, focusService }) {
                     border: '1px solid #D8D0C0',
                     fontFamily: FONTS.body,
                     boxSizing: 'border-box',
-                    minHeight: 44,
                   }}
                 />
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
@@ -8719,15 +8879,14 @@ function MyPlanTab({ customer, focusService }) {
               <div style={{ marginTop: 14 }}>
                 <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Cancellation Request</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
-                  Submit a cancellation request and Waves will contact you to confirm the effective date and any remaining account details.
+                  Pausing keeps your discount and service spot reserved.
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
                   {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
                     <button key={r} type="button" onClick={() => setCancelReason(r)} style={{
                       padding: '7px 11px',
-                      minHeight: 44,
                       borderRadius: 999,
-                      fontSize: 14,
+                      fontSize: 12,
                       fontWeight: 800,
                       border: `1px solid ${cancelReason === r ? B.red : '#D8D0C0'}`,
                       background: cancelReason === r ? `${B.red}10` : '#fff',
@@ -8978,7 +9137,6 @@ function ServiceTracker() {
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
   const [propertyPrefs, setPropertyPrefs] = useState(null);
-  const [propertyPrefsStatus, setPropertyPrefsStatus] = useState('loading');
   const [weather, setWeather] = useState(null);
   // Monotonic sequence for tracker fetches: the 15s poll overlaps the initial
   // load (and itself on a slow network), and an out-of-order response would
@@ -8997,16 +9155,12 @@ function ServiceTracker() {
     api.getTodayTracker()
       .then(d => { if (seq !== trackerSeqRef.current) return; setTracker(d.tracker); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) fetchTracker(); });
-    api.getPropertyPreferences()
-      .then(d => { setPropertyPrefs(d.preferences); setPropertyPrefsStatus('ready'); })
-      .catch(() => setPropertyPrefsStatus('error'));
+    api.getPropertyPreferences().then(d => setPropertyPrefs(d.preferences)).catch(() => {});
     api.getWeather().then(setWeather).catch(() => {});
   }, [fetchTracker]);
 
   useEffect(() => {
-    // Poll from Scheduled onward so a page left open advances without a
-    // reload. Only terminal states stop the interval.
-    if (!tracker || tracker.currentStep >= 7) return;
+    if (!tracker || tracker.currentStep <= 1 || tracker.currentStep >= 7) return;
     const interval = setInterval(fetchTracker, 15000);
     return () => clearInterval(interval);
   }, [tracker?.currentStep, fetchTracker]);
@@ -9038,8 +9192,12 @@ function ServiceTracker() {
   const etaDisplay = eta == null ? '—' : eta < 1 ? 'Now' : Math.round(eta);
   const hasLiveMap = !!(tracker.techPosition && tracker.customerLocation);
 
-  const terminalState = String(tracker.state || '').toLowerCase();
-  const isCancelled = terminalState === 'cancelled' || terminalState === 'canceled';
+  // Estimated completion
+  const avgDurations = { lawn: 45, pest: 35, mosquito: 25, termite: 60 };
+  const svcDuration = isLawn ? avgDurations.lawn : isPest ? avgDurations.pest : isMosquito ? avgDurations.mosquito : isTermite ? avgDurations.termite : 40;
+  const estComplete = step >= 4 && step < 6 && tracker.steps[3]?.completedAt
+    ? new Date(new Date(tracker.steps[3].completedAt).getTime() + svcDuration * 60000)
+    : null;
 
   // Status pill: maps the 7-step internal model to the 5-state UI
   // taxonomy used on the public /track/<token> page so authenticated
@@ -9048,8 +9206,7 @@ function ServiceTracker() {
   // pull from tracker.techPosition.eta.distanceMiles when available.
   const distMi = tracker.techPosition?.eta?.distanceMiles;
   const status = (() => {
-    if (terminalState === 'no_show') return { label: 'Missed visit', color: B.orange };
-    if (isCancelled) return { label: 'Visit cancelled', color: B.orange };
+    if (tracker.state === 'no_show') return { label: 'Missed visit', color: B.orange };
     if (step === 7) return { label: 'Service complete', color: B.glassNavy };
     if (step >= 4) {
       if (step === 6) return { label: 'Finishing up', color: B.glassNavy };
@@ -9090,7 +9247,7 @@ function ServiceTracker() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <div style={{
           display: 'inline-block',
-          fontSize: 14, fontWeight: 700,
+          fontSize: 12, fontWeight: 700,
           letterSpacing: 0, textTransform: 'uppercase',
           color: status.color, background: `${status.color}1A`,
           padding: '6px 12px', borderRadius: 8,
@@ -9106,7 +9263,7 @@ function ServiceTracker() {
           <div style={{ fontSize: 14, color: B.textBody, fontFamily: FONTS.ui, textAlign: 'right' }}>
             {weather.temp}°F
             {weather.forecast?.toLowerCase().includes('rain') && (
-              <div style={{ fontSize: 14, color: B.textCaption, marginTop: 2 }}>Rain possible — tech may adjust timing</div>
+              <div style={{ fontSize: 12, color: B.textCaption, marginTop: 2 }}>Rain possible — tech may adjust timing</div>
             )}
           </div>
         )}
@@ -9125,7 +9282,7 @@ function ServiceTracker() {
               Your {svcType.toLowerCase()} is {step === 2 ? 'confirmed' : 'booked'}{tracker.service?.windowStart ? ` for ${window}` : ''}.
             </div>
             <div style={{ fontSize: 16, color: B.textBody, marginTop: 12, lineHeight: 1.5 }}>
-              Tracking will update here when {techFirst} is on the way.
+              You'll get a text as soon as {techFirst} is on the way.
             </div>
           </>
         )}
@@ -9198,12 +9355,17 @@ function ServiceTracker() {
             }}>
               {techName} is {step === 6 ? 'wrapping up' : step === 5 ? 'servicing your property' : 'on your property'}.
             </div>
+            {estComplete && (
+              <div style={{ fontSize: 16, color: B.textBody, marginTop: 10, lineHeight: 1.5 }}>
+                Estimated done at {estComplete.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}.
+              </div>
+            )}
           </>
         )}
 
         {/* Step 7: NO-SHOW (terminal; status='no_show' maps to step 7 but
             must not read as a completed visit) */}
-        {step === 7 && terminalState === 'no_show' && (
+        {step === 7 && tracker.state === 'no_show' && (
           <>
             <div style={{
               fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
@@ -9217,19 +9379,8 @@ function ServiceTracker() {
           </>
         )}
 
-        {step === 7 && isCancelled && (
-          <>
-            <div style={{ fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700, lineHeight: 1.25, color: B.glassNavy }}>
-              This visit was cancelled.
-            </div>
-            <div style={{ fontSize: 16, color: B.textBody, marginTop: 8 }}>
-              No completed service is recorded for this appointment. Contact Waves if you need to reschedule.
-            </div>
-          </>
-        )}
-
         {/* Step 7: COMPLETE */}
-        {step === 7 && terminalState !== 'no_show' && !isCancelled && (
+        {step === 7 && tracker.state !== 'no_show' && (
           <>
             <div style={{
               fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
@@ -9336,16 +9487,12 @@ function ServiceTracker() {
         <div style={subCardBase}>
           <div style={{ fontSize: 16, fontWeight: 600, color: B.glassNavy, marginBottom: 8 }}>Before your tech arrives</div>
           {[
-            ...(propertyPrefsStatus === 'ready' ? [
-              propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
-                ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
-                : { icon: 'warning', text: 'No gate code on file', ok: false },
-              propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
-                ? { icon: 'checkCircle', text: `Pet plan: ${(propertyPrefs.petsSecuredPlan || propertyPrefs.petSecuredPlan).slice(0, 40)}`, ok: true }
-                : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
-            ] : propertyPrefsStatus === 'error' ? [
-              { icon: 'warning', text: 'Property access and pet details are unavailable right now', ok: false },
-            ] : []),
+            propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
+              ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
+              : { icon: 'warning', text: 'No gate code on file', ok: false },
+            propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
+              ? { icon: 'checkCircle', text: `Pet plan: ${(propertyPrefs.petsSecuredPlan || propertyPrefs.petSecuredPlan).slice(0, 40)}`, ok: true }
+              : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
             { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
             ...(isLawn ? [
               { icon: 'droplet', text: 'Turn off irrigation 24hrs before', ok: true },
@@ -9379,7 +9526,7 @@ function ServiceTracker() {
       {notes.length > 0 && (
         <div style={subCardBase}>
           <div style={{
-            fontSize: 14, fontWeight: 700, letterSpacing: 0,
+            fontSize: 12, fontWeight: 700, letterSpacing: 0,
             textTransform: 'uppercase', color: B.wavesBlue, marginBottom: 8,
           }}>Live updates</div>
           {notes.map((n, i) => (
@@ -9469,13 +9616,6 @@ function ReferTab({ customer, onSwitchTab }) {
   const [emailSubmitting, setEmailSubmitting] = useState(false);
   const [notice, setNotice] = useState(null);
   const [copied, setCopied] = useState(false);
-  const [phoneError, setPhoneError] = useState('');
-  const referralPhoneDigits = form.phone.replace(/\D/g, '');
-  const referralPhoneValid = referralPhoneDigits.length === 10
-    || (referralPhoneDigits.length === 11 && referralPhoneDigits.startsWith('1'));
-  const visiblePhoneError = phoneError || (form.phone.trim() && !referralPhoneValid
-    ? 'Enter a valid 10-digit US phone number.'
-    : '');
 
   const fetchData = ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -9518,8 +9658,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const handleCopy = async (value) => {
     if (!value) return;
     try {
-      if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('Clipboard unavailable');
-      await navigator.clipboard.writeText(value);
+      await navigator.clipboard?.writeText(value);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -9531,13 +9670,7 @@ function ReferTab({ customer, onSwitchTab }) {
     e.preventDefault();
     const friendName = form.name.trim();
     const friendPhone = form.phone.trim();
-    const phoneDigits = friendPhone.replace(/\D/g, '');
-    const validPhone = phoneDigits.length === 10 || (phoneDigits.length === 11 && phoneDigits.startsWith('1'));
-    if (!friendName || !validPhone) {
-      setPhoneError(validPhone ? '' : 'Enter a valid 10-digit US phone number.');
-      return;
-    }
-    setPhoneError('');
+    if (!friendName || !friendPhone) return;
     setSubmitting(true);
     try {
       const result = await api.submitReferral({ name: friendName, phone: friendPhone });
@@ -9611,7 +9744,7 @@ function ReferTab({ customer, onSwitchTab }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 40,
     position: 'relative',
   };
   const secondaryButton = {
@@ -9660,7 +9793,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const converted = Number(stats.converted ?? stats.totalConverted ?? 0);
   const pending = Number(stats.pending ?? referrals.filter(r => PENDING_REFERRAL_STATUSES.includes(r.status)).length);
   const clicks = Number(stats.totalClicks || 0);
-  const rewardPerReferral = data?.rewardPerReferral == null ? null : Number(data.rewardPerReferral);
+  const rewardPerReferral = Number(data?.rewardPerReferral || 25);
   const lifetimeEarned = data?.totalEarned != null
     ? Number(data.totalEarned || 0) / 100
     : Number(stats.totalEarned || 0);
@@ -9685,21 +9818,23 @@ function ReferTab({ customer, onSwitchTab }) {
     ambassador: { label: 'Ambassador', next: 'champion' },
     champion: { label: 'Champion', next: null },
   };
-  const currentMilestone = data?.milestoneLevel || 'none';
-  const nextMilestone = data?.nextMilestone || null;
+  const currentMilestone = data?.milestoneLevel || (converted >= 10 ? 'champion' : converted >= 5 ? 'ambassador' : converted >= 3 ? 'advocate' : 'none');
+  const fallbackMilestone = [
+    { level: 'advocate', threshold: 3, bonus: 2500 },
+    { level: 'ambassador', threshold: 5, bonus: 5000 },
+    { level: 'champion', threshold: 10, bonus: 10000 },
+  ].find(m => converted < m.threshold);
+  const nextMilestone = data?.nextMilestone || fallbackMilestone;
   const milestoneThreshold = Number(nextMilestone?.threshold || 0);
   const milestoneProgress = milestoneThreshold ? Math.min(100, Math.round((converted / milestoneThreshold) * 100)) : 100;
   const milestoneRemaining = Number(nextMilestone?.remaining ?? Math.max(0, milestoneThreshold - converted));
-  const openShareUrl = async (url) => {
-    let copiedLink = false;
-    if (typeof navigator.clipboard?.writeText === 'function') {
-      copiedLink = await navigator.clipboard.writeText(shareLink).then(() => true).catch(() => false);
-    }
+  const openShareUrl = (url, backupText) => {
+    navigator.clipboard?.writeText(shareLink).catch(() => {});
     window.location.href = url;
-    flash(copiedLink ? 'Text message opened. Referral link copied as a backup.' : 'Text message opened.');
+    flash(backupText);
   };
   const handleSmsShare = () => {
-    void openShareUrl(`sms:?body=${encodeURIComponent(shareText)}`);
+    openShareUrl(`sms:?body=${encodeURIComponent(shareText)}`, 'Text message opened. Referral link copied as a backup.');
   };
   // Email now routes through the branded-glass server send (Email a friend
   // form below) instead of a plain mailto draft — focus that form.
@@ -9729,7 +9864,7 @@ function ReferTab({ customer, onSwitchTab }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {notice && (
-        <div role={notice.type === 'error' ? 'alert' : 'status'} aria-live="polite" style={{
+        <div style={{
           padding: '12px 14px',
           borderRadius: 8,
           border: `1px solid ${notice.type === 'error' ? `${B.red}33` : '#BBF7D0'}`,
@@ -9754,7 +9889,7 @@ function ReferTab({ customer, onSwitchTab }) {
               background: PORTAL_SHELL.soft,
               border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.glassNavy,
-              fontSize: 14,
+              fontSize: 12,
               fontWeight: 850,
             }}>
               <Icon name="gift" size={14} strokeWidth={2} />
@@ -9771,9 +9906,7 @@ function ReferTab({ customer, onSwitchTab }) {
               Refer and Earn
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {rewardPerReferral == null
-                ? 'Share your Waves link with neighbors. Current reward details are shown when available.'
-                : `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`}
+              Share your Waves link with neighbors. You earn {money(rewardPerReferral)} account credit when a referral starts service.
             </div>
           </div>
           <div style={{
@@ -9784,13 +9917,13 @@ function ReferTab({ customer, onSwitchTab }) {
             border: `1px solid ${availableBalance > 0 ? '#BBF7D0' : '#E7E2D7'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 14, color: availableBalance > 0 ? B.green : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: availableBalance > 0 ? B.green : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               Available credit
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
               {money(availableBalance)}
             </div>
-            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
               {money(lifetimeEarned)} earned all time
             </div>
           </div>
@@ -9816,9 +9949,9 @@ function ReferTab({ customer, onSwitchTab }) {
               minHeight: 74,
               boxSizing: 'border-box',
             }}>
-              <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
               <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 17, fontWeight: 850, lineHeight: 1.15, fontFamily: FONTS.ui }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 14 }}>{item.sub}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
             </div>
           ))}
         </div>
@@ -9842,7 +9975,7 @@ function ReferTab({ customer, onSwitchTab }) {
             border: '1px solid #E7E2D7',
           }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>Code</div>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>Code</div>
               <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {referralCode || 'Auto-assigned'}
               </div>
@@ -9861,7 +9994,7 @@ function ReferTab({ customer, onSwitchTab }) {
             borderRadius: 8,
             border: '1px solid #E7E2D7',
             color: muted,
-            fontSize: 14,
+            fontSize: 12,
             lineHeight: 1.45,
             overflowWrap: 'anywhere',
           }}>
@@ -9884,7 +10017,7 @@ function ReferTab({ customer, onSwitchTab }) {
             We will send a short referral text from {customerFirstName}.
           </div>
           <form onSubmit={handleSubmit} style={{ marginTop: 16 }}>
-            <label htmlFor="portal-referral-name" style={{ fontSize: 14, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <label htmlFor="portal-referral-name" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
               Friend's Name
             </label>
             <input
@@ -9906,11 +10039,10 @@ function ReferTab({ customer, onSwitchTab }) {
                 color: B.glassNavy,
                 background: '#fff',
                 boxSizing: 'border-box',
-                minHeight: 44,
                 marginBottom: 12,
               }}
             />
-            <label htmlFor="portal-referral-phone" style={{ fontSize: 14, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <label htmlFor="portal-referral-phone" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
               Phone Number
             </label>
             <input
@@ -9919,14 +10051,9 @@ function ReferTab({ customer, onSwitchTab }) {
               type="tel"
               inputMode="tel"
               value={form.phone}
-              onChange={e => {
-                setForm(prev => ({ ...prev, phone: e.target.value }));
-                if (phoneError) setPhoneError('');
-              }}
+              onChange={e => setForm(prev => ({ ...prev, phone: e.target.value }))}
               placeholder="(941) 555-0123"
               autoComplete="tel"
-              aria-invalid={!!visiblePhoneError}
-              aria-describedby={visiblePhoneError ? 'portal-referral-phone-error' : undefined}
               className="waves-focus-ring"
               style={{
                 width: '100%',
@@ -9938,16 +10065,14 @@ function ReferTab({ customer, onSwitchTab }) {
                 color: B.glassNavy,
                 background: '#fff',
                 boxSizing: 'border-box',
-                minHeight: 44,
                 marginBottom: 14,
               }}
             />
-            {visiblePhoneError && <div id="portal-referral-phone-error" role="alert" style={{ color: B.red, fontSize: 14, marginTop: -8, marginBottom: 12 }}>{visiblePhoneError}</div>}
-            <button type="submit" disabled={!form.name.trim() || !referralPhoneValid || submitting} data-glass-accent="" style={{
+            <button type="submit" disabled={!form.name.trim() || !form.phone.trim() || submitting} data-glass-accent="" style={{
               ...primaryButton,
               width: '100%',
-              opacity: submitting || !form.name.trim() || !referralPhoneValid ? 0.65 : 1,
-              cursor: submitting || !form.name.trim() || !referralPhoneValid ? 'not-allowed' : 'pointer',
+              opacity: submitting || !form.name.trim() || !form.phone.trim() ? 0.65 : 1,
+              cursor: submitting || !form.name.trim() || !form.phone.trim() ? 'not-allowed' : 'pointer',
             }}>
               {submitting ? 'Sending...' : 'Send Invite'}
             </button>
@@ -9962,7 +10087,7 @@ function ReferTab({ customer, onSwitchTab }) {
           We will send a branded referral email from Waves with your link and their new-customer offer.
         </div>
         <form onSubmit={handleEmailSubmit} style={{ marginTop: 16 }}>
-          <label htmlFor="portal-referral-email-name" style={{ fontSize: 14, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <label htmlFor="portal-referral-email-name" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
             Friend's Name
           </label>
           <input
@@ -9984,11 +10109,10 @@ function ReferTab({ customer, onSwitchTab }) {
               color: B.glassNavy,
               background: '#fff',
               boxSizing: 'border-box',
-              minHeight: 44,
               marginBottom: 12,
             }}
           />
-          <label htmlFor="portal-referral-email" style={{ fontSize: 14, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <label htmlFor="portal-referral-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
             Email Address
           </label>
           <input
@@ -10011,7 +10135,6 @@ function ReferTab({ customer, onSwitchTab }) {
               color: B.glassNavy,
               background: '#fff',
               boxSizing: 'border-box',
-              minHeight: 44,
               marginBottom: 14,
             }}
           />
@@ -10052,7 +10175,7 @@ function ReferTab({ customer, onSwitchTab }) {
             transition: 'width 0.4s ease',
           }} />
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: muted, fontSize: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: muted, fontSize: 12 }}>
           <span>{converted} converted</span>
           <span>{milestoneThreshold ? `${milestoneThreshold} target` : 'Complete'}</span>
         </div>
@@ -10066,9 +10189,7 @@ function ReferTab({ customer, onSwitchTab }) {
               {referrals.length ? `${referrals.length} referral${referrals.length === 1 ? '' : 's'}` : 'No referrals yet'}
             </div>
           </div>
-          <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>
-            {rewardPerReferral == null ? 'Reward details unavailable' : `${money(rewardPerReferral)} per signup`}
-          </div>
+          <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{money(rewardPerReferral)} per signup</div>
         </div>
 
         {referrals.length === 0 ? (
@@ -10121,18 +10242,18 @@ function ReferTab({ customer, onSwitchTab }) {
                 }}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{nameLabel}</div>
-                    <div style={{ marginTop: 3, fontSize: 14, color: muted }}>
+                    <div style={{ marginTop: 3, fontSize: 12, color: muted }}>
                       {[phoneLabel, created && !isNaN(created) ? created.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null].filter(Boolean).join(' - ')}
                     </div>
                     {rewardEarned && reward > 0 && (
-                      <div style={{ marginTop: 6, fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>
+                      <div style={{ marginTop: 6, fontSize: 12, color: B.glassNavy, fontWeight: 850 }}>
                         {money(reward)} credit earned
                       </div>
                     )}
                   </div>
                   <span style={{
                     flexShrink: 0,
-                    fontSize: 14,
+                    fontSize: 12,
                     fontWeight: 850,
                     padding: '5px 9px',
                     borderRadius: 8,
@@ -10153,7 +10274,7 @@ function ReferTab({ customer, onSwitchTab }) {
           {[
             { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
             { icon: 'checkCircle', title: 'They start', text: 'We track the referral when they become a Waves customer.' },
-            { icon: 'coins', title: 'You earn', text: rewardPerReferral == null ? 'A qualifying reward is applied according to the current referral offer.' : `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
+            { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
           ].map(item => (
             <div key={item.title} style={{
               padding: 14,
@@ -10297,11 +10418,6 @@ function DocumentsTab({ customer, onSwitchTab }) {
       : null;
 
   const handleDownload = (doc) => {
-    const hasWorkingSource = !!(doc.downloadUrl || doc.isProjectReport || (doc.isAutoGenerated && doc.linkedServiceRecordId));
-    if (!hasWorkingSource) {
-      flash('This stored document is listed on your account but online file access is not available yet. Contact Waves for a copy.', 'error');
-      return;
-    }
     // Capacitor shell: window.open(_blank) and <a download> are both dead
     // ends in the webview (F-017/F-046) — render the report itself in an
     // in-app overlay instead. Android's webview can't display PDFs inline,
@@ -10341,11 +10457,6 @@ function DocumentsTab({ customer, onSwitchTab }) {
   };
 
   const handleShare = async (doc) => {
-    const hasWorkingSource = doc.shareable !== false && !!(doc.downloadUrl || doc.isProjectReport || (doc.isAutoGenerated && doc.linkedServiceRecordId));
-    if (!hasWorkingSource) {
-      flash('Sharing is unavailable until the stored file is connected. Contact Waves for a copy.', 'error');
-      return;
-    }
     setShareStatus(prev => ({ ...prev, [doc.id]: 'copying' }));
     try {
       // Native shell: share the report file itself when a PDF exists — the
@@ -10385,23 +10496,11 @@ function DocumentsTab({ customer, onSwitchTab }) {
     }
   };
 
-  const handleShareWithRealtor = async (doc) => {
+  const handleShareWithRealtor = (doc) => {
     const safeAddress = formatPropertyAddress(customer) || 'the property on file';
     const safeReportTitle = doc.title || 'WDO Inspection Report';
     const subject = encodeURIComponent(`WDO Inspection Report - ${safeAddress}`);
-    let shareLink = doc.viewUrl || doc.isProjectReport ? absoluteUrl(doc.viewUrl || doc.downloadUrl) : '';
-    if (!shareLink && doc.shareable !== false) {
-      try {
-        shareLink = (await api.shareDocument(doc.id)).shareLink;
-      } catch (err) {
-        console.error(err);
-      }
-    }
-    if (!shareLink) {
-      flash('This report does not have a working share link yet. Contact Waves for a copy.', 'error');
-      return;
-    }
-    const docLink = `\nReport link: ${shareLink}\n`;
+    const docLink = doc.viewUrl || doc.isProjectReport ? `\nReport link: ${absoluteUrl(doc.viewUrl || doc.downloadUrl)}\n` : '';
     const validThrough = doc.expirationDate
       ? `Valid through: ${new Date(doc.expirationDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`
       : '';
@@ -10559,7 +10658,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               background: PORTAL_SHELL.soft,
               border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.glassNavy,
-              fontSize: 14,
+              fontSize: 12,
               fontWeight: 850,
             }}>
               <Icon name="document" size={14} strokeWidth={2} />
@@ -10587,13 +10686,13 @@ function DocumentsTab({ customer, onSwitchTab }) {
             border: '1px solid #E7E2D7',
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 14, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 12, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
               On file
             </div>
             <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
               {currentTotal}
             </div>
-            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
               {totalDocs > currentTotal ? `${totalDocs} total on file` : 'Customer documents'}
             </div>
           </div>
@@ -10619,7 +10718,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               minHeight: 78,
               boxSizing: 'border-box',
             }}>
-              <div style={{ fontSize: 14, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
               <div style={{
                 marginTop: 6,
                 color: B.glassNavy,
@@ -10631,7 +10730,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
               }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 14, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.sub}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 12, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.sub}</div>
             </div>
           ))}
         </div>
@@ -10654,7 +10753,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               className="waves-focus-ring"
               style={{
                 width: '100%',
-                minHeight: 44,
+                minHeight: 40,
                 padding: '10px 12px 10px 38px',
                 borderRadius: 8,
                 border: '1px solid #D8D0C0',
@@ -10680,12 +10779,12 @@ function DocumentsTab({ customer, onSwitchTab }) {
                     border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
                     background: active ? '#F8FCFE' : '#fff',
                     color: active ? B.glassNavy : muted,
-                    fontSize: 14,
+                    fontSize: 12,
                     fontWeight: 850,
                     cursor: 'pointer',
                     fontFamily: FONTS.heading,
                     whiteSpace: 'nowrap',
-                    minHeight: 44,
+                    minHeight: 40,
                   }}
                 >
                   {f.label}
@@ -10695,7 +10794,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
           </div>
         </div>
         {hasActiveFilter && (
-          <div style={{ marginTop: 10, fontSize: 14, color: muted }}>
+          <div style={{ marginTop: 10, fontSize: 12, color: muted }}>
             Showing {resultCount} matching document{resultCount === 1 ? '' : 's'}.
           </div>
         )}
@@ -10728,7 +10827,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
           </span>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Looking for a recent service report?</div>
-            <div style={{ fontSize: 14, color: muted, marginTop: 2, lineHeight: 1.45 }}>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2, lineHeight: 1.45 }}>
               Reports from every completed service visit appear here — you can also open them any time under Visits → Completed.
             </div>
           </div>
@@ -10784,7 +10883,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
           </span>
           <div>
             <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Invoices and receipts</div>
-            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Payment records now live in Billing.</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Payment records now live in Billing.</div>
           </div>
         </div>
         <button type="button" onClick={() => onSwitchTab?.('billing')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative' }}>
@@ -10862,7 +10961,7 @@ function DocumentPreviewOverlay({ preview, onClose, onError }) {
     boxShadow: 'none',
     padding: '8px 12px',
     fontSize: 14,
-    minHeight: 44,
+    minHeight: 38,
     letterSpacing: 0,
   };
 
@@ -10871,7 +10970,6 @@ function DocumentPreviewOverlay({ preview, onClose, onError }) {
     // every other portal overlay (owner 2026-07-09); the document itself
     // stays opaque inside its iframe. Inert without the glass theme.
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} data-glass="modal" style={{
-      '--glass-modal-radius': '0px',
       position: 'fixed', inset: 0, zIndex: 9999, background: '#FAF8F3',
       display: 'flex', flexDirection: 'column',
     }}>
@@ -10932,8 +11030,8 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
     borderRadius: 8,
     boxShadow: 'none',
     padding: '8px 10px',
-    fontSize: 14,
-    minHeight: 44,
+    fontSize: 12,
+    minHeight: 34,
     letterSpacing: 0,
   };
 
@@ -11042,7 +11140,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                     }}>
                       {(doc.title || '').replace(/^Visit Report — /, '')}
                     </div>
-                    <div style={{ marginTop: 3, fontSize: 14, color: muted }}>{formatDate(doc)}</div>
+                    <div style={{ marginTop: 3, fontSize: 12, color: muted }}>{formatDate(doc)}</div>
                   </div>
                 </button>
               ))}
@@ -11063,8 +11161,11 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
               const isInsurance = doc.documentType === 'insurance_cert';
               const isServiceReport = doc.documentType === 'service_report';
               const canOpen = !!(doc.viewUrl || doc.isProjectReport);
-              const canDownload = !!(doc.downloadUrl || doc.isProjectReport || (doc.isAutoGenerated && doc.linkedServiceRecordId));
-              const canShare = doc.shareable !== false && canDownload;
+              // Stored documents without a file: the server returns
+              // downloadUrl: null / shareable: false and rejects /share with
+              // 409 — don't offer actions that can only fail.
+              const canShare = doc.shareable !== false;
+              const canDownload = !!(canOpen || doc.downloadUrl || (doc.isAutoGenerated && doc.linkedServiceRecordId));
               const meta = [
                 formatDate(doc),
                 relativeTime(doc),
@@ -11105,13 +11206,13 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                           {doc.description}
                         </div>
                       )}
-                      <div style={{ fontSize: 14, color: muted, marginTop: 5, fontWeight: 700 }}>
+                      <div style={{ fontSize: 12, color: muted, marginTop: 5, fontWeight: 700 }}>
                         {meta.join(' - ')}
                       </div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
                         {expBadge && (
                           <span style={{
-                            fontSize: 14,
+                            fontSize: 12,
                             fontWeight: 850,
                             padding: '4px 8px',
                             borderRadius: 8,
@@ -11121,7 +11222,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                         )}
                         {doc.isSharedWithThirdParty && (
                           <span style={{
-                            fontSize: 14,
+                            fontSize: 12,
                             fontWeight: 850,
                             padding: '4px 8px',
                             borderRadius: 8,
@@ -11131,7 +11232,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                         )}
                         {isInsurance && (doc.licenseNumber || customer?.licenseNumber) && (
                           <span style={{
-                            fontSize: 14,
+                            fontSize: 12,
                             fontWeight: 850,
                             padding: '4px 8px',
                             borderRadius: 8,
@@ -11141,7 +11242,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                           }}>License {doc.licenseNumber || customer.licenseNumber}</span>
                         )}
                       </div>
-                      {isWdo && canShare && (
+                      {isWdo && (
                         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
                           <button type="button" onClick={() => onShareWithRealtor(doc)} style={actionButton}>
                             <Icon name="mail" size={14} strokeWidth={2} style={{ marginRight: 5 }} />
@@ -11149,46 +11250,51 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                           </button>
                         </div>
                       )}
-                      {!canDownload && !canShare && (
-                        <div style={{ marginTop: 9, fontSize: 14, color: muted, lineHeight: 1.4 }}>
-                          Online file access is not available yet. Contact Waves for a copy.
-                        </div>
-                      )}
                     </div>
 
-                    {(canDownload || canShare) && <div style={{
-                      display: 'flex',
-                      gap: 6,
-                      flexShrink: 0,
-                      flexDirection: compact ? 'column' : 'row',
-                      alignItems: 'stretch',
-                    }}>
-                      {canShare && <button
-                        type="button"
-                        onClick={() => onShare(doc)}
-                        disabled={share === 'copying'}
-                        style={{
-                          ...actionButton,
-                          background: share === 'copied' ? '#F0FDF4' : '#fff',
-                          color: share === 'copied' ? B.green : B.glassNavy,
-                          opacity: share === 'copying' ? 0.65 : 1,
-                          cursor: share === 'copying' ? 'wait' : 'pointer',
-                        }}
-                        aria-label={`Share ${doc.title || 'document'}`}
-                      >
-                        <Icon name={share === 'copied' ? 'check' : 'share'} size={14} strokeWidth={2} style={{ marginRight: compact ? 0 : 5 }} />
-                        {!compact && (share === 'copied' ? 'Copied' : share === 'copying' ? 'Copying' : 'Share')}
-                      </button>}
-                      {canDownload && <button
-                        type="button"
-                        onClick={() => onDownload(doc)}
-                        style={actionButton}
-                        aria-label={`${canOpen ? 'Open' : 'Download'} ${doc.title || 'document'}`}
-                      >
-                        <Icon name={canOpen ? 'arrowRight' : 'document'} size={14} strokeWidth={2} style={{ marginRight: compact ? 0 : 5 }} />
-                        {!compact && (canOpen ? 'Open' : 'Download')}
-                      </button>}
-                    </div>}
+                    {(canShare || canDownload) ? (
+                      <div style={{
+                        display: 'flex',
+                        gap: 6,
+                        flexShrink: 0,
+                        flexDirection: compact ? 'column' : 'row',
+                        alignItems: 'stretch',
+                      }}>
+                        {canShare && (
+                          <button
+                            type="button"
+                            onClick={() => onShare(doc)}
+                            disabled={share === 'copying'}
+                            style={{
+                              ...actionButton,
+                              background: share === 'copied' ? '#F0FDF4' : '#fff',
+                              color: share === 'copied' ? B.green : B.glassNavy,
+                              opacity: share === 'copying' ? 0.65 : 1,
+                              cursor: share === 'copying' ? 'wait' : 'pointer',
+                            }}
+                            aria-label={`Share ${doc.title || 'document'}`}
+                          >
+                            <Icon name={share === 'copied' ? 'check' : 'share'} size={14} strokeWidth={2} style={{ marginRight: compact ? 0 : 5 }} />
+                            {!compact && (share === 'copied' ? 'Copied' : share === 'copying' ? 'Copying' : 'Share')}
+                          </button>
+                        )}
+                        {canDownload && (
+                          <button
+                            type="button"
+                            onClick={() => onDownload(doc)}
+                            style={actionButton}
+                            aria-label={`${canOpen ? 'Open' : 'Download'} ${doc.title || 'document'}`}
+                          >
+                            <Icon name={canOpen ? 'arrowRight' : 'document'} size={14} strokeWidth={2} style={{ marginRight: compact ? 0 : 5 }} />
+                            {!compact && (canOpen ? 'Open' : 'Download')}
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: 12, color: muted, fontWeight: 700, flexShrink: 0, alignSelf: 'center' }}>
+                        Not available online
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -11204,22 +11310,9 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // =========================================================================
 // NEW REQUEST OVERLAY — shared support form triggered across the portal
 // =========================================================================
-function getRequestPhotoConfirmationError(selectedCount, returnedPhotoCount) {
-  const selected = Math.max(0, Number(selectedCount) || 0);
-  if (selected === 0) return '';
-  if (returnedPhotoCount === null || returnedPhotoCount === undefined || !Number.isFinite(Number(returnedPhotoCount))) {
-    return 'Request sent, but attachment confirmation was unavailable. Contact Waves if a photo is important to the request.';
-  }
-  const saved = Math.max(0, Number(returnedPhotoCount));
-  if (saved !== selected) {
-    return `Request sent, but only ${saved} of ${selected} photos were attached. Contact Waves if the missing photo is important.`;
-  }
-  return '';
-}
-
-function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusRef }) {
+function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   useLockBodyScroll(open);
-  const dialogRef = useModalFocus(open, onClose, returnFocusRef);
+  const dialogRef = useModalFocus(open, onClose);
   const compact = useIsMobile(760);
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
@@ -11230,45 +11323,17 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [lastService, setLastService] = useState(null);
-  const [recentServices, setRecentServices] = useState([]);
-  const [recentServicesStatus, setRecentServicesStatus] = useState('loading');
   const [nextService, setNextService] = useState(null);
-  const [photoError, setPhotoError] = useState('');
-  const [submittedPhotoCount, setSubmittedPhotoCount] = useState(0);
   const fileRef = useRef(null);
 
   useEffect(() => {
     if (open) {
-      let cancelled = false;
-      setCategory('');
-      setUrgency('routine');
-      setDescription('');
-      setLocation('');
-      setPhotos([]);
-      setSubmitting(false);
-      setSubmitted(false);
       setSubmitError('');
-      setPhotoError('');
-      setSubmittedPhotoCount(0);
-      setLastService(null);
-      setRecentServices([]);
-      setNextService(null);
-      setRecentServicesStatus('loading');
-      api.getServices({ limit: 20 }).then(d => {
-        if (cancelled) return;
-        const rows = d.services || [];
-        setRecentServices(rows);
-        setLastService(rows[0] || null);
-        setRecentServicesStatus('ready');
-      }).catch(() => {
-        if (!cancelled) setRecentServicesStatus('error');
-      });
-      api.getNextService().then(d => {
-        if (!cancelled) setNextService(d.next || null);
+      api.getServices({ limit: 1 }).then(d => {
+        if (d.services?.length) setLastService(d.services[0]);
       }).catch(() => {});
-      return () => { cancelled = true; };
+      api.getNextService().then(d => setNextService(d.next || null)).catch(() => {});
     }
-    return undefined;
   }, [open]);
 
   const requestCategories = [
@@ -11294,19 +11359,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
   const propertyAddress = formatPropertyAddress(customer);
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(' ');
 
-  // Callback recognition uses the most recent matching service family, not
-  // merely the latest visit of any type (a termite project cannot establish
-  // pest/lawn callback coverage).
+  // Callback recognition: pest/lawn issue within 30 days of last service
   const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
-  const callbackService = recentServices.find((service) => {
-    const type = String(service.type || service.serviceType || service.service_type || '').toLowerCase();
-    if (category === 'pest_issue') return /pest|roach|ant|spider|interior|exterior/.test(type);
-    if (category === 'lawn_concern') return /lawn|turf|fertiliz|weed/.test(type);
-    return false;
-  });
-  const isCallbackEligible = callbackService && (() => {
-    const svcDate = parseDate(callbackService.date);
+  const isCallbackEligible = isProblemCategory && lastService && (() => {
+    const svcDate = parseDate(lastService.date);
     const daysSince = (new Date() - svcDate) / (1000 * 60 * 60 * 24);
     return daysSince <= 30 && daysSince >= 0;
   })();
@@ -11321,7 +11378,6 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
   const lastServiceDateStr = lastService ? fmtDate(lastService.date, { month: 'short', day: 'numeric' }) : '';
   const descriptionLimit = 500;
   const photoLimit = 3;
-  const maxPhotoBytes = 5 * 1024 * 1024;
   const canSubmit = !!category && !!description.trim() && !submitting;
   const photosRemaining = Math.max(0, photoLimit - photos.length);
 
@@ -11359,7 +11415,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
     flexShrink: 0,
   };
   const secondaryAction = {
-    minHeight: 44,
+    minHeight: 40,
     borderRadius: 8,
     border: `1px solid ${PORTAL_SHELL.borderStrong}`,
     background: PORTAL_SHELL.surface,
@@ -11381,7 +11437,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
 
   const readPhotoFile = (file) => new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = (ev) => resolve({ preview: ev.target.result, data: ev.target.result, name: file.name, size: file.size });
+    reader.onload = (ev) => resolve({ preview: ev.target.result, data: ev.target.result, name: file.name });
     // A corrupt/unreadable file fires error/abort instead of load — settle
     // with null so one bad image can't hang Promise.all (and the photo
     // picker) forever; nulls are filtered out below.
@@ -11393,12 +11449,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
   const handlePhoto = async (e) => {
     const files = Array.from(e.target.files || []).slice(0, photosRemaining);
     if (!files.length) return;
-    const accepted = files.filter(file => file.type.startsWith('image/') && file.size <= maxPhotoBytes);
-    const rejected = files.length - accepted.length;
-    setPhotoError(rejected
-      ? `${rejected} photo${rejected === 1 ? ' was' : 's were'} not added. Use image files no larger than 5 MB each.`
-      : '');
-    const nextPhotos = (await Promise.all(accepted.map(readPhotoFile))).filter(Boolean);
+    const nextPhotos = (await Promise.all(files.map(readPhotoFile))).filter(Boolean);
     setPhotos(prev => [...prev, ...nextPhotos].slice(0, photoLimit));
     e.target.value = '';
   };
@@ -11411,15 +11462,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
     if (photosRemaining <= 0) return;
     const result = await captureCameraPhoto();
     if (result.photo) {
-      const data = String(result.photo.data || result.photo.preview || '');
-      const base64 = data.split(',')[1] || '';
-      const approximateBytes = Math.floor((base64.length * 3) / 4);
-      if (approximateBytes > maxPhotoBytes) {
-        setPhotoError('That photo is larger than 5 MB. Choose a smaller image.');
-      } else {
-        setPhotoError('');
-        setPhotos(prev => [...prev, result.photo].slice(0, photoLimit));
-      }
+      setPhotos(prev => [...prev, result.photo].slice(0, photoLimit));
     } else if (result.unavailable) {
       fileRef.current?.click();
     }
@@ -11438,7 +11481,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
     setSubmitting(true);
     setSubmitError('');
     try {
-      const result = await api.createRequest({
+      await api.createRequest({
         category,
         subject: description.trim().slice(0, 80),
         description: description.trim(),
@@ -11446,14 +11489,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
         locationOnProperty: location || null,
         photos: photos.map(p => p.data),
       });
-      const returnedPhotoCount = result?.request?.photoCount;
-      const savedPhotoCount = returnedPhotoCount === null || returnedPhotoCount === undefined
-        ? null
-        : Number(returnedPhotoCount);
-      setSubmittedPhotoCount(savedPhotoCount);
-      setPhotoError(getRequestPhotoConfirmationError(photos.length, returnedPhotoCount));
       setSubmitted(true);
       onSubmitted?.();
+      setTimeout(() => {
+        setSubmitted(false);
+        setCategory(''); setDescription('');
+        setUrgency('routine'); setLocation(''); setPhotos([]); setSubmitError('');
+        onClose();
+      }, 2500);
     } catch (err) {
       console.error(err);
       setSubmitError(err?.message || 'Could not submit the request. Please try again or call Waves at (941) 297-5749.');
@@ -11490,7 +11533,6 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
         data-request-overlay
         data-glass="modal"
         style={{
-          '--glass-modal-radius': compact ? '0px' : '8px',
           position: 'relative',
           width: '100%',
           maxWidth: compact ? 'none' : 720,
@@ -11511,7 +11553,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
           background: 'rgba(255,255,255,0.96)',
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
-          padding: compact ? 'calc(12px + env(safe-area-inset-top, 0px)) 14px 12px' : '14px 18px',
+          padding: compact ? '12px 14px' : '14px 18px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -11557,15 +11599,12 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
               <div style={{ fontSize: 22, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, marginTop: 16 }}>Request sent</div>
               <div style={{ fontSize: 15, color: B.textBody, marginTop: 8, lineHeight: 1.55 }}>
                 Waves will review this and follow up directly.
-                {urgency === 'urgent' && isProblemCategory ? ' The request was marked urgent for team review.' : ''}
+                {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized for the next available response.' : ''}
               </div>
-              {submittedPhotoCount > 0 && <div style={{ fontSize: 14, color: B.textBody, marginTop: 6 }}>{submittedPhotoCount} photo{submittedPhotoCount === 1 ? '' : 's'} attached.</div>}
-              {photoError && <div role="alert" style={{ fontSize: 14, color: B.red, marginTop: 8, lineHeight: 1.4 }}>{photoError}</div>}
               <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
                 <a href="tel:+19412975749" style={secondaryAction}>Call</a>
                 <a href="sms:+19412975749" style={secondaryAction}>Text</a>
               </div>
-              <button type="button" onClick={onClose} style={{ ...PORTAL_PRIMARY_ACTION, width: '100%', marginTop: 10, minHeight: 44 }}>Done</button>
             </div>
           </div>
         ) : (
@@ -11589,7 +11628,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                           {customerName || 'Waves customer'}
                         </div>
                         {propertyAddress && (
-                          <div style={{ fontSize: 14, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          <div style={{ fontSize: 12, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                             {propertyAddress}
                           </div>
                         )}
@@ -11608,9 +11647,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                       </div>
                       <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}>Last service</div>
-                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>
-                          {recentServicesStatus === 'loading' ? 'Checking…' : lastServiceDateStr || 'Not available'}
-                        </div>
+                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
                       </div>
                     </div>
                   </div>
@@ -11659,7 +11696,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                         </span>
                         <span>
                           <span style={{ display: 'block', fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading }}>{compact ? c.shortLabel : c.label}</span>
-                          {!compact && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.35 }}>{c.description}</span>}
+                          {!compact && <span style={{ display: 'block', marginTop: 3, fontSize: 12, color: muted, lineHeight: 1.35 }}>{c.description}</span>}
                         </span>
                       </button>
                     );
@@ -11681,9 +11718,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                     }}>
                       <span style={{ ...iconTile, background: B.greenLight, color: B.glassNavy }}><Icon name="checkCircle" size={16} strokeWidth={2} /></span>
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.successText }}>Recent matching visit</div>
+                        <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.successText }}>Covered callback</div>
                         <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.successText, lineHeight: 1.4 }}>
-                          This may qualify as a callback because a matching service was completed recently. The Waves team will confirm coverage after reviewing your request.
+                          {activeTierName
+                            ? `Callbacks are included with your WaveGuard ${tierName} plan when an issue returns soon after service.`
+                            : 'Callbacks may be included when an issue returns soon after service.'}
                         </div>
                       </div>
                     </div>
@@ -11717,7 +11756,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8, marginTop: 12 }}>
                     {[
                       { value: 'routine', label: 'Routine', desc: 'Next business window', icon: 'clock', color: B.wavesBlue, bg: '#F8FCFE' },
-                      { value: 'urgent', label: 'Urgent', desc: 'Flag for team review', icon: 'warning', color: B.red, bg: '#FEF2F2' },
+                      { value: 'urgent', label: 'Urgent', desc: 'Prioritize response', icon: 'warning', color: B.red, bg: '#FEF2F2' },
                     ].map(u => {
                       const active = urgency === u.value;
                       return (
@@ -11745,7 +11784,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                           </span>
                           <span style={{ minWidth: 0 }}>
                             <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: active ? u.color : B.glassNavy }}>{u.label}</span>
-                            <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.35 }}>{u.desc}</span>
+                            <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{u.desc}</span>
                           </span>
                         </button>
                       );
@@ -11793,7 +11832,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                   display: 'flex',
                   justifyContent: 'space-between',
                   gap: 10,
-                  fontSize: 14,
+                  fontSize: 12,
                   color: description.length > 450 ? B.red : muted,
                 }}>
                   <span>{description.trim() ? 'Enough detail helps dispatch route this quickly.' : 'A short description is required.'}</span>
@@ -11815,14 +11854,14 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                           aria-pressed={active}
                           onClick={() => toggleLocation(l.value)}
                           style={{
-                            minHeight: 44,
+                            minHeight: 36,
                             padding: '8px 10px',
                             borderRadius: 8,
                             border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
                             background: active ? '#F8FCFE' : '#fff',
                             color: active ? B.glassNavy : B.textBody,
                             cursor: 'pointer',
-                            fontSize: 14,
+                            fontSize: 12,
                             fontWeight: 850,
                             fontFamily: FONTS.heading,
                           }}
@@ -11839,9 +11878,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
                   <div>
                     <div style={sectionTitle}>Photos</div>
-                    <div style={helperText}>Optional, up to {photoLimit}. Image files must be 5 MB or smaller each.</div>
+                    <div style={helperText}>Optional, up to {photoLimit}. Photos help the technician identify the issue before arrival.</div>
                   </div>
-                  <div style={{ fontSize: 14, color: muted, fontWeight: 850, whiteSpace: 'nowrap' }}>{photos.length}/{photoLimit}</div>
+                  <div style={{ fontSize: 12, color: muted, fontWeight: 850, whiteSpace: 'nowrap' }}>{photos.length}/{photoLimit}</div>
                 </div>
                 <input
                   ref={fileRef}
@@ -11877,7 +11916,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                     >
                       <Icon name="camera" size={22} strokeWidth={2} />
                       <span style={{ fontSize: 14 }}>Add photos</span>
-                      <span style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{photosRemaining} remaining</span>
+                      <span style={{ fontSize: 12, color: muted, fontWeight: 700 }}>{photosRemaining} remaining</span>
                     </button>
                   )}
                   <div style={{
@@ -11912,8 +11951,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                             position: 'absolute',
                             top: 5,
                             right: 5,
-                            width: 44,
-                            height: 44,
+                            width: 26,
+                            height: 26,
                             borderRadius: 8,
                             background: 'rgba(15,23,42,0.82)',
                             color: '#fff',
@@ -11931,7 +11970,6 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, returnFocusR
                     ))}
                   </div>
                 </div>
-                {photoError && <div role="alert" style={{ marginTop: 9, color: B.red, fontSize: 14, lineHeight: 1.4 }}>{photoError}</div>}
               </section>
 
               {submitError && (
@@ -12031,7 +12069,7 @@ function MyRequestsCard() {
         border: '1px solid #E7E2D7', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
       }}>
         <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Recent requests couldn&rsquo;t be loaded</div>
-        <div style={{ fontSize: 14, color: '#475569', marginTop: 4 }}>A submitted request is not affected. Retry to view its receipt.</div>
+        <div style={{ fontSize: 12, color: '#475569', marginTop: 4 }}>A submitted request is not affected. Retry to view its receipt.</div>
         <button type="button" onClick={loadRequests} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, padding: '8px 12px' }}>Try again</button>
       </section>
     );
@@ -12074,7 +12112,7 @@ function MyRequestsCard() {
         </span>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>My Requests</div>
-          <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>We've got your recent requests — our team will follow up directly.</div>
+          <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>We've got your recent requests — our team will follow up directly.</div>
         </div>
       </div>
 
@@ -12091,12 +12129,12 @@ function MyRequestsCard() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, lineHeight: 1.35 }}>{r.subject}</div>
-                  <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
+                  <div style={{ fontSize: 12, color: muted, marginTop: 4 }}>
                     {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                   </div>
                 </div>
                 <span style={{
-                  fontSize: 14,
+                  fontSize: 12,
                   fontWeight: 850,
                   padding: '5px 8px',
                   borderRadius: 8,
@@ -12107,7 +12145,7 @@ function MyRequestsCard() {
                 }}>Received</span>
               </div>
               {r.urgency === 'urgent' && (
-                <div style={{ marginTop: 8, fontSize: 14, color: B.red, fontWeight: 850, display: 'flex', alignItems: 'center', gap: 5 }}>
+                <div style={{ marginTop: 8, fontSize: 12, color: B.red, fontWeight: 850, display: 'flex', alignItems: 'center', gap: 5 }}>
                   <Icon name="warning" size={13} strokeWidth={2} /> Urgent priority
                 </div>
               )}
@@ -12146,67 +12184,13 @@ const TAB_TITLES = {
   property: 'My Property',
   learn: 'Learn and Stay Informed',
 };
-const PORTAL_TAB_IDS = Object.keys(TAB_TITLES);
-
-function readPortalLocation(search = window.location.search) {
-  try {
-    const params = new URLSearchParams(search);
-    const requestedTab = params.get('tab');
-    if (requestedTab === 'schedule') return ['visits', 'upcoming', false, null];
-    if (requestedTab === 'services') return ['visits', 'completed', false, null];
-    if (requestedTab === 'request') return ['dashboard', 'upcoming', true, null];
-    const tab = requestedTab && PORTAL_TAB_IDS.includes(requestedTab) ? requestedTab : 'dashboard';
-    const view = tab === 'visits' && params.get('view') === 'completed' ? 'completed' : 'upcoming';
-    const requestedService = params.get('service');
-    const planService = tab === 'plan' && SERVICE_CATALOG.some(service => service.id === requestedService)
-      ? requestedService
-      : null;
-    return [tab, view, false, planService];
-  } catch {
-    return ['dashboard', 'upcoming', false, null];
-  }
-}
-
-function writePortalLocation(tab, { visitsView = 'upcoming', planService = null, replace = false } = {}) {
-  try {
-    const url = new URL(window.location.href);
-    if (tab === 'dashboard') url.searchParams.delete('tab');
-    else url.searchParams.set('tab', tab);
-    if (tab === 'visits') url.searchParams.set('view', visitsView === 'completed' ? 'completed' : 'upcoming');
-    else url.searchParams.delete('view');
-    if (tab === 'plan' && planService) url.searchParams.set('service', planService);
-    else url.searchParams.delete('service');
-    const method = replace ? 'replaceState' : 'pushState';
-    window.history[method]({}, '', `${url.pathname}${url.search}${url.hash}`);
-  } catch {
-    // Navigation still works in restricted webviews that disallow History API writes.
-  }
-}
-
-function clearRequestDeepLink(activeTab, visitsView = 'upcoming', planService = null) {
-  const [, , locationOpensRequest] = readPortalLocation();
-  if (!locationOpensRequest) return;
-  writePortalLocation(activeTab, {
-    replace: true,
-    visitsView,
-    planService,
-  });
-}
-
-function resetPortalScroll() {
-  document.documentElement.scrollTop = 0;
-  document.body.scrollTop = 0;
-  const main = document.getElementById('portal-main');
-  if (main) main.scrollTop = 0;
-}
 
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
-function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef }) {
-  const button = (t, onClick, isActive, buttonRef = null) => (
+function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
+  const button = (t, onClick, isActive) => (
     <button
       key={t.id}
-      ref={buttonRef}
       type="button"
       onClick={onClick}
       aria-current={isActive ? 'page' : undefined}
@@ -12228,7 +12212,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef 
         background: B.wavesBlue,
       }} />}
       <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
-      <span style={{ fontSize: 14, fontWeight: isActive ? 850 : 700, letterSpacing: 0 }}>{t.label}</span>
+      <span style={{ fontSize: 10, fontWeight: isActive ? 850 : 700, letterSpacing: 0 }}>{t.label}</span>
     </button>
   );
   return (
@@ -12247,13 +12231,12 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef 
         { id: 'more', label: 'More', icon: 'more' },
         onOpenMore,
         moreActive || MORE_TABS.some(m => m.id === activeTab),
-        moreButtonRef,
       )}
     </nav>
   );
 }
 
-function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, returnFocusRef }) {
+function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
@@ -12306,7 +12289,6 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, returnFocu
       }}
     >
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="More navigation" data-more-sheet="" data-glass="modal" style={{
-        '--glass-modal-radius': '8px 8px 0 0',
         background: PORTAL_SHELL.page,
         borderRadius: '8px 8px 0 0',
         position: 'relative',
@@ -12358,7 +12340,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, returnFocu
                 </span>
                 <span style={{ minWidth: 0, flex: 1 }}>
                   <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>{t.label}</span>
-                  <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.35 }}>{t.description}</span>
+                  <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{t.description}</span>
                 </span>
                 <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: muted }} />
               </button>
@@ -12370,7 +12352,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, returnFocu
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={iconTile}><Icon name="sos" size={18} strokeWidth={2} /></span>
             <div>
-              <div style={{ fontSize: 14, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Support</div>
+              <div style={{ fontSize: 12, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Support</div>
               <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>Need help with service?</div>
             </div>
           </div>
@@ -12382,18 +12364,10 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, returnFocu
           }}>
             <a href="tel:+19412975749" onClick={onClose} style={supportActionStyle}>Call</a>
             <a href="sms:+19412975749" onClick={onClose} style={supportActionStyle}>Text</a>
-            <button type="button" onClick={() => {
-              returnFocusRef?.current?.focus({ preventScroll: true });
-              onRequest?.();
-              onClose();
-            }} style={supportActionStyle}>
+            <button type="button" onClick={() => { onRequest?.(); onClose(); }} style={supportActionStyle}>
               Request
             </button>
-            <button type="button" onClick={() => {
-              returnFocusRef?.current?.focus({ preventScroll: true });
-              onChat?.();
-              onClose();
-            }} style={supportActionStyle}>
+            <button type="button" onClick={() => { onChat?.(); onClose(); }} style={supportActionStyle}>
               Chat
             </button>
           </div>
@@ -12430,15 +12404,13 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
         type="button"
         key={id}
         onClick={() => onSubTabChange(id)}
-        role="tab"
-        aria-selected={isActive}
         style={{
           flex: 1, padding: '9px 14px', borderRadius: 8, border: `1px solid ${isActive ? B.wavesBlue : 'transparent'}`,
           cursor: 'pointer', fontSize: 14, fontWeight: 850,
           fontFamily: FONTS.heading,
           background: isActive ? '#F8FCFE' : 'transparent',
           color: isActive ? B.glassNavy : muted,
-          minHeight: 44,
+          minHeight: 38,
         }}
       >{label}</button>
     );
@@ -12457,7 +12429,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
               background: PORTAL_SHELL.soft,
               border: `1px solid ${PORTAL_SHELL.softBorder}`,
               color: B.glassNavy,
-              fontSize: 14,
+              fontSize: 12,
               fontWeight: 850,
             }}>
               <Icon name="calendar" size={14} strokeWidth={2} />
@@ -12486,7 +12458,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
             padding: 4,
             border: '1px solid rgba(255,255,255,0.65)',
             minWidth: compact ? '100%' : 260,
-          }} role="tablist" aria-label="Visit history">
+          }}>
             {pill('upcoming', 'Upcoming')}
             {pill('completed', 'Completed')}
           </div>
@@ -12500,10 +12472,10 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
 // =========================================================================
 // AI CHAT WIDGET
 // =========================================================================
-function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
+function ChatWidget({ customer, onClose, initialQuestion }) {
   // Rendered only while open — lock the page behind the chat overlay.
   useLockBodyScroll(true);
-  const dialogRef = useModalFocus(true, onClose, returnFocusRef);
+  const dialogRef = useModalFocus(true, onClose);
   const compact = useIsMobile(760);
   const firstName = customer?.firstName || customer?.first_name || '';
   const [messages, setMessages] = useState([
@@ -12523,6 +12495,8 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
     if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
     setReportState(prev => ({ ...prev, [idx]: 'sending' }));
     try {
+      // api.request, not raw fetch: access tokens expire after 15 minutes and
+      // only the api client can rotate the refresh session on a 401.
       await api.request('/ai/chat/report', {
         method: 'POST',
         body: JSON.stringify({ sessionId: sessionId.current, messageContent: content }),
@@ -12570,6 +12544,8 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
     setSending(true);
 
     try {
+      // api.request, not raw fetch: access tokens expire after 15 minutes and
+      // only the api client can rotate the refresh session on a 401.
       const data = await api.request('/ai/chat', {
         method: 'POST',
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
@@ -12601,7 +12577,6 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
         data-chat-sheet=""
         data-glass="modal"
         style={{
-          '--glass-modal-radius': compact ? '8px 8px 0 0' : '8px',
           background: PORTAL_SHELL.page,
           position: 'relative',
           boxSizing: 'border-box',
@@ -12638,13 +12613,13 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
             <img src="/waves-logo.png" alt="Waves" style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }} />
             <div>
               <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>Waves Assistant</div>
-              <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2 }}>AI help with account questions</div>
+              <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>Usually replies instantly</div>
             </div>
           </div>
           <ShellCloseButton onClick={onClose} label="Close chat" />
         </div>
 
-        <div role="log" aria-live="polite" aria-relevant="additions" style={{
+        <div style={{
           flex: compact ? '1 1 300px' : '1 1 360px',
           minHeight: 0,
           overflowY: 'auto',
@@ -12669,7 +12644,7 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
                 ...(msg.role === 'user' ? {
                   background: B.glassNavy, color: '#fff',
                 } : msg.role === 'system' ? {
-                  background: PORTAL_SHELL.soft, color: PORTAL_SHELL.text, fontSize: 14, fontWeight: 700,
+                  background: PORTAL_SHELL.soft, color: PORTAL_SHELL.text, fontSize: 12, fontWeight: 700,
                   border: `1px solid ${PORTAL_SHELL.softBorder}`,
                 } : {
                   background: PORTAL_SHELL.surface, color: PORTAL_SHELL.text,
@@ -12680,7 +12655,7 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
               </div>
               {msg.reportable && (
                 reportState[i] === 'done' ? (
-                  <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontFamily: FONTS.body, marginTop: 4, paddingLeft: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontFamily: FONTS.body, marginTop: 4, paddingLeft: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
                     <Icon name="check" size={12} strokeWidth={2} /> Reported — our team will review this response.
                   </div>
                 ) : (
@@ -12691,8 +12666,8 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
                     aria-label="Report this AI response as inappropriate"
                     style={{
                       border: 'none', background: 'transparent', cursor: 'pointer',
-                      fontSize: 14, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
-                      textDecoration: 'underline', padding: '8px 4px', marginTop: 2, minHeight: 44,
+                      fontSize: 12, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
+                      textDecoration: 'underline', padding: '2px 4px', marginTop: 2,
                     }}
                   >
                     {reportState[i] === 'sending' ? 'Reporting…'
@@ -12704,7 +12679,7 @@ function ChatWidget({ customer, onClose, initialQuestion, returnFocusRef }) {
             </div>
           ))}
           {sending && (
-            <div role="status" aria-label="Waves Assistant is typing" style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
               <div style={{ background: PORTAL_SHELL.surface, padding: '10px 14px', borderRadius: 8, fontSize: 14, color: PORTAL_SHELL.muted, border: `1px solid ${PORTAL_SHELL.border}` }}>
                 <span data-chat-typing="" style={{ animation: 'pulse 1.5s ease infinite' }}>{'•••'}</span>
               </div>
@@ -12769,7 +12744,20 @@ export default function PortalPage() {
   // preselected; ?tab=request opens the request overlay instead of routing
   // to a tab; ?tab=plan&service=<catalog id> (e.g. lawn_care) lands on My
   // Plan with that service row pre-expanded.
-  const [initialTab, initialVisitsSubTab, initialOpenRequest, initialPlanService] = readPortalLocation();
+  const [initialTab, initialVisitsSubTab, initialOpenRequest, initialPlanService] = (() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const t = params.get('tab');
+      if (t === 'schedule') return ['visits', 'upcoming', false, null];
+      if (t === 'services') return ['visits', 'completed', false, null];
+      if (t === 'request') return ['dashboard', 'upcoming', true, null];
+      const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+      const tab = t && allowed.includes(t) ? t : 'dashboard';
+      const svc = params.get('service');
+      const planService = tab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null;
+      return [tab, 'upcoming', false, planService];
+    } catch { return ['dashboard', 'upcoming', false, null]; }
+  })();
   const [activeTab, setActiveTab] = useState(initialTab);
   // Which My Plan service row to open expanded on the next Plan mount —
   // deep-link above or the home lawn teaser; nav clicks reset it.
@@ -12781,67 +12769,21 @@ export default function PortalPage() {
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
   const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest);
-  const requestReturnFocusRef = useRef(null);
-  const openRequestOverlay = (returnTarget = null) => {
-    requestReturnFocusRef.current = returnTarget;
-    setShowReportIssue(true);
-  };
-  const flushPropertyEdits = useCallback(async ({ notifyOnFailure = true } = {}) => {
-    if (activeTab !== 'property') return true;
-    const waiters = [];
-    window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
-    const results = await Promise.allSettled(waiters);
-    const saved = results.every(result => result.status === 'fulfilled');
-    if (!saved && notifyOnFailure) {
-      showCustomerAlert('Your latest property edits could not be saved, so My Property is still open. Try saving again before leaving.');
-    }
-    return saved;
-  }, [activeTab]);
   // Translates legacy 'schedule' / 'services' / 'request' targets into
   // their consolidated surfaces (Visits sub-tabs, request overlay) so
   // existing call-sites route correctly without rewriting each one.
-  const switchTab = async (id) => {
-    if (id === 'request') {
-      openRequestOverlay();
-      return true;
-    }
-    const targetTab = id === 'schedule' || id === 'services' ? 'visits' : id;
-    if (targetTab !== activeTab && !(await flushPropertyEdits())) return false;
+  const switchTab = (id) => {
     // Plain nav clears any pending row focus so Plan doesn't keep
     // re-expanding a row the customer already closed.
     setPlanFocusService(null);
-    if (id === 'schedule') {
-      setVisitsSubTab('upcoming');
-      setActiveTab('visits');
-      writePortalLocation('visits', { visitsView: 'upcoming' });
-      resetPortalScroll();
-      return true;
-    }
-    if (id === 'services') {
-      setVisitsSubTab('completed');
-      setActiveTab('visits');
-      writePortalLocation('visits', { visitsView: 'completed' });
-      resetPortalScroll();
-      return true;
-    }
+    if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); return; }
+    if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); return; }
+    if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
-    writePortalLocation(id, { visitsView: id === 'visits' ? visitsSubTab : 'upcoming' });
-    resetPortalScroll();
-    return true;
   };
-  const openPlanService = async (svcId) => {
-    if (activeTab !== 'plan' && !(await flushPropertyEdits())) return false;
+  const openPlanService = (svcId) => {
     setPlanFocusService(svcId);
     setActiveTab('plan');
-    writePortalLocation('plan', { planService: svcId });
-    resetPortalScroll();
-    return true;
-  };
-  const switchVisitsSubTab = (nextView) => {
-    const normalized = nextView === 'completed' ? 'completed' : 'upcoming';
-    setVisitsSubTab(normalized);
-    writePortalLocation('visits', { visitsView: normalized });
-    resetPortalScroll();
   };
   const headerNavItems = [...PRIMARY_TABS, ...MORE_TABS];
   const headerNavButton = (tab) => {
@@ -12855,7 +12797,7 @@ export default function PortalPage() {
         style={{
           border: `1px solid ${isActive ? PORTAL_SHELL.softBorder : 'transparent'}`,
           borderRadius: 8,
-          minHeight: 44,
+          minHeight: 40,
           padding: '8px 8px',
           display: 'inline-flex',
           alignItems: 'center',
@@ -12866,7 +12808,7 @@ export default function PortalPage() {
           background: isActive ? PORTAL_SHELL.surface : 'transparent',
           color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
           fontFamily: FONTS.body,
-          fontSize: 14,
+          fontSize: 12,
           fontWeight: 800,
           cursor: 'pointer',
           boxShadow: isActive ? PORTAL_SHELL.shadowSoft : 'none',
@@ -12878,46 +12820,15 @@ export default function PortalPage() {
     );
   };
   const [showChat, setShowChat] = useState(false);
-  const chatReturnFocusRef = useRef(null);
-  const openChatOverlay = (returnTarget = null) => {
-    chatReturnFocusRef.current = returnTarget;
-    setShowChat(true);
-  };
   // Question handed from the Waves AI bar into the assistant on open.
   const [chatPrompt, setChatPrompt] = useState(null);
   const [showMoreSheet, setShowMoreSheet] = useState(false);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
-  const [propertySwitchError, setPropertySwitchError] = useState('');
   const menuRef = useRef(null);
-  const accountMenuButtonRef = useRef(null);
-  const mobileMoreButtonRef = useRef(null);
   // Home is the hero surface (full scene with orbs). Glass is the unconditional
   // portal theme now, so the scene always mounts.
-  useGlassSurface(true, 'full', 'app');
-
-  useEffect(() => {
-    const handleHistoryNavigation = async () => {
-      const [tab, visitView, openRequest, service] = readPortalLocation();
-      if (tab !== activeTab && !(await flushPropertyEdits())) {
-        writePortalLocation(activeTab, {
-          replace: true,
-          visitsView: activeTab === 'visits' ? visitsSubTab : 'upcoming',
-          planService: activeTab === 'plan' ? planFocusService : null,
-        });
-        return;
-      }
-      setActiveTab(tab);
-      setVisitsSubTab(visitView);
-      setPlanFocusService(service);
-      setShowReportIssue(openRequest);
-      setShowMenu(false);
-      setShowMoreSheet(false);
-      resetPortalScroll();
-    };
-    window.addEventListener('popstate', handleHistoryNavigation);
-    return () => window.removeEventListener('popstate', handleHistoryNavigation);
-  }, [activeTab, flushPropertyEdits, planFocusService, visitsSubTab]);
+  useGlassSurface(true, 'full');
 
   // Close menu on outside click
   useEffect(() => {
@@ -12949,44 +12860,34 @@ export default function PortalPage() {
   const propertyRenderKey = `${customer.id}:${requestRefreshKey}`;
   const selectProperty = async (propertyId) => {
     if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
-    setPropertySwitchError('');
     setSwitchingPropertyId(propertyId);
+    // Flush PropertyTab's debounced edits BEFORE switchProperty replaces the
+    // access token — a delayed save after the swap would write the previous
+    // property's gate/pet details into the newly selected account.
     const waiters = [];
     window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
-    const saves = await Promise.allSettled(waiters);
+    // Also await saves already in flight — e.g. one started by PropertyTab's
+    // unmount flush after tab navigation removed its event listener.
+    const saves = await Promise.allSettled([...waiters, ...inFlightPropertyPrefSaves]);
     if (saves.some(result => result.status === 'rejected')) {
       setSwitchingPropertyId(null);
       showCustomerAlert('Your latest property edits could not be saved, so we kept this property open. Try saving again before switching.');
       return;
     }
-    let switched = false;
-    try {
-      switched = await switchProperty(propertyId);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setSwitchingPropertyId(null);
-    }
+    const switched = await switchProperty(propertyId);
+    setSwitchingPropertyId(null);
     if (switched) {
       setActiveTab('dashboard');
       setVisitsSubTab('upcoming');
-      writePortalLocation('dashboard', { replace: true });
-      resetPortalScroll();
       setShowMenu(false);
       setShowMoreSheet(false);
       setRequestRefreshKey(key => key + 1);
-    } else {
-      setPropertySwitchError('Could not switch properties. Your current property is still active.');
     }
-  };
-  const closeRequestOverlay = () => {
-    setShowReportIssue(false);
-    clearRequestDeepLink(activeTab, visitsSubTab, planFocusService);
   };
   const activePropertyAddress = formatPropertyAddress(customer);
   const accountMenuItems = [
     { icon: 'home', label: 'Home', sub: 'Portal overview', tab: 'dashboard', action: () => switchTab('dashboard') },
-    { icon: 'plan', label: 'My Plan', sub: 'Scheduled services and billing', tab: 'plan', action: () => switchTab('plan') },
+    { icon: 'plan', label: 'My Plan', sub: 'Services and bundle savings', tab: 'plan', action: () => switchTab('plan') },
     { icon: 'calendar', label: 'Visits', sub: 'Upcoming and completed service', tab: 'visits', action: () => switchTab('visits') },
     { icon: 'card', label: 'Billing', sub: 'Payments, cards, and history', tab: 'billing', action: () => switchTab('billing') },
     { icon: 'gift', label: 'Refer & Earn', sub: 'Share Waves with neighbors', tab: 'refer', action: () => switchTab('refer') },
@@ -12997,8 +12898,8 @@ export default function PortalPage() {
   const accountSupportActions = [
     { icon: 'phone', label: 'Call', href: 'tel:+19412975749' },
     { icon: 'chat', label: 'Text', href: 'sms:+19412975749' },
-    { icon: 'wrench', label: 'Request', action: () => openRequestOverlay(accountMenuButtonRef.current) },
-    { icon: 'bot', label: 'Chat', action: () => openChatOverlay(accountMenuButtonRef.current) },
+    { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
+    { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
   ];
   const shellMaxWidth = 1040;
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
@@ -13021,7 +12922,7 @@ export default function PortalPage() {
         background: PORTAL_SHELL.surface,
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
-        padding: '12px max(16px, calc((100vw - 1040px) / 2 + 16px))',
+        padding: '12px max(16px, calc((100vw - 1440px) / 2 + 16px))',
         // Clear the iPhone notch/status bar in standalone PWA mode (viewport-fit=cover).
         paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -13041,10 +12942,10 @@ export default function PortalPage() {
           {!isMobileShell && (
             <button
               type="button"
-              onClick={() => openRequestOverlay()}
+              onClick={() => setShowReportIssue(true)}
               data-glass-accent=""
               style={{
-                minHeight: 44,
+                minHeight: 38,
                 borderRadius: 10,
                 border: 'none',
                 background: PORTAL_SHELL.text,
@@ -13068,7 +12969,6 @@ export default function PortalPage() {
           <NotificationBell type="customer" />
           <div ref={menuRef} style={{ position: 'relative' }}>
             <button
-              ref={accountMenuButtonRef}
               type="button"
               onClick={() => setShowMenu(!showMenu)}
               aria-label="Account menu"
@@ -13076,8 +12976,8 @@ export default function PortalPage() {
               aria-expanded={showMenu}
               data-glass="chip"
               style={{
-                minHeight: 44,
-                width: isMobileShell ? 44 : 'auto',
+                minHeight: 38,
+                width: isMobileShell ? 38 : 'auto',
                 borderRadius: 10,
                 background: PORTAL_SHELL.surface,
                 border: `1px solid ${PORTAL_SHELL.borderStrong}`,
@@ -13104,7 +13004,7 @@ export default function PortalPage() {
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: 14,
+                fontSize: 12,
                 fontWeight: 850,
                 flexShrink: 0,
               }}>{initials}</span>
@@ -13117,7 +13017,6 @@ export default function PortalPage() {
             </button>
             {showMenu && (
               <div ref={accountMenuDialogRef} role="dialog" aria-modal="true" aria-label="Account menu" data-glass="modal" style={{
-                '--glass-modal-radius': '16px',
                 position: 'absolute',
                 right: 0,
                 top: 46,
@@ -13138,7 +13037,7 @@ export default function PortalPage() {
                 zIndex: 200,
               }}>
                 <div style={{ padding: 14, background: PORTAL_SHELL.surface, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
-                  <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontWeight: 850, letterSpacing: 0, textTransform: 'uppercase', marginBottom: 10 }}>
+                  <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, letterSpacing: 0, textTransform: 'uppercase', marginBottom: 10 }}>
                     Account
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -13160,31 +13059,25 @@ export default function PortalPage() {
                       <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>
                         {customerName}
                       </div>
-                      <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
+                      <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
                       {activePropertyAddress && (
-                        <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {activePropertyAddress}
                         </div>
                       )}
                     </div>
                   </div>
                 </div>
-                {(propertiesError || propertySwitchError) && (
+                {propertiesError && (
                   <div role="alert" style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}`, background: '#FFF7ED' }}>
-                    <div style={{ fontSize: 14, color: PORTAL_SHELL.text, lineHeight: 1.4 }}>{propertySwitchError || propertiesError}</div>
-                    <button
-                      type="button"
-                      onClick={propertySwitchError ? () => setPropertySwitchError('') : refreshProperties}
-                      style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 8, padding: '7px 10px', minHeight: 44 }}
-                    >
-                      {propertySwitchError ? 'Dismiss' : 'Try again'}
-                    </button>
+                    <div style={{ fontSize: 14, color: PORTAL_SHELL.text, lineHeight: 1.4 }}>{propertiesError}</div>
+                    <button type="button" onClick={refreshProperties} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 8, padding: '7px 10px', minHeight: 34 }}>Try again</button>
                   </div>
                 )}
                 {canSwitchProperties && (
                   <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
                     <div style={{
-                      fontSize: 14,
+                      fontSize: 12,
                       color: PORTAL_SHELL.muted,
                       fontWeight: 850,
                       letterSpacing: 0,
@@ -13219,12 +13112,12 @@ export default function PortalPage() {
                               <span style={{ fontSize: 14, fontWeight: 800, minWidth: 0 }}>
                                 {property.profileLabel || (property.isPrimaryProfile ? 'Primary' : 'Property')}
                               </span>
-                              {active && <span style={{ fontSize: 14, color: B.wavesBlue, fontWeight: 850 }}>Current</span>}
-                              {switchingPropertyId === property.id && <span style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontWeight: 850 }}>Switching</span>}
+                              {active && <span style={{ fontSize: 12, color: B.wavesBlue, fontWeight: 850 }}>Current</span>}
+                              {switchingPropertyId === property.id && <span style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850 }}>Switching</span>}
                             </div>
                             {address && (
                               <div style={{
-                                fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2,
+                                fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2,
                                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                               }}>
                                 {address}
@@ -13238,7 +13131,7 @@ export default function PortalPage() {
                 )}
                 <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
                   <div style={{
-                    fontSize: 14,
+                    fontSize: 12,
                     color: PORTAL_SHELL.muted,
                     fontWeight: 850,
                     textTransform: 'uppercase',
@@ -13259,7 +13152,7 @@ export default function PortalPage() {
                         justifyContent: 'center',
                         gap: 5,
                         fontFamily: FONTS.heading,
-                        fontSize: 14,
+                        fontSize: 12,
                         fontWeight: 850,
                         textDecoration: 'none',
                         cursor: 'pointer',
@@ -13281,11 +13174,7 @@ export default function PortalPage() {
                         <button
                           key={action.label}
                           type="button"
-                          onClick={() => {
-                            accountMenuButtonRef.current?.focus({ preventScroll: true });
-                            action.action();
-                            setShowMenu(false);
-                          }}
+                          onClick={() => { action.action(); setShowMenu(false); }}
                           style={sharedStyle}
                         >
                           {content}
@@ -13331,7 +13220,7 @@ export default function PortalPage() {
                         </span>
                         <span style={{ minWidth: 0, flex: 1 }}>
                           <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>{item.label}</span>
-                          <span style={{ display: 'block', marginTop: 1, fontSize: 14, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.sub}</span>
+                          <span style={{ display: 'block', marginTop: 1, fontSize: 12, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.sub}</span>
                         </span>
                         {isActive && <Icon name="check" size={15} strokeWidth={2.2} style={{ color: B.wavesBlue }} />}
                       </button>
@@ -13340,10 +13229,13 @@ export default function PortalPage() {
                   <button
                     type="button"
                     onClick={async () => {
-                      if (!(await flushPropertyEdits())) {
-                        setShowMenu(false);
-                        return;
-                      }
+                      // Flush any debounced property edits while the token is
+                      // still valid — logout revokes the refresh session, so a
+                      // delayed PUT would be silently lost (or, after a fast
+                      // re-login, could fire under the next account's token).
+                      const waiters = [];
+                      window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
+                      await Promise.allSettled([...waiters, ...inFlightPropertyPrefSaves]);
                       logout();
                       setShowMenu(false);
                     }}
@@ -13391,7 +13283,7 @@ export default function PortalPage() {
                         await api.deleteAccount();
                         logout();
                         setShowMenu(false);
-                      } catch {
+                      } catch (e) {
                         showCustomerAlert('Sorry — we couldn’t delete your account just now. Please try again or contact support.');
                       }
                     }}
@@ -13435,7 +13327,7 @@ export default function PortalPage() {
       {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
           that are programmatically focusable — without it the skip link
           scrolls but Tab keeps walking the header. */}
-      <main id="portal-main" tabIndex={-1} style={{ padding: `16px 16px ${isMobileShell ? 'calc(100px + env(safe-area-inset-bottom, 0px))' : '32px'}`, maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
+      <main id="portal-main" tabIndex={-1} style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
             Home · Plan · Visits · Billing · Refer · Documents · My Property ·
@@ -13456,17 +13348,15 @@ export default function PortalPage() {
             {headerNavItems.map(headerNavButton)}
           </nav>
         )}
+        <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} />}
-        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={switchVisitsSubTab} onRequestVisit={() => openRequestOverlay()} />}
+        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
-        <div style={{ marginTop: 16 }}>
-          <WavesAiBar compact={isMobileShell} tab={activeTab} onAsk={(q) => { setChatPrompt(q); openChatOverlay(); }} />
-        </div>
       </main>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}
@@ -13476,7 +13366,6 @@ export default function PortalPage() {
           onSelect={switchTab}
           onOpenMore={() => setShowMoreSheet(true)}
           moreActive={showMoreSheet}
-          moreButtonRef={mobileMoreButtonRef}
         />
       )}
       {isMobileShell && showMoreSheet && (
@@ -13484,22 +13373,20 @@ export default function PortalPage() {
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
           onClose={() => setShowMoreSheet(false)}
-          onRequest={() => openRequestOverlay(mobileMoreButtonRef.current)}
-          onChat={() => openChatOverlay(mobileMoreButtonRef.current)}
-          returnFocusRef={mobileMoreButtonRef}
+          onRequest={() => setShowReportIssue(true)}
+          onChat={() => setShowChat(true)}
         />
       )}
 
       {/* AI Chat Widget */}
-      {showChat && <ChatWidget customer={customer} initialQuestion={chatPrompt} returnFocusRef={chatReturnFocusRef} onClose={() => { setShowChat(false); setChatPrompt(null); }} />}
+      {showChat && <ChatWidget customer={customer} initialQuestion={chatPrompt} onClose={() => { setShowChat(false); setChatPrompt(null); }} />}
 
       {/* Report Issue Overlay */}
       <ReportIssueOverlay
         open={showReportIssue}
-        onClose={closeRequestOverlay}
+        onClose={() => setShowReportIssue(false)}
         onSubmitted={() => setRequestRefreshKey(k => k + 1)}
         customer={customer}
-        returnFocusRef={requestReturnFocusRef}
       />
     </div>
     </PortalGlassContext.Provider>
@@ -13508,4 +13395,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ChatWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, clearRequestDeepLink, getRequestPhotoConfirmationError };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection };
