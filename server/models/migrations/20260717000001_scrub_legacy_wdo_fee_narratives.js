@@ -13,7 +13,11 @@
 // the write guard itself. Down is a no-op — the redaction is deliberate
 // data hygiene, not reversible.
 const { redactInspectionFeeCues, containsInspectionFeeCue } = require('@waves/report-redaction');
-const { PROJECT_TYPE_KEYS, projectTypeHasInternalFindingKeys } = require('../../services/project-types');
+const {
+  PROJECT_TYPE_KEYS,
+  projectTypeHasInternalFindingKeys,
+  PROJECT_TITLE_MAX_LENGTH,
+} = require('../../services/project-types');
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('projects'))) return;
@@ -39,7 +43,11 @@ exports.up = async function up(knex) {
     for (const field of ['recommendations', 'title']) {
       const value = row[field];
       if (!value || !containsInspectionFeeCue(value)) continue;
-      const scrubbed = redactInspectionFeeCues(value);
+      let scrubbed = redactInspectionFeeCues(value);
+      // the marker is longer than a short amount ("$1" → "[fee removed]"),
+      // and projects.title is varchar(200) — clamp so a near-limit title
+      // can't abort the migration on the column constraint
+      if (field === 'title') scrubbed = scrubbed.slice(0, PROJECT_TITLE_MAX_LENGTH);
       if (scrubbed === value) continue;
       await knex('projects')
         .where({ id: row.id })

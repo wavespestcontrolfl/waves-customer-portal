@@ -1042,6 +1042,16 @@ function redactInspectionFeeCuesForType(text, projectTypeKey) {
     : text;
 }
 
+// projects.title is varchar(200) and the scrub can LENGTHEN text ("$1" →
+// "[fee removed]"), so every persisted title is clamped after redaction —
+// otherwise a near-limit title aborts the write (or the backfill migration)
+// on the column constraint (codex #2817).
+const PROJECT_TITLE_MAX_LENGTH = 200;
+function redactProjectTitleForWrite(title, projectTypeKey) {
+  const scrubbed = redactInspectionFeeCuesForType(title, projectTypeKey);
+  return typeof scrubbed === 'string' ? scrubbed.slice(0, PROJECT_TITLE_MAX_LENGTH) : scrubbed;
+}
+
 // Deep cue detection over a findings object (or JSON string of one).
 function findingsContainFeeCue(rawFindings) {
   let parsed = rawFindings;
@@ -1149,6 +1159,8 @@ module.exports = {
   filingBinaryMayDiscloseFee,
   customerSafeServiceNotes,
   redactInspectionFeeCuesForType,
+  redactProjectTitleForWrite,
+  PROJECT_TITLE_MAX_LENGTH,
   projectTypeHasInternalFindingKeys,
   projectTypeConfigHasInternalFindingKeys,
 };

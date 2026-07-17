@@ -7,7 +7,9 @@ const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
   redactInspectionFeeCuesForType,
+  redactProjectTitleForWrite,
   projectTypeHasInternalFindingKeys,
+  PROJECT_TITLE_MAX_LENGTH,
 } = require('../services/project-types');
 
 describe('stripInternalFindingKeys', () => {
@@ -66,6 +68,19 @@ describe('stripInternalFindingKeys', () => {
     const findings = { comments: 'A follow-up inspection fee of $100 applies.' };
     expect(stripInternalFindingKeys(findings, { redactValues: false }))
       .toEqual({ comments: 'A follow-up inspection fee of $100 applies.' });
+  });
+});
+
+describe('redactProjectTitleForWrite', () => {
+  test('a scrubbed title never exceeds the varchar(200) column', () => {
+    const nearLimit = `${'x'.repeat(180)} inspection fee $1`;
+    const scrubbed = redactProjectTitleForWrite(nearLimit, 'wdo_inspection');
+    expect(scrubbed.length).toBeLessThanOrEqual(PROJECT_TITLE_MAX_LENGTH);
+    expect(scrubbed).not.toContain('$1');
+  });
+  test('non-fee types pass through untouched', () => {
+    const title = 'Rodent trapping — inspection fee $100 applies';
+    expect(redactProjectTitleForWrite(title, 'rodent_trapping')).toBe(title);
   });
 });
 

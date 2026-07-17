@@ -32,6 +32,7 @@ const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
   redactInspectionFeeCuesForType,
+  redactProjectTitleForWrite,
   projectTypeConfigHasInternalFindingKeys,
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
@@ -1565,8 +1566,9 @@ router.post('/', async (req, res, next) => {
         project_type,
         project_date: projectDate,
         // title is customer-facing headline text — same write-time fee scrub
-        // as recommendations (codex #2817)
-        title: title ? redactInspectionFeeCuesForType(title, project_type) : null,
+        // as recommendations, clamped to the varchar(200) column since the
+        // scrub can lengthen text (codex #2817)
+        title: title ? redactProjectTitleForWrite(title, project_type) : null,
         findings: findings || null,
         // inspection fee must never be customer-facing — sanitized on WRITE
         // (durable for new rows; migration 20260717000001 cleaned legacy rows
@@ -1961,7 +1963,7 @@ router.put('/:id', async (req, res, next) => {
     // persist the internal fee (legacy rows cleaned at rest by migration
     // 20260717000001, codex #2817). Type-gated — see the create path.
     if (updates.recommendations != null) updates.recommendations = redactInspectionFeeCuesForType(updates.recommendations, project.project_type);
-    if (updates.title != null) updates.title = redactInspectionFeeCuesForType(updates.title, project.project_type);
+    if (updates.title != null) updates.title = redactProjectTitleForWrite(updates.title, project.project_type);
     dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
