@@ -676,6 +676,10 @@ function Modal({ title, children, onClose }) {
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
         border: `1px solid ${PORTAL_BILLING.border}`,
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+        // The body behind is scroll-locked, so on short viewports (landscape
+        // phones, small screens with the Payment Element open) the dialog
+        // itself must scroll or the bottom controls become unreachable.
+        maxHeight: 'min(92dvh, 92vh)', overflowY: 'auto', WebkitOverflowScrolling: 'touch',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: 16, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading }}>{title}</div>

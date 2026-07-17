@@ -1627,16 +1627,21 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
 
   const handleSatFeedback = async () => {
     setSatSubmitting(true);
+    setSatError('');
     try {
       await api.submitSatisfaction({
         serviceRecordId: pendingSatisfaction.id,
         rating: satRating,
         feedbackText: satFeedback,
       });
-    } catch {
-      // Rating is already recorded; feedback is supplemental.
+      setSatPhase('thanks');
+    } catch (err) {
+      // The rating from the previous step is already recorded, but this
+      // note is NOT — thanking the customer for a message we never received
+      // silently loses a service concern. Keep the form open to retry.
+      console.error(err);
+      setSatError('Your note could not be sent. Your rating is saved — please try sending the note again.');
     }
-    setSatPhase('thanks');
     setSatSubmitting(false);
   };
 
@@ -1894,6 +1899,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   resize: 'vertical',
                 }}
               />
+              {satError && (
+                <div role="alert" style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 10 }}>
+                  {satError}
+                </div>
+              )}
               <button type="button" onClick={handleSatFeedback} disabled={satSubmitting} style={{
                 ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.glassNavy,
                 color: '#fff', boxShadow: 'none', borderRadius: 8,
@@ -2924,6 +2934,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const compact = useIsMobile(760);
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
+  const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -2935,15 +2946,22 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const loadSchedule = useCallback(() => {
     setLoading(true);
     setLoadError('');
+    // Notification preferences are presentation data — a transient failure
+    // there must not hide the customer's valid appointments (or the confirm
+    // and reschedule controls) behind a schedule error. Only /schedule
+    // itself can fail the load.
     Promise.all([
       api.getSchedule(90),
-      api.getNotificationPrefs(),
+      api.getNotificationPrefs()
+        .then(data => ({ data, failed: false }))
+        .catch(() => ({ data: null, failed: true })),
       api.getPropertyNotificationPrefs()
         .then(data => ({ data, failed: false }))
         .catch(() => ({ data: null, failed: true })),
-    ]).then(([schedData, prefsData, propertyPrefsData]) => {
+    ]).then(([schedData, prefsResult, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
-      setPrefs(prefsData);
+      setPrefsError(prefsResult.failed);
+      if (prefsResult.data) setPrefs(prefsResult.data);
       setPropertyPrefsError(propertyPrefsData.failed);
       if (propertyPrefsData.data) {
         setPropertyPrefs(propertyPrefsData.data.properties || []);
@@ -3504,7 +3522,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </section>
       )}
 
-      {/* Notification Preferences */}
+      {/* Notification Preferences — when the prefs request failed, say so
+          with a retry instead of silently omitting the section (the schedule
+          above stays fully usable). */}
+      {prefsError && !prefs && (
+        <section data-glass="card" style={{ ...card, padding: 18 }}>
+          <div style={sectionTitle}>Reminder Settings</div>
+          <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
+            Your schedule is up to date, but notification preferences couldn&apos;t be loaded.
+            <button type="button" onClick={loadSchedule} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
+          </div>
+        </section>
+      )}
       {prefs && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
@@ -5306,12 +5335,21 @@ function ServicePrefsSection() {
   const [prefs, setPrefs] = useState(null);
   const [busy, setBusy] = useState(null); // which key is currently saving
   const [error, setError] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
 
-  useEffect(() => {
+  // Fail closed: a read failure must never render defaults — a customer who
+  // opted out of interior spraying would see the opposite of the work-order
+  // source of truth, including the safety-sensitive exterior-only choice.
+  const loadPrefs = useCallback(() => {
+    setLoadFailed(false);
     api.getServicePreferences()
       .then((d) => setPrefs(d.preferences || { interior_spray: true, exterior_sweep: true }))
-      .catch(() => setPrefs({ interior_spray: true, exterior_sweep: true }));
+      .catch(() => setLoadFailed(true));
   }, []);
+
+  useEffect(() => {
+    loadPrefs();
+  }, [loadPrefs]);
 
   async function toggle(key) {
     if (!prefs) return;
@@ -5331,7 +5369,21 @@ function ServicePrefsSection() {
     }
   }
 
-  if (!prefs) return null;
+  if (!prefs) {
+    if (!loadFailed) return null; // still loading
+    return (
+      <PropertySection
+        title="Service preferences"
+        icon="wrench"
+        summary="Choose what is included on each recurring pest control visit."
+      >
+        <div role="alert" style={{ fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px', lineHeight: 1.5 }}>
+          Your saved visit preferences couldn&apos;t be loaded, so they aren&apos;t shown here. Your work orders still follow what&apos;s on file.
+          <button type="button" onClick={loadPrefs} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
+        </div>
+      </PropertySection>
+    );
+  }
 
   const rows = [
     { key: 'interior_spray', icon: 'home', title: 'Interior spraying', desc: 'Treat inside the home on each visit. Turn off for exterior-only service.' },
@@ -9171,7 +9223,11 @@ function ServiceTracker() {
   }, [fetchTracker]);
 
   useEffect(() => {
-    if (!tracker || tracker.currentStep <= 1 || tracker.currentStep >= 7) return;
+    // Poll from step 1 (Scheduled) too — nothing else updates this
+    // component, so a portal left open before dispatch would otherwise stay
+    // stuck at Scheduled through confirmation and en-route. Only terminal
+    // states stop the refresh loop.
+    if (!tracker || tracker.currentStep >= 7) return;
     const interval = setInterval(fetchTracker, 15000);
     return () => clearInterval(interval);
   }, [tracker?.currentStep, fetchTracker]);
@@ -9689,7 +9745,13 @@ function ReferTab({ customer, onSwitchTab }) {
   const handleCopy = async (value) => {
     if (!value) return;
     try {
-      await navigator.clipboard?.writeText(value);
+      // Optional chaining resolves undefined (no throw) when the Clipboard
+      // API is absent (in-app webviews, non-secure contexts) — never report
+      // "Copied" without an actual write. Mirrors ReportViewPage's share().
+      if (typeof navigator.clipboard?.writeText !== 'function') {
+        throw new Error('Clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(value);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -11361,6 +11423,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const [photos, setPhotos] = useState([]); // array of { preview, data }
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [submittedNote, setSubmittedNote] = useState('');
   const [submitError, setSubmitError] = useState('');
   const [lastService, setLastService] = useState(null);
   const [nextService, setNextService] = useState(null);
@@ -11521,7 +11584,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     setSubmitting(true);
     setSubmitError('');
     try {
-      await api.createRequest({
+      const result = await api.createRequest({
         category,
         subject: description.trim().slice(0, 80),
         description: description.trim(),
@@ -11529,14 +11592,25 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         locationOnProperty: location || null,
         photos: photos.map(p => p.data),
       });
+      // The server's 60s dedupe path returns success against the EARLIER
+      // request with photoCount: 0 — if the customer attached photos this
+      // time, say so instead of implying they were received.
+      setSubmittedNote(
+        result?.deduped && photos.length > 0 && !(Number(result.photoCount) > 0)
+          ? 'We already had this request from a moment ago, so your new photos were not attached. Text them to us if they show something new.'
+          : '',
+      );
       setSubmitted(true);
       onSubmitted?.();
+      const hadNote = result?.deduped && photos.length > 0 && !(Number(result.photoCount) > 0);
       setTimeout(() => {
         setSubmitted(false);
         setCategory(''); setDescription('');
         setUrgency('routine'); setLocation(''); setPhotos([]); setSubmitError('');
+        setSubmittedNote('');
         onClose();
-      }, 2500);
+        // Give the photos-not-attached note time to be read before closing.
+      }, hadNote ? 7000 : 2500);
     } catch (err) {
       console.error(err);
       setSubmitError(err?.message || 'Could not submit the request. Please try again or call Waves at (941) 297-5749.');
@@ -11641,6 +11715,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 Waves will review this and follow up directly.
                 {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized for the next available response.' : ''}
               </div>
+              {submittedNote && (
+                <div role="alert" style={{ fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px', marginTop: 10, lineHeight: 1.5, textAlign: 'left' }}>
+                  {submittedNote}
+                </div>
+              )}
               <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
                 <a href="tel:+19412975749" style={secondaryAction}>Call</a>
                 <a href="sms:+19412975749" style={secondaryAction}>Text</a>

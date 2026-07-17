@@ -15,6 +15,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [notifications, setNotifications] = useState([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [tab, setTab] = useState('account'); // 'account' | 'whats_new'
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
@@ -160,13 +161,18 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     }
   };
 
-  // Load notifications when opened
+  // Load notifications when opened. A failed load is recorded — rendering
+  // "No notifications yet" (or stale rows) for an outage would present a
+  // broken inbox as a confirmed-empty one.
   const loadNotifications = async () => {
     setLoading(true);
+    setLoadFailed(false);
     try {
       const d = await requestJson(`${basePath}?limit=30`);
       setNotifications(d.notifications || []);
-    } catch {}
+    } catch {
+      setLoadFailed(true);
+    }
     setLoading(false);
   };
 
@@ -342,7 +348,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 scroll from chaining to the page behind it on iOS. */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: '#71717A', fontSize: 14 }}>Loading…</div>}
-              {!loading && tab === 'account' && notifications.length === 0 && (
+              {!loading && loadFailed && tab === 'account' && (
+                <div style={{ padding: 60, textAlign: 'center' }}>
+                  <div style={{ fontSize: 14, color: '#71717A' }}>Notifications couldn&apos;t be loaded.</div>
+                  <button type="button" onClick={loadNotifications} style={{
+                    marginTop: 12, padding: '8px 14px', borderRadius: 8, border: '1px solid #D8D0C0',
+                    background: '#fff', color: '#04395E', fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                  }}>Try again</button>
+                </div>
+              )}
+              {!loading && !loadFailed && tab === 'account' && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <div style={{ fontSize: 14, color: '#71717A' }}>No notifications yet</div>
                 </div>
@@ -352,7 +367,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{ fontSize: 14, color: '#71717A' }}>Nothing new right now</div>
                 </div>
               )}
-              {!loading && tab === 'account' && notifications.map(n => (
+              {!loading && !loadFailed && tab === 'account' && notifications.map(n => (
                 <div key={n.id}
                   onClick={async () => {
                     if (!n.read_at) await markRead(n.id);
@@ -442,7 +457,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             {/* Notification List */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: colors.muted }}>Loading...</div>}
-              {!loading && notifications.length === 0 && (
+              {!loading && loadFailed && (
+                <div style={{ padding: 60, textAlign: 'center' }}>
+                  <div style={{ fontSize: 14, color: colors.muted }}>Notifications couldn&apos;t be loaded.</div>
+                  <button type="button" onClick={loadNotifications} style={{
+                    marginTop: 12, padding: '8px 14px', borderRadius: 8, border: `1px solid ${colors.border || '#D8D0C0'}`,
+                    background: 'transparent', color: colors.text || colors.muted, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                  }}>Try again</button>
+                </div>
+              )}
+              {!loading && !loadFailed && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke={colors.muted} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 12 }}>
                     <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
@@ -451,7 +475,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{ fontSize: 14, color: colors.muted }}>No notifications yet</div>
                 </div>
               )}
-              {!loading && groupByTime(notifications).map(([group, items]) => (
+              {!loading && !loadFailed && groupByTime(notifications).map(([group, items]) => (
                 <div key={group}>
                   <div style={{
                     padding: '8px 20px', fontSize: 11, fontWeight: 700, color: colors.muted,
