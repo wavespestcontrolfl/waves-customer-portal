@@ -9035,9 +9035,14 @@ router.put('/:token/accept', async (req, res, next) => {
       }
       // Appointment-type automations (tagging, prep guide emails) — same hook
       // the admin scheduling path runs. Post-commit and fire-and-forget so the
-      // accept response never waits on it.
+      // accept response never waits on it. suppressWelcome: the converter's
+      // pre-conversion candidacy gate owns the new-recurring welcome on the
+      // accept path (fired below via acceptConversion.welcomeSms), and this
+      // row may be a REUSED existing appointment, where the tagger's
+      // before-the-booking history scoping would wrongly read the customer's
+      // own series as excluded batch siblings.
       const AppointmentTagger = require('../services/appointment-tagger');
-      void AppointmentTagger.onServiceScheduled(appointment.id)
+      void AppointmentTagger.onServiceScheduled(appointment.id, { suppressWelcome: true })
         .catch((e) => logger.error(`[estimate-accept] appointment automations failed (non-blocking) for ${appointment.id}: ${e.message}`));
     }
     const deferredFollowUpReminderRows = Array.isArray(acceptConversion?.deferredFollowUpReminderRows)
@@ -9491,7 +9496,12 @@ router.put('/:token/accept', async (req, res, next) => {
       });
       await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
-        await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, { icon: '\u2705', link: notificationPayload.customerLink, metadata: { estimateId: estimate.id, invoiceId } });
+        await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, {
+          icon: '\u2705',
+          link: notificationPayload.customerLink,
+          dedupeKey: `estimate:${estimate.id}:accepted`,
+          metadata: { estimateId: estimate.id, invoiceId },
+        });
       }
     } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
 

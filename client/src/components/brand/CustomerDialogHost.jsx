@@ -5,6 +5,7 @@ import useModalFocus from '../../hooks/useModalFocus';
 import { COLORS, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import Icon from '../Icon';
+import { useBiometricLock } from '../BiometricGate';
 
 const DIALOG_EVENT = 'waves:customer-dialog';
 
@@ -28,6 +29,7 @@ export function showCustomerConfirm(message, options = {}) {
 export default function CustomerDialogHost() {
   const [dialogs, setDialogs] = useState([]);
   const active = dialogs[0] || null;
+  const biometricLocked = useBiometricLock();
 
   useEffect(() => {
     const enqueue = (event) => setDialogs((current) => [...current, event.detail]);
@@ -43,10 +45,13 @@ export default function CustomerDialogHost() {
     });
   }, []);
 
-  useLockBodyScroll(Boolean(active));
-  const dialogRef = useModalFocus(Boolean(active), () => settle(false));
+  useLockBodyScroll(Boolean(active) && !biometricLocked);
+  const dialogRef = useModalFocus(Boolean(active) && !biometricLocked, () => settle(false));
 
-  if (!active || typeof document === 'undefined') return null;
+  // Dialog events can arrive while the native shell is backgrounded (for
+  // example, an async request settling after the biometric lock appeared).
+  // Keep them queued, but expose no portaled DOM or focus trap until unlock.
+  if (!active || biometricLocked || typeof document === 'undefined') return null;
 
   const { kind, message, options } = active;
   const confirm = kind === 'confirm';
@@ -81,6 +86,7 @@ export default function CustomerDialogHost() {
         aria-describedby="customer-dialog-message"
         data-glass="modal"
         style={{
+          '--glass-modal-radius': '16px',
           width: 'min(420px, 100%)',
           position: 'relative',
           padding: 24,
@@ -135,7 +141,7 @@ export default function CustomerDialogHost() {
               data-glass="chip"
               onClick={() => settle(false)}
               style={{
-                minHeight: 42,
+                minHeight: 44,
                 padding: '0 17px',
                 borderRadius: 10,
                 border: `1px solid ${CUSTOMER_SURFACE.borderStrong}`,
@@ -156,7 +162,7 @@ export default function CustomerDialogHost() {
             data-glass-accent={danger ? undefined : ''}
             onClick={() => settle(true)}
             style={{
-              minHeight: 42,
+              minHeight: 44,
               padding: '0 18px',
               borderRadius: 10,
               border: danger ? `1px solid ${COLORS.red}` : '1px solid rgba(4,57,94,0.16)',

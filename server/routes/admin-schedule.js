@@ -5498,7 +5498,12 @@ router.put('/:id/status', async (req, res, next) => {
 
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
+          icon: '\u{1F697}',
+          preferenceKey: 'tech_en_route',
+          dedupeKey: `scheduled-service:${svc.id}:en-route`,
+          metadata: { scheduledServiceId: svc.id },
+        });
       } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
     }
 
@@ -5586,7 +5591,13 @@ router.put('/:id/status', async (req, res, next) => {
         const NotificationService = require('../services/notification-service');
         // PortalPage only honors ?tab= deep links — a '/documents' path just
         // lands on the Home tab.
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Service completed', `Your ${sanitizeServiceType(svc.service_type)} has been completed. View your report in Documents.`, { icon: '\u{1F3E0}', link: '/?tab=documents' });
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Service completed', `Your ${sanitizeServiceType(svc.service_type)} has been completed. View your report in Documents.`, {
+          icon: '\u{1F3E0}',
+          link: '/?tab=documents',
+          preferenceKey: 'service_completed',
+          dedupeKey: `scheduled-service:${svc.id}:completed`,
+          metadata: { scheduledServiceId: svc.id },
+        });
       } catch (e) { logger.error(`[notifications] Service completed notification failed: ${e.message}`); }
 
       // --- Post-service automation chain (all fire-and-forget, non-blocking) ---
@@ -6160,7 +6171,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
 router.post('/:id/regenerate-brief', async (req, res, next) => {
   try {
     const AppointmentTagger = require('../services/appointment-tagger');
-    await AppointmentTagger.onServiceScheduled(req.params.id);
+    await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
     res.json({ success: true, brief: svc.pre_service_brief ? JSON.parse(svc.pre_service_brief) : null });
   } catch (err) { next(err); }

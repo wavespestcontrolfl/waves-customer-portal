@@ -35,7 +35,7 @@ function normalizeAuthError(error) {
 }
 
 export default function LoginPage() {
-  const { sendCode, verifyCode, error, isAuthenticated, loading } = useAuth();
+  const { sendCode, verifyCode, clearError, error, isAuthenticated, loading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const nextPath = safeNextPath(location.search);
@@ -43,7 +43,7 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
-  useGlassSurface(true, 'full');
+  useGlassSurface(true, 'full', 'app');
 
   useEffect(() => {
     if (isAuthenticated) navigate(nextPath, { replace: true });
@@ -628,7 +628,7 @@ export default function LoginPage() {
                   <button
                     type="button"
                     className="portal-login-secondary"
-                    onClick={() => { setStep('phone'); setCode(''); }}
+                    onClick={() => { clearError(); setStep('phone'); setCode(''); }}
                   >
                     Use Different Number
                   </button>

@@ -19,7 +19,7 @@ function parseJson(value, fallback) {
   if (typeof value === 'object') return value;
   try {
     return JSON.parse(value);
-  } catch (_err) {
+  } catch {
     return fallback;
   }
 }
@@ -85,32 +85,24 @@ function mapRouteFeedback(row) {
 // =========================================================================
 
 // POST /api/ai/chat — customer sends a message via portal chat
-router.post('/chat', async (req, res, next) => {
+router.post('/chat', authenticate, async (req, res, next) => {
   try {
-    const { message, sessionId } = req.body;
+    const message = String(req.body?.message || '').trim();
+    const sessionId = String(req.body?.sessionId || '').trim().slice(0, 120);
     if (!message) return res.status(400).json({ error: 'Message required' });
+    if (message.length > 4000) return res.status(400).json({ error: 'Message is too long' });
 
-    // Try to identify customer from auth token
-    let customerId = null;
-    let customerPhone = null;
-    try {
-      const jwt = require('jsonwebtoken');
-      const config = require('../config');
-      const token = req.headers.authorization?.replace('Bearer ', '');
-      if (token) {
-        const decoded = jwt.verify(token, config.jwt.secret);
-        if (decoded.customerId) {
-          customerId = decoded.customerId;
-          const customer = await db('customers').where('id', customerId).first();
-          customerPhone = customer?.phone;
-        }
-      }
-    } catch { /* unauthenticated chat is allowed */ }
+    // The authenticated middleware is the sole source of portal identity.
+    // Never trust a body claim or decode a second, optional token here: doing
+    // either lets a caller detach model tools from the property they actually
+    // authenticated as.
+    const customerId = req.customerId;
+    const customerPhone = req.customer.phone || null;
 
     const result = await WavesAssistant.processMessage({
       message,
       channel: 'portal_chat',
-      channelIdentifier: sessionId || customerId || `anon-${Date.now()}`,
+      channelIdentifier: sessionId || customerId,
       customerId,
       customerPhone,
     });
@@ -119,7 +111,7 @@ router.post('/chat', async (req, res, next) => {
     // deterministic escalation template are not AI-generated content. The
     // affordance also needs the same auth state /chat/report requires, or an
     // expired-token tab would render a Report link whose POST always 401s.
-    res.json({ ...result, canReport: aiContentReportEnabled() && result.generated === true && !!customerId });
+    res.json({ ...result, canReport: aiContentReportEnabled() && result.generated === true });
   } catch (err) { next(err); }
 });
 
@@ -167,13 +159,17 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
     let conversation = null;
     if (sessionId) {
       conversation = await db('agent_sessions')
-        .where({ channel: 'portal_chat', channel_identifier: sessionId })
+        .where({
+          channel: 'portal_chat',
+          channel_identifier: sessionId,
+          customer_id: customerId,
+        })
         .orderBy('created_at', 'desc')
         .first();
-      // Session IDs are client-generated and guessable — never link (and via
-      // resolution, never close) another customer's conversation. Anonymous
-      // sessions (customer_id null) stay linkable to whoever holds the ID.
-      if (conversation?.customer_id && conversation.customer_id !== customerId) {
+      // Keep a second check at the trust boundary even though the SQL is
+      // scoped; it protects against future query refactors and mock/adapter
+      // mistakes returning a row outside the predicate.
+      if (conversation && String(conversation.customer_id) !== String(customerId)) {
         conversation = null;
       }
     }

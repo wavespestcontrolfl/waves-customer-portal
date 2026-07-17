@@ -28,6 +28,7 @@ jest.mock('../services/payment-lifecycle-email', () => ({
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => {}), getRecent: jest.fn(async () => []) }));
 jest.mock('../services/autopay-eligibility', () => ({
   isChargeableAutopayMethod: jest.fn(() => true),
+  isExpiredCardMethod: jest.fn(() => false),
   isBankMethodType: (t) => ['ach', 'us_bank_account'].includes(String(t || '').toLowerCase()),
 }));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn(), isCardMethodType: jest.fn((t) => t === 'card') }));

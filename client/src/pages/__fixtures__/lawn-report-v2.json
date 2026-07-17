@@ -4,6 +4,8 @@
   "serviceDisplayName": "Lawn Care Visit",
   "serviceLineDisplay": "WaveGuard lawn care",
   "customerName": "Test Customer",
+  "customerEmail": "test.customer@example.com",
+  "customerPhone": "9415550190",
   "serviceDate": "2026-06-25T00:00:00.000Z",
   "technicianName": "Alex",
   "technician": {

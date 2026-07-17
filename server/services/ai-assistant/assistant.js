@@ -6,12 +6,11 @@
  *  - Tool-use based: Claude decides when to look up data, escalate, or respond
  *  - Escalation-first: schedule changes, cancellations, complaints → escalate to human
  *  - 30-min conversation timeout: context resets after inactivity
- *  - Uses ALL portal data: SMS history, call transcripts, Stripe billing, service records
+ *  - Data-minimized: only authenticated scheduling facts are exposed to the model
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const ContextAggregator = require('../context-aggregator');
 const { TOOLS, executeToolCall } = require('./tools');
 
 let Anthropic;
@@ -25,6 +24,19 @@ const MODEL = require('../../config/models').FLAGSHIP;
 // keep appending to — so markers don't accumulate across tool-use rounds past
 // the API's 4-breakpoint limit.
 const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
+const MINIMAL_CONTEXT_VERSION = 2;
+
+function parsedContextSnapshot(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function safeFirstNameFromSnapshot(raw) {
+  const snapshot = parsedContextSnapshot(raw);
+  if (snapshot?.version !== MINIMAL_CONTEXT_VERSION || typeof snapshot.firstName !== 'string') return '';
+  return snapshot.firstName.trim().replace(/[^\p{L}\p{M}' -]/gu, '').slice(0, 80);
+}
 
 function withCacheBreakpoint(messages) {
   if (!messages.length) return messages;
@@ -59,10 +71,10 @@ PERSONALITY:
 - Never sound robotic or corporate
 
 WHAT YOU CAN DO:
-- Answer questions about services, scheduling, products, pricing
-- Look up customer accounts, upcoming services, billing
+- Answer general questions about services, products, pests, and lawn care
+- Look up the authenticated customer's upcoming services
 - Provide pest/lawn care advice specific to SWFL
-- Send service reminders and confirmations
+- Escalate account, billing, and service-change questions to the Waves team
 
 WHAT YOU MUST ESCALATE (use the escalate tool):
 - Any request to cancel, pause, or downgrade service
@@ -90,8 +102,8 @@ ESCALATION FORMAT: When escalating, explain to the customer that you're connecti
 RULES:
 - Never make up service dates, prices, or technician names — always look them up
 - Never promise specific times without checking availability
-- If a customer asks about pricing, give the general range but note it depends on property size
-- Always mention the WaveGuard tier benefits when relevant
+- Do not expose or request addresses, phone numbers, payment details, balances, service notes, or call history
+- Do not quote account-specific pricing; escalate billing and pricing questions
 - If you detect the customer is frustrated, acknowledge it before solving
 - End every conversation with an offer to help with anything else`;
 
@@ -144,11 +156,13 @@ class WavesAssistant {
     // 5. Build conversation history for Claude
     const history = await this.buildHistory(conversation.id);
 
-    // 6. Build context string from snapshot
+    // 6. Build a data-minimized context string. Older active rows may still
+    // contain the legacy full-account summary; never forward that shape to the
+    // model during the rollout window.
     let contextStr = '';
     if (conversation.context_snapshot) {
-      const snap = conversation.context_snapshot;
-      contextStr = typeof snap === 'object' ? (snap.summary || JSON.stringify(snap)) : String(snap);
+      const firstName = safeFirstNameFromSnapshot(conversation.context_snapshot);
+      if (firstName) contextStr = `Customer first name: ${firstName}`;
     }
 
     // 7. Call Claude with tools
@@ -265,43 +279,73 @@ class WavesAssistant {
    */
   async getOrCreateConversation(channel, channelIdentifier, customerId, customerPhone) {
     const now = new Date();
+    const identifier = channelIdentifier || customerPhone;
 
-    // Look for an active conversation on this channel
-    const existing = await db('agent_sessions')
-      .where({ channel_identifier: channelIdentifier || customerPhone, status: 'active' })
+    if (!channel || !identifier) {
+      throw new Error('Conversation channel and identifier are required');
+    }
+
+    // Client session IDs and phone identifiers are not authorization. Scope
+    // every lookup by channel AND the already-resolved customer identity (or
+    // explicitly to an anonymous lead) so a guessed identifier can never
+    // attach another customer's message history.
+    const existingQuery = db('agent_sessions')
+      .where({ channel, channel_identifier: identifier, status: 'active' });
+    if (customerId) existingQuery.where({ customer_id: customerId });
+    else existingQuery.whereNull('customer_id');
+    const existing = await existingQuery
       .where('timeout_at', '>', now)
       .orderBy('last_activity_at', 'desc')
       .first();
 
-    if (existing) return existing;
+    // Do not carry legacy full-context snapshots/history across this security
+    // boundary. Those conversations may contain model replies grounded in
+    // billing, call-summary, contact, or service-note data. Anonymous lead
+    // sessions had no customer snapshot and remain safe to reuse.
+    if (existing && (!existing.customer_id
+      || parsedContextSnapshot(existing.context_snapshot)?.version === MINIMAL_CONTEXT_VERSION)) {
+      return existing;
+    }
 
     // Timeout any stale conversations for this identifier
-    await db('agent_sessions')
-      .where({ channel_identifier: channelIdentifier || customerPhone, status: 'active' })
+    const staleQuery = db('agent_sessions')
+      .where({ channel, channel_identifier: identifier, status: 'active' });
+    if (customerId) staleQuery.where({ customer_id: customerId });
+    else staleQuery.whereNull('customer_id');
+    await staleQuery
       .update({ status: 'timeout', resolved_by: 'timeout', updated_at: now });
 
-    // Build customer context snapshot
-    let contextSnapshot = '';
+    // Keep model context deliberately small. The legacy full-context
+    // aggregator included payment history, property flags, SMS/call summaries,
+    // service notes and contact details. The model only needs a first name for
+    // natural phrasing; schedule facts come through the scoped tool above.
+    let contextSnapshot = null;
     try {
-      if (customerPhone) {
-        const ctx = await ContextAggregator.getFullCustomerContext(customerPhone);
-        contextSnapshot = ctx.summary || '';
-        if (!customerId && ctx.customer?.id) customerId = ctx.customer.id;
+      if (customerId) {
+        const customer = await db('customers')
+          .where({ id: customerId })
+          .select('first_name')
+          .first();
+        if (customer?.first_name) {
+          contextSnapshot = { version: MINIMAL_CONTEXT_VERSION, firstName: customer.first_name };
+        } else {
+          contextSnapshot = { version: MINIMAL_CONTEXT_VERSION };
+        }
       }
     } catch (ctxErr) {
-      logger.warn(`[ai-assistant] Context aggregation failed (non-blocking): ${ctxErr.message}`);
+      logger.warn(`[ai-assistant] Minimal context lookup failed (non-blocking): ${ctxErr.message}`);
     }
 
     // Create new conversation — pass plain object for jsonb column (Knex serializes it)
     const [conv] = await db('agent_sessions').insert({
       customer_id: customerId || null,
       channel,
-      channel_identifier: channelIdentifier || customerPhone,
+      channel_identifier: identifier,
       status: 'active',
       last_activity_at: now,
       timeout_at: new Date(now.getTime() + CONVERSATION_TIMEOUT_MS),
       message_count: 0,
-      context_snapshot: contextSnapshot ? JSON.stringify(contextSnapshot) : null,
+      context_snapshot: contextSnapshot,
     }).returning('*');
 
     return conv;

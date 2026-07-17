@@ -180,7 +180,7 @@ function CardTitle({ children, sub }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <h2 style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: 0 }}>{children}</h2>
-      {sub ? <div style={{ fontSize: 13, color: MUTED, marginTop: 3 }}>{sub}</div> : null}
+      {sub ? <div style={{ fontSize: 14, color: MUTED, marginTop: 3 }}>{sub}</div> : null}
     </div>
   );
 }
@@ -406,7 +406,7 @@ export function PlantGroupStatusCards({ plantGroups = [] }) {
                 <StatusPill status={g.status || 'stable'} small />
               </div>
               {g.finding ? <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>{g.finding}</div> : null}
-              {g.wavesAction ? <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5, marginTop: 5 }}><strong style={{ color: BODY }}>Waves:</strong> {g.wavesAction}</div> : null}
+              {g.wavesAction ? <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, marginTop: 5 }}><strong style={{ color: BODY }}>Waves:</strong> {g.wavesAction}</div> : null}
             </div>
           );
         })}
@@ -419,7 +419,9 @@ export function PlantGroupStatusCards({ plantGroups = [] }) {
 function inchLabel(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0) return null;
-  return `${String(Number(n.toFixed(2))).replace(/\.?0+$/, '')}"`;
+  // Number() already drops trailing decimal zeros; the old /\.?0+$/ regex
+  // also ate integer zeros — 0 rendered as a bare '"' and 10 as '1"'.
+  return `${Number(n.toFixed(2))}"`;
 }
 // Server water vocabulary (surplus/deficit/balanced/unknown) → status pill word.
 const WATER_PILL = { surplus: 'watch', deficit: 'watch', balanced: 'stable', unknown: 'tracking' };
@@ -509,8 +511,8 @@ export function TreeShrubPhotoCards({ photos = [], summary = null }) {
                 (same class as the lawn strip; owner-reported). */}
             <img src={p.url} alt={p.label || 'Plant photo'}
               style={{ width: '100%', height: 180, objectFit: 'cover', borderRadius: 12, border: `1px solid ${BORDER}`, display: 'block' }} />
-            {p.label ? <figcaption style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 13, color: TEXT, marginTop: 7 }}>{p.label}</figcaption> : null}
-            {p.caption ? <div style={{ fontSize: 13, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{p.caption}</div> : null}
+            {p.label ? <figcaption style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT, marginTop: 7 }}>{p.label}</figcaption> : null}
+            {p.caption ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{p.caption}</div> : null}
           </figure>
         ))}
       </div>
@@ -575,7 +577,10 @@ export function TreeShrubTrends({ trends = {} }) {
   const minis = [
     foliage && { key: 'foliage', title: 'Foliage Fullness', sub: 'higher is better', points: foliage },
     color && { key: 'color', title: 'Leaf Color & Vigor', sub: 'higher is better', points: color },
-    pest && { key: 'pest', title: 'Pest Pressure', sub: 'higher is better', points: pest },
+    // the series is the INVERTED pest_activity cleanliness score (higher =
+    // cleaner) — titled "Pest Pressure" it read as rising pests being good;
+    // named honestly like lawn's "Weed Cleanliness" (audit 2026-07-16)
+    pest && { key: 'pest', title: 'Pest Cleanliness', sub: 'higher is better', points: pest },
     water && { key: 'water', title: 'Water / Heat Stress', sub: 'higher is better', points: water },
   ].filter(Boolean).filter((m) => (m.points || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2);
   if (!hasOverall && !minis.length) return null;

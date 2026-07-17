@@ -79,6 +79,7 @@ describe('invoiceCaptureNeeded — saved-chargeable-method test, NOT customerOnA
   const CUSTOMER = { id: 'cust-1', autopay_enabled: true, ach_status: null, autopay_paused_until: null };
   const CARD_METHOD = {
     id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_stripe_1', is_default: true, autopay_enabled: true,
+    exp_month: 12, exp_year: 2099,
   };
 
   test('unknown autopay state reads as CAPTURE NEEDED — this is the only gate on the covered-by-credit capture step and there is no PI/webhook fallback', async () => {

@@ -1954,7 +1954,6 @@ export default function EstimateToolViewV2({
       setTimeout(() => clearInterval(interval), 5000);
     };
     document.head.appendChild(script);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function initAutocomplete() {
@@ -2555,7 +2554,6 @@ export default function EstimateToolViewV2({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editEstimateId]);
 
   function exitEditMode() {
@@ -2699,7 +2697,6 @@ export default function EstimateToolViewV2({
     } catch {
       /* ignore */
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Prefill bait-station footprint from house sqft, but keep BoraCare and
@@ -2749,13 +2746,11 @@ export default function EstimateToolViewV2({
     } catch {
       /* ignore */
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     const t = setTimeout(() => searchCustomers(customerSearch), 300);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerSearch]);
 
   const [enrichedProfile, setEnrichedProfile] = useState(null);
@@ -2798,7 +2793,6 @@ export default function EstimateToolViewV2({
     } catch {
       setVerifySaveState("error");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, enrichedProfile]);
 
   const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
@@ -3827,13 +3821,6 @@ export default function EstimateToolViewV2({
         else if (sd === "LIGHT")
           add("pest", "Light shrubs: -$5/visit", -5, "down");
         else add("pest", "Shrubs: not specified", 0, "info");
-        const td = p.treeDensity || p.trees;
-        if (td === "HEAVY") add("pest", "Heavy trees: +$6/visit", 6, "up");
-        else if (td === "MODERATE")
-          add("pest", "Moderate trees: $0/visit", 0, "info");
-        else if (td === "LIGHT")
-          add("pest", "Light trees: -$5/visit", -5, "down");
-        else add("pest", "Trees: not specified", 0, "info");
         const lc = p.landscapeComplexity || p.complexity;
         if (lc === "COMPLEX")
           add("pest", "Complex landscape: +$3/visit", 3, "up");
@@ -3844,8 +3831,6 @@ export default function EstimateToolViewV2({
         if (nw && nw !== "NONE" && nw !== "NO" && nw !== false)
           add("pest", "Near water: +$3/visit", 3, "up");
         else add("pest", "No water nearby: $0/visit", 0, "info");
-        if (p.hasLargeDriveway)
-          add("pest", "Large driveway: +$3/visit", 3, "up");
         if (p.yearBuilt)
           add(
             "property",

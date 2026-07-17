@@ -12,6 +12,7 @@ jest.mock('../services/property-lookup/ai-property-lookup', () => ({
 }));
 jest.mock('../services/new-recurring-welcome-sms', () => ({
   sendNewRecurringWelcome: jest.fn(),
+  isNewRecurringSignupCandidate: jest.fn(async () => false),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async () => null),

@@ -43,14 +43,45 @@ export function sameOriginUrl(rawUrl, loc = window.location) {
   return target;
 }
 
-function navigateTo(rawUrl) {
-  const target = sameOriginUrl(rawUrl);
-  if (!target) return;
-  if (STAFF_OR_API_PATH.test(target.pathname)) return;
+// Push payloads commonly use a portal-relative path (for example
+// /?tab=documents), while universal links are absolute. Accept both forms,
+// but only after proving that the final URL stays on this exact origin and is
+// a customer route. Bare strings such as "evil.example/login" are rejected
+// instead of being reinterpreted as a same-origin pathname.
+export function customerAppUrl(rawUrl, loc = window.location) {
+  if (typeof rawUrl !== 'string') return null;
+  const value = rawUrl.trim();
+  if (!value) return null;
+  const absolute = /^[a-z][a-z\d+.-]*:/i.test(value);
+  if (!absolute && (!value.startsWith('/') || value.startsWith('//'))) return null;
+
+  let target;
+  try {
+    target = new URL(value, loc.origin);
+  } catch {
+    return null;
+  }
+  if (target.origin !== loc.origin) return null;
+  if (target.pathname.startsWith('//') || STAFF_OR_API_PATH.test(target.pathname)) return null;
+  return target;
+}
+
+export function navigateToCustomerUrl(rawUrl, loc = window.location) {
+  const target = customerAppUrl(rawUrl, loc);
+  if (!target) return false;
   const dest = `${target.pathname}${target.search}${target.hash}`;
-  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  if (dest === current) return;
-  window.location.assign(target.href);
+  const current = `${loc.pathname || ''}${loc.search || ''}${loc.hash || ''}`;
+  if (dest === current) return false;
+  try {
+    loc.assign(target.href);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function navigateTo(rawUrl) {
+  navigateToCustomerUrl(rawUrl);
 }
 
 export async function initNativeLinks() {

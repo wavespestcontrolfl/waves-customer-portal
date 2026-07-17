@@ -109,14 +109,10 @@ const PEST = {
     poolCageLarge: r(12),
     poolCageOversized: r(18),
     poolNoCage: 0,
-    trees_light: -r(5),         // Same drift fix as shrubs_light.
-    trees_moderate: 0,
-    trees_heavy: r(6),
     complexity_simple: -r(5),   // Open turf, minimal beds — less perimeter to spray.
     complexity_moderate: 0,     // Baseline.
     complexity_complex: r(3),
     nearWater: r(3),
-    largeDriveway: r(3),
     attachedGarage: r(5),
   },
   // Multiplicative roach modifier zeroed out (was 0.15 across the board) —

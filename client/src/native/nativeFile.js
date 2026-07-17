@@ -121,9 +121,11 @@ export async function saveUrlNative(url, fileName) {
   if (!canSaveNative()) return false;
   let abs = url;
   try { abs = new URL(url, window.location.origin).toString(); } catch { /* keep as-is */ }
-  let token = '';
-  try { token = localStorage.getItem('waves_token') || ''; } catch { /* storage unavailable */ }
-  const r = await fetch(abs, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  // Keep the customer API singleton lazy: this helper is imported by public
+  // report modules that also run in Node test/SSR contexts without browser
+  // localStorage. Only a real native save needs authenticated networking.
+  const { default: api } = await import('../utils/api');
+  const r = await api.fetchRaw(abs);
   if (!r.ok) throw new Error(`Download failed (${r.status})`);
   return saveBlobNative(await r.blob(), fileName);
 }

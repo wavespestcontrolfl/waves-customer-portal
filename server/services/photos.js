@@ -56,6 +56,26 @@ const PhotoService = {
   },
 
   /**
+   * Generate a short-lived URL that downloads an existing private object.
+   * The filename is forced through S3's signed response headers so customer
+   * documents do not inherit an opaque object-key name.
+   */
+  async getDownloadUrl(s3Key, fileName = 'document', expiresIn = 900) {
+    const safeName = String(fileName || 'document')
+      .replace(/[\r\n"\\]/g, '_')
+      .replace(/[^\x20-\x7E]/g, '_')
+      .trim()
+      .slice(0, 180) || 'document';
+    const command = new GetObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: s3Key,
+      ResponseContentDisposition: `attachment; filename="${safeName}"`,
+    });
+
+    return getSignedUrl(s3Client, command, { expiresIn });
+  },
+
+  /**
    * Fetch a photo's raw bytes from S3 as base64 (for vision/OCR input).
    * Returns { data, mimeType } or throws.
    */

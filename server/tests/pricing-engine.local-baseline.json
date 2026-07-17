@@ -23,9 +23,9 @@
   },
   "zone_b_monthly_pest_bermuda_premium": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1938.6,
-      "recurringMonthlyAfterDiscount": 161.55,
-      "year1Total": 1939
+      "recurringAnnualAfterDiscount": 1893.24,
+      "recurringMonthlyAfterDiscount": 157.77,
+      "year1Total": 1893
     },
     "waveGuard": {
       "tier": "silver",
@@ -34,8 +34,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1134,
-        "monthly": 94.5
+        "annual": 1083.6,
+        "monthly": 90.3
       },
       "lawn_care": {
         "annual": 1020,
@@ -71,9 +71,9 @@
   },
   "zone_d_quarterly_pest_bahia_basic": {
     "summary": {
-      "recurringAnnualAfterDiscount": 970.8,
-      "recurringMonthlyAfterDiscount": 80.9,
-      "year1Total": 971
+      "recurringAnnualAfterDiscount": 988.8,
+      "recurringMonthlyAfterDiscount": 82.4,
+      "year1Total": 989
     },
     "waveGuard": {
       "tier": "silver",
@@ -82,8 +82,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 412,
-        "monthly": 34.33
+        "annual": 432,
+        "monthly": 36
       },
       "lawn_care": {
         "annual": 603,
@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 4355.67,
-      "recurringMonthlyAfterDiscount": 362.97,
-      "year1Total": 4356
+      "recurringAnnualAfterDiscount": 4295.19,
+      "recurringMonthlyAfterDiscount": 357.93,
+      "year1Total": 4295
     },
     "waveGuard": {
       "tier": "platinum",
@@ -122,8 +122,8 @@
     },
     "lineItems": {
       "pest_control": {
-        "annual": 1260,
-        "monthly": 105
+        "annual": 1184.4,
+        "monthly": 98.7
       },
       "lawn_care": {
         "annual": 1368,

@@ -29,6 +29,7 @@ function chain(overrides = {}) {
     where: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereExists: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),

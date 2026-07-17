@@ -43,6 +43,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
+  const logoutTokenReleaseRef = useRef(null);
   // Mirrors `customer` for reads inside the stable loadCustomer callback
   // (empty deps ⇒ stale closure) — the transient branch needs to know
   // whether a session is already on screen.
@@ -52,8 +53,7 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     const token = localStorage.getItem('waves_token');
     if (token) {
-      api.token = token;
-      api.refreshToken = localStorage.getItem('waves_refresh_token');
+      api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       loadCustomer();
     } else {
       setLoading(false);
@@ -151,8 +151,7 @@ export function AuthProvider({ children }) {
       }
       const nextId = tokenCustomerId(token);
       const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token);
-      api.token = token;
-      api.refreshToken = localStorage.getItem('waves_refresh_token');
+      api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not
         // keep rendering (and firing actions) against it while loadCustomer
@@ -185,6 +184,9 @@ export function AuthProvider({ children }) {
   const verifyCode = async (phone, code) => {
     setError(null);
     try {
+      // A prior native logout may still be using the old credentials to
+      // unsubscribe this device. Never let that cleanup erase a new login.
+      if (logoutTokenReleaseRef.current) await logoutTokenReleaseRef.current;
       const data = await api.verifyCode(phone, code);
       api.setTokens(data.token, data.refreshToken);
       setProperties(data.properties || []);
@@ -197,27 +199,51 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const logout = async () => {
+  const logout = () => {
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
     }
-    // Deactivate this device's push registration BEFORE dropping the JWT —
-    // otherwise the device keeps receiving the previous account's pushes.
-    // Awaited (with a cap) because the unsubscribe may need the api client's
-    // 401→refresh retry, which dies the moment clearTokens runs; the timeout
-    // keeps a dead network from wedging logout. No-op (instant) on web.
-    try {
-      await Promise.race([
-        deactivateNativePushToken(),
-        new Promise((resolve) => { setTimeout(resolve, 4000); }),
-      ]);
-    } catch { /* best-effort */ }
-    api.clearTokens();
+    // Clear the rendered identity immediately. Credentials remain available
+    // only to the bounded native-unsubscribe cleanup below; this keeps logout
+    // responsive without abandoning a signed-out customer's private pushes.
     customerRef.current = null;
     setCustomer(null);
     setProperties([]);
     setPropertiesError(null);
+    setError(null);
+    setLoading(false);
+
+    const tokenRelease = (async () => {
+      let timeoutId;
+      try {
+        await Promise.race([
+          deactivateNativePushToken(),
+          new Promise((resolve) => { timeoutId = window.setTimeout(resolve, 4000); }),
+        ]);
+      } catch { /* best-effort device cleanup */ }
+      if (timeoutId) window.clearTimeout(timeoutId);
+
+      // Native cleanup may have refreshed and rotated the family. Capture the
+      // newest credential, then remove both credentials together from this
+      // tab and publish the access-token removal to other tabs.
+      const refreshToken = api.refreshToken || localStorage.getItem('waves_refresh_token');
+      api.clearTokens();
+
+      // Revocation is non-blocking from the customer's perspective and does
+      // not require an access JWT. It is deliberately started only after push
+      // cleanup has had its chance to use/rotate the refresh credential.
+      if (refreshToken) {
+        api.request('/auth/logout', {
+          method: 'POST',
+          body: JSON.stringify({ refreshToken }),
+        }).catch(() => {});
+      }
+    })();
+    logoutTokenReleaseRef.current = tokenRelease;
+    tokenRelease.finally(() => {
+      if (logoutTokenReleaseRef.current === tokenRelease) logoutTokenReleaseRef.current = null;
+    });
   };
 
   const refreshProperties = async () => {
@@ -270,6 +296,7 @@ export function AuthProvider({ children }) {
       switchProperty,
       refreshProperties,
       logout,
+      clearError: () => setError(null),
       refreshCustomer: loadCustomer,
     }}>
       {children}

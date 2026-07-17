@@ -114,6 +114,7 @@ describe('POST /ai/chat/report', () => {
       expect(sessionQuery.where).toHaveBeenCalledWith({
         channel: 'portal_chat',
         channel_identifier: 'chat-123',
+        customer_id: 'cust-1',
       });
       expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({
         conversation_id: 'conv-1',
@@ -263,7 +264,7 @@ describe('POST /ai/chat canReport flag', () => {
     });
   });
 
-  test('unauthenticated chat never advertises canReport (report route requires auth)', async () => {
+  test('rejects unauthenticated chat before invoking the model', async () => {
     mockReportTables();
     WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
 
@@ -274,7 +275,35 @@ describe('POST /ai/chat canReport flag', () => {
         body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
       });
       const body = await res.json();
-      expect(body.canReport).toBe(false);
+      expect(res.status).toBe(401);
+      expect(body).toEqual({ error: 'Authentication required' });
+      expect(WavesAssistant.processMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('uses only the authenticated customer identity, ignoring body customer claims', async () => {
+    mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
+    WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+        body: JSON.stringify({
+          message: 'hello',
+          sessionId: 'shared-session',
+          customerId: 'victim-customer',
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(WavesAssistant.processMessage).toHaveBeenCalledWith({
+      message: 'hello',
+      channel: 'portal_chat',
+      channelIdentifier: 'shared-session',
+      customerId: 'cust-1',
+      customerPhone: '+19415550100',
     });
   });
 

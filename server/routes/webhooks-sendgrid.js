@@ -22,6 +22,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const bounceRecovery = require('../services/email-bounce-recovery');
+const providerRetry = require('../services/transactional-email-provider-retry');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
 const TS_HEADER = 'x-twilio-email-event-webhook-timestamp';
@@ -337,7 +338,10 @@ async function handleEvent(ev) {
     // Tracked bounces are NOT routed through alertBouncedContactAddress —
     // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
     if (processedNew) {
-      if (bounceRecovery.isHardBounceEvent(ev)) {
+      if (providerRetry.isProviderBlockedEvent(ev)) {
+        providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
+          .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
+      } else if (bounceRecovery.isHardBounceEvent(ev)) {
         bounceRecovery.attemptRecovery(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] bounce recovery failed for ${messageId}: ${err.message}`));
       } else if (String(ev.event || '').toLowerCase() === 'delivered' && bounceRecovery.isRecoveryMessage(emailMessage)) {
@@ -431,6 +435,20 @@ async function processWebhookEvent(ev, messageId, email, handler) {
 function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
   const event = String(ev?.event || '').toLowerCase();
   const reason = String(ev?.reason || ev?.response || ev?.type || '').trim().toLowerCase();
+  if (providerRetry.isProviderBlockedEvent(ev)) {
+    return {
+      delivery: {
+        // SendGrid sometimes reports reputation/content blocks as
+        // event="bounce", type="blocked". The recipient did not bounce:
+        // keep the delivery retryable and do not damage subscriber health.
+        status: 'failed',
+        sent_at: null,
+        bounce_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
+        updated_at: now,
+      },
+      reconcileSendStatus: true,
+    };
+  }
   if (event === 'dropped' && (reason === 'group unsubscribe' || reason === 'unsubscribed address')) {
     if (delivery.unsubscribed_at) return null;
     return {
@@ -547,6 +565,18 @@ function eventOccurredAt(ev, fallback = new Date()) {
 }
 
 function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
+  if (providerRetry.isProviderBlockedEvent(ev)) {
+    return {
+      // Provider/IP/content rejection, not a bad recipient address. `failed`
+      // remains retryable when the owning workflow runs again and, unlike
+      // `bounced`, does not claim that the mailbox itself is invalid.
+      status: 'failed',
+      error_message: (ev.reason || ev.response || ev.type || '').toString().slice(0, 1000),
+      ...providerRetry.retryStateForProviderBlock(message, now),
+      updated_at: now,
+    };
+  }
+
   switch (ev.event) {
     case 'delivered':
       if (message.delivered_at) return null;
@@ -821,9 +851,9 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
 
     case 'bounce':
     case 'blocked':
-    case 'dropped':
+    case 'dropped': {
       await client('automation_step_sends').where({ id: sendRow.id }).update({
-        status: 'bounced',
+        status: providerRetry.isProviderBlockedEvent(ev) ? 'failed' : 'bounced',
         failure_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
         updated_at: now,
       });
@@ -837,6 +867,7 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
         await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' }, client);
       }
       break;
+    }
 
     case 'spamreport':
       await client('automation_step_sends').where({ id: sendRow.id }).update({

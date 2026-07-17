@@ -18,7 +18,16 @@ router.use(authenticate);
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
-    const requestedLimit = parseInt(req.query.limit) || 20;
+    const querySchema = Joi.object({
+      limit: Joi.number().integer().min(1).max(100).default(50),
+      cursor: Joi.number().integer().min(0).default(0),
+    });
+    const { value: page, error: queryError } = querySchema.validate(req.query);
+    if (queryError) {
+      return res.status(400).json({ error: 'limit must be 1-100 and cursor must be a non-negative integer' });
+    }
+    const requestedLimit = page.limit;
+    const requestedCursor = page.cursor;
     const service = await PaymentRouter.getServiceForCustomer(req.customerId);
 
     // Third-party Bill-To: a payment against a payer-billed invoice belongs to
@@ -47,30 +56,53 @@ router.get('/', async (req, res, next) => {
       const invId = invoiceIdOf(p);
       return !!(invId && payerInvoiceIds.has(invId));
     };
-    let visiblePayments;
+    let total;
     if (payerInvoiceIds.size === 0) {
-      visiblePayments = await service.getPaymentHistory(req.customerId, requestedLimit);
+      const countRow = await db('payments')
+        .where({ customer_id: req.customerId })
+        .count('* as count')
+        .first();
+      total = Number(countRow?.count || 0);
     } else {
-      // Page through history (excluding payer-linked rows) until we have the
-      // requested number of customer-visible payments or the table is exhausted.
-      // Avoids both under-filling (a hard cap that drops payer rows) and a
-      // metadata::jsonb cast over the whole payments table.
-      visiblePayments = [];
-      const pageSize = Math.max(requestedLimit, 20);
-      let offset = 0;
-      // Bound the loop so a customer with a huge history of payer payments can't
-      // scan unboundedly; ~10 pages is far beyond any realistic visible page.
-      for (let page = 0; page < 10 && visiblePayments.length < requestedLimit; page += 1) {
-        const batch = await service.getPaymentHistory(req.customerId, pageSize, offset);
-        if (!batch.length) break;
-        for (const p of batch) {
-          if (!isPayerLinked(p)) visiblePayments.push(p);
-          if (visiblePayments.length >= requestedLimit) break;
-        }
-        if (batch.length < pageSize) break; // exhausted
-        offset += pageSize;
+      const rows = await db('payments')
+        .where({ customer_id: req.customerId })
+        .select('metadata');
+      total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
+    }
+
+    // `cursor` is the raw payment-history offset. Scan bounded chunks so a
+    // page still contains up to `limit` customer-visible rows when third-party
+    // payer rows are interspersed. The cursor points at (not beyond) the first
+    // visible look-ahead row, so no payment is lost between pages.
+    const visiblePayments = [];
+    const batchSize = 100;
+    let rawCursor = requestedCursor;
+    let nextCursor = null;
+    let exhausted = false;
+    for (let scan = 0; scan < 10 && !exhausted && nextCursor == null; scan += 1) {
+      const batch = await service.getPaymentHistory(req.customerId, batchSize, rawCursor);
+      if (!batch.length) {
+        exhausted = true;
+        break;
       }
-      visiblePayments = visiblePayments.slice(0, requestedLimit);
+      for (let index = 0; index < batch.length; index += 1) {
+        const payment = batch[index];
+        if (isPayerLinked(payment)) continue;
+        if (visiblePayments.length < requestedLimit) visiblePayments.push(payment);
+        else {
+          nextCursor = rawCursor + index;
+          break;
+        }
+      }
+      if (nextCursor != null) break;
+      rawCursor += batch.length;
+      if (batch.length < batchSize) exhausted = true;
+    }
+    if (nextCursor == null && !exhausted) {
+      // The bounded scan may encounter an unusually long run of payer-only
+      // rows. Continue from the raw position on the next request rather than
+      // scanning without limit or claiming the history is complete.
+      nextCursor = rawCursor;
     }
 
     // Recurring = the monthly WaveGuard plan obligation. Metadata-first, same
@@ -106,6 +138,11 @@ router.get('/', async (req, res, next) => {
         refundAmount: p.refund_amount ? parseFloat(p.refund_amount) : null,
         refundStatus: p.refund_status || null,
       })),
+      total,
+      limit: requestedLimit,
+      cursor: requestedCursor,
+      hasMore: nextCursor != null,
+      nextCursor,
     });
   } catch (err) {
     next(err);

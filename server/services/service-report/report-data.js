@@ -1927,6 +1927,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
+  // Owner ruling 2026-07-16: the report kicker mirrors the customer's LINKED
+  // service on the schedule ("Monthly Lawn Care Service"), so the scheduled
+  // row's service_type (the catalog name) wins over the record's snapshot
+  // when the visit is linked; unlinked/legacy records keep the snapshot.
+  const scheduledServiceRow = service.scheduled_service_id
+    ? await knex('scheduled_services')
+      .where({ id: service.scheduled_service_id })
+      .first('service_type')
+      .catch(() => null)
+    : null;
+  const linkedServiceName = String(scheduledServiceRow?.service_type || '').trim()
+    || serviceDisplayName(service);
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -2443,7 +2455,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceReportId: service.id,
     serviceLine,
     serviceType: service.service_type,
-    serviceDisplayName: serviceDisplayName(service),
+    serviceDisplayName: linkedServiceName,
     serviceDate: service.service_date,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
@@ -2567,7 +2579,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           const nextRow = await knex('scheduled_services')
             .where('customer_id', service.customer_id)
             .andWhere('scheduled_date', '>', afterIso)
-            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site', 'rescheduled'])
+            // NO 'rescheduled': phantom placeholders hold the OLD date until the
+            // office rebooks — publishing one shows a stale time as still real
+            // (same rule as the tree-shrub and nextAppointment queries below).
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
             // "turf": commercial lawn persists as "Commercial Turf Treatment Program".
             // Grouped OR so it stays ANDed with the customer/date/status predicates.
             .andWhere((qb) => qb
@@ -2765,7 +2780,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   ) {
     visitSummary = await applyVisitSummaryNarrative({
       recap: visitSummary,
-      serviceTypeDisplay: serviceDisplayName(service),
+      serviceTypeDisplay: linkedServiceName,
       areasServiced: areaLabels,
       pestPressure,
       findings,
@@ -2779,7 +2794,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     token,
     serviceRecordId: service.id,
     serviceType: service.service_type,
-    serviceDisplayName: serviceDisplayName(service),
+    serviceDisplayName: linkedServiceName,
     serviceLine,
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
@@ -2910,7 +2925,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     photoChain,
     pdfUrl: `/api/reports/${token}`,
     legacy: {
-      notes: service.technician_notes || '',
+      // No raw technician_notes here (owner ruling 2026-07-16): the field is
+      // internal — access codes, billing notes — and the only sanctioned path
+      // to customer copy is technicianReportCustomerCopy's reviewed parse,
+      // which already feeds the summary slot. The client never read this key.
       measurements: {
         soilTemp: service.soil_temp,
         thatch: service.thatch_measurement,

@@ -1028,12 +1028,37 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
     const description = post.meta_description || (post.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300);
 
     const SocialMediaService = require('../services/social-media');
-    const result = await SocialMediaService.publishToAll({
-      title, description, link,
-      guid: `blog_${post.id}`,
-      source: 'blog',
-      imageUrl: publicBlogImageUrl(post),
-    });
+    let result;
+    if (req.body?.force === true) {
+      // Explicit owner re-share: the button was clicked AGAIN after the UI
+      // said this URL already went out — deliberate double-post is the
+      // owner's call (e.g. boosting a post a week later).
+      result = await SocialMediaService.publishToAll({
+        title, description, link,
+        guid: `blog_${post.id}`,
+        source: 'blog',
+        imageUrl: publicBlogImageUrl(post),
+      });
+    } else {
+      // Default path dedupes via shareUrlOnce — with the live-flip auto-share
+      // now posting every post the moment it goes live, a Share click minutes
+      // later would otherwise silently double-post the same URL.
+      result = await SocialMediaService.shareUrlOnce({
+        title, description, link,
+        source: 'blog',
+        noAiImage: true,
+      });
+      if (result?.skipped === 'already_posted') {
+        return res.status(409).json({
+          alreadyShared: true,
+          blocking_status: result.blocking_status || null,
+          error: 'This post already went out to social (or has studio copy drafted for it). Re-run with force to share again.',
+        });
+      }
+      if (result?.skipped) {
+        return res.status(409).json({ error: `Share skipped: ${result.skipped}` });
+      }
+    }
 
     // Mark post as shared
     try {

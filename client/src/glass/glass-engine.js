@@ -25,11 +25,14 @@ import './glass-theme.css';
  * the parallax orbs + film grain. Returns the orb container for pointer FX
  * plus a cleanup that restores everything it changed.
  */
-export function applyGlassScene(variant) {
+export function applyGlassScene(variant, surface = null) {
   const html = document.documentElement;
   const prevHtmlBg = html.style.background;
   const prevBodyBg = document.body.style.background;
+  const prevSurface = html.getAttribute('data-glass-surface');
   html.setAttribute('data-glass-theme', variant);
+  if (surface) html.setAttribute('data-glass-surface', surface);
+  else html.removeAttribute('data-glass-surface');
   // The 'pro' scene (invoices/receipts/statements) stays quiet: one soft
   // brand-tinted wash, no orbs, no grain — financial documents should feel
   // composed, not playful.
@@ -84,6 +87,8 @@ export function applyGlassScene(variant) {
     if (orbs) orbs.remove();
     if (grain) grain.remove();
     html.removeAttribute('data-glass-theme');
+    if (prevSurface == null) html.removeAttribute('data-glass-surface');
+    else html.setAttribute('data-glass-surface', prevSurface);
     html.style.background = prevHtmlBg;
     document.body.style.background = prevBodyBg;
   };
@@ -179,16 +184,16 @@ export function fireGlassConfetti(cx, cy) {
  * the browser paints the first frame, or every glass surface flashes its
  * un-themed (legacy-token) styling for a frame before the scene mounts.
  */
-export function useGlassSurface(active, variant = 'full') {
+export function useGlassSurface(active, variant = 'full', surface = null) {
   useLayoutEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const { orbs, cleanup } = applyGlassScene(variant);
+    const { orbs, cleanup } = applyGlassScene(variant, surface);
     const detachFx = attachGlassPointerFx(html, orbs, reduced);
     return () => {
       detachFx();
       cleanup();
     };
-  }, [active, variant]);
+  }, [active, variant, surface]);
 }

@@ -1447,14 +1447,10 @@ function pricePestControl(property, options = {}) {
   else if (f.shrubs === 'light') additionalAdj += (PEST.additionalAdjustments.shrubs_light || 0);
   if (f.poolCage) additionalAdj += poolCageMeta.adjustment;
   else if (f.pool) additionalAdj += PEST.additionalAdjustments.poolNoCage;
-  if (f.trees === 'heavy') additionalAdj += PEST.additionalAdjustments.trees_heavy;
-  else if (f.trees === 'moderate') additionalAdj += PEST.additionalAdjustments.trees_moderate;
-  else if (f.trees === 'light') additionalAdj += (PEST.additionalAdjustments.trees_light || 0);
   if (f.complexity === 'complex') additionalAdj += PEST.additionalAdjustments.complexity_complex;
   else if (f.complexity === 'moderate') additionalAdj += (PEST.additionalAdjustments.complexity_moderate || 0);
   else if (f.complexity === 'simple') additionalAdj += (PEST.additionalAdjustments.complexity_simple || 0);
   if (f.nearWater) additionalAdj += PEST.additionalAdjustments.nearWater;
-  if (f.largeDriveway) additionalAdj += PEST.additionalAdjustments.largeDriveway;
   additionalAdj += attachedGarageAdj;
 
   const propAdj = PROPERTY_TYPE_ADJ[propertyTypeMeta.propertyType] || 0;
@@ -4547,9 +4543,9 @@ function priceOneTimePest(property, options = {}) {
   }
 
   // One-time = quarterly per-app × multiplier. The quarterly rate already
-  // encodes all property metrics (footprint, lot, tree/shrub, pool/cage,
-  // driveway, complexity, type, age), so one-time scales proportionally with
-  // real job difficulty. multiplier >= 2 (+ the $199 floor) keeps a one-off
+  // encodes the active pest metrics (footprint, shrubs, pool/cage,
+  // complexity, type, and age). Tree density and driveway size remain
+  // context-only. The multiplier >= 2 (+ the $199 floor) keeps a one-off
   // visit above a recurring customer's visit-1 cost ($99 setup + quarterly),
   // preserving the incentive to commit.
   const multiplier = Number.isFinite(Number(ONE_TIME.pest.multiplier)) && Number(ONE_TIME.pest.multiplier) > 0

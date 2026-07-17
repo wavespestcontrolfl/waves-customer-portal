@@ -155,7 +155,7 @@ describe('ReportViewPage report chrome helpers', () => {
     };
 
     expect(smartStatusSummary(data, 'static', Date.parse('2026-05-21T19:00:00.000Z'))).toEqual(expect.objectContaining({
-      heading: 'one area needs attention.',
+      heading: 'one area needs attention!',
       status: 'Follow-up recommended',
       result: 'Lanai was marked follow-up recommended.',
     }));
@@ -203,7 +203,7 @@ describe('ReportViewPage report chrome helpers', () => {
     }, 'static', Date.parse('2026-05-21T19:00:00.000Z'));
 
     expect(status).toEqual(expect.objectContaining({
-      heading: 'we found activity that needs attention.',
+      heading: 'we found activity that needs attention!',
       status: 'Ready after 4:00 PM',
       statusTone: 'pending',
     }));
@@ -334,6 +334,37 @@ describe('ReportViewPage service coverage helper', () => {
     });
 
     expect(coverage.enabled).toBe(false);
+  });
+
+  // 2026-07-16 audit: the client fallback builder mirrored the server's
+  // fabrication — inspected/skipped/not-serviced areas were described and
+  // counted as completed work.
+  it('never describes or counts inspected/skipped/not-serviced areas as completed', () => {
+    const coverage = normalizeServiceCoverage({
+      serviceLine: 'pest',
+      serviceType: 'Quarterly Pest Control Service',
+      serviceAreas: [],
+      zones: [],
+      serviceLocations: [
+        { id: 'loc-a', name: 'Perimeter', status: 'inspected' },
+        { id: 'loc-b', name: 'Back Gate Zone', status: 'skipped', skippedReason: 'heavy rain' },
+        { id: 'loc-c', name: 'Detached Shed', status: 'not_serviced' },
+        { id: 'loc-d', name: 'Garage', status: 'needs_follow_up' },
+      ],
+    });
+
+    const byName = Object.fromEntries(coverage.items.map((item) => [item.areaName, item]));
+    expect(byName.Perimeter.status).toBe('inspected');
+    expect(byName.Perimeter.customerDescription).toBe('Perimeter inspected.');
+    expect(byName['Back Gate Zone'].customerDescription).toBe('Service was skipped because heavy rain.');
+    expect(byName['Detached Shed'].customerDescription).toBe('This area was not serviced on this visit.');
+    expect(byName.Garage.customerDescription).toBe('Technician flagged this area for follow-up.');
+    expect(coverage.summary).toMatchObject({
+      completedCount: 0,
+      inspectedCount: 1,
+      skippedCount: 2,
+      needsAttentionCount: 1,
+    });
   });
 });
 

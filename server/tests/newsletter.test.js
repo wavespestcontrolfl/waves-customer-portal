@@ -604,7 +604,7 @@ describe('newsletter computeNewsletterEventUpdates', () => {
   });
 
   describe('bounce / blocked / dropped', () => {
-    test.each(['bounce', 'blocked', 'dropped'])('%s stamps bounce + increments + bounce_count', (eventName) => {
+    test.each(['bounce', 'dropped'])('%s stamps bounce + increments + bounce_count', (eventName) => {
       const u = computeNewsletterEventUpdates(
         { event: eventName, reason: 'mailbox does not exist' },
         fresh(),
@@ -617,6 +617,21 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       expect(u.reconcileSendStatus).toBe(true);
       expect(u.subscriberAction).toBe('bounce_increment');
       expect(u.subscriberAt).toBe(now);
+    });
+    test.each([
+      { event: 'blocked', response: 'IP reputation block' },
+      { event: 'bounce', type: 'blocked', reason: 'Spamhaus SBL' },
+    ])('provider block stays retryable and does not increment bounce health: $event/$type', (event) => {
+      const u = computeNewsletterEventUpdates(event, fresh({ sent_at: now }), now);
+      expect(u).toEqual({
+        delivery: {
+          status: 'failed',
+          sent_at: null,
+          bounce_reason: event.reason || event.response || event.type,
+          updated_at: now,
+        },
+        reconcileSendStatus: true,
+      });
     });
     test('truncates very long bounce_reason to 500 chars', () => {
       const long = 'x'.repeat(800);
@@ -799,6 +814,7 @@ describe('email template suppression event mapping', () => {
       suppression_type: 'bounce',
       group_key: null,
     });
+    expect(suppressionForEmailEvent({ event: 'bounce', type: 'blocked', bounce_classification: 'Reputation' })).toBeNull();
     expect(suppressionForEmailEvent({ event: 'blocked' })).toBeNull();
     expect(suppressionForEmailEvent({ event: 'dropped', reason: 'Spam Content' })).toBeNull();
   });
@@ -1203,14 +1219,32 @@ describe('email template send history webhook updates', () => {
     });
   });
 
-  test('bounce, blocked, and dropped preserve the provider reason', () => {
+  test('hard bounce and dropped preserve the provider reason', () => {
     const bounced = computeEmailMessageEventUpdates({ event: 'bounce', reason: 'mailbox missing' }, fresh(), now);
     expect(bounced.status).toBe('bounced');
     expect(bounced.bounced_at).toBe(now);
     expect(bounced.error_message).toBe('mailbox missing');
 
-    expect(computeEmailMessageEventUpdates({ event: 'blocked', response: 'rate limited' }, fresh(), now).status).toBe('blocked');
     expect(computeEmailMessageEventUpdates({ event: 'dropped', type: 'suppressed' }, fresh(), now).status).toBe('dropped');
+  });
+
+  test.each([
+    { event: 'blocked', response: 'rate limited' },
+    { event: 'bounce', type: 'blocked', reason: 'Spamhaus SBL' },
+  ])('provider block is a retryable failure, not a recipient bounce: $event/$type', (event) => {
+    const tracked = fresh({
+      recipient_email_snapshot: 'customer@example.com',
+      subject_snapshot: 'Tracked transactional email',
+      suppression_group_key_snapshot: 'service_operational',
+      provider_retry_count: 0,
+    });
+    expect(computeEmailMessageEventUpdates(event, tracked, now)).toEqual({
+      status: 'failed',
+      error_message: event.reason || event.response || event.type,
+      provider_retry_next_at: new Date(now.getTime() + (10 * 60 * 1000)),
+      provider_retry_exhausted_at: null,
+      updated_at: now,
+    });
   });
 
   test('complaints and unsubscribes update customer-facing send history status', () => {

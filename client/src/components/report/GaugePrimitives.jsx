@@ -66,7 +66,10 @@ export function PressureHistoryChart({ history, cadence }) {
     (history || [])
       .map((row) => {
         const t = Date.parse(`${row.serviceDate}T12:00:00`);
-        return Number.isFinite(t) ? { t, score: Number(row.score) } : null;
+        const score = Number(row.score);
+        // Number(null) === 0 — a null-score history row must drop, not chart
+        // as a false 0 dip (audit 2026-07-16)
+        return Number.isFinite(t) && row.score != null && Number.isFinite(score) ? { t, score } : null;
       })
       .filter(Boolean)
       .sort((a, b) => a.t - b.t)
@@ -145,10 +148,14 @@ export function PressureHistoryChart({ history, cadence }) {
 }
 
 export function MeterSvg({ score, label, noun = 'Pest Pressure' }) {
-  const safeScore = score === null || score === undefined ? 0 : Math.max(0, Math.min(MAX_SCORE, Number(score)));
+  // Treat '' and non-numeric the same as null: Number('') === 0 would render
+  // a real 0 score, and NaN would emit invalid SVG attributes + an "NaN out
+  // of 5" aria-label (audit 2026-07-16) — matching the V2 toScore() rule.
+  const numeric = score !== null && score !== undefined && score !== '' && Number.isFinite(Number(score));
+  const safeScore = numeric ? Math.max(0, Math.min(MAX_SCORE, Number(score))) : 0;
   const pct = (safeScore / MAX_SCORE) * 100;
   const labelName = label && label.name ? label.name : 'No score';
-  const ariaLabel = score === null || score === undefined
+  const ariaLabel = !numeric
     ? `${noun} score not yet available.`
     : `${noun} ${safeScore.toFixed(1)} out of 5, labelled ${labelName}.`;
 
@@ -156,13 +163,13 @@ export function MeterSvg({ score, label, noun = 'Pest Pressure' }) {
     <div role="img" aria-label={ariaLabel} style={{ width: '100%' }}>
       <svg viewBox="0 0 200 24" preserveAspectRatio="none" style={{ width: '100%', height: 18, display: 'block' }}>
         <rect x="0" y="9" width="200" height="6" rx="3" fill="#E5E7EB" />
-        {score !== null && score !== undefined ? (
+        {numeric ? (
           <rect x="0" y="9" width={Math.max(2, (pct / 100) * 200)} height="6" rx="3" fill="#0B3A66" />
         ) : null}
         {[0, 50, 100].map((tickPct) => (
           <rect key={tickPct} x={tickPct === 100 ? 198 : tickPct === 0 ? 0 : (tickPct / 100) * 200 - 1} y="6" width="2" height="12" rx="1" fill="#94A3B8" />
         ))}
-        {score !== null && score !== undefined ? (
+        {numeric ? (
           <circle cx={(pct / 100) * 200} cy="12" r="6" fill="#FFFFFF" stroke="#0B3A66" strokeWidth="2" />
         ) : null}
       </svg>
@@ -176,7 +183,10 @@ export function MeterSvg({ score, label, noun = 'Pest Pressure' }) {
 }
 
 export function TrendChip({ trend, delta }) {
-  const meta = TREND_META[trend] || TREND_META.stable;
+  // an unknown/absent trend must not assert "Stable" — render nothing,
+  // like the V2 TrendArrow (audit 2026-07-16)
+  const meta = TREND_META[trend];
+  if (!meta) return null;
   const tone = TONE_STYLES[meta.tone];
   const { Icon } = meta;
   const deltaText = trendDeltaText(trend, delta);
