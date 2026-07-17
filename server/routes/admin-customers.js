@@ -536,7 +536,10 @@ function mapCustomerListRow(c) {
     propertyType: c.property_type,
     lastContactDate: c.last_contact_date, lastContactType: c.last_contact_type,
     nextFollowUp: c.next_follow_up_date,
-    lifetimeRevenue: parseFloat(c.lifetime_revenue || 0),
+    // lifetime_revenue_net is the payments-derived net computed by the list
+    // query; the bare column is a writer-less legacy fallback for callers
+    // that don't select it.
+    lifetimeRevenue: parseFloat(c.lifetime_revenue_net ?? c.lifetime_revenue ?? 0),
     totalServices: parseInt(c.total_services || c.services_count || 0),
     lastServiceDate: c.last_service_date, nextServiceDate: c.next_service_date,
     serviceTypes: c.service_types || '',
@@ -1306,6 +1309,11 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
       healthScoreSelect,
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
+      // Net of all paid payments minus refunds — the same definition the
+      // customer-detail endpoint computes. customers.lifetime_revenue has NO
+      // production writer (only demo seeds ever set it), so reading the
+      // column shows $0 for every real customer.
+      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
     );
 
     // Alphabetical by first name only — operator preference. No tie-break
@@ -1314,8 +1322,12 @@ router.get('/', async (req, res, next) => {
     const dir = order === 'desc' ? 'desc' : 'asc';
     if (sort === 'name') {
       query = query.orderByRaw(`LOWER(first_name) ${dir} NULLS LAST`);
+    } else if (sort === 'revenue') {
+      // Sort by the computed net, not the writer-less lifetime_revenue column.
+      // `dir` is sanitized to asc/desc above.
+      query = query.orderByRaw(`lifetime_revenue_net ${dir}`);
     } else {
-      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date', revenue: 'lifetime_revenue' }[sort] || 'first_name';
+      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date' }[sort] || 'first_name';
       query = query.orderBy(sortCol, dir);
     }
 
