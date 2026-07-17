@@ -117,7 +117,7 @@ const INPUT = {
     homeSqFt: { value: 2000, source: 'county', confidence: 'high' },
   },
   protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
-  inventoryReview: [{ serviceKey: 'pest', productName: 'Pest protocol products', status: 'in_stock', onHand: 8 }],
+  inventoryReview: [{ serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 8 }],
 };
 
 function thenable(value) {
@@ -589,7 +589,7 @@ describe('Agent Estimate draft tool', () => {
 
   test('uses live stock instead of a model-asserted available inventory row', async () => {
     mockExecuteProcurementTool.mockResolvedValueOnce({
-      products: [{ id: 'product-pest', name: 'Pest protocol products', on_hand: 0, unit: 'oz' }],
+      products: [{ id: 'product-pest', name: 'Demand CS', on_hand: 0, unit: 'oz' }],
     });
     const { database } = makeDatabase();
     mockDb.mockImplementation(database);
@@ -598,16 +598,37 @@ describe('Agent Estimate draft tool', () => {
     const result = await executeEstimateTool('create_agent_estimate_draft', {
       ...INPUT,
       inventoryReview: [{
-        serviceKey: 'pest', productName: 'Pest protocol products', status: 'in_stock', onHand: 99,
+        serviceKey: 'pest', productName: 'Demand CS', status: 'in_stock', onHand: 99,
       }],
     });
 
     expect(result.lane).toBe('yellow');
-    expect(result.lane_reasons).toContain('Pest protocol products: unavailable (0 on hand)');
+    expect(result.lane_reasons).toContain('Demand CS: unavailable (0 on hand)');
     expect(result.inventoryReview[0]).toEqual(expect.objectContaining({
       onHand: 0,
       status: 'unavailable',
       verifiedLive: true,
+    }));
+  });
+
+  test('requires each reviewed inventory product to belong to the selected service protocol', async () => {
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      inventoryReview: [{
+        serviceKey: 'pest', productName: 'Unrelated Catalog Product', status: 'in_stock', onHand: 8,
+      }],
+    });
+
+    expect(result.lane_reasons).toContain(
+      'Unrelated Catalog Product: product is not named in the pest protocol',
+    );
+    expect(result.inventoryReview[0]).toEqual(expect.objectContaining({
+      verifiedLive: true,
+      protocolMatched: false,
     }));
   });
 
@@ -813,7 +834,7 @@ describe('Agent Estimate property lookup safety', () => {
   });
 
   test('binds a structure fact to its own value when one quote names multiple dimensions', async () => {
-    const quote = 'The home is 2,000 square feet and the lot is 8,000 square feet';
+    const quote = 'The home is 2,000 square feet with an 8,000 square foot lot';
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       lead: {
         id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
@@ -874,6 +895,65 @@ describe('Agent Estimate property lookup safety', () => {
       source: 'call_extraction',
       confidence: 'low',
     }));
+  });
+
+  test('keeps an exact transcript-summary quote at low confidence', async () => {
+    const quote = 'The home is 2000 square feet';
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: {
+        id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+      },
+      quote_form: { message_fields: [], extracted_data: {} },
+      calls: [{ transcript: '', transcript_summary: quote, extraction: {} }],
+      sms_thread: [], activities: [],
+      customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' } } },
+      evidence: [{ source: 'transcript_summary', quote, decision: 'home square footage' }],
+      propertyFacts: {
+        address: INPUT.propertyFacts.address,
+        homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane_reasons).toContain(
+      'homeSqFt lacks a server-verified value, source, confidence, or evidence binding',
+    );
+    expect(result.propertyFacts.homeSqFt).toEqual(expect.objectContaining({
+      source: 'transcript_summary',
+      confidence: 'low',
+    }));
+  });
+
+  test('requires verified facts for every supplied top-level price driver', async () => {
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        homeSqFt: 2000,
+        yearBuilt: 1985,
+        imperviousSurfacePercent: 40,
+        pool: true,
+        poolCage: true,
+        services: { pest: { frequency: 'quarterly' } },
+      },
+    });
+
+    expect(result.lane_reasons).toEqual(expect.arrayContaining([
+      'year built was used for pricing without a matching verified property fact',
+      'impervious surface percent was used for pricing without a matching verified property fact',
+      'pool presence was used for pricing without a matching verified property fact',
+      'pool cage presence was used for pricing without a matching verified property fact',
+    ]));
   });
 
   test('does not promote an estimated turf lookup into a measured turf credential', async () => {

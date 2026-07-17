@@ -438,27 +438,85 @@ function propertyLookupCredentialFacts(property, enriched) {
   return facts;
 }
 
-function quoteClauseAt(text, index, valueLength) {
-  const separators = [...String(text || '').matchAll(/(?:;|\n+|[.!?](?:\s+|$)|,\s+|\b(?:and|but|while|whereas)\b)/gi)];
-  let start = 0;
-  let end = text.length;
-  for (const separator of separators) {
-    const separatorStart = Number(separator.index);
-    const separatorEnd = separatorStart + separator[0].length;
-    if (separatorEnd <= index) start = separatorEnd;
-    else if (separatorStart >= index + valueLength) {
-      end = separatorStart;
-      break;
+const FACT_FAMILY_PATTERNS = Object.freeze({
+  building_slab: /building.{0,20}slab|slab.{0,20}building/gi,
+  bed_area: /bed.{0,20}(?:area|square|sq\s*ft|sqft)|treatable.{0,20}bed/gi,
+  attic: /attic/gi,
+  footprint: /footprint/gi,
+  slab: /slab/gi,
+  turf: /lawn|turf/gi,
+  lot: /lot|outdoor/gi,
+  structure: /\b(?:home|house|building|residence)\b|living\s+area/gi,
+  stories: /stor(?:y|ies)|floor/gi,
+  bedrooms: /bedroom/gi,
+  units: /unit|apartment/gi,
+  palms: /palm/gi,
+  perimeter: /perimeter|linear/gi,
+});
+
+function distanceBetweenSpans(leftStart, leftLength, rightStart, rightLength) {
+  const leftEnd = leftStart + leftLength;
+  const rightEnd = rightStart + rightLength;
+  if (leftEnd < rightStart) return rightStart - leftEnd;
+  if (rightEnd < leftStart) return leftStart - rightEnd;
+  return 0;
+}
+
+// Bind a quoted number to the closest dimension label, not merely any label
+// in the same sentence. This handles constructions such as "the home is
+// 2,000 square feet with an 8,000 square foot lot" without letting the lot
+// value authenticate homeSqFt.
+function quoteNumberMatchesFact(text, match, key, semanticPattern) {
+  const numberStart = Number(match.index);
+  const numberLength = match[0].length;
+  const requestedFamily = factFamily(key);
+  if (!requestedFamily) {
+    const localStart = Math.max(0, numberStart - 60);
+    const localEnd = Math.min(text.length, numberStart + numberLength + 60);
+    return semanticPattern.test(text.slice(localStart, localEnd));
+  }
+  const distances = [];
+  for (const [family, pattern] of Object.entries(FACT_FAMILY_PATTERNS)) {
+    pattern.lastIndex = 0;
+    for (const label of String(text || '').matchAll(pattern)) {
+      distances.push({
+        family,
+        distance: distanceBetweenSpans(numberStart, numberLength, Number(label.index), label[0].length),
+      });
     }
   }
-  return text.slice(start, end);
+  const requestedDistance = distances
+    .filter((entry) => entry.family === requestedFamily)
+    .reduce((min, entry) => Math.min(min, entry.distance), Number.POSITIVE_INFINITY);
+  if (!Number.isFinite(requestedDistance) || requestedDistance > 60) return false;
+  const competingDistance = distances
+    .filter((entry) => entry.family !== requestedFamily)
+    .reduce((min, entry) => Math.min(min, entry.distance), Number.POSITIVE_INFINITY);
+  // A compound label may overlap its component words ("building slab"
+  // matches building_slab, structure, and slab). The compound family wins a
+  // tie; a generic structure/slab fact must not borrow that same number.
+  return ['building_slab', 'bed_area'].includes(requestedFamily)
+    ? requestedDistance <= competingDistance
+    : requestedDistance < competingDistance;
 }
 
 function canonicalProductName(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-async function validateInventoryReviewRows(rows = []) {
+function protocolContainsProduct(serviceKey, lawnTrack, productName) {
+  const result = getProtocol({ service_type: serviceKey, lawn_track: lawnTrack });
+  if (!result?.protocol) return null;
+  const protocolText = canonicalProductName(JSON.stringify(result.protocol));
+  const requested = canonicalProductName(productName);
+  if (!requested) return false;
+  const tokens = requested.split(' ').filter(Boolean);
+  const aliases = [requested];
+  if (tokens.length > 2) aliases.push(tokens.slice(0, 2).join(' '));
+  return aliases.some((alias) => alias.length >= 5 && protocolText.includes(alias));
+}
+
+async function validateInventoryReviewRows(rows = [], protocolReview = []) {
   const validatedRows = [];
   const reasons = [];
   for (const row of rows) {
@@ -495,7 +553,15 @@ async function validateInventoryReviewRows(rows = []) {
       inventoryUnit: product.unit || null,
       verifiedLive: true,
     };
+    const review = protocolReview.find((candidate) => (
+      String(candidate?.serviceKey || '').toLowerCase() === String(row?.serviceKey || '').toLowerCase()
+    ));
+    const protocolMatch = protocolContainsProduct(row?.serviceKey, review?.lawnTrack, product.name);
+    verified.protocolMatched = protocolMatch === true;
     validatedRows.push(verified);
+    if (protocolMatch === false) {
+      reasons.push(`${product.name}: product is not named in the ${row?.serviceKey || 'selected service'} protocol`);
+    }
     if (onHand == null) reasons.push(`${product.name}: count untracked`);
     else if (onHand <= 0) reasons.push(`${product.name}: unavailable (${onHand} on hand)`);
   }
@@ -913,6 +979,20 @@ function normalizeEvidenceText(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+function evidenceSourceKey(source) {
+  const normalized = String(source || '').trim().toLowerCase();
+  if (/summary/.test(normalized)) return 'transcript_summary';
+  if (/(?:quote|form|submission).*(?:extraction|structured)|(?:extraction|structured).*(?:quote|form|submission)/.test(normalized)) {
+    return 'quote_form_extraction';
+  }
+  if (/extraction|structured.*call/.test(normalized)) return 'call_extraction';
+  if (/quote|form|submission/.test(normalized)) return 'quote_form';
+  if (/call|transcript|recording/.test(normalized)) return 'call_transcript';
+  if (/sms|text|message/.test(normalized)) return 'sms';
+  if (/activity|note/.test(normalized)) return 'activity';
+  return null;
+}
+
 function verifyAgentEvidenceQuotes(evidence, context) {
   const structuredText = (value) => {
     try {
@@ -926,21 +1006,12 @@ function verifyAgentEvidenceQuotes(evidence, context) {
       ...(context?.quote_form?.message_fields || []).map((row) => row.text).filter(Boolean),
       structuredText(context?.quote_form?.extracted_data),
     ].join(' ')),
+    quote_form_extraction: normalizeEvidenceText(structuredText(context?.quote_form?.extracted_data)),
     call_transcript: normalizeEvidenceText((context?.calls || []).map((call) => call.transcript).filter(Boolean).join(' ')),
     transcript_summary: normalizeEvidenceText((context?.calls || []).map((call) => call.transcript_summary).filter(Boolean).join(' ')),
     call_extraction: normalizeEvidenceText((context?.calls || []).map((call) => structuredText(call.extraction)).join(' ')),
     sms: normalizeEvidenceText((context?.sms_thread || []).map((message) => message.body).filter(Boolean).join(' ')),
     activity: normalizeEvidenceText((context?.activities || []).map((activity) => activity.description).filter(Boolean).join(' ')),
-  };
-  const evidenceSourceKey = (source) => {
-    const normalized = String(source || '').trim().toLowerCase();
-    if (/quote|form|submission/.test(normalized)) return 'quote_form';
-    if (/extraction|structured.*call/.test(normalized)) return 'call_extraction';
-    if (/summary/.test(normalized)) return 'transcript_summary';
-    if (/call|transcript|recording/.test(normalized)) return 'call_transcript';
-    if (/sms|text|message/.test(normalized)) return 'sms';
-    if (/activity|note/.test(normalized)) return 'activity';
-    return null;
   };
   const quotedRows = (Array.isArray(evidence) ? evidence : [])
     .map((row, index) => ({ index, quote: row?.quote, source: row?.source }))
@@ -1498,7 +1569,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const protocolReview = Array.isArray(input.protocolReview) ? input.protocolReview : [];
   const inventoryReview = Array.isArray(input.inventoryReview) ? input.inventoryReview : [];
   const inventoryValidation = inventoryReview.length
-    ? await validateInventoryReviewRows(inventoryReview)
+    ? await validateInventoryReviewRows(inventoryReview, protocolReview)
     : { rows: [], reasons: [] };
 
   if (accountPricing.recognized) {
@@ -1573,9 +1644,19 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       units: /unit|apartment/i,
       palms: /palm/i,
       perimeter: /perimeter|linear/i,
+      year_built: /year.{0,12}built|built.{0,12}(?:in|year)|construction.{0,12}year/i,
+      impervious: /impervious|hardscape|non[-\s]?turf/i,
+      pool_cage: /pool.{0,12}(?:cage|enclosure)|(?:cage|enclosure).{0,12}pool/i,
+      pool: /\bpool\b/i,
     };
     const family = factFamily(key);
     if (familyPatterns[family]) return familyPatterns[family];
+    if (/year.*built|built.*year/i.test(key)) return familyPatterns.year_built;
+    if (/impervious/i.test(key)) return familyPatterns.impervious;
+    if (/pool.*cage|cage.*pool/i.test(key)) return familyPatterns.pool_cage;
+    if (/pool/i.test(key)) return familyPatterns.pool;
+    if (/commercial.*(?:subtype|risk)|(?:subtype|risk).*commercial/i.test(key)) return /commercial|property|risk|occupancy|business/i;
+    if (/property.*type|iscommercial/i.test(key)) return /property|commercial|residential|home|business/i;
     const meaningfulToken = String(key || '')
       .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
       .split(/[^a-z0-9]+/i)
@@ -1583,25 +1664,47 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     return meaningfulToken ? new RegExp(meaningfulToken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
   };
   const verifiedQuoteGrounding = (key, fact) => {
-    const observed = Number(fact.value);
-    if (!Number.isFinite(observed)) return null;
     const semanticPattern = semanticPatternForFact(key);
     if (!semanticPattern) return null;
     const matchedRow = (Array.isArray(input.evidence) ? input.evidence : []).find((row) => {
       const quote = String(row?.quote || '');
-      const quoteValues = [...quote.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
-      const groundedValue = quoteValues.some((match) => {
-        if (!numericValuesMatch(match[0].replace(/,/g, ''), observed)) return false;
-        return semanticPattern.test(quoteClauseAt(quote, Number(match.index), match[0].length));
-      });
+      let groundedValue = false;
+      if (typeof fact.value === 'boolean') {
+        const flags = `${semanticPattern.flags.replace(/g/g, '')}g`;
+        const semanticMatches = [...quote.matchAll(new RegExp(semanticPattern.source, flags))];
+        groundedValue = semanticMatches.some((semanticMatch) => {
+          const local = quote.slice(Math.max(0, semanticMatch.index - 24), semanticMatch.index + semanticMatch[0].length + 12);
+          const negated = /\b(?:no|not|without|doesn['’]?t\s+have|has\s+no)\b/i.test(local);
+          return fact.value ? !negated : negated;
+        });
+      } else if (Number.isFinite(Number(fact.value))) {
+        const quoteValues = [...quote.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
+        groundedValue = quoteValues.some((match) => (
+          numericValuesMatch(match[0].replace(/,/g, ''), fact.value)
+          && quoteNumberMatchesFact(quote, match, key, semanticPattern)
+        ));
+      } else {
+        groundedValue = semanticPattern.test(quote)
+          && normalizeEvidenceText(quote).includes(normalizeEvidenceText(fact.value));
+        semanticPattern.lastIndex = 0;
+      }
       if (!groundedValue) return false;
       return verifyAgentEvidenceQuotes([row], evidenceContext).verified === 1;
     });
-    return matchedRow ? {
-      source: 'operator_confirmation',
-      confidence: 'high',
+    if (!matchedRow) return null;
+    const sourceKey = evidenceSourceKey(matchedRow.source);
+    let confidence = ['call_extraction', 'quote_form_extraction', 'transcript_summary'].includes(sourceKey) ? 'low' : 'high';
+    if (sourceKey === 'quote_form') {
+      const needle = normalizeEvidenceText(matchedRow.quote);
+      const freeText = normalizeEvidenceText((evidenceContext?.quote_form?.message_fields || [])
+        .map((row) => row.text).filter(Boolean).join(' '));
+      if (!needle || !freeText.includes(needle)) confidence = 'low';
+    }
+    return {
+      source: confidence === 'high' ? 'operator_confirmation' : sourceKey,
+      confidence,
       evidenceSource: String(matchedRow.source || ''),
-    } : null;
+    };
   };
   const serverEvidenceGrounding = (key, fact) => {
     const credential = credentialGrounding(key, fact);
@@ -1713,9 +1816,13 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     .map(([key]) => key);
   const hasVerifiedMatchingFact = (pattern) => propertyFactEntries
     .some(([key, fact]) => pattern.test(key) && factMatchesPricingInput(key, fact));
-  const valuesMatch = (observed, expected) => Number.isFinite(Number(observed))
-    && Number.isFinite(Number(expected))
-    && Math.abs(Number(expected) - Number(observed)) <= Math.max(1, Math.abs(Number(expected)) * 0.01);
+  const valuesMatch = (observed, expected) => {
+    if (typeof expected === 'boolean') return typeof observed === 'boolean' && observed === expected;
+    if (typeof expected === 'string') return String(observed).trim().toLowerCase() === expected.trim().toLowerCase();
+    return Number.isFinite(Number(observed))
+      && Number.isFinite(Number(expected))
+      && Math.abs(Number(expected) - Number(observed)) <= Math.max(1, Math.abs(Number(expected)) * 0.01);
+  };
   const requirePricingFact = (active, pattern, label, expected = undefined) => {
     const hasMatch = expected === undefined
       ? hasVerifiedMatchingFact(pattern)
@@ -1738,6 +1845,15 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   requirePricingFact(Number.isFinite(Number(input.engineInputs.buildingSlabSqFt)), /building.*slab|slab.*building/i, 'building slab square footage', input.engineInputs.buildingSlabSqFt);
   requirePricingFact(Number.isFinite(Number(input.engineInputs.footprintSqFt)), /footprint.*(sq|area|size)/i, 'building footprint', input.engineInputs.footprintSqFt);
   requirePricingFact(Number.isFinite(Number(input.engineInputs.estimatedBedAreaSf)), /bed.*area|treatable.*bed/i, 'treated bed area', input.engineInputs.estimatedBedAreaSf);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.imperviousSurfacePercent)), /impervious|hardscape|non[-\s]?turf/i, 'impervious surface percent', input.engineInputs.imperviousSurfacePercent);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.yearBuilt)), /year.*built|built.*year|construction.*year/i, 'year built', input.engineInputs.yearBuilt);
+  requirePricingFact(Object.prototype.hasOwnProperty.call(input.engineInputs, 'pool'), /^(?:has)?pool$|pool(?!.*cage)/i, 'pool presence', input.engineInputs.pool);
+  requirePricingFact(Object.prototype.hasOwnProperty.call(input.engineInputs, 'poolCage'), /pool.*cage|cage.*pool/i, 'pool cage presence', input.engineInputs.poolCage);
+  const normalizedPropertyType = String(input.engineInputs.propertyType || '').trim().toLowerCase();
+  requirePricingFact(!!normalizedPropertyType && !['single family', 'single_family', 'residential'].includes(normalizedPropertyType), /property.*type|residential|commercial/i, 'property type', input.engineInputs.propertyType);
+  requirePricingFact(input.engineInputs.isCommercial === true, /is.*commercial|commercial.*property/i, 'commercial status', true);
+  requirePricingFact(!!String(input.engineInputs.commercialSubtype || '').trim(), /commercial.*subtype|property.*type/i, 'commercial subtype', input.engineInputs.commercialSubtype);
+  requirePricingFact(!!String(input.engineInputs.commercialRiskType || '').trim(), /commercial.*risk|risk.*type|occupancy.*risk/i, 'commercial risk type', input.engineInputs.commercialRiskType);
   const nestedMeasurements = [];
   const collectMeasurements = (value, path = []) => {
     if (!value || typeof value !== 'object') return;

@@ -357,14 +357,21 @@ class SatelliteAnalyzer {
 
     // Boolean fields — agree if same, flag if different
     for (const field of boolFields) {
-      const values = providerResults.map(({ analysis }) => analysis[field]).filter((v) => typeof v === 'boolean');
-      const trueCount = values.filter(Boolean).length;
+      const values = providerResults
+        .map(({ provider, analysis }) => ({ provider, value: analysis[field] }))
+        .filter((entry) => typeof entry.value === 'boolean');
+      const trueCount = values.filter((entry) => entry.value).length;
       const falseCount = values.length - trueCount;
       if (!values.length) {
-        merged[field] = false;
+        merged[field] = null;
+        confidenceDetails[field] = { values: [], status: 'missing' };
+      } else if (values.length < providerResults.length) {
+        merged[field] = trueCount > 0;
+        fieldVerify.push(field);
+        confidenceDetails[field] = { values, status: 'single_source' };
       } else if (trueCount === 0 || falseCount === 0) {
         merged[field] = trueCount > 0;
-        confidenceDetails[field] = { status: 'agree' };
+        confidenceDetails[field] = { values, status: 'agree' };
       } else {
         merged[field] = true; // err on the side of true
         fieldVerify.push(field);

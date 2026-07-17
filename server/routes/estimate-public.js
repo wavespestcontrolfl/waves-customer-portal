@@ -12624,14 +12624,13 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
   // CEIL to cents: nearest-cent rounding of floor/12 can reconstruct an
   // annual a cent BELOW the floor (630.85 → 52.57/mo → 630.84/yr), quietly
   // defeating the 35% post-discount guard.
-  const applyMarginFloor = !manualDiscount;
-  const marginFloorMonthly = applyMarginFloor && Number.isFinite(Number(marginFloorAnnual)) && Number(marginFloorAnnual) > 0
+  const marginFloorMonthly = Number.isFinite(Number(marginFloorAnnual)) && Number(marginFloorAnnual) > 0
     ? Math.ceil((Number(marginFloorAnnual) / 12) * 100) / 100
     : 0;
   const minMonthly = Math.max(programMinMonthly > 0 ? programMinMonthly : 0, marginFloorMonthly);
   const minAnnual = Math.max(
     programMinMonthly > 0 ? roundMonthly(programMinMonthly * 12) : 0,
-    applyMarginFloor && Number.isFinite(Number(marginFloorAnnual)) ? Number(marginFloorAnnual) : 0,
+    Number.isFinite(Number(marginFloorAnnual)) ? Number(marginFloorAnnual) : 0,
   );
   if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };
   const clampedMonthlyBase = monthlyBase != null ? Math.max(monthlyBase, minMonthly) : monthlyBase;
@@ -12673,7 +12672,7 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
         recurringAmount: effAmount,
         monthlyAmount: effMonthlyOff,
         capped: true,
-        capReason: 'lawn_program_minimum',
+        capReason: marginFloorMonthly > programMinMonthly ? 'lawn_margin_floor' : 'lawn_program_minimum',
       };
     }
   }

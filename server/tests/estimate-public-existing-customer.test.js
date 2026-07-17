@@ -85,6 +85,27 @@ test('a monthly lawn floor re-anchors annual billing to the rounded monthly char
   expect(result.annual).toBe(640.08);
 });
 
+test('a manual lawn discount cannot lower the accepted price below its cost-derived margin floor', () => {
+  const result = clampLawnLadderEntry({
+    monthlyBase: 60,
+    monthly: 45,
+    annual: 540,
+    perTreatment: 60,
+    visits: 9,
+    manualDiscount: { type: 'FIXED', amount: 180, monthlyAmount: 15 },
+    marginFloorAnnual: 640,
+  });
+
+  expect(result.monthly).toBe(53.34);
+  expect(result.annual).toBe(640.08);
+  expect(result.perTreatment).toBe(71.12);
+  expect(result.manualDiscount).toEqual(expect.objectContaining({
+    amount: 79.92,
+    capped: true,
+    capReason: 'lawn_margin_floor',
+  }));
+});
+
 describe('existing-customer public estimate page', () => {
   test('existing-customer lawn estimate has no setup fee and no prepay option', () => {
     const html = renderPage('existing-token', lawnEstimate(), lawnEstimateData(), donMembership());

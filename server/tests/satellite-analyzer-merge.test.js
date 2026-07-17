@@ -87,4 +87,20 @@ describe('satellite analyzer per-field confidence', () => {
     });
     expect(result.fieldVerify).not.toContain('shrub_density');
   });
+
+  test('flags a boolean reported by only one of multiple providers', () => {
+    const result = satelliteAnalyzer.mergeResults([
+      { provider: 'claude', analysis: { has_pool: true } },
+      { provider: 'openai', analysis: {} },
+    ]);
+
+    expect(result.has_pool).toBe(true);
+    expect(result.fieldVerify).toContain('has_pool');
+    expect(result.confidenceDetails.has_pool).toEqual({
+      values: [{ provider: 'claude', value: true }],
+      status: 'single_source',
+    });
+    expect(result.has_pool_cage).toBeNull();
+    expect(result.confidenceDetails.has_pool_cage).toEqual({ values: [], status: 'missing' });
+  });
 });
