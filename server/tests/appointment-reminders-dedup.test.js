@@ -564,11 +564,14 @@ describe('appointment reminder reschedule windows', () => {
     );
 
     // Guarded by the appointment time this invocation handled (so a stale
-    // failure can't clobber a newer overlapping reschedule) and by the
-    // sibling-suppression marker (so a suppressed slot sibling stays quiet).
+    // failure can't clobber a newer overlapping reschedule), by this
+    // invocation's own updated_at claim (so a successful SAME-time overlap
+    // isn't clobbered either), and by the sibling-suppression marker (so a
+    // suppressed slot sibling stays quiet).
     expect(rearmUpdate.where).toHaveBeenCalledWith({
       id: 'reminder-reschedule',
       appointment_time: expect.any(Date),
+      updated_at: expect.any(Date),
       suppressed_by_sibling: false,
     });
     const [{ appointment_time: rearmTime }] = rearmUpdate.where.mock.calls[0];

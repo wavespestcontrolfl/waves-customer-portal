@@ -1711,16 +1711,23 @@ const AppointmentReminders = {
         }
       } finally {
         if (!noticeSent) {
-          // Guard on appointment_time so a stale failure can't clobber a
-          // newer overlapping reschedule: if another invocation has since
-          // moved the row to a different time (and possibly marked its own
-          // notice sent), this re-arm no-ops instead of re-opening the 72h
-          // window for a slot this attempt no longer owns. Also skip rows
-          // the DB sync trigger suppressed as slot siblings — the slot's
-          // owner carries the reminders; re-arming a suppressed row would
-          // double-text the customer.
+          // Guarded three ways so a failed attempt only re-arms state it
+          // still owns:
+          //   • appointment_time — a newer reschedule to a different time
+          //     (which may have sent its own notice) makes this a no-op;
+          //   • updated_at = this invocation's own write — an overlapping
+          //     SAME-time attempt that succeeded afterward (its
+          //     markRescheduleNoticeSent bumps updated_at) is not clobbered;
+          //   • suppressed_by_sibling — a row the DB sync trigger suppressed
+          //     under a slot owner stays quiet; re-arming it would
+          //     double-text the customer.
           await db('appointment_reminders')
-            .where({ id: record.id, appointment_time: newApptTime, suppressed_by_sibling: false })
+            .where({
+              id: record.id,
+              appointment_time: newApptTime,
+              updated_at: now,
+              suppressed_by_sibling: false,
+            })
             .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() })
             .catch((rearmErr) => logger.error(`[appt-remind] 72h re-arm after failed notice failed: ${rearmErr.message}`));
         }

@@ -113,6 +113,37 @@ END;
 $$ LANGUAGE plpgsql;
 `;
 
+// Rolling-deploy protection: an old app replica (pre-marker code) can insert
+// a legacy-shape suppressed sibling AFTER the one-time backfill ran — its
+// insert omits the column, defaulting to false, and the row would then be
+// invisible to promotion forever. Derive the marker at insert time from the
+// same fingerprint the backfill uses (identical confirmation/72h/24h stamps +
+// an active same-slot sibling). New-code suppressed inserts set the column
+// explicitly, so this only fires for legacy-shape rows; a false positive is
+// only possible for an already-past appointment, where suppression is moot.
+const LEGACY_MARKER_SQL = `
+CREATE OR REPLACE FUNCTION mark_legacy_suppressed_reminder_insert()
+RETURNS trigger AS $$
+BEGIN
+  IF NOT NEW.suppressed_by_sibling
+     AND NEW.cancelled = false
+     AND NEW.confirmation_sent AND NEW.reminder_72h_sent AND NEW.reminder_24h_sent
+     AND NEW.reminder_72h_sent_at IS NOT NULL
+     AND NEW.reminder_72h_sent_at = NEW.reminder_24h_sent_at
+     AND NEW.reminder_72h_sent_at = NEW.confirmation_sent_at
+     AND EXISTS (
+           SELECT 1 FROM appointment_reminders sib
+            WHERE sib.customer_id = NEW.customer_id
+              AND sib.appointment_time = NEW.appointment_time
+              AND sib.cancelled = false
+              AND sib.id IS DISTINCT FROM NEW.id) THEN
+    NEW.suppressed_by_sibling := true;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+`;
+
 const FUNCTION_SQL = `
 CREATE OR REPLACE FUNCTION sync_appointment_reminder_on_service_change()
 RETURNS trigger AS $$
@@ -123,6 +154,7 @@ DECLARE
   became_terminal boolean;
   became_active boolean;
   became_sendable boolean;
+  entered_rescheduled boolean;
   time_changed boolean;
   l_new integer;
   l_old integer;
@@ -137,6 +169,12 @@ BEGIN
   -- be re-decided or two armed rows share the slot.
   became_sendable := OLD.status = 'rescheduled'
                      AND NEW.status IN ${SENDABLE_SERVICE};
+  -- The mirror transition: an owner entering 'rescheduled' (customer
+  -- requested a new time) becomes cron-blocked without moving, so a
+  -- suppressed sibling sharing its slot would otherwise be stranded with
+  -- no sendable reminder. Treat it as a slot departure.
+  entered_rescheduled := OLD.status IN ${SENDABLE_SERVICE}
+                         AND NEW.status = 'rescheduled';
   time_changed    := (NEW.scheduled_date IS DISTINCT FROM OLD.scheduled_date)
                      OR (NEW.window_start IS DISTINCT FROM OLD.window_start);
 
@@ -220,6 +258,16 @@ BEGIN
     END IF;
   END IF;
 
+  -- Owner entered 'rescheduled' in place (no move): its slot departure was
+  -- not handled above, so promote a suppressed sibling there. When the move
+  -- and the status change happen together, the time_changed branch already
+  -- promoted at the old slot.
+  IF entered_rescheduled AND NOT time_changed THEN
+    PERFORM pg_advisory_xact_lock(reminder_slot_lock_key(NEW.customer_id, old_appt_time));
+    PERFORM promote_suppressed_reminder_sibling(NEW.customer_id, NEW.id, old_appt_time,
+                                                OLD.scheduled_date, OLD.window_start);
+  END IF;
+
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -262,11 +310,18 @@ exports.up = async function up(knex) {
   await knex.raw(LOCK_KEY_SQL);
   await knex.raw(PROMOTE_SQL);
   await knex.raw(FUNCTION_SQL);
+  await knex.raw(LEGACY_MARKER_SQL);
   await knex.raw('DROP TRIGGER IF EXISTS scheduled_services_sync_reminder ON scheduled_services');
   await knex.raw(`
     CREATE TRIGGER scheduled_services_sync_reminder
     AFTER UPDATE OF scheduled_date, window_start, status ON scheduled_services
     FOR EACH ROW EXECUTE FUNCTION sync_appointment_reminder_on_service_change()
+  `);
+  await knex.raw('DROP TRIGGER IF EXISTS appointment_reminders_legacy_suppression ON appointment_reminders');
+  await knex.raw(`
+    CREATE TRIGGER appointment_reminders_legacy_suppression
+    BEFORE INSERT ON appointment_reminders
+    FOR EACH ROW EXECUTE FUNCTION mark_legacy_suppressed_reminder_insert()
   `);
 
   // 3. One-time drift heal: future active appointments whose reminder clock
@@ -381,6 +436,11 @@ exports.down = async function down(knex) {
   if (hasServices) {
     await knex.raw('DROP TRIGGER IF EXISTS scheduled_services_sync_reminder ON scheduled_services');
   }
+  const hasRemindersTable = await knex.schema.hasTable('appointment_reminders');
+  if (hasRemindersTable) {
+    await knex.raw('DROP TRIGGER IF EXISTS appointment_reminders_legacy_suppression ON appointment_reminders');
+  }
+  await knex.raw('DROP FUNCTION IF EXISTS mark_legacy_suppressed_reminder_insert()');
   await knex.raw('DROP FUNCTION IF EXISTS sync_appointment_reminder_on_service_change()');
   await knex.raw('DROP FUNCTION IF EXISTS promote_suppressed_reminder_sibling(uuid, uuid, timestamptz, date, time)');
   await knex.raw('DROP FUNCTION IF EXISTS reminder_slot_lock_key(uuid, timestamptz)');
