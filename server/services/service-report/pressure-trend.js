@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
-const { formatVisitLabel, normalizeDate } = require('./time-format');
+const { dateOnlyToNoonUtc, formatVisitLabel, normalizeDate } = require('./time-format');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 const SEVERITY_RANK = {
@@ -20,9 +20,11 @@ function pressureNumber(value) {
 }
 
 function serviceStartedAt(row) {
+  // service_date is DATE-only: anchored at noon UTC so the NY-formatted
+  // visit label can't roll back a day for rows without a real timestamp.
   const date = normalizeDate(row?.started_at)
     || normalizeDate(row?.ended_at)
-    || normalizeDate(row?.service_date)
+    || dateOnlyToNoonUtc(row?.service_date)
     || normalizeDate(row?.created_at);
   return date || new Date(0);
 }

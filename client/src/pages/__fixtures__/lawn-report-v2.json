@@ -1431,7 +1431,7 @@
   "check_out_time": "2026-06-25T14:56:39.602Z",
   "token": "v2-lawn-token",
   "serviceRecordId": "test-record",
-  "serviceAddress": "1234 Manatee Ave W, Bradenton, FL 34205",
+  "serviceAddress": "456 Test Ave W, Testville, FL 34000",
   "recap": {
     "ready": true,
     "durationMs": 34000
