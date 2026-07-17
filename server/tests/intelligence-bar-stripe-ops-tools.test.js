@@ -160,7 +160,7 @@ describe('intelligence bar Stripe ops tools', () => {
           code: 'card_declined',
           decline_code: 'insufficient_funds',
           message: 'Your card has insufficient funds.',
-          payment_method: { card: { last4: '4242' } },
+          payment_method: { type: 'card', card: { last4: '4242' } },
         },
       }],
     }));
@@ -183,6 +183,7 @@ describe('intelligence bar Stripe ops tools', () => {
         code: 'card_declined',
         decline_code: 'insufficient_funds',
         message: 'Your card has insufficient funds.',
+        payment_method_type: 'card',
       },
     }]);
     expect(JSON.stringify(result)).not.toContain('private@example.com');
@@ -301,10 +302,44 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(result.error).toBeUndefined();
     expect(result.payment_intents.map(p => p.id)).toEqual(['pi_old_retry']);
     expect(result.payment_intents[0].created_before_window).toBe(true);
+    // The record answers WHEN the qualifying attempt happened, not just the
+    // weeks-old creation time.
+    expect(result.payment_intents[0].last_attempt_at).toBe(new Date((now - 600) * 1000).toISOString());
     expect(result.total_matched).toBe(1);
     expect(result.scan_exhaustive).toBe(true);
-    expect(String(global.fetch.mock.calls[1][0])).toContain('type=payment_intent.payment_failed');
+    // Both attempt shapes are swept — failures AND 3DS/action stalls
+    const sweepUrl = String(global.fetch.mock.calls[1][0]);
+    expect(sweepUrl).toContain('payment_intent.payment_failed');
+    expect(sweepUrl).toContain('payment_intent.requires_action');
     expect(String(global.fetch.mock.calls[2][0])).toContain('/v1/payment_intents/pi_old_retry');
+  });
+
+  test('a reused intent stalled at 3DS today surfaces via the requires_action event sweep', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const now = Math.floor(Date.now() / 1000);
+    const oldCreated = now - 20 * 24 * 3600;
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [{
+          id: 'evt_ra_1',
+          type: 'payment_intent.requires_action',
+          created: now - 300,
+          data: { object: { id: 'pi_3ds_stall', object: 'payment_intent', status: 'requires_action' } },
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        id: 'pi_3ds_stall', status: 'requires_action', amount: 3333, currency: 'usd',
+        created: oldCreated, payment_method_types: ['card'],
+        next_action: { type: 'use_stripe_sdk' },
+      }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete' });
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents.map(p => p.id)).toEqual(['pi_3ds_stall']);
+    expect(result.payment_intents[0].next_action_type).toBe('use_stripe_sdk');
+    expect(result.payment_intents[0].created_before_window).toBe(true);
   });
 
   test('retry sweep runs for status:succeeded too — an older intent can fail in-window then succeed', async () => {

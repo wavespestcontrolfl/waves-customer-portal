@@ -46,9 +46,13 @@ const PI_INCOMPLETE_STATUSES = new Set(['requires_payment_method', 'requires_con
 // same subtype. Excluded from the "incomplete" aggregate; still reachable
 // via an explicit status filter, with next_action_type distinguishing it.
 const ACH_VERIFICATION_NEXT_ACTION = 'verify_with_microdeposits';
-// Live re-fetches for intents surfaced by the failed-attempt event sweep
+// Live re-fetches for intents surfaced by the attempt event sweep
 // (event snapshots go stale — the intent may have succeeded since).
 const RETRY_LOOKUP_CAP = 10;
+// A retried attempt on a reused intent surfaces as payment_failed OR as
+// requires_action (card stopped at 3DS — the webhook handler treats both;
+// see stripe-webhook.js) — sweep both or 3DS-stalled retries are missed.
+const RETRY_EVENT_TYPES = ['payment_intent.payment_failed', 'payment_intent.requires_action'];
 const PI_STATUSES = [
   'incomplete', 'requires_payment_method', 'requires_confirmation', 'requires_action',
   'processing', 'requires_capture', 'canceled', 'succeeded',
@@ -78,8 +82,8 @@ Use for: "did we miss any Stripe events?", "webhook delivery failures today?"`,
   },
   {
     name: 'get_stripe_payment_intents',
-    description: `List recent Stripe PaymentIntents (live processor data), filterable by status and exact amount. This is the ONLY view of payment attempts that never completed — an incomplete "draft" fires no completion webhook, so it never reaches the local database and the revenue/banking tools cannot see it. The window covers intents CREATED in it plus older reused intents with a FAILED ATTEMPT in it (created_before_window marks those). Completed revenue questions still belong to the revenue tools.
-Use for: "any incomplete card payments?", "find the $33.33 drafts in Stripe", "did that payment attempt fail, and why?"`,
+    description: `List recent Stripe PaymentIntents (live processor data), filterable by status and exact amount. This is the ONLY view of payment attempts that never completed — an incomplete "draft" fires no completion webhook, so it never reaches the local database and the revenue/banking tools cannot see it. The window covers intents CREATED in it plus older reused intents with a failed or action-stalled ATTEMPT in it (created_before_window + last_attempt_at mark those). last_payment_error.payment_method_type is the method the failed attempt actually used (payment_method_types is just the allowlist). Completed revenue questions still belong to the revenue tools.
+Use for: "any incomplete payments?", "find the $33.33 drafts in Stripe", "did that payment attempt fail, and why?"`,
     input_schema: {
       type: 'object',
       properties: {
@@ -101,7 +105,13 @@ const NOT_CONFIGURED_MESSAGE = 'Stripe access is not configured. STRIPE_SECRET_K
 async function stripeGet(path, params = {}) {
   const url = new URL(`${STRIPE_API_BASE}${path}`);
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null) url.searchParams.set(key, value);
+    if (value === undefined || value === null) continue;
+    // Stripe repeats array params (types[]=a&types[]=b)
+    if (Array.isArray(value)) {
+      for (const item of value) url.searchParams.append(key, item);
+    } else {
+      url.searchParams.set(key, value);
+    }
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -231,6 +241,9 @@ function mapPaymentIntent(pi) {
       code: pi.last_payment_error.code || null,
       decline_code: pi.last_payment_error.decline_code || null,
       message: pi.last_payment_error.message || null,
+      // payment_method_types is only the ALLOWLIST — this is the method the
+      // failed attempt actually used (type only, never the card object).
+      payment_method_type: (pi.last_payment_error.payment_method && pi.last_payment_error.payment_method.type) || null,
     };
   }
   if (pi.status === 'canceled') {
@@ -280,9 +293,10 @@ async function getStripePaymentIntents(input) {
 
   // The list API bounds by ORIGINAL creation time, but the portal reuses
   // requires_payment_method intents across retries (stripe.js payment
-  // flows), so a failed attempt today on an intent created before the
-  // window would be invisible to the scan above. Sweep failed-attempt
-  // events in the same window and re-fetch the LIVE intent for any id the
+  // flows), so an attempt today on an intent created before the window
+  // would be invisible to the scan above. Sweep attempt events
+  // (payment_failed + requires_action — a card stopped at 3DS emits the
+  // latter) in the same window and re-fetch the LIVE intent for any id the
   // scan didn't cover (event snapshots go stale); the same filters apply to
   // the live state. Runs for every status filter — an older intent can fail
   // inside the window and be succeeded (or canceled) by now, and its live
@@ -291,12 +305,13 @@ async function getStripePaymentIntents(input) {
   let retryLookupsDropped = 0;
   let retryLookupFailures = 0;
   {
-    const retryCandidates = [];
+    // id → newest in-window attempt event time (events arrive newest-first)
+    const retryCandidates = new Map();
     let eventsAfter = null;
     let eventPages = 0;
     let moreEvents = true;
     while (moreEvents && eventPages < MAX_EVENT_PAGES) {
-      const params = { type: 'payment_intent.payment_failed', 'created[gte]': createdGte, limit: EVENTS_PAGE_SIZE };
+      const params = { 'types[]': RETRY_EVENT_TYPES, 'created[gte]': createdGte, limit: EVENTS_PAGE_SIZE };
       if (eventsAfter) params.starting_after = eventsAfter;
       const json = await stripeGet('/v1/events', params);
       eventPages += 1;
@@ -304,21 +319,23 @@ async function getStripePaymentIntents(input) {
       for (const event of data) {
         const snapshot = event.data && event.data.object;
         if (!snapshot || !snapshot.id) continue;
-        if (scannedIds.has(snapshot.id) || retryCandidates.includes(snapshot.id)) continue;
-        retryCandidates.push(snapshot.id);
+        if (scannedIds.has(snapshot.id) || retryCandidates.has(snapshot.id)) continue;
+        retryCandidates.set(snapshot.id, event.created);
       }
       moreEvents = Boolean(json.has_more) && data.length > 0;
       eventsAfter = data.length ? data[data.length - 1].id : null;
     }
     retrySweepExhaustive = !moreEvents;
-    retryLookupsDropped = Math.max(0, retryCandidates.length - RETRY_LOOKUP_CAP);
+    retryLookupsDropped = Math.max(0, retryCandidates.size - RETRY_LOOKUP_CAP);
     // Concurrent lookups bound the whole phase to ~one request timeout
     // instead of cap × timeout when Stripe degrades. Results are folded in
     // candidate order so output stays deterministic.
+    const candidateEntries = [...retryCandidates.entries()].slice(0, RETRY_LOOKUP_CAP);
     const lookups = await Promise.allSettled(
-      retryCandidates.slice(0, RETRY_LOOKUP_CAP).map(id => stripeGet(`/v1/payment_intents/${id}`)),
+      candidateEntries.map(([id]) => stripeGet(`/v1/payment_intents/${id}`)),
     );
-    for (const lookup of lookups) {
+    for (let i = 0; i < lookups.length; i++) {
+      const lookup = lookups[i];
       if (lookup.status !== 'fulfilled') {
         // An unevaluated candidate means the window may hold more than
         // shown — reported via retry_lookup_failures and scan_exhaustive.
@@ -327,9 +344,14 @@ async function getStripePaymentIntents(input) {
         continue;
       }
       const pi = lookup.value;
-      // Only present because an attempt failed inside the window — flag
-      // when the intent itself predates it.
-      considerIntent(pi, pi.created < createdGte ? { created_before_window: true } : undefined);
+      const attemptAt = candidateEntries[i][1];
+      // Only present because an attempt happened inside the window — carry
+      // when it happened (the intent's created can be weeks older), and flag
+      // intents that predate the window.
+      considerIntent(pi, {
+        last_attempt_at: new Date(attemptAt * 1000).toISOString(),
+        ...(pi.created < createdGte ? { created_before_window: true } : {}),
+      });
     }
   }
 
@@ -346,7 +368,7 @@ async function getStripePaymentIntents(input) {
     // shown.
     scan_exhaustive: !morePages && matchedSeen === matched.length
       && retrySweepExhaustive && retryLookupsDropped === 0 && retryLookupFailures === 0,
-    note: 'Live Stripe data; amounts are dollars. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft. created_before_window marks an older intent surfaced by a failed attempt inside the window.',
+    note: 'Live Stripe data; amounts are dollars. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft. created_before_window marks an older intent surfaced by an in-window attempt; last_attempt_at is when that attempt happened.',
   };
 }
 
