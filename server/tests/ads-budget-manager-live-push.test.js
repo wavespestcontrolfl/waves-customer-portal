@@ -631,9 +631,15 @@ describe('in-lock rechecks (requireLivePush)', () => {
     campaignFirstRow = baseCampaign();
     mockIsConfigured.mockReturnValue(true);
     mockUpdateBudget.mockResolvedValue({ ok: true }); // push + rollback accepted
-    // Statements succeed; the transaction promise itself rejects (COMMIT failed).
+    // Statements succeed; the APPLY transaction's own COMMIT rejects. The
+    // rollback's reacquire-transaction (second call) must still work.
     const realTransaction = mockDb.transaction;
-    mockDb.transaction = async (cb) => { await cb(mockDb); throw new Error('commit failed'); };
+    let firstTrx = true;
+    mockDb.transaction = async (cb) => {
+      const r = await cb(mockDb);
+      if (firstTrx) { firstTrx = false; throw new Error('commit failed'); }
+      return r;
+    };
 
     await expect(BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true }))
       .rejects.toMatchObject({ code: 'live_push_rolled_back' });
@@ -654,6 +660,36 @@ describe('in-lock rechecks (requireLivePush)', () => {
 
     expect(mockUpdateBudget).not.toHaveBeenCalled();
     expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
+  });
+
+  test('rollback is skipped when a newer state committed meanwhile (superseded)', async () => {
+    // Snapshot says base/$40; the locked re-read shows a newer committed $55.
+    campaignFirstRow = { ...baseCampaign(), daily_budget_current: '55' };
+    mockIsConfigured.mockReturnValue(true);
+
+    const err = await BudgetManager.rollbackAfterLivePush(baseCampaign(), new Error('db down'));
+
+    expect(err.code).toBe('live_push_rolled_back');
+    expect(err.message).toMatch(/newer budget change/);
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+  });
+
+  test('cron transition: persist failure after a successful push compensates Google', async () => {
+    campaignRows = [baseCampaign()];
+    mockIsEnabled.mockReturnValue(true);
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+    mockLogInsert.mockRejectedValueOnce(new Error('db down'));
+    jest.spyOn(BudgetManager, 'getCapacityForArea')
+      .mockResolvedValue({ utilizationPct: 99, booked: 8, slots: 8, techs: 1 });
+
+    await BudgetManager.adjustBudgets(); // must not throw — cron continues
+
+    // 1st push = the stop transition (0.4); 2nd = the compensating rollback
+    // to the prior live amount after the transaction failed.
+    expect(mockUpdateBudget).toHaveBeenCalledTimes(2);
+    expect(mockUpdateBudget).toHaveBeenLastCalledWith('1234567890', 40);
     jest.restoreAllMocks();
   });
 });

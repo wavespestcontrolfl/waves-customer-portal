@@ -57,6 +57,14 @@ class BudgetManager {
     };
 
     for (const listed of campaigns) {
+      // Set once Google accepts a TRANSITION push inside the transaction —
+      // if the local writes (or COMMIT) then fail, PostgreSQL rolls the row
+      // back while Google keeps the new amount, so the catch compensates via
+      // the same lock-reacquiring rollback the advisor apply uses. The
+      // reconcile branch never sets it: its push moves Google TOWARD the
+      // recorded local state, so a failed write self-heals next run and a
+      // rollback would undo a correct fix.
+      let cronPushed = null;
       try {
         const area = listed.target_area || 'general';
         const capacity = await this.getCapacityForArea(area, checkDate);
@@ -104,6 +112,7 @@ class BudgetManager {
               return;
             }
             pushedLive = true;
+            cronPushed = campaign;
           }
 
           await trx('ad_campaigns').where({ id: campaign.id }).update({
@@ -172,7 +181,12 @@ class BudgetManager {
         }
         });
       } catch (err) {
-        logger.error(`Budget adjust failed for ${listed.campaign_name}: ${err.message}`);
+        if (cronPushed) {
+          const rollback = await this.rollbackAfterLivePush(cronPushed, err);
+          logger.error(`Budget adjust: ${listed.campaign_name} persist failed after live push — ${rollback.message}`);
+        } else {
+          logger.error(`Budget adjust failed for ${listed.campaign_name}: ${err.message}`);
+        }
       }
     }
   }
@@ -509,17 +523,41 @@ class BudgetManager {
    */
   async rollbackAfterLivePush(campaign, persistErr) {
     const previousLive = Number(campaign.daily_budget_current);
-    let restored = false;
-    if (Number.isFinite(previousLive) && previousLive > 0) {
-      try {
-        restored = Boolean(await getGoogleAds().updateBudget(campaign.platform_campaign_id, previousLive));
-      } catch { restored = false; }
-    }
-    logger.error(`[budget-manager] persist failed after live push for ${campaign.id} (${persistErr.message}); live rollback ${restored ? 'succeeded' : 'FAILED'}`);
-    const err = new Error(restored
-      ? 'Recording the change failed after Google accepted it — the live budget was rolled back and nothing was changed. Try again.'
-      : 'Google accepted the change but recording it locally failed, and the rollback push also failed — the live campaign may be running the new amount. Local records still hold the previous state (the budget reconcile restores it within ~2 hours); check the campaign in Google Ads.');
-    err.code = restored ? 'live_push_rolled_back' : 'live_push_ambiguous';
+    // 'restored' — we pushed the prior live budget back; nothing changed.
+    // 'superseded' — a writer queued behind our failed apply committed (and
+    //   pushed) a NEWER state after our rollback released the lock; restoring
+    //   the old amount would clobber it on Google while the DB records the
+    //   newer change, so we leave the newer state alone. Our apply still
+    //   persisted nothing.
+    // 'ambiguous' — we couldn't safely determine/restore; the reconcile cron
+    //   converges Google back onto the recorded local state.
+    let outcome = 'ambiguous';
+    try {
+      if (Number.isFinite(previousLive) && previousLive > 0) {
+        await db.transaction(async (trx) => {
+          // Reacquire the row lock and verify the row still matches our
+          // pre-apply snapshot before touching Google.
+          const row = await trx('ad_campaigns').where({ id: campaign.id }).forUpdate().first();
+          const centsEq = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
+          if (row
+            && String(row.budget_mode ?? '') === String(campaign.budget_mode ?? '')
+            && centsEq(row.daily_budget_current, previousLive)) {
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, previousLive);
+            if (pushed) outcome = 'restored';
+          } else {
+            outcome = 'superseded';
+          }
+        });
+      }
+    } catch { outcome = 'ambiguous'; }
+    logger.error(`[budget-manager] persist failed after live push for ${campaign.id} (${persistErr.message}); live rollback: ${outcome}`);
+    const messages = {
+      restored: 'Recording the change failed after Google accepted it — the live budget was rolled back and nothing was changed. Try again.',
+      superseded: 'This apply failed to record and was not applied — a newer budget change committed in the meantime and owns the live budget; nothing from this apply persisted.',
+      ambiguous: 'Google accepted the change but recording it locally failed, and the rollback push could not safely run — the live campaign may be running the new amount. Local records still hold the previous state (the budget reconcile restores it within ~2 hours); check the campaign in Google Ads.',
+    };
+    const err = new Error(messages[outcome]);
+    err.code = outcome === 'ambiguous' ? 'live_push_ambiguous' : 'live_push_rolled_back';
     return err;
   }
 
