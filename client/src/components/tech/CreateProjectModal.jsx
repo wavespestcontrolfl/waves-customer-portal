@@ -15,6 +15,8 @@ const ESTIMATE_INPUT_BG = '#FFFFFF';
 const ESTIMATE_TEXT = '#09090B';
 const ESTIMATE_MUTED = '#71717A';
 const ESTIMATE_BUTTON_BG = '#09090B';
+const WDO_PROJECT_TYPE = 'wdo_inspection';
+const PRE_TREATMENT_CERTIFICATE_TYPE = 'pre_treatment_termite_certificate';
 
 /**
  * CreateProjectModal — form for creating a Project (inspection or
@@ -366,10 +368,11 @@ export default function CreateProjectModal({
   const [aiUseComms, setAiUseComms] = useState(true);
   const [error, setError] = useState(null);
   const [createdProject, setCreatedProject] = useState(null);
-  // One-page create-and-sign (WDO): after a successful save, the sheet stays
-  // open on a licensee-signature step instead of closing — the signature
-  // needs a saved project id and saved content to certify, which now exist.
-  // Shape: { project, applicator: {name, idCardNo}, signature: meta|null }.
+  // One-page official-document completion: after a successful save, the sheet
+  // stays open for the remaining delivery action instead of detouring to the
+  // legacy project editor. WDO adds its canvas signature here; pre-treatment
+  // already carries its typed applicator attestation in the saved certificate.
+  // Shape: { project, requiresSignature, applicator, signature }.
   // onCreated/onClose are DEFERRED to finishSignStep so parents (which
   // unmount the modal from onCreated) don't tear the step down.
   const [signStep, setSignStep] = useState(null);
@@ -377,8 +380,8 @@ export default function CreateProjectModal({
   // exit holds until it settles, or the modal could unmount mid-mutation and
   // hand the parent stale signed/unsigned state (Codex P2).
   const [signBusy, setSignBusy] = useState(false);
-  // Invoice-first WDO completion is two durable server actions: deliver the
-  // invoice/arm the customer-side report hold, then close the linked service.
+  // Invoice-first official-document completion is two durable server actions:
+  // deliver the invoice/arm the customer-side hold, then close the service.
   // Keep its own lock so no sign-step exit can unmount either request.
   const [completionBusy, setCompletionBusy] = useState(false);
 
@@ -1300,19 +1303,22 @@ export default function CreateProjectModal({
       }
 
       try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
-      if (projectType === 'wdo_inspection' && !signStep) {
+      if ([WDO_PROJECT_TYPE, PRE_TREATMENT_CERTIFICATE_TYPE].includes(projectType) && !signStep) {
         // Fetch the detail payload for the same signer prefill the report
         // page uses (findings applicator → creating tech's name + FDACS
         // license) plus the stripped signature metadata. Prefill-only: if
         // the fetch fails, the pad still works with blank fields.
         let detail = null;
-        try {
-          const dr = await adminFetch(`/admin/projects/${data.project.id}`);
-          const dd = await dr.json().catch(() => null);
-          if (dr.ok) detail = dd?.project || null;
-        } catch { /* prefill only */ }
+        if (projectType === WDO_PROJECT_TYPE) {
+          try {
+            const dr = await adminFetch(`/admin/projects/${data.project.id}`);
+            const dd = await dr.json().catch(() => null);
+            if (dr.ok) detail = dd?.project || null;
+          } catch { /* prefill only */ }
+        }
         setSignStep({
           project: data.project,
+          requiresSignature: projectType === WDO_PROJECT_TYPE,
           applicator: detail?.wdo_applicator || { name: '', idCardNo: '' },
           signature: detail?.wdo_signature || null,
         });
@@ -1346,8 +1352,13 @@ export default function CreateProjectModal({
     return payload;
   }
 
-  async function sendWdoInvoiceAndFinish() {
-    if (!allowInvoiceCompletion || !signStep?.project?.id || (!signStep.signature?.signed && !signStep.invoiceDelivery)) return;
+  async function sendInvoiceAndFinish() {
+    const requiresSignature = signStep?.requiresSignature !== false;
+    if (!allowInvoiceCompletion
+      || !signStep?.project?.id
+      || (requiresSignature && !signStep.signature?.signed && !signStep.invoiceDelivery)) return;
+    const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
+    const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
     setCompletionBusy(true);
     setError(null);
     let invoiceDelivery = signStep.invoiceDelivery || null;
@@ -1360,14 +1371,14 @@ export default function CreateProjectModal({
             body: { dry_run: true, hold_report_until_paid: true },
           },
         );
-        const preview = await readProjectAction(previewResponse, 'Could not prepare the WDO invoice');
+        const preview = await readProjectAction(previewResponse, `Could not prepare the ${documentLabel} invoice`);
         const amount = Number(preview?.invoice?.total || 0).toLocaleString('en-US', {
           style: 'currency',
           currency: 'USD',
         });
         if (!confirm(
           `Send the ${amount} invoice now and finish this service?\n\n` +
-          'The customer receives the invoice and payment link now. Their WDO report stays locked until payment, then emails and unlocks automatically.',
+          `The customer receives the invoice and payment link now. Their ${documentLabel} stays locked until payment, then emails and unlocks automatically.`,
         )) return;
 
         const sendResponse = await adminFetch(
@@ -1380,7 +1391,7 @@ export default function CreateProjectModal({
             },
           },
         );
-        const sent = await readProjectAction(sendResponse, 'Could not send the WDO invoice');
+        const sent = await readProjectAction(sendResponse, `Could not send the ${documentLabel} invoice`);
         if (!sent.sent || !sent.report_held) {
           throw new Error('The invoice was not delivered, so the report was not placed on hold. Please retry.');
         }
@@ -1399,7 +1410,7 @@ export default function CreateProjectModal({
         closeResponse,
         invoiceDelivery
           ? 'The invoice was sent and the report is locked, but the service could not be closed. Tap Finish service to retry.'
-          : 'Could not finish the WDO service',
+          : `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`,
       );
       finishSignStep({
         project: closed.project || signStep.project,
@@ -1407,7 +1418,7 @@ export default function CreateProjectModal({
         invoice: invoiceDelivery.invoice || null,
       });
     } catch (e) {
-      setError(e.message || 'Could not finish the WDO service');
+      setError(e.message || `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`);
     } finally {
       setCompletionBusy(false);
     }
@@ -1512,9 +1523,13 @@ export default function CreateProjectModal({
               lineHeight: 1.35,
             }}>
               {signStep
-                ? 'Draft saved — licensee signature'
-                : projectType === 'wdo_inspection'
+                ? signStep.requiresSignature === false
+                  ? 'Certificate saved — invoice delivery'
+                  : 'Draft saved — licensee signature'
+                : projectType === WDO_PROJECT_TYPE
                   ? 'Wood Destroying Organism (WDO) Inspection Report'
+                  : projectType === PRE_TREATMENT_CERTIFICATE_TYPE
+                    ? 'Pre-Treatment Certificate of Compliance'
                   : 'Inspection or documentation-heavy job'}
             </div>
           </div>
@@ -1554,10 +1569,9 @@ export default function CreateProjectModal({
           </div>
         </div>
 
-        {/* Sign step (WDO): the draft is saved server-side; the licensee signs
-            against that saved content in the same sheet — no detour to the
-            report page. The pad is the same component the report page mounts,
-            posting to /:id/wdo-signature itself. */}
+        {/* Official-document completion: WDO captures its saved-content
+            signature here; a pre-treatment certificate already contains the
+            typed applicator attestation and proceeds directly to delivery. */}
         {signStep ? (
           <>
           <div style={{
@@ -1566,16 +1580,20 @@ export default function CreateProjectModal({
             ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
           }}>
             <div style={{ fontSize: 14, fontWeight: wStrong, color: P.heading, fontFamily: P.bodyFont }}>
-              ✓ Report draft saved
+              {signStep.requiresSignature === false ? '✓ Certificate saved' : '✓ Report draft saved'}
             </div>
             <div style={{ fontSize: 13, color: P.muted, lineHeight: 1.45, fontFamily: P.bodyFont }}>
-              {signStep.signature?.signed
-                ? signStep.invoiceDelivery
-                  ? `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} sent. The customer’s report is locked until payment; finish the service without sending anything again.`
-                  : allowInvoiceCompletion
+              {signStep.invoiceDelivery
+                ? `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} sent. The customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} is locked until payment; finish the service without sending anything again.`
+                : signStep.requiresSignature === false
+                  ? allowInvoiceCompletion
+                    ? 'Applicator attestation saved — send the invoice now. The customer’s certificate stays locked until payment, then emails and unlocks automatically.'
+                    : 'Applicator attestation saved — ready for office invoice delivery.'
+                  : signStep.signature?.signed
+                    ? allowInvoiceCompletion
                     ? 'Signed — send the invoice now. The customer’s report stays locked until payment, then emails and unlocks automatically.'
                     : 'Signed — saved for office review and invoice delivery.'
-                : 'Sign now to finish in one step — the FDACS-13645 report can’t be sent until the licensee signs. You can also sign later from the saved report.'}
+                    : 'Sign now to finish in one step — the FDACS-13645 report can’t be sent until the licensee signs. You can also sign later from the saved report.'}
             </div>
             {error && (
               <div style={{
@@ -1590,7 +1608,7 @@ export default function CreateProjectModal({
                 {error}
               </div>
             )}
-            {!signStep.invoiceDelivery && (
+            {signStep.requiresSignature !== false && !signStep.invoiceDelivery && (
               <WdoSignaturePad
                 projectId={signStep.project.id}
                 signature={signStep.signature}
@@ -1608,15 +1626,15 @@ export default function CreateProjectModal({
             display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'stretch',
             ...(isSheet ? { paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
           }}>
-            {!signStep.signature?.signed && (
+            {signStep.requiresSignature !== false && !signStep.signature?.signed && (
               <span style={{ fontSize: 12, color: P.muted, fontFamily: P.bodyFont }}>
                 Unsigned reports can’t be sent yet.
               </span>
             )}
-            {allowInvoiceCompletion && (signStep.signature?.signed || signStep.invoiceDelivery) && (
+            {allowInvoiceCompletion && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.invoiceDelivery) && (
               <button
                 type="button"
-                onClick={sendWdoInvoiceAndFinish}
+                onClick={sendInvoiceAndFinish}
                 disabled={signBusy || completionBusy}
                 style={{
                   minHeight: 52,
@@ -1654,7 +1672,7 @@ export default function CreateProjectModal({
                 cursor: signBusy || completionBusy ? 'default' : 'pointer',
                 opacity: signBusy || completionBusy ? 0.5 : 1,
               }}
-            >{signBusy ? 'Saving…' : signStep.signature?.signed ? 'Save for later' : 'Sign later'}</button>
+            >{signBusy ? 'Saving…' : signStep.requiresSignature === false || signStep.signature?.signed ? 'Save for later' : 'Sign later'}</button>
           </div>
           </>
         ) : (

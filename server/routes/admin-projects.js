@@ -83,6 +83,17 @@ const AI_PHOTO_MAX_BYTES = 4.5 * 1024 * 1024;
 const AI_PHOTO_TOTAL_MAX_BYTES = 12 * 1024 * 1024;
 const AI_SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Official termite documents use the same invoice-first customer delivery:
+// invoice now, report/certificate held until settlement, automatic release.
+// Ordinary service reports continue to send immediately and are never gated.
+const REPORT_PAYMENT_HOLD_PROJECT_TYPES = new Set([
+  'wdo_inspection',
+  'pre_treatment_termite_certificate',
+]);
+
+function supportsReportPaymentHold(projectType) {
+  return REPORT_PAYMENT_HOLD_PROJECT_TYPES.has(String(projectType || ''));
+}
 
 function isAdmin(req) {
   return req.techRole === 'admin';
@@ -1311,9 +1322,9 @@ router.get('/:id', async (req, res, next) => {
         wdo_applicator: wdoApplicator,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
-        // Drives the "Hold report until paid" toggle in the drawer: gate on +
-        // WDO + not yet delivered. The columns ride on ...project above.
-        report_payment_hold_available: project.project_type === 'wdo_inspection'
+        // Drives the "Hold report until paid" toggle in the drawer for both
+        // official termite documents. The columns ride on ...project above.
+        report_payment_hold_available: supportsReportPaymentHold(project.project_type)
           && isEnabled('wdoReportPaymentHold')
           && !project.sent_at
           && project.status !== 'sent',
@@ -2531,38 +2542,34 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
 
     // 3. Nothing to reuse — mint the project's draft invoice. How the draft is
     //    built depends on the project type.
-    if (project.project_type === 'wdo_inspection') {
-      // Hold-until-paid must never CREATE a statement-accrued invoice as a
-      // side effect of a send the route is about to reject (Codex P1 on
-      // #2753): InvoiceService.create would resolve a NET-terms payer, stamp
-      // payer_statement_id, and roll the line onto the open monthly statement
-      // BEFORE the route's accrued guard runs. Predict accrual here with the
-      // same read-only payer resolution the dry-run preview uses, mirroring
-      // create()'s accrual condition (NET-terms payer + GATE_PAYER_STATEMENTS
-      // — see invoice.js), and refuse before anything exists. Runs on the
-      // dry-run too so the operator learns at preview time. Existing invoices
-      // (explicit id / reuse paths above) are covered by the route's
-      // payer_statement_id check instead — no creation happens there.
-      if (holdRequested) {
-        let holdSsId = project.scheduled_service_id || null;
-        if (!holdSsId && project.service_record_id) {
-          const srLink = await trx('service_records')
-            .where({ id: project.service_record_id, customer_id: project.customer_id })
-            .first('scheduled_service_id').catch(() => null);
-          if (srLink?.scheduled_service_id) holdSsId = srLink.scheduled_service_id;
-        }
-        const resolvedHoldPayer = await require('../services/payer').resolveForInvoice({
-          customerId: project.customer_id,
-          scheduledServiceId: holdSsId,
-        }).catch(() => null);
-        if (resolvedHoldPayer?.payerId
-          && ['net15', 'net30'].includes(String(resolvedHoldPayer.paymentTerms || ''))
-          && isEnabled('payerStatements')) {
-          const err = new Error('This inspection bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices');
-          err.code = 'hold_statement_accrued';
-          throw err;
-        }
+    //
+    // Hold-until-paid must never CREATE a statement-accrued invoice as a side
+    // effect of a send the route is about to reject. This applies equally to
+    // WDO reports and pre-treatment certificates. Predict accrual before the
+    // type-specific create path runs; existing/reused invoices are guarded by
+    // payer_statement_id in the route after resolution.
+    if (holdRequested) {
+      let holdSsId = project.scheduled_service_id || null;
+      if (!holdSsId && project.service_record_id) {
+        const srLink = await trx('service_records')
+          .where({ id: project.service_record_id, customer_id: project.customer_id })
+          .first('scheduled_service_id').catch(() => null);
+        if (srLink?.scheduled_service_id) holdSsId = srLink.scheduled_service_id;
       }
+      const resolvedHoldPayer = await require('../services/payer').resolveForInvoice({
+        customerId: project.customer_id,
+        scheduledServiceId: holdSsId,
+      }).catch(() => null);
+      if (resolvedHoldPayer?.payerId
+        && ['net15', 'net30'].includes(String(resolvedHoldPayer.paymentTerms || ''))
+        && isEnabled('payerStatements')) {
+        const err = new Error('This service bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices');
+        err.code = 'hold_statement_accrued';
+        throw err;
+      }
+    }
+
+    if (project.project_type === 'wdo_inspection') {
 
       // WDO bills a single auto-priced "WDO Inspection" line. On a dry-run, DON'T
       // mint a real draft just to show the amount — every cancelled preview would
@@ -2605,22 +2612,26 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     }
 
     // Non-WDO service reports bill what the visit actually was, so the draft's
-    // line items come from the linked service record's scheduled-service pricing.
+    // line items come from the linked scheduled-service pricing. A pre-treatment
+    // certificate reaches this path before closeout creates its service record,
+    // so scheduled_service_id alone is a valid invoice source.
     // Unlike WDO there's no cheap synthetic fee to preview, and replaying the
     // full discount/tax math outside create() would risk drift, so we mint the
     // real draft on BOTH the dry-run and the send. That's safe: the draft is
     // persisted + linked to the project, so a re-preview or the follow-up send
     // reuses the SAME draft (reuse path 1 above) — a cancelled preview leaves at
     // most one legitimate draft per project, never duplicates.
-    if (!project.service_record_id) {
-      const err = new Error('This service report isn’t linked to a completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
+    if (!project.service_record_id && !project.scheduled_service_id) {
+      const err = new Error('This service report isn’t linked to an appointment or completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
       err.code = 'invoice_build_failed';
       throw err;
     }
-    const serviceRecord = await trx('service_records')
-      .where({ id: project.service_record_id, customer_id: project.customer_id })
-      .first();
-    if (!serviceRecord) {
+    const serviceRecord = project.service_record_id
+      ? await trx('service_records')
+        .where({ id: project.service_record_id, customer_id: project.customer_id })
+        .first()
+      : null;
+    if (project.service_record_id && !serviceRecord) {
       const err = new Error('The visit linked to this report wasn’t found for this customer, so an invoice can’t be built automatically.');
       err.code = 'invoice_build_failed';
       throw err;
@@ -2633,10 +2644,10 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // is a separate denormalized link that, if it disagrees, would price the
     // invoice off a different appointment than the one being reported on. Without
     // any scheduled service there's no priced line set to bill from.
-    const scheduledServiceId = serviceRecord.scheduled_service_id || project.scheduled_service_id;
+    const scheduledServiceId = serviceRecord?.scheduled_service_id || project.scheduled_service_id;
     const built = scheduledServiceId
       ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
-          fallbackDescription: serviceRecord.service_type || getProjectType(project.project_type)?.label || 'Service visit',
+          fallbackDescription: serviceRecord?.service_type || getProjectType(project.project_type)?.label || 'Service visit',
         })
       : { lineItems: [], discountIds: [] };
     // Sum the non-discount (positive) lines — a draft with no positive lines
@@ -2651,7 +2662,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     }
     const createdNonWdo = await InvoiceService.create({
       customerId: project.customer_id,
-      serviceRecordId: project.service_record_id,
+      serviceRecordId: project.service_record_id || undefined,
       scheduledServiceId: scheduledServiceId || undefined,
       lineItems: built.lineItems,
       discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
@@ -3089,7 +3100,7 @@ function normalizeUsPhone(phone) {
 }
 
 // ---------------------------------------------------------------------------
-// WDO report payment hold — release ("pay before you get the report")
+// Official termite document payment hold — release ("pay before delivery")
 // ---------------------------------------------------------------------------
 
 // Failed release deliveries retry on the sweep with exponential backoff,
@@ -3332,6 +3343,15 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
       emailRecipient.email ? 'email' : null,
     ].filter(Boolean);
     const successfulChannelCount = availableChannels.filter((ch) => channels[ch]?.ok).length;
+    // Non-WDO official documents can release by email OR SMS, but at least one
+    // real customer channel must succeed. Never mark a paid certificate as
+    // released when every delivery attempt failed (or no contact exists).
+    if (!isWdo && successfulChannelCount === 0) {
+      const reasons = availableChannels.length
+        ? availableChannels.map((ch) => channels[ch]?.error).filter(Boolean).join('; ')
+        : 'No customer email or phone on file';
+      return await revertToHeld(`Certificate delivery failed: ${reasons || 'unknown'}`);
+    }
     const deliveryStatus = successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
 
     const releaseUpdate = {
@@ -3701,17 +3721,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const dryRun = req.body?.dry_run === true || req.body?.dry_run === 'true';
 
     // Payment hold ("pay before you get the report"): deliver the invoice +
-    // pay link ONLY, and park the report until the invoice settles (the
-    // release sweep then delivers it). Same explicit-boolean parsing as
-    // dry_run. WDO-only by design — a non-WDO combined send carries the
-    // report link inside the SMS/email body, so there is nothing to hold.
+    // pay link ONLY, and park the report/certificate until the invoice settles
+    // (the release sweep then delivers it). Limited to the two official termite
+    // documents; ordinary service reports continue to deliver immediately.
     const holdRequested = req.body?.hold_report_until_paid === true || req.body?.hold_report_until_paid === 'true';
     if (holdRequested) {
       if (!isEnabled('wdoReportPaymentHold')) {
         return res.status(422).json({ error: 'Report payment hold is not enabled (GATE_WDO_REPORT_PAYMENT_HOLD)', code: 'hold_not_enabled' });
       }
-      if (!isWdoProject) {
-        return res.status(422).json({ error: 'Hold-until-paid is available for WDO inspection reports only', code: 'hold_not_supported' });
+      if (!supportsReportPaymentHold(project.project_type)) {
+        return res.status(422).json({ error: 'Hold-until-paid is available for WDO reports and pre-treatment certificates only', code: 'hold_not_supported' });
       }
       if (project.sent_at || project.status === 'sent') {
         return res.status(422).json({ error: 'This report was already delivered — a payment hold can only apply before the first send', code: 'hold_after_send' });
@@ -4265,7 +4284,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // there is no report leg yet. Payer holds skip the homeowner channels by
     // design, so they never count against the delivery status.
     const delivered = holdActive
-      ? (isPayerInvoice ? !!channels.payer_email?.ok : !!channels.email?.ok)
+      ? (isPayerInvoice
+          ? !!channels.payer_email?.ok
+          : isWdoProject
+            ? !!channels.email?.ok
+            : successfulChannelCount > 0)
       : (delivered_report && payerLegOk);
     const anySuccess = successfulChannelCount > 0
       || (isPayerInvoice && (accruedOnStatement || !!channels.payer_email?.ok));

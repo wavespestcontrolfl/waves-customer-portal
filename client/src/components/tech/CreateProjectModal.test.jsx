@@ -413,3 +413,76 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('CreateProjectModal pre-treatment invoice-first completion', () => {
+  function renderCertificateSheet(overrides = {}) {
+    return render(
+      <CreateProjectModal
+        theme="light"
+        presentation="sheet"
+        defaultCustomerId="9"
+        defaultCustomerLabel="Mike Padil"
+        defaultScheduledServiceId="55"
+        defaultProjectDate="2026-07-16"
+        defaultProjectType="pre_treatment_termite_certificate"
+        allowedProjectTypes={['pre_treatment_termite_certificate']}
+        allowInvoiceCompletion
+        onClose={() => {}}
+        onCreated={() => {}}
+        {...overrides}
+      />,
+    );
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
+      }
+      if (u.includes('/admin/projects/cert-1/send-with-invoice')) {
+        const body = JSON.parse(opts.body || '{}');
+        if (body.dry_run) return jsonResponse({ invoice: { id: 'inv-cert', total: 425 } });
+        return jsonResponse({
+          sent: true,
+          report_held: true,
+          invoice: { id: 'inv-cert', invoice_number: 'INV-2001', total: 425 },
+        });
+      }
+      if (u.includes('/admin/projects/cert-1/close')) {
+        return jsonResponse({
+          project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate', status: 'closed' },
+        });
+      }
+      return jsonResponse({});
+    }));
+  });
+
+  it('uses the saved applicator attestation, sends the invoice, holds the certificate, and closes the service', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    renderCertificateSheet({ onCreated, onClose });
+
+    await screen.findByText('Treatment address');
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+
+    await screen.findByText('✓ Certificate saved');
+    expect(screen.queryByTestId('sign-pad')).toBeNull();
+    expect(screen.getByText(/Applicator attestation saved/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Send invoice & finish service' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cert-1', status: 'closed' }),
+      expect.objectContaining({
+        completed: true,
+        invoice: expect.objectContaining({ id: 'inv-cert' }),
+      }),
+    ));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    const sendCalls = fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'));
+    expect(sendCalls).toHaveLength(2);
+    expect(sendCalls.every(([, opts]) => JSON.parse(opts.body).hold_report_until_paid === true)).toBe(true);
+  });
+});

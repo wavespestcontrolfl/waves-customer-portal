@@ -78,6 +78,10 @@ jest.mock('../services/project-email', () => ({
 jest.mock('../services/invoice', () => ({
   markDeliverySent: jest.fn(async () => ({})),
   previewInvoiceTotals: jest.fn(async () => ({ total: 175 })),
+  buildLineItemsForScheduledService: jest.fn(async () => ({
+    lineItems: [{ description: 'Pre-treatment termite service', quantity: 1, unit_price: 425, amount: 425 }],
+    discountIds: [],
+  })),
   update: jest.fn(async () => null),
   create: jest.fn(async () => ({ id: 'inv-new' })),
 }));
@@ -256,6 +260,19 @@ const FINDINGS = {
   report_sent_to: 'ABC Title <closing@abctitle.com>',
 };
 
+const PRE_TREATMENT_FINDINGS = {
+  treatment_address: '456 Palm Dr, Sarasota, FL 34236',
+  treatment_method: 'Soil barrier (chemical)',
+  product_name: 'Termidor SC',
+  active_ingredient: 'fipronil',
+  concentration_pct: '0.060',
+  square_footage: '2200',
+  gallons_applied: '220',
+  applicator_name: 'Adam B',
+  applicator_fdacs_id: 'JF111111',
+  applicator_attestation: 'I certify this treatment record is true and complete.',
+};
+
 function wdoProject(overrides = {}) {
   const findings = overrides.findings || FINDINGS;
   return {
@@ -275,6 +292,15 @@ function wdoProject(overrides = {}) {
     report_hold_attempts: 0,
     ...overrides,
   };
+}
+
+function preTreatmentProject(overrides = {}) {
+  return wdoProject({
+    project_type: 'pre_treatment_termite_certificate',
+    wdo_signature: null,
+    findings: PRE_TREATMENT_FINDINGS,
+    ...overrides,
+  });
 }
 
 const CUSTOMER = {
@@ -299,7 +325,13 @@ function invoiceRow(overrides = {}) {
   };
 }
 
-function mockTables({ project = wdoProject(), invoice = invoiceRow(), updates = {}, projectUpdateResult = null } = {}) {
+function mockTables({
+  project = wdoProject(),
+  invoice = invoiceRow(),
+  invoiceFirstResults = null,
+  updates = {},
+  projectUpdateResult = null,
+} = {}) {
   const recordUpdate = (table) => jest.fn(async (payload) => {
     (updates[table] = updates[table] || []).push(payload);
     if (table === 'projects' && projectUpdateResult) return projectUpdateResult(payload);
@@ -307,12 +339,20 @@ function mockTables({ project = wdoProject(), invoice = invoiceRow(), updates = 
   });
   const projectUpdate = recordUpdate('projects');
   const invoiceUpdate = recordUpdate('invoices');
+  const queuedInvoiceFirstResults = Array.isArray(invoiceFirstResults)
+    ? [...invoiceFirstResults]
+    : null;
   db.mockImplementation((table) => {
     if (table === 'projects' || table === 'projects as p') {
       return chain({ first: jest.fn(async () => project), update: projectUpdate });
     }
     if (table === 'invoices') {
-      return chain({ first: jest.fn(async () => invoice), update: invoiceUpdate });
+      return chain({
+        first: jest.fn(async () => (
+          queuedInvoiceFirstResults?.length ? queuedInvoiceFirstResults.shift() : invoice
+        )),
+        update: invoiceUpdate,
+      });
     }
     if (table === 'customers') return chain({ first: jest.fn(async () => CUSTOMER) });
     if (table === 'notification_prefs') return chain({ first: jest.fn(async () => null) });
@@ -378,7 +418,63 @@ describe('send-with-invoice hold_report_until_paid', () => {
     });
   });
 
-  test('hold is rejected for non-WDO projects', async () => {
+  test('hold is accepted for a pre-treatment certificate without a second signature', async () => {
+    const { updates } = mockTables({ project: preTreatmentProject() });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hold_report_until_paid: true, invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.sent).toBe(true);
+      expect(body.report_held).toBe(true);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).toHaveBeenCalledTimes(1);
+      expect(buildWdoReportPDFBuffer).not.toHaveBeenCalled();
+      expect(mockS3Send).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(true);
+    });
+  });
+
+  test('pre-treatment preview builds its invoice from the appointment before a service record exists', async () => {
+    const project = preTreatmentProject({
+      invoice_id: null,
+      scheduled_service_id: 'sched-55',
+      service_record_id: null,
+    });
+    const createdInvoice = invoiceRow({ id: 'inv-new', total: 425, invoice_number: 'INV-2001' });
+    mockTables({
+      project,
+      invoice: createdInvoice,
+      // No reusable draft, no already-paid invoice, then the row created by
+      // InvoiceService.create. This mirrors the first completion attempt.
+      invoiceFirstResults: [null, null, createdInvoice],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hold_report_until_paid: true, dry_run: true }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.dry_run).toBe(true);
+      expect(body.invoice).toEqual(expect.objectContaining({ id: 'inv-new', total: 425 }));
+      expect(InvoiceService.buildLineItemsForScheduledService).toHaveBeenCalledWith(
+        'sched-55',
+        expect.objectContaining({ fallbackDescription: expect.stringMatching(/Pre-Treatment/i) }),
+      );
+      expect(InvoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'customer-1',
+        scheduledServiceId: 'sched-55',
+        serviceRecordId: undefined,
+      }));
+    });
+  });
+
+  test('hold is rejected for ordinary non-compliance projects', async () => {
     mockTables({
       project: wdoProject({ project_type: 'pest_inspection', wdo_signature: null }),
     });
@@ -501,6 +597,23 @@ describe('releaseHeldProjectReport', () => {
     expect(releaseEmail.attachments).toHaveLength(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].body).toContain('/report/project/');
+  });
+
+  test('releases a paid pre-treatment certificate by report link without a WDO PDF', async () => {
+    const project = preTreatmentProject({ report_hold_status: 'held', status: 'closed' });
+    const { updates } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
+
+    const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+
+    expect(result.released).toBe(true);
+    expect(buildWdoReportPDFBuffer).not.toHaveBeenCalled();
+    expect(mockS3Send).not.toHaveBeenCalled();
+    expect(ProjectEmail.sendProjectReportReady).toHaveBeenCalledTimes(1);
+    expect(ProjectEmail.sendProjectReportReady.mock.calls[0][0].attachments).toEqual([]);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    const releasedStamp = (updates.projects || []).find((u) => u.report_hold_status === 'released');
+    expect(releasedStamp).toBeTruthy();
+    expect(releasedStamp.status).toBe('closed');
   });
 
   test('does not release while the invoice is unsettled, without burning an attempt', async () => {

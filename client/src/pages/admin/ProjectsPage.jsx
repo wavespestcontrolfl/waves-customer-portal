@@ -1569,8 +1569,8 @@ export function ProjectDetail({
   // WDO reports can't be sent until the licensee signature is captured.
   const wdoNeedsSignature =
     project?.project_type === WDO_TYPE && !project?.wdo_signature?.signed;
-  // Payment hold: server-computed availability (WDO + gate on + not sent)
-  // and the live held state driving the banner + manual-release hint.
+  // Payment hold: server-computed availability (official termite document +
+  // gate on + not sent) and the live state driving the release hint.
   const reportHoldAvailable = !!project?.report_payment_hold_available;
   const reportHeld = ["held", "releasing"].includes(
     String(project?.report_hold_status || ""),
@@ -2949,7 +2949,9 @@ export function ProjectDetail({
               cursor: "pointer",
               marginRight: "auto",
             }}
-            title="Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
+            title={project.project_type === WDO_TYPE
+              ? "Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
+              : "Send the invoice + pay link now; the pre-treatment certificate is delivered automatically once the invoice is paid"}
           >
             <input
               type="checkbox"
@@ -3061,7 +3063,9 @@ export function ProjectDetail({
             </button>
           )}
         {canAdminActions &&
-          (project.project_type === WDO_TYPE || project.service_record_id) &&
+          (project.project_type === WDO_TYPE ||
+            project.project_type === CERTIFICATE_TYPE ||
+            project.service_record_id) &&
           project.status !== "closed" && (
             <button
               type="button"
@@ -3071,14 +3075,16 @@ export function ProjectDetail({
               title={
                 wdoNeedsSignature
                   ? "Capture the licensee signature first"
-                  : project.project_type === WDO_TYPE
+                  : reportHoldAvailable
                     ? holdReportUntilPaid
-                      ? "Send the invoice and payment link now; release the FDACS-13645 report automatically after payment"
-                      : "Send the filled FDACS-13645 report and an invoice together via email + text"
+                      ? project.project_type === WDO_TYPE
+                        ? "Send the invoice and payment link now; release the FDACS-13645 report automatically after payment"
+                        : "Send the invoice and payment link now; release the pre-treatment certificate automatically after payment"
+                      : "Send the report and an invoice together via email + text"
                     : "Send the report and an invoice together via email + text"
               }
             >
-              {project.project_type === WDO_TYPE && holdReportUntilPaid
+              {reportHoldAvailable && holdReportUntilPaid
                 ? "Send invoice & hold report"
                 : "Send report + invoice"}
             </button>
