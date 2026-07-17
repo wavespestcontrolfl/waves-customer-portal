@@ -8,6 +8,23 @@ const { isEnabled } = require('../../config/feature-gates');
 let _googleAds;
 function getGoogleAds() { return _googleAds || (_googleAds = require('./google-ads')); }
 
+// ad_campaigns.daily_budget_base / daily_budget_current are decimal(10,2), so
+// the largest storable value is 99,999,999.99. A budget above that (a typo like
+// 100000000) could be accepted by Google BEFORE the local write, then fail the
+// DB update — leaving the live campaign changed but the DB out of sync. Reject
+// it up front, before any push. (Google itself enforces its own maxima too.)
+const MAX_DAILY_BUDGET = 99999999.99;
+
+// ad_budget_log.reason is a varchar(255). A caller-supplied reason longer than
+// that would make the ad_budget_log insert fail AFTER the live Google push (and,
+// in setBudget, after the campaign write) — losing the audit row and 500-ing an
+// otherwise-successful change. Bound it up front so the audit insert can't fail
+// on length. Cron-generated reasons are short by construction.
+const MAX_REASON_LEN = 255;
+function boundReason(reason) {
+  return String(reason == null ? '' : reason).slice(0, MAX_REASON_LEN);
+}
+
 class BudgetManager {
   /**
    * Core budget adjustment — runs every 2 hours via cron.
@@ -166,7 +183,12 @@ class BudgetManager {
   }
 
   calculateBudget(campaign, mode) {
-    const base = parseFloat(campaign.daily_budget_base || 20);
+    // $20 is the fallback ONLY for a NULL/blank/non-numeric base (legacy DB-only
+    // campaign not yet backfilled). A real stored 0 stays 0 — writes reject a
+    // non-positive base, so a genuine 0 never reaches a live campaign, and the
+    // old `|| 20` collapsing 0→$20 can't silently spend money.
+    const parsed = parseFloat(campaign.daily_budget_base);
+    const base = Number.isFinite(parsed) ? parsed : 20;
     switch (mode) {
       case 'base': return base;
       case 'spent': return parseFloat(campaign.daily_budget_current || base); // freeze at current
@@ -337,6 +359,7 @@ class BudgetManager {
    * Manually set a campaign's budget mode (from advisor "Apply" button).
    */
   async setMode(campaignId, mode, reason = 'manual') {
+    reason = boundReason(reason);
     // Now that setMode can mutate real Google Ads spend, an unknown mode
     // must be rejected up front — calculateBudget's default case would
     // silently price a typo as the full base budget AND persist the invalid
@@ -391,30 +414,127 @@ class BudgetManager {
    * Manually update a campaign's base daily budget.
    */
   async setBudget(campaignId, newBaseBudget, reason = 'manual') {
+    reason = boundReason(reason);
+    // Validate the amount up front — a non-positive / NaN / non-finite base would
+    // be written locally and pushed to Google as garbage micros (or, at 0,
+    // collapse to the $20 fallback), and the 2-hourly reconcile would keep
+    // re-pushing it. A daily budget must be strictly positive; use mode 'stop'
+    // to throttle. parseFloat is deliberately avoided so '50junk' is rejected.
+    let base = typeof newBaseBudget === 'number'
+      ? newBaseBudget
+      : (typeof newBaseBudget === 'string' && newBaseBudget.trim() !== '' ? Number(newBaseBudget) : NaN);
+    if (!Number.isFinite(base) || base <= 0) {
+      throw new Error(`Invalid budget "${newBaseBudget}" — must be a number > 0`);
+    }
+    // Cap at the storable maximum BEFORE the Google push, so an over-large value
+    // can't change the live campaign and then fail the decimal(10,2) DB write.
+    if (base > MAX_DAILY_BUDGET) {
+      throw new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
+    }
+    // Round to cents so Google receives EXACTLY what the decimal(10,2) columns
+    // store — a value like 50.001 would otherwise push exact micros to Google
+    // while the DB rounds to 50.00, re-creating the live/local drift this path
+    // is meant to prevent.
+    base = Math.round(base * 100) / 100;
+    // Re-check after rounding: a sub-cent input like 0.004 passes the > 0 check
+    // above but rounds to 0, which would push an invalid $0 to Google / persist a
+    // 0 base. The minimum daily budget is one cent.
+    if (base <= 0) {
+      throw new Error(`Invalid budget "${newBaseBudget}" — rounds to $0; the minimum is $0.01`);
+    }
+
     const campaign = await db('ad_campaigns').where({ id: campaignId }).first();
     if (!campaign) throw new Error('Campaign not found');
     if (campaign.platform !== 'google_ads') {
       throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
     }
 
-    await db('ad_campaigns').where({ id: campaignId }).update({
-      daily_budget_base: newBaseBudget,
-      daily_budget_current: campaign.budget_mode === 'base' ? newBaseBudget : campaign.daily_budget_current,
-    });
+    // What Google should actually run given the campaign's CURRENT mode: editing
+    // the base while a campaign is throttled ('stop') or frozen ('spent') must
+    // NOT blast the raw new base live — push the mode-derived amount, exactly
+    // like setMode and the capacity cron. In 'base' mode this is the new base
+    // itself; 'spent' stays frozen at daily_budget_current; 'stop' recomputes 1%.
+    const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
 
-    await db('ad_budget_log').insert({
-      campaign_id: campaignId,
-      campaign_name: campaign.campaign_name,
-      previous_mode: campaign.budget_mode,
-      new_mode: campaign.budget_mode,
-      previous_budget: campaign.daily_budget_base,
-      new_budget: newBaseBudget,
-      reason,
-      trigger: 'manual',
-    });
+    // Push FIRST so daily_budget_current only ever records a budget Google is
+    // actually running: if Google rejects the change (shared budget, API error)
+    // we keep the prior current, so a requested decrease can't leave local state
+    // claiming the lower budget is live while Google keeps overspending. An
+    // unlinked/unconfigured campaign has no live counterpart, so its current
+    // advances to the intended amount (DB-only intent tracking).
+    let googleAdsUpdated = false;
+    let pushAttempted = false;
+    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+      pushAttempted = true;
+      const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
+      googleAdsUpdated = !!pushed;
+    }
+    const newCurrent = (pushAttempted && !googleAdsUpdated)
+      ? campaign.daily_budget_current   // push failed → Google still runs the old amount
+      : effectiveBudget;
 
-    return { campaign: campaign.campaign_name, previousBudget: campaign.daily_budget_base, newBudget: newBaseBudget };
+    // If the live push already changed Google but we then fail to record it
+    // locally (a transient DB error — the deterministic cases, over-max budget
+    // and over-long reason, are rejected up front), roll Google back to the
+    // amount it was running before so live spend and local state don't drift,
+    // then surface the failure. No false success, and the reconcile cron isn't
+    // left chasing a phantom. (calculateBudget's fallbacks mean a null prior
+    // current can't be safely restored — log for manual follow-up instead.)
+    // Atomic: the campaign write and the audit insert must land together, or the
+    // catch below would roll Google back while the campaign row keeps the new
+    // base — in base mode the reconcile check then sees current === base and
+    // never restores Google, leaving the old higher spend running.
+    try {
+      await db.transaction(async (trx) => {
+        await trx('ad_campaigns').where({ id: campaignId }).update({
+          daily_budget_base: base,
+          daily_budget_current: newCurrent,
+        });
+
+        await trx('ad_budget_log').insert({
+          campaign_id: campaignId,
+          campaign_name: campaign.campaign_name,
+          previous_mode: campaign.budget_mode,
+          new_mode: campaign.budget_mode,
+          previous_budget: campaign.daily_budget_base,
+          new_budget: base,
+          reason,
+          trigger: 'manual',
+        });
+      });
+    } catch (persistErr) {
+      if (googleAdsUpdated && campaign.platform_campaign_id) {
+        const prevLive = parseFloat(campaign.daily_budget_current);
+        if (Number.isFinite(prevLive)) {
+          // updateBudget RETURNS null on an API error (it doesn't throw), so a
+          // failed rollback must be detected on the return value, not just via a
+          // catch — otherwise it fails silently and Google keeps running the new
+          // budget while local state shows the old one.
+          let rolled = null;
+          try {
+            rolled = await getGoogleAds().updateBudget(campaign.platform_campaign_id, prevLive);
+          } catch (rollbackErr) {
+            logger.error(`setBudget: rollback push threw for ${campaign.campaign_name} after a persist error — Google may run ${effectiveBudget} while local shows the old base: ${rollbackErr.message}`);
+          }
+          if (!rolled) {
+            logger.error(`setBudget: rollback push did NOT take for ${campaign.campaign_name} after a persist error — Google may still run ${effectiveBudget} while local shows the old base; manual reconciliation may be needed`);
+          }
+        } else {
+          logger.error(`setBudget: persist failed for ${campaign.campaign_name} after pushing ${effectiveBudget} live, and prior live budget is unknown — manual reconciliation may be needed`);
+        }
+      }
+      throw persistErr;
+    }
+
+    return {
+      campaign: campaign.campaign_name,
+      previousBudget: campaign.daily_budget_base,
+      newBudget: base,
+      effectiveBudget,
+      googleAdsUpdated,
+    };
   }
 }
 
 module.exports = new BudgetManager();
+module.exports.MAX_DAILY_BUDGET = MAX_DAILY_BUDGET;

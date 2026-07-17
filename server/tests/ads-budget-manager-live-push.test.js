@@ -51,6 +51,9 @@ const mockDb = jest.fn((table) => {
   }
   throw new Error(`Unexpected table in test: ${table}`);
 });
+// db.transaction(cb) runs cb with a trx that dispatches like db itself; a throw
+// inside rejects (knex would roll back). setBudget's atomic writes use this.
+mockDb.transaction = (cb) => cb(mockDb);
 jest.mock('../models/db', () => mockDb);
 
 const BudgetManager = require('../services/ads/budget-manager');
@@ -368,6 +371,155 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalled();
       expect(mockUpdateBudget).not.toHaveBeenCalled();
       expect(result.googleAdsUpdated).toBe(false);
+    });
+  });
+
+  describe('setBudget (manual: base change)', () => {
+    test('base mode: pushes the new base and syncs current, reports googleAdsUpdated', async () => {
+      campaignFirstRow = baseCampaign(); // budget_mode 'base', base/current 40
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      const result = await BudgetManager.setBudget('c-1', 50, 'test');
+
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50,
+        daily_budget_current: 50,
+      });
+      expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 50);
+      expect(result).toMatchObject({ newBudget: 50, effectiveBudget: 50, googleAdsUpdated: true });
+    });
+
+    test('stop mode: pushes the mode-derived 1%, NOT the raw new base, and leaves current frozen', async () => {
+      campaignFirstRow = { ...baseCampaign(), budget_mode: 'stop', daily_budget_current: '0.4' };
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      const result = await BudgetManager.setBudget('c-1', 50, 'test');
+
+      // base recorded; Google gets 1% of the NEW base (0.5), never the raw 50
+      // that would blast full spend during a stop; current advances to the new
+      // throttle so the dashboard/reconcile stay consistent.
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50,
+        daily_budget_current: 0.5,
+      });
+      expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.5);
+      expect(result.effectiveBudget).toBe(0.5);
+    });
+
+    test('invalid or non-positive amount rejected before any write or push', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+
+      await expect(BudgetManager.setBudget('c-1', 'abc', 'test')).rejects.toThrow(/Invalid budget/);
+      await expect(BudgetManager.setBudget('c-1', '50junk', 'test')).rejects.toThrow(/Invalid budget/);
+      await expect(BudgetManager.setBudget('c-1', -5, 'test')).rejects.toThrow(/Invalid budget/);
+      await expect(BudgetManager.setBudget('c-1', 0, 'test')).rejects.toThrow(/Invalid budget/);
+      // 0.004 passes the > 0 check but rounds to $0 — must be rejected too.
+      await expect(BudgetManager.setBudget('c-1', 0.004, 'test')).rejects.toThrow(/rounds to \$0|minimum/);
+
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockLogInsert).not.toHaveBeenCalled();
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+    });
+
+    test('over-max budget rejected before any push (decimal(10,2) storable cap)', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+
+      // 100000000 exceeds decimal(10,2)'s 99999999.99 — must be rejected BEFORE
+      // the Google push, so the live campaign can't change and then fail the DB write.
+      await expect(BudgetManager.setBudget('c-1', 100000000, 'test')).rejects.toThrow(/exceeds the maximum/);
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockLogInsert).not.toHaveBeenCalled();
+    });
+
+    test('unconfigured API: base + current advance (intent tracking), no push', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(false);
+
+      const result = await BudgetManager.setBudget('c-1', 50, 'test');
+
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50,
+        daily_budget_current: 50,
+      });
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(result.googleAdsUpdated).toBe(false);
+    });
+
+    test('push failure: base recorded but current stays at the old live amount', async () => {
+      campaignFirstRow = baseCampaign(); // current '40'
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue(null); // Google refused (e.g. shared budget)
+
+      const result = await BudgetManager.setBudget('c-1', 50, 'test');
+
+      // Google still runs the old budget, so current must NOT claim the new one.
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50,
+        daily_budget_current: '40',
+      });
+      expect(result.googleAdsUpdated).toBe(false);
+    });
+
+    test('over-long reason is bounded to 255 chars so the audit insert cannot fail after the push', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      await BudgetManager.setBudget('c-1', 50, 'x'.repeat(500));
+
+      expect(mockLogInsert).toHaveBeenCalledTimes(1);
+      const logged = mockLogInsert.mock.calls[0][0];
+      expect(logged.reason.length).toBe(255);
+    });
+
+    test('rounds the base to cents so Google and the DB agree', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      const result = await BudgetManager.setBudget('c-1', 50.007, 'test'); // → 50.01
+
+      expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 50.01);
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50.01,
+        daily_budget_current: 50.01,
+      });
+      expect(result.newBudget).toBe(50.01);
+    });
+
+    test('post-push persist failure rolls Google back to the prior live budget, then rethrows', async () => {
+      campaignFirstRow = baseCampaign(); // prior live current = '40'
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+      mockCampaignUpdate.mockRejectedValueOnce(new Error('db down')); // the post-push write fails
+
+      await expect(BudgetManager.setBudget('c-1', 50, 'test')).rejects.toThrow(/db down/);
+
+      // First pushed the new budget (50), then rolled Google back to 40 so live
+      // spend and local state don't drift; no false success is returned.
+      expect(mockUpdateBudget).toHaveBeenNthCalledWith(1, '1234567890', 50);
+      expect(mockUpdateBudget).toHaveBeenNthCalledWith(2, '1234567890', 40);
+    });
+
+    test('logs when the compensating rollback push does not take (updateBudget returns null)', async () => {
+      const logger = require('../services/logger');
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      // push succeeds; the persist then fails; the rollback push returns null
+      // (Google API error — updateBudget returns null rather than throwing).
+      mockUpdateBudget.mockResolvedValueOnce({ success: true }).mockResolvedValueOnce(null);
+      mockCampaignUpdate.mockRejectedValueOnce(new Error('db down'));
+
+      await expect(BudgetManager.setBudget('c-1', 50, 'test')).rejects.toThrow(/db down/);
+
+      expect(mockUpdateBudget).toHaveBeenNthCalledWith(2, '1234567890', 40); // rollback attempted
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('did NOT take'));
     });
   });
 });
