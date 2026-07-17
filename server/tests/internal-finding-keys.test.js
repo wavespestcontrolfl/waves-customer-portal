@@ -139,6 +139,29 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Home of 2400 sq ft; inspection fee is 175.'))
       .toBe('Home of 2400 sq ft; inspection fee [fee removed].');
   });
+  test('money-subject nouns end the cue reach — customer financials survive', () => {
+    expect(redactInspectionFeeCues('Inspection fee paid separately, purchase price $400,000.'))
+      .toBe('Inspection fee paid separately, purchase price $400,000.');
+    expect(redactInspectionFeeCues('Inspection fee paid separately, closing costs $12,000.'))
+      .toBe('Inspection fee paid separately, closing costs $12,000.');
+    expect(redactInspectionFeeCues('Inspection fee on file, home value $400,000.'))
+      .toBe('Inspection fee on file, home value $400,000.');
+  });
+  test('cost/charge/price/run directly after the cue bridge the fee, not a new subject', () => {
+    expect(redactInspectionFeeCues('Inspection fee costs $250.'))
+      .toBe('Inspection fee costs [fee removed].');
+    expect(redactInspectionFeeCues('Inspection fee runs $175.'))
+      .toBe('Inspection fee runs [fee removed].');
+  });
+  test('abbreviation periods do not end the cue reach', () => {
+    expect(redactInspectionFeeCues('Inspection fee approx. $250'))
+      .toBe('Inspection fee approx. [fee removed]');
+    expect(redactInspectionFeeCues('Inspection fee est. at $250'))
+      .toBe('Inspection fee est. at [fee removed]');
+    // a word merely ending in the abbreviation letters still terminates
+    expect(redactInspectionFeeCues('The fee was modest. Total due $400.'))
+      .toBe('The fee was modest. Total due $400.');
+  });
   test('every amount in a fee range is consumed into one redaction', () => {
     expect(redactInspectionFeeCues('Inspection fee ranges from $175 to $250 depending on construction.'))
       .toBe('Inspection fee ranges from [fee removed] depending on construction.');

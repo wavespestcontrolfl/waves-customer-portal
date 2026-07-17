@@ -36,7 +36,31 @@ const FEE_REACH_BREAKERS = [
   'repairs?', 're-?treatments?', 'treatments?', 'permits?', 'damages?',
   'estimates?', 'quotes?', 'deductibles?', 'discounts?', 'credits?',
   'balance', 'totals?', 'subtotal', 'amount\\s+due',
+  // money-subject nouns: "purchase price $400,000", "closing costs $12,000",
+  // "service charge $75", "home value $400,000" are legitimate customer
+  // financials and must never be consumed by a fee cue earlier in the clause.
+  // The verb reading of cost/charge/price/run ("inspection fee costs $250")
+  // is handled by DIRECT_BRIDGE below — adjacent to the cue it is the fee's
+  // own amount, not a new subject.
+  'prices?', 'costs?', 'charges?', 'values?', 'purchase',
 ].join('|');
+
+// Immediately after the cue, cost/charge/price/run read as the VERB stating
+// the fee's own amount ("Inspection fee costs $250", "fee runs $175") — the
+// one position where those words are a bridge, not a new money subject.
+const DIRECT_BRIDGE = '(?:\\s(?:costs?|charges?|prices?|runs?)\\b)?';
+
+// Known abbreviations whose trailing period must not read as end-of-sentence
+// — "Inspection fee approx. $250" / "est. at $250" keep the cue's reach.
+// Each is consumed as one gap token WITH its period; a word merely ENDING in
+// these letters ("largest.") fails the leading \b and still terminates.
+const GAP_ABBREVIATIONS = '(?:approx|appx|est|min|max|incl|excl)';
+
+// A money-subject noun preceded by a container preposition is WHERE the fee
+// lives, not a new subject — "included in closing costs: $250" is still the
+// fee. Consumed atomically so the money-noun breaker doesn't fire on it;
+// "purchase price $400,000" (no container prep) still breaks.
+const CONTAINER_PHRASE = '\\b(?:in|into|within|under)\\s+(?:\\w+\\s+){0,2}?(?:costs?|prices?|charges?|values?)\\b';
 
 // Amount forms the cue can disclose. A literal $ amount, a USD/US$-prefixed
 // amount, a "250 dollars" currency-word amount, or a bare number. The bare
@@ -86,7 +110,7 @@ const RANGE_CONTINUATION =
 
 const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
-  + `((?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)[^.;!?\\n]){0,160}?)`
+  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?:${CONTAINER_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|[^.;!?\\n])){0,160}?)`
   + `(?:${AMOUNT_PATTERN})`
   + RANGE_CONTINUATION,
   'gi',
