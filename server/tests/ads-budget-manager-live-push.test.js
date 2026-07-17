@@ -732,6 +732,43 @@ describe('rollbackAfterLivePush r9', () => {
       { ...baseCampaign(), daily_budget_current: null }, new Error('db down'), 30);
 
     expect(err.code).toBe('live_push_ambiguous');
-    expect(err.message).toMatch(/within ~2 hours/);
+    // The 2-hourly reconcile can't see this drift class (current still equals
+    // the mode's expected amount) — only the daily sync exposes it.
+    expect(err.message).toMatch(/daily Google Ads sync/);
+  });
+
+  test('a same-amount edit that also rewrote the BASE is superseded, not treated as a mirror', async () => {
+    // Advisor push $40→$50 failed to persist; a queued manual setBudget to
+    // $50 then committed (base 50, current 50). Restoring $40 would clobber
+    // the newer human change.
+    campaignFirstRow = { ...baseCampaign(), daily_budget_base: '50', daily_budget_current: '50' };
+    mockIsConfigured.mockReturnValue(true);
+
+    const err = await BudgetManager.rollbackAfterLivePush(baseCampaign(), new Error('db down'), 50);
+
+    expect(err.code).toBe('live_push_rolled_back');
+    expect(err.message).toMatch(/newer budget change/);
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+  });
+
+  test('manual (legacy) setMode: commit failure after an accepted push takes the compensating rollback', async () => {
+    campaignFirstRow = baseCampaign();
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+    const realTransaction = mockDb.transaction;
+    let firstTrx = true;
+    mockDb.transaction = async (cb) => {
+      const r = await cb(mockDb);
+      if (firstTrx) { firstTrx = false; throw new Error('commit failed'); }
+      return r;
+    };
+
+    await expect(BudgetManager.setMode('c-1', 'stop', 'test'))
+      .rejects.toMatchObject({ code: 'live_push_rolled_back' });
+
+    // Push (0.4) then compensating restore (40).
+    expect(mockUpdateBudget).toHaveBeenLastCalledWith('1234567890', 40);
+    mockDb.transaction = realTransaction;
   });
 });

@@ -476,7 +476,12 @@ class BudgetManager {
     // are otherwise unchanged: the write commits even when the push fails
     // (googleAdsUpdated reports the outcome; the gate-on reconcile converges
     // Google later), so a thrown push is swallowed into googleAdsUpdated:false.
-    return db.transaction(async (trx) => {
+    // Because the push now runs BEFORE the COMMIT, a commit failure after an
+    // accepted push gets the same compensating rollback the advisor path uses
+    // (previously the write was already committed, so there was no divergence).
+    let manualPushed = null;
+    try {
+    return await db.transaction(async (trx) => {
       const campaign = await trx('ad_campaigns').where({ id: campaignId }).forUpdate().first();
       if (!campaign) throw new Error('Campaign not found');
       // Source-level guard so EVERY caller is covered: only Google campaigns
@@ -516,10 +521,17 @@ class BudgetManager {
           const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
           googleAdsUpdated = !!pushed;
         } catch { googleAdsUpdated = false; }
+        if (googleAdsUpdated) manualPushed = { campaign, attempted: newBudget };
       }
 
       return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated, livePushAttempted };
     });
+    } catch (err) {
+      if (manualPushed) {
+        throw await this.rollbackAfterLivePush(manualPushed.campaign, err, manualPushed.attempted);
+      }
+      throw err;
+    }
   }
 
   /**
@@ -550,12 +562,16 @@ class BudgetManager {
           if (sameMode && centsEq(row.daily_budget_current, previousLive)) {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, previousLive);
             if (pushed) outcome = 'restored';
-          } else if (sameMode && attemptedLiveBudget != null && centsEq(row.daily_budget_current, attemptedLiveBudget)) {
+          } else if (sameMode
+            && centsEq(row.daily_budget_base, campaign.daily_budget_base)
+            && attemptedLiveBudget != null && centsEq(row.daily_budget_current, attemptedLiveBudget)) {
             // Not a newer change: the daily/manual Google sync mirrored OUR
-            // failed push's live amount into daily_budget_current (mode
-            // untouched, current == exactly what we pushed). Restore Google
-            // AND the mirrored current, or the failed budget stays live with
-            // local state agreeing with it.
+            // failed push's live amount into daily_budget_current (mode AND
+            // base untouched, current == exactly what we pushed — a queued
+            // manual setBudget to the same amount also rewrites the BASE, so
+            // it lands in 'superseded' below instead of being clobbered).
+            // Restore Google AND the mirrored current, or the failed budget
+            // stays live with local state agreeing with it.
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, previousLive);
             if (pushed) {
               await trx('ad_campaigns').where({ id: campaign.id }).update({ daily_budget_current: previousLive });
@@ -576,7 +592,7 @@ class BudgetManager {
       restored: 'Recording the change failed after Google accepted it — the live budget was rolled back and nothing was changed. Try again.',
       superseded: 'This apply failed to record and was not applied — a newer budget change committed in the meantime and owns the live budget; nothing from this apply persisted.',
       ambiguous: `Google accepted the change but recording it locally failed, and the rollback push could not safely run — the live campaign may be running the new amount. Local records still hold the previous state. ${reconcileActive
-        ? 'The budget reconcile restores it within ~2 hours; check the campaign in Google Ads.'
+        ? 'This corrects after the next daily Google Ads sync exposes the drift (up to ~24h) — the 2-hourly reconcile cannot see it until then, so check the campaign in Google Ads now if it matters today.'
         : 'Automatic budget reconciliation is currently OFF (GATE_ADS_BUDGET_LIVE_PUSH), so this will NOT self-heal — fix the budget in Google Ads or the campaign editor now.'}`,
     };
     const err = new Error(messages[outcome]);

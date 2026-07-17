@@ -408,6 +408,16 @@ test('an oversized model reason is truncated to the varchar(255) audit column', 
   expect(sentReason.length).toBeLessThanOrEqual(255);
 });
 
+test('change_mode also sends the truncated reason', async () => {
+  mockNameMatches = [{ id: 'c-9', campaign_name: 'Lawn Sarasota', platform: 'google_ads', status: 'active' }];
+  mockSetMode.mockResolvedValue({ campaign: 'Lawn Sarasota', newMode: 'stop', googleAdsUpdated: true, livePushAttempted: true });
+
+  const res = await apply({ action: 'change_mode', campaignName: 'Lawn Sarasota', value: 'stop', reason: 'y'.repeat(600) });
+
+  expect(res.status).toBe(200);
+  expect(mockSetMode.mock.calls[0][2].length).toBeLessThanOrEqual(255);
+});
+
 test('manager-thrown in-lock rechecks (budget_noop / budget_out_of_bounds) map to 422', async () => {
   mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20, daily_budget_current: 18 }];
   mockSetBudget.mockRejectedValueOnce(Object.assign(new Error('already at $30/day'), { code: 'budget_noop' }));

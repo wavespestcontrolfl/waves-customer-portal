@@ -1052,13 +1052,18 @@ function AdvisorTab() {
     // (Apply buttons are also disabled while generating.)
     reportGenRef.current += 1;
     setApplied({});
-    const r = await adminPost("/admin/ads/advisor/generate", {});
-    setReport({
-      report_data: r.report,
-      date: etDateString(),
-      grade: r.report?.grade,
-    });
-    setGenerating(false);
+    try {
+      const r = await adminPost("/admin/ads/advisor/generate", {});
+      setReport({
+        report_data: r.report,
+        date: etDateString(),
+        grade: r.report?.grade,
+      });
+    } finally {
+      // A failed generation must not leave every Apply button disabled until
+      // a page reload — generating gates them while true.
+      setGenerating(false);
+    }
   };
 
   const handleApply = async (rec, idx) => {
