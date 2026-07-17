@@ -8,6 +8,26 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-07-17 lawn spot-reserve fold
+
+Spot-treatment reserves folded into the lawn cost-floor material budgets
+(owner ruling 2026-07-16: herbicide spot = 1/8 broadcast cost, gated/curative
+fungicide + insecticide = 1/4, prorated to the sold cadence). See
+`pricing_changelog` entry via migration `20260717000001_lawn_spot_reserve_version`
+(`pricingVersion` → `LAWN_PRICING_V2_SPOT_RESERVE`) and
+`packages/lawn-cost-floor` for the folded budgets.
+
+Local baselines recaptured (`CAPTURE_BASELINE=1 LOCAL=1`) for both
+`pricing-engine.local-baseline.json` and
+`pricing-engine-v1-adapter.local-baseline.json`; the diff is confined to
+`lawn_care` line items / `results.lawn` and the dependent summary + bundle
+totals (verified via structural diff — no other service line moved). Floors
+rise where reserve-funded (e.g. St. Augustine enhanced golden master
+$621 → $648/yr; zoysia enhanced flips from market-table to floor-priced).
+Hardcoded lawn expectations in `pricing-commercial-safety-gate.test.js` and
+`lawn-pricing-followup.test.js` updated to the same effect. The DB baselines
+(`*.baseline.json`) are untouched pending post-deploy recapture.
+
 ## 2026-06-17 lawn 35% margin recalibration
 
 Recurring lawn repriced from a 45% to a 35% fully loaded margin floor (owner

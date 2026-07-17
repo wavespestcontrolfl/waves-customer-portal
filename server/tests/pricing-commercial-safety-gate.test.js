@@ -271,10 +271,12 @@ describe('commercial safety gate in generateEstimate', () => {
     const lawn = estimate.lineItems.find((line) => line.service === 'lawn_care');
 
     expect(pest).toMatchObject({ monthly: 39, annual: 468, perApp: 117 });
-    expect(lawn).toMatchObject({ monthly: 51.75, annual: 621, perApp: 69 });
+    // Lawn 621 → 648: spot reserves folded into the 35% cost floor
+    // (owner 2026-07-16, LAWN_PRICING_V2_SPOT_RESERVE).
+    expect(lawn).toMatchObject({ monthly: 54, annual: 648, perApp: 72 });
     expect(estimate.summary).toMatchObject({
-      recurringAnnualBeforeDiscount: 1089,
-      // Silver 10% on lawn (621 → 558.90) caps at the $600 lawn program
+      recurringAnnualBeforeDiscount: 1116,
+      // Silver 10% on lawn (648 → 583.20) caps at the $600 lawn program
       // minimum (owner 2026-07-09): pest 421.20 + lawn 600 = 1021.20.
       recurringAnnualAfterDiscount: 1021.2,
       recurringMonthlyAfterDiscount: 85.1,

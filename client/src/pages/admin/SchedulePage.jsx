@@ -6202,6 +6202,7 @@ function normalizeApplicationMethod(value = "") {
       "broadcast_spray",
       "spot_treatment",
       "granular_broadcast",
+      "soil_drench",
       "bait_placement",
       "station_check",
       "fog_ulv",
@@ -12349,6 +12350,7 @@ export function CompletionPanel({
                         <option value="broadcast_spray">Broadcast spray</option>
                         <option value="spot_treatment">Spot treatment</option>
                         <option value="granular_broadcast">Granular</option>
+                        <option value="soil_drench">Soil drench</option>
                         <option value="bait_placement">Bait</option>
                         <option value="station_check">Station check</option>
                         <option value="fog_ulv">Fog/ULV</option>
@@ -14347,6 +14349,7 @@ export function CompletionPanel({
                     <option value="broadcast_spray">Broadcast spray</option>
                     <option value="spot_treatment">Spot treatment</option>
                     <option value="granular_broadcast">Granular</option>
+                    <option value="soil_drench">Soil drench</option>
                     <option value="bait_placement">Bait</option>
                     <option value="station_check">Station check</option>
                     <option value="fog_ulv">Fog/ULV</option>
@@ -15211,6 +15214,7 @@ const PRODUCT_DESCRIPTIONS = {
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
+  tritek: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
   zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
   kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",
