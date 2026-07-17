@@ -776,6 +776,24 @@ describe('review fixes', () => {
     }
   });
 
+  test('treeShrub accepts a caller-stated treeCount and rejects out-of-range counts', () => {
+    const withCount = { ...baseIntent(), services: { treeShrub: { treeCount: 12 } }, service_interest_label: 'Tree & Shrub Care' };
+    expect(validateIntent(withCount).valid).toBe(true);
+    const zero = { ...baseIntent(), services: { treeShrub: { treeCount: 0 } }, service_interest_label: 'Tree & Shrub Care' };
+    expect(validateIntent(zero).valid).toBe(false);
+    const absurd = { ...baseIntent(), services: { treeShrub: { treeCount: 500 } }, service_interest_label: 'Tree & Shrub Care' };
+    expect(validateIntent(absurd).valid).toBe(false);
+  });
+
+  test('tree_shrub line priced from a defaulted-zero tree count requires review', () => {
+    expect(draftPriv.lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', annual: 400 })).toBe(true);
+    // A real count (caller-stated or density-estimated) does not block.
+    expect(draftPriv.lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'explicit', annual: 400 })).toBe(false);
+    expect(draftPriv.lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'density_estimate', annual: 400 })).toBe(false);
+    // Other services never trip on the tree-count source.
+    expect(draftPriv.lineRequiresReview({ service: 'lawn_care', treeCountSource: 'default_zero', annual: 400 })).toBe(false);
+  });
+
   test('street-only locality borrows city and ZIP from one record, never mixed', () => {
     const context = {
       extraction: { property: { service_address: { street_line_1: '123 Example St' } } },

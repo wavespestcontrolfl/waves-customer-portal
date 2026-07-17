@@ -45,7 +45,18 @@ const SERVICE_OPTION_SCHEMAS = {
     additionalProperties: false,
   },
   lawnPestControl: { type: 'object', additionalProperties: false, properties: {} },
-  treeShrub: { type: 'object', additionalProperties: false, properties: {} },
+  treeShrub: {
+    type: 'object',
+    properties: {
+      // Caller-stated count only. treeCount drives the pricer's labor
+      // minutes, per-tree material term, AND its ≥15-tree manual-review
+      // gate — blocking it here made every engine treeShrub draft price
+      // zero trees and skip that gate. Absent count → the pricer's
+      // treeCountSource marks the line for review (draft-builder).
+      treeCount: { type: 'integer', minimum: 1, maximum: 200 },
+    },
+    additionalProperties: false,
+  },
   mosquito: {
     type: 'object',
     properties: { tier: { enum: ['seasonal9', 'monthly12'] } },

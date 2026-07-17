@@ -57,6 +57,10 @@ function lineRequiresReview(line = {}) {
     || line.customQuoteFlag
     || line.requiresCustomQuote
     || (Array.isArray(line.manualReviewReasons) && line.manualReviewReasons.length)
+    // No caller-stated count and no property density data: the pricer
+    // silently priced ZERO trees (fixed costs only) — an underquote with no
+    // warning of its own, so the draft must carry the review flag here.
+    || (line.service === 'tree_shrub' && line.treeCountSource === 'default_zero')
   );
 }
 
@@ -546,19 +550,6 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       category: intent.category,
     }).returning(['id', 'token']);
 
-    // Link the originating lead to the draft (same transaction) so the
-    // send/view/accept pipeline advances THIS lead instead of falling back
-    // to shared-contact matching. Same leadIsForThisCall gate as the
-    // metadata mirror above — a stale phone-history lead must not be
-    // mutated as if it originated this call.
-    if (context?.lead?.id && context?.leadIsForThisCall) {
-      try {
-        await trx('leads').where({ id: context.lead.id }).update({ estimate_id: estimate.id });
-      } catch (linkErr) {
-        logger.warn(`[estimator-engine] lead link update failed (non-blocking): ${linkErr.message}`);
-      }
-    }
-
     return { estimate };
   });
 
@@ -567,6 +558,22 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       existingEstimateId: creationResult.duplicateBlock.existingEstimateId,
     });
     return { created: false, blocked: true, duplicateBlock: creationResult.duplicateBlock };
+  }
+
+  // Link the originating lead to the draft AFTER the creation transaction
+  // commits — a failed statement inside a Postgres transaction aborts the
+  // whole transaction regardless of a JS catch, so an in-transaction link
+  // failure would have rolled back the estimate itself. Out here the catch
+  // is genuinely fail-open: worst case the draft exists unlinked and
+  // advancement falls back to contact matching. Same leadIsForThisCall
+  // gate as the estimate_data lead_id mirror — a stale phone-history lead
+  // must not be mutated as if it originated this call.
+  if (context?.lead?.id && context?.leadIsForThisCall) {
+    try {
+      await db('leads').where({ id: context.lead.id }).update({ estimate_id: creationResult.estimate.id });
+    } catch (linkErr) {
+      logger.warn(`[estimator-engine] lead link update failed (non-blocking): ${linkErr.message}`);
+    }
   }
 
   return { created: true, estimate: creationResult.estimate };

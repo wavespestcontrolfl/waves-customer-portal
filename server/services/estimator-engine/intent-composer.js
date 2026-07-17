@@ -36,7 +36,7 @@ SERVICE VOCABULARY (the only keys allowed in "services"):
 - lawn: recurring lawn health program. Options: track (st_augustine|bahia|zoysia|bermuda|paspalum — from what the caller says about their grass; default st_augustine when unknown in SW Florida), tier (basic|standard|enhanced|premium — default enhanced).
 - oneTimeLawn: one-off lawn treatment. Options: treatmentType (fertilizer|weed).
 - lawnPestControl: ONE-TIME lawn insect knockdown (chinch bugs, grubs) — a single treatment, NOT a recurring program. A caller wanting ONGOING lawn insect control belongs on the lawn program (its tiers include insect control); if they explicitly want a recurring insect-only lawn program, skip with reason.
-- treeShrub: recurring ornamental tree & shrub care (fertilization, insect, disease).
+- treeShrub: recurring ornamental tree & shrub care (fertilization, insect, disease). Options: treeCount (integer 1-200 — ONLY when the caller states how many trees/palms they have; never guess a count).
 - mosquito: recurring mosquito program. Options: tier (seasonal9|monthly12).
 - oneTimeMosquito: single mosquito treatment (event, one-off).
 - termite: termite BAIT/MONITORING program only. Options: system=advance, monitoringTier=basic. Active termite TREATMENT (tenting, liquid treatment) is out of scope — skip with reason.

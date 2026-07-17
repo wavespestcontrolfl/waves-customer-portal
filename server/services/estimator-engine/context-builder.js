@@ -140,13 +140,21 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
     // twilio_call_sid) is THIS call's lead: it was touched at/after the call
     // started. It outranks any newer-by-created_at stale/foreign lead on the
     // same last-10 — and on an AMBIGUOUS shared line it is the ONLY
-    // phone-matched lead trusted at all.
+    // phone-matched lead trusted at all. BOUNDED at the call's processing
+    // window: on a retried/backfilled old call, an open-ended >= start would
+    // claim any lead touched in the days since — a later unrelated
+    // interaction's lead would get current-call priority AND be mutated via
+    // leads.estimate_id. Outside the window the lead falls to the byPhone
+    // path (forThisCall=false), which is the conservative direction;
+    // processor-CREATED leads are sid-stamped and already claimed above.
     if (call?.created_at) {
+      const processedBy = new Date(new Date(call.created_at).getTime() + 2 * 3600 * 1000);
       const reused = await db('leads')
         .select(LEAD_COLS)
         .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
         .whereNull('deleted_at')
         .where('updated_at', '>=', call.created_at)
+        .where('updated_at', '<=', processedBy)
         .orderBy('updated_at', 'desc')
         .first();
       if (reused) return { lead: reused, forThisCall: true };
@@ -171,10 +179,10 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
   }
 }
 
-// Two-way SMS with this caller UP TO the call — service requests arrive
-// across channels ("I texted you the photos"), and the thread often carries
-// the address or sqft the call lacked. Bounded to the call timestamp so a
-// reprocessed old call (or a later text about a different property) can't
+// Two-way SMS with this caller UP TO THE END of the call — service requests
+// arrive across channels ("I texted you the photos"), and the thread often
+// carries the address or sqft the call lacked. Bounded to the call's end so
+// a reprocessed old call (or a later text about a different property) can't
 // leak post-call messages into the composer's evidence.
 async function loadSmsThread(phone, { limit = 20, before = null } = {}) {
   const digits = last10(phone);
@@ -274,12 +282,22 @@ async function buildCallContext(callLogId) {
   }
   const customer = customerMatch.customer;
 
+  // Bound the SMS thread at the call's END, not its start — call_log rows
+  // are created when the inbound call first rings, so a start bound would
+  // exclude exactly the during-call texts ("just texted you the address")
+  // this loader exists to capture. Unknown duration degrades to the start
+  // bound; a reprocessed old call still can't leak later messages.
+  const callDurationSeconds = Number(
+    call.recording_duration_seconds || call.duration_seconds || call.duration || 0
+  ) || 0;
+  const callEndsAt = new Date(new Date(call.created_at).getTime() + callDurationSeconds * 1000);
+
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
     loadLeadForCall(call, phone, { phoneFallback: !customerMatch.ambiguous }),
     // A shared line with MULTIPLE profiles carries texts, estimates, and
     // leads for other people/properties — none of that history may steer
     // the composer on an ambiguous match.
-    customerMatch.ambiguous ? Promise.resolve([]) : loadSmsThread(phone, { before: call.created_at }),
+    customerMatch.ambiguous ? Promise.resolve([]) : loadSmsThread(phone, { before: callEndsAt }),
     customerMatch.ambiguous ? Promise.resolve([]) : loadPriorEstimates(phone),
   ]);
   const lead = leadMatch.lead;
