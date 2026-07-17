@@ -578,6 +578,114 @@ function keywordStuffingFinding(body, primaryKeyword) {
   return null;
 }
 
+// ── Product / inventory claims (P1 PRODUCT_CLAIM) ─────────────────────────
+// Autonomous drafts have repeatedly asserted professional product names,
+// active-ingredient mechanisms, and "what our techs carry" inventory claims
+// that nothing in content-ops/facts-bank/ supports (Codex flagged Advion/
+// indoxacarb + "which is what our techs carry" on astro PR #383). Product
+// facts are never in the brief facts_pack, so in this lane they are
+// UNVERIFIABLE by construction: block them all. Consumer-brand "don't spray
+// Raid/Ortho" warnings stay legal — the lists below cover professional
+// products and active ingredients only.
+const PRO_PRODUCT_TERMS = [
+  'advion', 'termidor', 'taurus sc', 'alpine wsg', 'phantom', 'temprid',
+  'demand cs', 'suspend sc', 'suspend polyzone', 'talstar', 'maxforce',
+  'optigard', 'vendetta', 'premise', 'arilon', 'tandem', 'intice',
+  'essentria', 'sentricon', 'trelona', 'altriset', 'terro pro',
+];
+const ACTIVE_INGREDIENT_TERMS = [
+  'indoxacarb', 'fipronil', 'dinotefuran', 'imidacloprid', 'bifenthrin',
+  'hydramethylnon', 'abamectin', 'avermectin', 'thiamethoxam', 'clothianidin',
+  'cyfluthrin', 'deltamethrin', 'lambda-cyhalothrin', 'cyhalothrin',
+  'permethrin', 'cypermethrin', 'esfenvalerate', 'chlorfenapyr', 'novaluron',
+  'pyriproxyfen', 'methoprene', 'hexaflumuron', 'noviflumuron', 'sulfluramid',
+  'chlorantraniliprole',
+];
+const INVENTORY_CLAIM_RES = [
+  // "our techs carry / use / apply / lean on / prefer …"
+  /\b(?:our|waves(?:'s?)?)\s+(?:techs?|technicians?|team|pros?|crews?)\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\s+on|prefer|prefers|spray|sprays)\b/i,
+  // "what our technicians carry", "which is what our techs use"
+  /\bwhat\s+(?:our|the)\s+(?:techs?|technicians?|team|pros?)\s+(?:carry|carries|use|uses)\b/i,
+  /\bwhich\s+is\s+what\s+(?:our\s+(?:techs?|technicians?|team)|we)\s+(?:carry|carries|use|uses)\b/i,
+];
+
+// A professional product named as a TOPIC ("Sentricon in Southwest Florida")
+// is legitimate informational content; the violation is naming it in a
+// recommendation / usage / inventory context ("the gel pros reach for is
+// Advion", "grab some Advion", "which is what our techs carry"). Active
+// ingredients get no such carve-out — mechanism-level specifics are never in
+// the facts bank and homeowners don't search them.
+const PRODUCT_CONTEXT_VERBS_SRC = "(?:use[sd]?|using|appl(?:y|ies|ied|ying)|plac(?:e[sd]?|ing)|put(?:s|ting)?\\s+(?:out|down)|grabs?|bu(?:y|ys|ying)|pick(?:s|ing)?\\s+up|recommend\\w*|carr(?:y|ies|ying)|reach(?:es)?\\s+for|lean[s]?\\s+on|trusts?|sprays?|spraying|treats?\\s+with)";
+
+function productClaimFinding(text) {
+  const s = String(text || '');
+  for (const term of ACTIVE_INGREDIENT_TERMS) {
+    const re = new RegExp(`\\b${escapeRegExp(term)}\\b`, 'i');
+    if (re.test(s)) {
+      return finding('P1', 'PRODUCT_CLAIM', `Names the active ingredient "${term}" — mechanism-level product facts are not in the facts bank and cannot ship in autonomous content. Describe the product class generically (e.g. "a slow-acting sugar-based bait gel labeled for indoor use") and defer specifics to the label.`);
+    }
+  }
+  const brandAlt = PRO_PRODUCT_TERMS.map(escapeRegExp).join('|');
+  // Context that turns a brand TOPIC into a recommendation/endorsement:
+  // usage verbs before the brand, or endorsement phrasing near it.
+  const brandInRecommendation = new RegExp(`\\b${PRODUCT_CONTEXT_VERBS_SRC}\\b[^.!?\\n]{0,120}\\b(?:${brandAlt})\\b|\\b(?:${brandAlt})\\b[^.!?\\n]{0,120}\\b(?:is\\s+what|which\\s+is\\s+what|pro\\s+choice|go-?to|top\\s+pick|favorite|best\\s+(?:bait|gel|product|option|choice))\\b`, 'i');
+  const brandMatch = s.match(brandInRecommendation);
+  if (brandMatch) {
+    return finding('P1', 'PRODUCT_CLAIM', `Recommends the professional product in "${brandMatch[0].trim().slice(0, 120)}" — unsupported by the facts bank. Name the product class generically and defer specifics to the label; product names are only legal as an informational topic, never as a usage recommendation.`);
+  }
+  for (const re of INVENTORY_CLAIM_RES) {
+    const m = s.match(re);
+    if (m) {
+      return finding('P1', 'PRODUCT_CLAIM', `Inventory claim "${m[0]}" asserts what Waves technicians carry/use — unverifiable from the facts bank and goes stale. Remove the claim; describe what a licensed professional would do instead.`);
+    }
+  }
+  return null;
+}
+
+// ── Prevention / elimination promises (P1 PREVENTION_PROMISE) ─────────────
+// The facts bank prohibits guaranteed-extermination / 100%-elimination
+// claims, and drafts keep emitting softer variants ("prevents next month's
+// trail", "keeps them from coming back") that Codex then flags round after
+// round. The documented offer is reduced recurrence + free re-treatment —
+// never prevention. Patterns are pest-anchored to avoid the bare-'never'
+// false-positive class that got the old signal removed (PR #2776).
+const PEST_OBJ_SRC = "(?:ants?|pests?|bugs?|roaches|cockroaches|termites?|rodents?|mice|rats?|mosquito(?:es)?|spiders?|fleas?|ticks?|infestations?|colon(?:y|ies)|trails?|them|they)";
+const PREVENTION_PROMISE_RES = [
+  // "prevents/keeps/stops <pest> from coming back / returning / getting in"
+  new RegExp(`\\b(?:prevents?|keeps?|stops?)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+from\\s+(?:coming\\s+back|returning|re-?infest\\w*|ever\\s+\\w+|getting\\s+(?:back\\s+)?in(?:side)?\\b)`, 'i'),
+  // "<pest> won't / will not come back or return"
+  new RegExp(`\\b${PEST_OBJ_SRC}\\s+(?:won'?t|will\\s+not|never)\\s+(?:come\\s+back|return|be\\s+back)`, 'i'),
+  // "never see/deal with another <pest>"
+  new RegExp(`\\bnever\\s+(?:see|have|deal\\s+with|worry\\s+about)\\s+(?:another\\s+)?${PEST_OBJ_SRC}`, 'i'),
+  // guaranteed / promised elimination or 100% anything
+  /\b(?:guarantees?d?|promises?d?)\s+(?:[\w'’]+\s+){0,3}?(?:eliminat\w+|exterminat\w+|eradicat\w+|pest[-\s]?free|100\s?%)/i,
+  /\b100\s?%\s+(?:effective|eliminat\w+|eradicat\w+|pest[-\s]?free|guaranteed?|success)/i,
+  // "eliminates/gets rid of <pest> for good / permanently / forever"
+  new RegExp(`\\b(?:eliminates?|gets?\\s+rid\\s+of|removes?|clears?\\s+out)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+(?:for\\s+good|permanently|forever|once\\s+and\\s+for\\s+all)`, 'i'),
+  // "prevents next month's/season's trail/infestation" (the PR #383 shape)
+  new RegExp(`\\bprevents?\\s+(?:the\\s+)?(?:next|future)\\s+(?:month|year|season|week)[\\w'’]*\\s*${PEST_OBJ_SRC}?`, 'i'),
+  // "keeps your home/kitchen/yard pest-free" as an unconditional state
+  /\bkeeps?\s+(?:your\s+)?(?:home|house|kitchen|yard|lawn|property)\s+(?:pest|ant|roach|termite|rodent|bug)[-\s]?free\b/i,
+];
+
+// Honest-disclaimer context: "no honest company will promise you'll never
+// see another ant" is the phrasing we WANT — a match preceded by a negated
+// promise is a disclaimer, not a claim.
+const NEGATED_PROMISE_CONTEXT_RE = /(?:no\s+(?:honest\s+)?(?:company|one|body|pro)|won'?t|will\s+not|cannot|can'?t|nobody\s+can)\s+(?:[\w'’]+\s+){0,3}?(?:promise|guarantee|tell\s+you)/i;
+
+function preventionPromiseFinding(text) {
+  const s = String(text || '');
+  for (const re of PREVENTION_PROMISE_RES) {
+    const m = re.exec(s);
+    if (m) {
+      const before = s.slice(Math.max(0, m.index - 80), m.index);
+      if (NEGATED_PROMISE_CONTEXT_RE.test(before)) continue;
+      return finding('P1', 'PREVENTION_PROMISE', `Prevention/elimination promise "${m[0].trim()}" — the facts bank prohibits guaranteed-outcome claims. Describe reduced recurrence and the free re-treatment (callback) guarantee instead.`);
+    }
+  }
+  return null;
+}
+
 /**
  * evaluate(draft, { service, primaryKeyword, domains }) → { pass, findings }
  *
@@ -634,6 +742,10 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // (publishAstro, mined opportunities) keeps full enforcement.
     operatorFaqException ? null : faqBlockedFinding(body, service),
     keywordStuffingFinding(body, kw),
+    // Product/mechanism/inventory claims and prevention promises ship in meta
+    // just like in body — scan the full publishable text for both.
+    productClaimFinding(publishableText),
+    preventionPromiseFinding(publishableText),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -651,5 +763,10 @@ module.exports = {
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS },
+  // single source of truth for the product-claim + prevention-promise
+  // policies — consumed by the writer prompts so instruction and enforcement
+  // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).
+  PRO_PRODUCT_TERMS,
+  ACTIVE_INGREDIENT_TERMS,
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding },
 };

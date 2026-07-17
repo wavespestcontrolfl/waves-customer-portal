@@ -765,3 +765,72 @@ describe('JSX spread attributes fail closed (Codex round 16)', () => {
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('product-claim guard (P1 PRODUCT_CLAIM)', () => {
+  test('professional product brand blocks', () => {
+    const r = guardrails.evaluate({ body: 'The gel pros reach for is Advion — place pea-sized dabs along the trail.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('active ingredient blocks', () => {
+    const r = guardrails.evaluate({ body: 'Look for a bait whose active ingredient is indoxacarb for slow knockdown.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('tech inventory claim blocks', () => {
+    const r = guardrails.evaluate({ body: 'A sweet gel — which is what our techs carry on every ant call.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('product claim hiding in meta description blocks', () => {
+    const r = guardrails.evaluate({ body: 'Generic bait guidance.', frontmatter: { meta_description: 'Why Termidor is the pro choice for SWFL ants.' } }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('consumer-brand cautionary mention and generic class language pass', () => {
+    const r = guardrails.evaluate({ body: 'Do not blast the trail with Raid or Ortho Home Defense. Use a slow-acting, sugar-based bait gel labeled for indoor use instead, and homemade borax bait is risky to dose.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('professional product as an informational TOPIC passes (no recommendation context)', () => {
+    const r = guardrails.evaluate({
+      body: 'Bait stations target the colony itself.',
+      frontmatter: { title: 'Sentricon in Southwest Florida', meta_description: 'How termite bait stations work in Southwest Florida sandy soil, and what a monitored bait program actually covers for SWFL homeowners.' },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+});
+
+describe('prevention-promise guard (P1 PREVENTION_PROMISE)', () => {
+  test('"keeps them from coming back" blocks', () => {
+    const r = guardrails.evaluate({ body: 'Sealing the slab gap keeps the ants from coming back next month.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('"prevents next month\'s trail" blocks', () => {
+    const r = guardrails.evaluate({ body: 'A quarterly program prevents next month’s trail entirely.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('guaranteed elimination blocks', () => {
+    const r = guardrails.evaluate({ body: 'Our approach is guaranteed elimination of roaches in one visit.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('"gets rid of ants for good" blocks', () => {
+    const r = guardrails.evaluate({ body: 'This plan gets rid of the ants for good.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('reduced-recurrence + callback phrasing passes', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant. A quarterly program reduces recurrence, and if ants flare up between visits the re-treatment is free. Prevention tips: fix moisture, trim landscaping. Whenever storms hit, expect scouts.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('non-pest "prevents X from" phrasing passes', () => {
+    const r = guardrails.evaluate({ body: 'A door sweep prevents rainwater from pooling at the threshold, and mulch spacing prevents moisture buildup along the slab.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+});

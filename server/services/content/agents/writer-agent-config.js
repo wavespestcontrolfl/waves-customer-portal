@@ -25,7 +25,7 @@
  */
 
 const MODELS = require('../../../config/models');
-const { FAQ_BLOCKED_SERVICES } = require('../content-guardrails');
+const { FAQ_BLOCKED_SERVICES, PRO_PRODUCT_TERMS, ACTIVE_INGREDIENT_TERMS } = require('../content-guardrails');
 const { HYPE_TERMS, COMMERCIAL_TERMS } = require('../title-meta-spam-gate');
 
 // The FAQ-blocked list is interpolated into the system prompt straight from
@@ -45,6 +45,13 @@ const FAQ_BLOCKED_SERVICES_LIST = [...FAQ_BLOCKED_SERVICES].join(', ');
 // the gate checks so the prompt can never drift from enforcement.
 const HYPE_TERMS_LIST = HYPE_TERMS.join(', ');
 const COMMERCIAL_TERMS_LIST = COMMERCIAL_TERMS.join(', ');
+
+// Same single-source-of-truth rule for the product-claim guard (P1
+// PRODUCT_CLAIM in content-guardrails). Drafts kept naming professional
+// products/active ingredients and claiming what Waves techs carry — facts the
+// brief's facts_pack never contains, so Codex re-flagged them on every PR.
+const PRO_PRODUCT_TERMS_LIST = PRO_PRODUCT_TERMS.join(', ');
+const ACTIVE_INGREDIENT_TERMS_LIST = ACTIVE_INGREDIENT_TERMS.join(', ');
 
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
@@ -75,6 +82,50 @@ VOICE — same as the legacy waves-content-engine:
   PHOSPHORUS June 1 – Sept 30 — don't call it just "nitrogen blackout"
 - Never hardcode prices — link to /pest-control-calculator/ instead
 - Never quote SMS / call content verbatim (reviews ok with attribution)
+
+TREATMENT CLAIMS, PRODUCTS & SAFETY (binding — the publish guardrail
+hard-fails violations as P1 PRODUCT_CLAIM / PREVENTION_PROMISE; these lists
+are loaded from the same module the guardrail enforces):
+- NEVER name a professional pesticide product or its active ingredient in
+  your drafts. The gate hard-blocks active ingredients ANYWHERE
+  (${ACTIVE_INGREDIENT_TERMS_LIST}) and these products in any
+  recommendation/usage context (${PRO_PRODUCT_TERMS_LIST}). Describe the
+  product CLASS generically instead ("a slow-acting, sugar-based ant bait gel
+  labeled for indoor use", "a non-repellent professional perimeter product").
+- NEVER claim what Waves technicians carry, use, apply, stock, or prefer
+  ("which is what our techs carry" is a hard block). Product inventory is not
+  in the facts bank and goes stale.
+- Naming CONSUMER brands is allowed only in cautionary "what not to do"
+  context (e.g. "don't blast the trail with Raid") — never with mechanism or
+  efficacy claims.
+- NEVER promise prevention, elimination, or that pests won't come back —
+  no "prevents them from returning", "keeps ants from coming back", "pest-free
+  for good", "100% effective", or an unconditional "Yes" in a prevention row
+  of a comparison table. The documented offer is REDUCED RECURRENCE plus FREE
+  RE-TREATMENT between visits — describe that instead, always conditional.
+- Any DIY pesticide-application instruction (baits, gels, dusts, sprays) MUST
+  tell the reader to read and follow the product label, keep the product off
+  food-preparation/food-contact surfaces, and place it out of sight and reach
+  of children and pets. Treatment recommendations that depend on the pest
+  species MUST make identification a prerequisite step, not an optional
+  aside.
+
+POST TYPE + DUPLICATE INTENT (binding):
+- Set frontmatter.post_type explicitly. Rubric: "protocol" = a numbered or
+  step-by-step treatment/prevention playbook; "diagnostic" = identifying what
+  a pest/problem is; "decision" = should-I / X-vs-Y choices (requires
+  BottomLineBox + ComparisonTable + HonestRejection); "comparison" = product
+  or approach comparisons (requires ComparisonTable + HonestRejection);
+  "cost" = pricing-focused (requires ComparisonTable); "seasonal" = calendar
+  or season-driven; "location" = a single-city/location-scoped page;
+  "case-study" = a real job narrative. Never leave post_type unset — the
+  publisher's fallback misclassifies playbooks as "location".
+- BEFORE writing, call check_existing_content with the brief's target
+  keyword. If a published or queued post already serves the same search
+  intent, write the DIFFERENTIATED angle (different intent, different scope)
+  and link the existing post in the body — never a parallel page competing
+  for the same query. If no differentiated angle exists, say so in
+  notes_for_reviewer instead of forcing a duplicate.
 
 METADATA + INTERNAL LINKS (binding — the publish gate enforces these
 mechanically; a violation means the draft is rejected and the run is
