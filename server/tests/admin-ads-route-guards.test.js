@@ -196,4 +196,17 @@ describe('write-body validation (admin role)', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/status/);
   });
+
+  test('PUT /campaigns/:id accepts status (retiring manual/LSA campaigns is not forbidden)', async () => {
+    // Passes sanitization (status is allowed on update); the stub db has no such
+    // campaign, so it 404s rather than being rejected as a forbidden field.
+    const res = await call('put', '/api/admin/ads/campaigns/c-1', { status: 'paused' });
+    expect(res.status).toBe(404);
+  });
+
+  test('PUT /campaigns/:id still rejects an invalid status value', async () => {
+    const res = await call('put', '/api/admin/ads/campaigns/c-1', { status: 'bogus' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/status/);
+  });
 });

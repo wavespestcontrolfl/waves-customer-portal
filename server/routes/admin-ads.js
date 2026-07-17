@@ -50,9 +50,8 @@ const CAMPAIGN_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
 const CAMPAIGN_STATUSES = ['active', 'paused', 'removed'];
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
-// Settable only at creation (identity + initial status); an update must not
-// repoint them (status changes go through /pause + /enable, which sync Google).
-const CAMPAIGN_CREATE_ONLY_FIELDS = ['platform', 'platform_campaign_id', 'status'];
+// Identity — settable at creation, never repointed on update.
+const CAMPAIGN_CREATE_ONLY_FIELDS = ['platform', 'platform_campaign_id'];
 // Free-form metadata columns editable via either create or update.
 const CAMPAIGN_META_FIELDS = [
   'campaign_name', 'campaign_type', 'target_area', 'service_category',
@@ -63,7 +62,7 @@ const CAMPAIGN_META_FIELDS = [
 // Returns { ok:true, value } or { ok:false, error }.
 function sanitizeCampaignWrite(body, isUpdate) {
   const forbidden = isUpdate
-    ? [...CAMPAIGN_MANAGED_FIELDS, ...CAMPAIGN_CREATE_ONLY_FIELDS, 'status']
+    ? [...CAMPAIGN_MANAGED_FIELDS, ...CAMPAIGN_CREATE_ONLY_FIELDS]
     : CAMPAIGN_MANAGED_FIELDS;
   for (const f of forbidden) {
     if (body[f] !== undefined) {
@@ -71,7 +70,13 @@ function sanitizeCampaignWrite(body, isUpdate) {
     }
   }
 
-  const allow = isUpdate ? CAMPAIGN_META_FIELDS : [...CAMPAIGN_CREATE_ONLY_FIELDS, ...CAMPAIGN_META_FIELDS];
+  // status is settable on create (honored rather than defaulted to active) and
+  // on update (the only route to pause/remove a manual or google_lsa campaign —
+  // /pause + /enable reject non-google_ads; the route additionally steers a
+  // Google campaign's status change to those synced endpoints).
+  const allow = isUpdate
+    ? ['status', ...CAMPAIGN_META_FIELDS]
+    : [...CAMPAIGN_CREATE_ONLY_FIELDS, 'status', ...CAMPAIGN_META_FIELDS];
   const out = {};
   for (const key of allow) {
     if (body[key] === undefined) continue;
@@ -88,12 +93,10 @@ function sanitizeCampaignWrite(body, isUpdate) {
         && !/^\d+$/.test(String(out.platform_campaign_id))) {
       return { ok: false, error: 'platform_campaign_id must be digits only' };
     }
-    // Honor a requested initial status (validated) rather than silently dropping
-    // it and letting the DB default the campaign to 'active' — an unexpectedly
-    // active row would be eligible for the autonomous budget cron.
-    if (out.status !== undefined && !CAMPAIGN_STATUSES.includes(out.status)) {
-      return { ok: false, error: `status must be one of: ${CAMPAIGN_STATUSES.join(', ')}` };
-    }
+  }
+
+  if (out.status !== undefined && !CAMPAIGN_STATUSES.includes(out.status)) {
+    return { ok: false, error: `status must be one of: ${CAMPAIGN_STATUSES.join(', ')}` };
   }
 
   if (out.monthly_budget !== undefined && out.monthly_budget !== null) {
@@ -204,6 +207,17 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
   try {
     const clean = sanitizeCampaignWrite(req.body, true);
     if (!clean.ok) return res.status(400).json({ error: clean.error });
+    // A Google campaign's status must change through /pause + /enable so it syncs
+    // to Google Ads; a direct local flip here would drift from live spend.
+    // Manual / google_lsa campaigns have no synced status route, so PUT is the
+    // way to retire them.
+    if (clean.value.status !== undefined) {
+      const existing = await db('ad_campaigns').where({ id: req.params.id }).first();
+      if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+      if (existing.platform === 'google_ads' && clean.value.status !== existing.status) {
+        return res.status(400).json({ error: "Use /pause or /enable to change a Google campaign's status — they sync Google Ads." });
+      }
+    }
     const [campaign] = await db('ad_campaigns')
       .where({ id: req.params.id })
       .update({ ...clean.value, updated_at: new Date() })
