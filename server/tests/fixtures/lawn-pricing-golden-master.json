@@ -929,9 +929,9 @@
       }
     },
     "out": {
-      "perApp": 69,
-      "annual": 621,
-      "monthly": 51.75,
+      "perApp": 72,
+      "annual": 648,
+      "monthly": 54,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",
@@ -1010,9 +1010,9 @@
       }
     },
     "out": {
-      "perApp": 87,
-      "annual": 783,
-      "monthly": 65.25,
+      "perApp": 90,
+      "annual": 810,
+      "monthly": 67.5,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",
@@ -1091,9 +1091,9 @@
       }
     },
     "out": {
-      "perApp": 106,
-      "annual": 954,
-      "monthly": 79.5,
+      "perApp": 111,
+      "annual": 999,
+      "monthly": 83.25,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",
@@ -1172,9 +1172,9 @@
       }
     },
     "out": {
-      "perApp": 146,
-      "annual": 1314,
-      "monthly": 109.5,
+      "perApp": 152,
+      "annual": 1368,
+      "monthly": 114,
       "freq": 9,
       "tier": "enhanced",
       "track": "zoysia",

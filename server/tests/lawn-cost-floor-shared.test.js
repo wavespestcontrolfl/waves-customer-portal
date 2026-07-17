@@ -25,8 +25,8 @@ describe('lawnMaterialBudget', () => {
     // (scheduled material + conditional_cost per tier).
     expect(lawnMaterialBudget('st_augustine', 9)).toBe(187);
     expect(lawnMaterialBudget('bermuda', 9)).toBe(174);
-    expect(lawnMaterialBudget('zoysia', 9)).toBe(200);
-    expect(lawnMaterialBudget('zoysia', 12)).toBe(204);
+    expect(lawnMaterialBudget('zoysia', 9)).toBe(215);
+    expect(lawnMaterialBudget('zoysia', 12)).toBe(219);
     expect(lawnMaterialBudget('st_augustine', 6)).toBe(103);
     expect(lawnMaterialBudget('bermuda', 6)).toBe(92);
     expect(lawnMaterialBudget('zoysia', 6)).toBe(124);

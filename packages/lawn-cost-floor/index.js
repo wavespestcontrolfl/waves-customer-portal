@@ -41,13 +41,15 @@ const LAWN_TIER_VISITS = { basic: 4, standard: 6, enhanced: 9, premium: 12 };
 // 2026-07-16 (owner-approved): budgets now FUND the protocol spot-treatment
 // reserves (protocols.json conditional_cost — ¼ of gated fungicide/
 // insecticide apps, ⅛ of herbicide spot), summed per tier via each visit's
-// tiers flags and added to the prior scheduled-only budgets. Reserves per
-// track at 4/6/9/12 visits: st_aug 15/16/20/20, bermuda 5/5/10/10,
-// zoysia 23/23/26/26 (large-patch program dominates), bahia 9/15/16/16.
+// tiers flags and added to the prior scheduled-only budgets. OR-alternative
+// branches fund the MAX-cost branch (e.g. zoysia Feb Medallion-or-Velista
+// reserves the $67.50 Velista side). Reserves per track at 4/6/9/12 visits:
+// st_aug 15/16/20/20, bermuda 5/5/10/10, zoysia 23/23/41/41 (large-patch
+// program dominates), bahia 9/15/16/16.
 const LAWN_MATERIAL_BUDGETS = {
   st_augustine: { 4: 79, 6: 103, 9: 187, 12: 225 },
   bermuda: { 4: 62, 6: 92, 9: 174, 12: 225 },
-  zoysia: { 4: 90, 6: 124, 9: 200, 12: 204 },
+  zoysia: { 4: 90, 6: 124, 9: 215, 12: 219 },
   bahia: { 4: 54, 6: 83, 9: 111, 12: 131 },
 };
 
