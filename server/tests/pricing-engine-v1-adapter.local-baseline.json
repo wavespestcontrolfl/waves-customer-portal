@@ -3,10 +3,10 @@
     "recurring": {
       "tier": "Silver",
       "discount": 0.1,
-      "annualBeforeDiscount": 1143,
-      "annualAfterDiscount": 1091.48,
-      "monthlyTotal": 90.96,
-      "savings": 51.52,
+      "annualBeforeDiscount": 1170,
+      "annualAfterDiscount": 1117.12,
+      "monthlyTotal": 93.09,
+      "savings": 52.88,
       "serviceCount": 2
     },
     "results": {
@@ -17,12 +17,12 @@
           "name": "6x applications/yr"
         },
         {
-          "mo": 56.25,
+          "mo": 58.5,
           "recommended": true,
           "name": "9x applications/yr"
         },
         {
-          "mo": 71,
+          "mo": 73,
           "recommended": false,
           "name": "12x applications/yr"
         }
@@ -58,18 +58,18 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1190.48,
-      "year2": 1091.48
+      "year1": 1216.12,
+      "year2": 1117.12
     }
   },
   "v1adapter_platinum_bundle_4_services_zone_a": {
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 2893,
-      "annualAfterDiscount": 2523.57,
-      "monthlyTotal": 210.3,
-      "savings": 369.43,
+      "annualBeforeDiscount": 2929,
+      "annualAfterDiscount": 2557.76,
+      "monthlyTotal": 213.15,
+      "savings": 371.24,
       "serviceCount": 4
     },
     "results": {
@@ -80,12 +80,12 @@
           "name": "6x applications/yr"
         },
         {
-          "mo": 63,
+          "mo": 65.25,
           "recommended": false,
           "name": "9x applications/yr"
         },
         {
-          "mo": 79,
+          "mo": 82,
           "recommended": true,
           "name": "12x applications/yr"
         }
@@ -141,8 +141,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2622.57,
-      "year2": 2523.57
+      "year1": 2656.76,
+      "year2": 2557.76
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -484,10 +484,10 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 1773.7,
-      "annualAfterDiscount": 1608.49,
-      "monthlyTotal": 134.04,
-      "savings": 165.21,
+      "annualBeforeDiscount": 1827.7,
+      "annualAfterDiscount": 1661.49,
+      "monthlyTotal": 138.46,
+      "savings": 166.21,
       "serviceCount": 3
     },
     "results": {
@@ -498,7 +498,7 @@
           "name": "6x applications/yr"
         },
         {
-          "mo": 57,
+          "mo": 61.5,
           "recommended": true,
           "name": "9x applications/yr"
         },
@@ -550,8 +550,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1707.49,
-      "year2": 1608.49
+      "year1": 1760.49,
+      "year2": 1661.49
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {

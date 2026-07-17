@@ -22,6 +22,25 @@ core cases and three v1-adapter cases moved, all containing discounted lawn;
 non-lawn line items, tier selection, and pre-discount totals stayed unchanged.
 See `pricing_changelog` entry `codex-2026-07-16` and migration
 `20260716150001_lawn_post_discount_margin_floor_changelog`.
+## 2026-07-17 lawn spot-reserve fold
+
+Spot-treatment reserves folded into the lawn cost-floor material budgets
+(owner ruling 2026-07-16: herbicide spot = 1/8 broadcast cost, gated/curative
+fungicide + insecticide = 1/4, prorated to the sold cadence). See
+`pricing_changelog` entry via migration `20260717000001_lawn_spot_reserve_version`
+(`pricingVersion` → `LAWN_PRICING_V2_SPOT_RESERVE`) and
+`packages/lawn-cost-floor` for the folded budgets.
+
+Local baselines recaptured (`CAPTURE_BASELINE=1 LOCAL=1`) for both
+`pricing-engine.local-baseline.json` and
+`pricing-engine-v1-adapter.local-baseline.json`; the diff is confined to
+`lawn_care` line items / `results.lawn` and the dependent summary + bundle
+totals (verified via structural diff — no other service line moved). Floors
+rise where reserve-funded (e.g. St. Augustine enhanced golden master
+$621 → $648/yr; zoysia enhanced flips from market-table to floor-priced).
+Hardcoded lawn expectations in `pricing-commercial-safety-gate.test.js` and
+`lawn-pricing-followup.test.js` updated to the same effect. The DB baselines
+(`*.baseline.json`) are untouched pending post-deploy recapture.
 
 ## 2026-06-17 lawn 35% margin recalibration
 

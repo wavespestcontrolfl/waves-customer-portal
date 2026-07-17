@@ -802,34 +802,37 @@ describe('lawn pricing production follow-up', () => {
     const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9 });
     const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9 });
 
-    // St. Augustine enhanced at 4,492 sqft uses the 35% collected-margin floor
-    // ($594/yr), which then rides up to the $600 program minimum ($603/9-app).
-    expect(stAug.selected.perApp).toBe(67);
+    // St. Augustine enhanced at 4,492 sqft uses the 35% collected-margin floor —
+    // with spot reserves folded in (owner 2026-07-16) it lands at $621/yr,
+    // clear of the $600 program minimum.
+    expect(stAug.selected.perApp).toBe(69);
     expect(stAug.selected.costFloorApplied).toBe(true);
 
     // Bermuda enhanced remains market-table priced because market is above the floor.
     expect(bermuda.selected.perApp).toBe(68);
     expect(bermuda.selected.costFloorApplied).toBe(false);
 
-    // Zoysia enhanced has a higher material budget but still lands below market.
-    expect(zoysia.selected.perApp).toBe(68);
-    expect(zoysia.selected.costFloorApplied).toBe(false);
+    // Zoysia enhanced carries the largest reserve budget, which pushes its
+    // floor ($657/yr) above the market table — floor-priced since the fold.
+    expect(zoysia.selected.perApp).toBe(73);
+    expect(zoysia.selected.costFloorApplied).toBe(true);
   });
 
-  test('dense route St. Augustine enhanced quote prices off the market table just above the 35% floor', () => {
+  test('dense route St. Augustine enhanced quote floors just below the program minimum', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4250 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    // Under the 35% floor the cost floor (~$572/yr) drops below the market
-    // table (~$576/yr) — but both sit below the $600 program minimum, which
-    // is the final customer price ($603 ceil'd to a clean 9-app multiple).
+    // With spot reserves folded in the 35% cost floor (~$594/yr) sits above
+    // the market table (~$576/yr) — but both sit below the $600 program
+    // minimum, which is the final customer price ($603 ceil'd to a clean
+    // 9-app multiple).
     expect(lawn.selected.perApp).toBe(67);
     expect(lawn.annual).toBe(603);
     expect(lawn.monthly).toBe(50.25);
-    expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
-    expect(lawn.costs.total).toBeLessThan(372);
-    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(571);
-    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(572);
+    expect(lawn.costs.total).toBeGreaterThanOrEqual(385);
+    expect(lawn.costs.total).toBeLessThan(386);
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(593);
+    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(594);
     expect(lawn.margin).toBeGreaterThanOrEqual(0.35);
     expect(lawn.pricingBasis).toBe('PROGRAM_MINIMUM_MONTHLY');
     expect(lawn.selected.marketAnnual).toBe(576);

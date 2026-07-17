@@ -1,13 +1,14 @@
 // Tests services/ads/google-customer-match.js — Google Customer Match audience sync.
 
 let stateRow = null;
+let tableData = {}; // rows returned by .select() per table (consent suppression lists)
 const inserts = [];
 const mockDb = jest.fn((table) => {
   const b = {};
   ['where', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'whereIn', 'whereRaw', 'andWhere', 'whereNotExists'].forEach((m) => {
     b[m] = jest.fn(() => b);
   });
-  b.select = jest.fn(() => Promise.resolve([]));
+  b.select = jest.fn(() => Promise.resolve(tableData[table] || []));
   b.first = jest.fn(() => Promise.resolve(table === 'ad_audience_syncs' ? stateRow : null));
   b.insert = jest.fn((row) => {
     inserts.push({ table, row });
@@ -414,5 +415,41 @@ describe('buildReadiness', () => {
     expect(r.audiences.customers.eligible).toBe(2);
     expect(r.audiences.customers.withMatchKeys).toBe(1);
     expect(r.audiences.unbooked_leads.listId).toBe('222');
+  });
+});
+
+// ── r2 (Codex): consent removal overrides shared-identifier retention ──
+describe('consent (r2)', () => {
+  beforeEach(() => { tableData = {}; });
+  afterEach(() => { tableData = {}; });
+
+  test('an opted-out prior row is removed even when it shares a phone with a current member', async () => {
+    configure(); // dry run — the delta itself carries the decision
+    tableData.email_suppressions = [{ email: 'opted@x.com' }];
+    mockCollectLeads.mockResolvedValue([{ key: 'lead:l2', email: 'fine@x.com', phone: '9415551111' }]);
+    stateRow = {
+      member_keys: [
+        { k: 'lead:l1', d: ['h:opted@x.com', 'h:+19415551111'] }, // opted out, shares household phone
+        { k: 'lead:l2', d: ['h:fine@x.com', 'h:+19415551111'] },  // current housemate
+      ],
+    };
+    const r = await GCM.syncAudience('unbooked_leads', {});
+    expect(r.consentRemovals).toBe(1);
+    expect(r.toRemove).toBe(1);   // the old rule would have retained it forever
+    expect(r.retained).toBe(0);
+    expect(r.deferredReAdds).toBe(1); // housemate re-adds after the remove settles
+  });
+
+  test('gmail dot-variant suppression removes the row uploaded under the canonical hash', async () => {
+    configure();
+    tableData.email_suppressions = [{ email: 'o.p.t.e.d+x@gmail.com' }]; // stored variant
+    mockCollectLeads.mockResolvedValue([]);
+    stateRow = {
+      // uploaded hash is of the CANONICAL form — the suppression must still match it
+      member_keys: [{ k: 'lead:l1', d: ['h:opted@gmail.com', ''] }],
+    };
+    const r = await GCM.syncAudience('unbooked_leads', {});
+    expect(r.consentRemovals).toBe(1);
+    expect(r.toRemove).toBe(1);
   });
 });
