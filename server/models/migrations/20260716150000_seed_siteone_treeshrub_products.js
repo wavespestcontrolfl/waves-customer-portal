@@ -14,10 +14,16 @@
 const SEED_ID = 'seed_siteone_treeshrub_2026_07_16';
 
 const PRODUCTS = [
+  // active_ingredient/epa_reg_number are NOT NULL on migration-built
+  // databases (20260517000004 SET NOT NULL — silently failed on prod, but
+  // succeeds on fresh envs). EPA numbers are from the current product
+  // labels; non-pesticide rows follow the catalog's 'N/A' convention.
   {
     name: 'TriTek Spray Oil Emulsion (OMRI)',
     category: 'Insecticide',
     manufacturer: 'BRANDT',
+    active_ingredient: 'Mineral oil 80%',
+    epa_reg_number: '48813-1',
     container_size: '2.5 gal',
     unit_size_oz: 320,
     best_price: 76.02,
@@ -29,6 +35,8 @@ const PRODUCTS = [
     name: 'Azatin O Biological Insecticide',
     category: 'Insecticide',
     manufacturer: 'OHP',
+    active_ingredient: 'Azadirachtin 4.5%',
+    epa_reg_number: '70051-9-59807',
     container_size: '1 qt',
     unit_size_oz: 32,
     best_price: 595.92,
@@ -40,6 +48,8 @@ const PRODUCTS = [
     name: 'Sequestar 6% Fe EDDHA Soluble Micronutrient',
     category: 'Micronutrient Fertilizer',
     manufacturer: 'BRANDT',
+    active_ingredient: '6% Fe (EDDHA chelate)',
+    epa_reg_number: 'N/A',
     container_size: '5 lb',
     unit_size_oz: 80,
     best_price: 46.05,
@@ -51,6 +61,8 @@ const PRODUCTS = [
     name: 'Southern Ag Copper Fungicide 27.15%',
     category: 'Fungicide',
     manufacturer: 'Southern Ag',
+    active_ingredient: 'Copper diammonia diacetate complex 27.15%',
+    epa_reg_number: '10465-3-829',
     container_size: '1 pt',
     unit_size_oz: 16,
     best_price: 36.33,
@@ -62,6 +74,8 @@ const PRODUCTS = [
     name: 'Espoma Organic Soil Acidifier',
     category: 'Soil Amendment',
     manufacturer: 'Espoma',
+    active_ingredient: 'Elemental sulfur 30%',
+    epa_reg_number: 'N/A',
     container_size: '30 lb',
     unit_size_oz: 480,
     best_price: 53.17,
@@ -82,6 +96,8 @@ async function ensureProduct(knex, spec) {
       name: spec.name,
       category: spec.category,
       manufacturer: spec.manufacturer,
+      active_ingredient: spec.active_ingredient,
+      epa_reg_number: spec.epa_reg_number,
       container_size: spec.container_size,
       unit_size_oz: spec.unit_size_oz,
       best_price: spec.best_price,

@@ -1327,7 +1327,18 @@ export default function ProtocolReferenceTabV2() {
                             {Number.isFinite(parseFloat(v.conditional_cost)) &&
                               parseFloat(v.conditional_cost) > 0 && (
                                 <div className="text-10 text-ink-tertiary">
-                                  +${parseFloat(v.conditional_cost).toFixed(2)}{" "}
+                                  {/* Lawn material_cost is the 10,000 sqft
+                                      basis; conditional_cost reserves derive
+                                      from the ~4,500 sqft inline line costs —
+                                      scale so both numbers in this cell share
+                                      the Mat$ basis. Service programs
+                                      (tree_shrub/pest) are per-property; no
+                                      scaling. */}
+                                  +$
+                                  {(
+                                    parseFloat(v.conditional_cost) *
+                                    (isLawnTrack ? 10000 / 4500 : 1)
+                                  ).toFixed(2)}{" "}
                                   spot
                                 </div>
                               )}
