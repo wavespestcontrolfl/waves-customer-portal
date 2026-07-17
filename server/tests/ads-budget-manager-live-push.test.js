@@ -472,5 +472,19 @@ describe('BudgetManager live Google Ads push', () => {
       const logged = mockLogInsert.mock.calls[0][0];
       expect(logged.reason.length).toBe(255);
     });
+
+    test('post-push persist failure rolls Google back to the prior live budget, then rethrows', async () => {
+      campaignFirstRow = baseCampaign(); // prior live current = '40'
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+      mockCampaignUpdate.mockRejectedValueOnce(new Error('db down')); // the post-push write fails
+
+      await expect(BudgetManager.setBudget('c-1', 50, 'test')).rejects.toThrow(/db down/);
+
+      // First pushed the new budget (50), then rolled Google back to 40 so live
+      // spend and local state don't drift; no false success is returned.
+      expect(mockUpdateBudget).toHaveBeenNthCalledWith(1, '1234567890', 50);
+      expect(mockUpdateBudget).toHaveBeenNthCalledWith(2, '1234567890', 40);
+    });
   });
 });

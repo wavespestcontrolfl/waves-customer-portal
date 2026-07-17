@@ -462,21 +462,44 @@ class BudgetManager {
       ? campaign.daily_budget_current   // push failed → Google still runs the old amount
       : effectiveBudget;
 
-    await db('ad_campaigns').where({ id: campaignId }).update({
-      daily_budget_base: base,
-      daily_budget_current: newCurrent,
-    });
+    // If the live push already changed Google but we then fail to record it
+    // locally (a transient DB error — the deterministic cases, over-max budget
+    // and over-long reason, are rejected up front), roll Google back to the
+    // amount it was running before so live spend and local state don't drift,
+    // then surface the failure. No false success, and the reconcile cron isn't
+    // left chasing a phantom. (calculateBudget's fallbacks mean a null prior
+    // current can't be safely restored — log for manual follow-up instead.)
+    try {
+      await db('ad_campaigns').where({ id: campaignId }).update({
+        daily_budget_base: base,
+        daily_budget_current: newCurrent,
+      });
 
-    await db('ad_budget_log').insert({
-      campaign_id: campaignId,
-      campaign_name: campaign.campaign_name,
-      previous_mode: campaign.budget_mode,
-      new_mode: campaign.budget_mode,
-      previous_budget: campaign.daily_budget_base,
-      new_budget: base,
-      reason,
-      trigger: 'manual',
-    });
+      await db('ad_budget_log').insert({
+        campaign_id: campaignId,
+        campaign_name: campaign.campaign_name,
+        previous_mode: campaign.budget_mode,
+        new_mode: campaign.budget_mode,
+        previous_budget: campaign.daily_budget_base,
+        new_budget: base,
+        reason,
+        trigger: 'manual',
+      });
+    } catch (persistErr) {
+      if (googleAdsUpdated && campaign.platform_campaign_id) {
+        const prevLive = parseFloat(campaign.daily_budget_current);
+        if (Number.isFinite(prevLive)) {
+          try {
+            await getGoogleAds().updateBudget(campaign.platform_campaign_id, prevLive);
+          } catch (rollbackErr) {
+            logger.error(`setBudget: rollback push failed for ${campaign.campaign_name} after a persist error — Google may run ${effectiveBudget} while local shows the old base: ${rollbackErr.message}`);
+          }
+        } else {
+          logger.error(`setBudget: persist failed for ${campaign.campaign_name} after pushing ${effectiveBudget} live, and prior live budget is unknown — manual reconciliation may be needed`);
+        }
+      }
+      throw persistErr;
+    }
 
     return {
       campaign: campaign.campaign_name,
