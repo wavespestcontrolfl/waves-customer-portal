@@ -41,6 +41,11 @@ const PI_MAX_HOURS = 24 * 30;
 // requires_capture — the one-time card-hold flow parks legitimate
 // authorizations there awaiting capture; a hold is not an abandoned draft.
 const PI_INCOMPLETE_STATUSES = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action']);
+// requires_action with pending ACH micro-deposit verification is an ACTIVE
+// payment session, not an abandoned draft — prepaid-pi-guard.js detects the
+// same subtype. Excluded from the "incomplete" aggregate; still reachable
+// via an explicit status filter, with next_action_type distinguishing it.
+const ACH_VERIFICATION_NEXT_ACTION = 'verify_with_microdeposits';
 const PI_STATUSES = [
   'incomplete', 'requires_payment_method', 'requires_confirmation', 'requires_action',
   'processing', 'requires_capture', 'canceled', 'succeeded',
@@ -79,7 +84,7 @@ Use for: "any incomplete card payments?", "find the $33.33 drafts in Stripe", "d
         status: {
           type: 'string',
           enum: PI_STATUSES,
-          description: `Filter to one status. "incomplete" matches the dashboard's Incomplete bucket (requires_payment_method / requires_confirmation / requires_action). Note: requires_capture is a legitimate card hold awaiting capture, NOT an abandoned draft.`,
+          description: `Filter to one status. "incomplete" matches the dashboard's Incomplete bucket (requires_payment_method / requires_confirmation / requires_action) but excludes active ACH micro-deposit verifications (next_action_type verify_with_microdeposits — an in-progress bank payment, not abandoned). Note: requires_capture is a legitimate card hold awaiting capture, NOT an abandoned draft.`,
         },
         amount: { type: 'number', description: 'Match an exact amount in dollars (e.g. 33.33)' },
         limit: { type: 'number', description: `Max intents to return (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
@@ -189,10 +194,14 @@ async function getStripeWebhookFailures(input) {
   };
 }
 
-function paymentIntentMatchesStatus(status, filter) {
+function paymentIntentMatchesStatus(pi, filter) {
   if (!filter) return true;
-  if (filter === 'incomplete') return PI_INCOMPLETE_STATUSES.has(status);
-  return status === filter;
+  if (filter === 'incomplete') {
+    if (!PI_INCOMPLETE_STATUSES.has(pi.status)) return false;
+    // An in-progress ACH micro-deposit verification is not abandoned.
+    return (pi.next_action && pi.next_action.type) !== ACH_VERIFICATION_NEXT_ACTION;
+  }
+  return pi.status === filter;
 }
 
 // Only identifiers, money state, and failure codes leave this mapper — never
@@ -209,6 +218,10 @@ function mapPaymentIntent(pi) {
     customer: pi.customer || null,
     description: pi.description || null,
     payment_method_types: pi.payment_method_types || [],
+    // Type only, never the next_action object (it carries redirect/hosted
+    // URLs). Distinguishes active flows (e.g. verify_with_microdeposits)
+    // from truly abandoned drafts.
+    next_action_type: (pi.next_action && pi.next_action.type) || null,
   };
   if (pi.last_payment_error) {
     out.last_payment_error = {
@@ -247,7 +260,7 @@ async function getStripePaymentIntents(input) {
     const data = json.data || [];
     for (const pi of data) {
       scanned += 1;
-      if (!paymentIntentMatchesStatus(pi.status, statusFilter)) continue;
+      if (!paymentIntentMatchesStatus(pi, statusFilter)) continue;
       if (amountCents !== null && pi.amount !== amountCents) continue;
       if (matched.length < limit) matched.push(mapPaymentIntent(pi));
     }
@@ -262,7 +275,7 @@ async function getStripePaymentIntents(input) {
     total_matched: matched.length,
     total_scanned: scanned,
     scan_exhaustive: !morePages,
-    note: 'Live Stripe data; amounts are dollars. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, not abandoned drafts.',
+    note: 'Live Stripe data; amounts are dollars. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft.',
   };
 }
 

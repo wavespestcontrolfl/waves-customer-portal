@@ -202,6 +202,13 @@ function sanitizeQueryImages(images) {
   return out;
 }
 
+// PII-tool results (customer names in SMS threads, email bodies, payment
+// descriptions, …) enter conversationHistory just like image-derived text
+// does: a follow-up turn can echo the name with no tool call at all, so the
+// taint must survive the round-trip through the client the same way the
+// image taint does.
+const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
   return conversationHistory.some((message) => {
@@ -211,23 +218,30 @@ function hasImageTaintedHistory(conversationHistory) {
   });
 }
 
+function hasPiiTaintedHistory(conversationHistory) {
+  if (!Array.isArray(conversationHistory)) return false;
+  return conversationHistory.some((message) => (
+    message && typeof message.content === 'string' && message.content.includes(PII_TAINT_MARKER)
+  ));
+}
+
 function stripInternalHistoryMarkers(message) {
   if (!message || typeof message.content !== 'string') return message;
   return {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER)
+      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER && line.trim() !== PII_TAINT_MARKER)
       .join('\n')
       .trim(),
   };
 }
 
-function markImageTaintedContent(content, imageTainted) {
-  if (!imageTainted || typeof content !== 'string' || content.includes(IMAGE_TAINT_MARKER)) {
+function appendTaintMarker(content, tainted, marker) {
+  if (!tainted || typeof content !== 'string' || content.includes(marker)) {
     return content;
   }
-  return `${content}\n${IMAGE_TAINT_MARKER}`;
+  return `${content}\n${marker}`;
 }
 
 // Build the current-turn user message. Plain string when no images and no
@@ -1021,6 +1035,7 @@ router.post('/query', async (req, res, next) => {
     const { prompt, conversationHistory = [], context, pageData } = req.body;
     const images = sanitizeQueryImages(req.body.images);
     const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
+    const piiTaintedHistory = hasPiiTaintedHistory(conversationHistory);
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -1234,14 +1249,17 @@ For create_customer, the route-optimization writes, and the inventory stock writ
     // Log the query for analytics. tool_calls stores names + field keys only;
     // prompt/response are additionally redacted when a PII-bearing tool ran
     // (prompts carry typed customer contact details, responses echo SMS
-    // bodies) OR when the conversation is image-tainted — the current turn has
-    // attachments, or an earlier image turn is still in the window and its
-    // OCR-derived answer can be echoed by a follow-up that carries no images
-    // itself. Either way Claude can surface a customer's name/address/phone
-    // with no tool call at all.
+    // bodies), when an earlier PII-tool turn is still in the history window
+    // (its answer can be echoed by a follow-up with no tool call), OR when
+    // the conversation is image-tainted — the current turn has attachments,
+    // or an earlier image turn is still in the window and its OCR-derived
+    // answer can be echoed by a follow-up that carries no images itself.
+    // Either way Claude can surface a customer's name/address/phone with no
+    // tool call at all.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
-    const redactPii = usedPiiTool || imageTainted;
-    const redactNote = usedPiiTool
+    const piiTainted = usedPiiTool || piiTaintedHistory;
+    const redactPii = piiTainted || imageTainted;
+    const redactNote = piiTainted
       ? '[redacted — PII-bearing tools used]'
       : '[redacted — image attachment may contain PII]';
     try {
@@ -1266,19 +1284,33 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       ...(uiConfirmEnabled() ? { pendingActions: pendingProposals } : {}),
       // Return conversation history for multi-turn. Attached images are not
       // round-tripped (a text marker stands in) — keeps follow-up payloads
-      // small and image bytes out of the stored history.
+      // small and image bytes out of the stored history. Image and PII taint
+      // markers ride on the stored turns so follow-ups stay redacted; both
+      // are stripped before the history reaches the model.
       conversationHistory: [
         ...conversationHistory.slice(-8),
         {
           role: 'user',
-          content: markImageTaintedContent(
-            images.length
-              ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
-              : prompt,
-            imageTainted,
+          content: appendTaintMarker(
+            appendTaintMarker(
+              images.length
+                ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+                : prompt,
+              imageTainted,
+              IMAGE_TAINT_MARKER,
+            ),
+            piiTainted,
+            PII_TAINT_MARKER,
           ),
         },
-        { role: 'assistant', content: markImageTaintedContent(finalResponse, imageTainted) },
+        {
+          role: 'assistant',
+          content: appendTaintMarker(
+            appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
+            piiTainted,
+            PII_TAINT_MARKER,
+          ),
+        },
       ],
     });
 
