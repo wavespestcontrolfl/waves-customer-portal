@@ -25,6 +25,10 @@ const WDO_PROJECT_TYPE = 'wdo_inspection';
 const PRE_TREATMENT_CERTIFICATE_TYPE = 'pre_treatment_termite_certificate';
 const OFFICIAL_DOCUMENT_TYPES = new Set([WDO_PROJECT_TYPE, PRE_TREATMENT_CERTIFICATE_TYPE]);
 const BANK_PAYMENT_METHOD_TYPES = new Set(['ach', 'us_bank_account', 'bank', 'bank_account']);
+// project_photos.caption is varchar(200) — a longer description (typed or
+// seeded by the prior-treatment extractor) fails the INSERT after the image
+// is already in S3, so the queue clamps everywhere a caption enters.
+const PHOTO_CAPTION_MAX = 200;
 const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 
 /**
@@ -439,13 +443,19 @@ export default function CreateProjectModal({
   // legacy project editor. WDO adds its canvas signature here; pre-treatment
   // already carries its typed applicator attestation in the saved certificate.
   // Shape: { project, requiresSignature, applicator, signature,
-  //          reportHoldAvailable, billingReason, noCharge }.
+  //          reportHoldAvailable, billingReason, invoiceStatus, noCharge }.
   // onCreated/onClose are DEFERRED to finishSignStep so parents (which
   // unmount the modal from onCreated) don't tear the step down.
   const [signStep, setSignStep] = useState(null);
   const reportOnlyCompletion = Boolean(
     signStep?.noCharge
-    || ['prepaid_covered', 'not_billable'].includes(signStep?.billingReason),
+    || ['prepaid_covered', 'not_billable'].includes(signStep?.billingReason)
+    // An existing invoice that already settled ('paid', or credit-covered
+    // 'prepaid' — the same statuses the hold release treats as settled money)
+    // has nothing left to collect: offer the send-report path instead of
+    // charge/invoice actions that /send-with-invoice would 409.
+    || (signStep?.billingReason === 'invoice_exists'
+      && ['paid', 'prepaid'].includes(String(signStep?.invoiceStatus || '').toLowerCase())),
   );
   // True while the pad's signature POST/DELETE is in flight — every sign-step
   // exit holds until it settles, or the modal could unmount mid-mutation and
@@ -1328,7 +1338,7 @@ export default function CreateProjectModal({
       // reviewed extraction into its caption so the PDF does not show a bare
       // "Photo N -" line or force the tech to type the same details twice.
       if (notes) {
-        const generatedCaption = `Previous treatment evidence: ${notes}`;
+        const generatedCaption = `Previous treatment evidence: ${notes}`.slice(0, PHOTO_CAPTION_MAX);
         setPhotoQueue(prev => prev.map(item => (
           item.id === started.photoId
             ? {
@@ -1477,6 +1487,7 @@ export default function CreateProjectModal({
           signature: detail?.wdo_signature || null,
           reportHoldAvailable: detail?.report_payment_hold_available === true,
           billingReason: detailPayload?.closeoutPreview?.billing?.reason || null,
+          invoiceStatus: detailPayload?.closeoutPreview?.billing?.invoiceStatus || null,
           noCharge: projectType === WDO_PROJECT_TYPE && wdoFeeIsExplicitZero(findings.inspection_fee),
         });
         return;
@@ -2702,8 +2713,9 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
   }
 
   function updateCaption(id, caption) {
+    const bounded = String(caption || '').slice(0, PHOTO_CAPTION_MAX);
     setQueue(q => q.map(item => (
-      item.id === id ? { ...item, caption, generatedCaption: undefined } : item
+      item.id === id ? { ...item, caption: bounded, generatedCaption: undefined } : item
     )));
   }
 
@@ -2775,6 +2787,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
                 <input
                   type="text"
                   value={item.caption || ''}
+                  maxLength={PHOTO_CAPTION_MAX}
                   onChange={(e) => updateCaption(item.id, e.target.value)}
                   placeholder="Describe what this shows and where"
                   aria-label={`Photo description for ${item.file.name}`}

@@ -79,6 +79,15 @@ const s3 = new S3Client({
     : undefined,
 });
 const PHOTO_PREFIX = 'project-photos/';
+// project_photos.caption is varchar(200): a longer caption would fail the
+// INSERT after the image is already in S3, stranding an orphan object and
+// blocking every Save retry. Clamp rather than reject — losing the tail of a
+// description is recoverable; a wedged photo upload is not.
+const PHOTO_CAPTION_MAX = 200;
+function clampPhotoCaption(value) {
+  const caption = String(value ?? '').trim();
+  return caption ? caption.slice(0, PHOTO_CAPTION_MAX) : null;
+}
 const AI_PHOTO_LIMIT = 8;
 const AI_PHOTO_MAX_BYTES = 4.5 * 1024 * 1024;
 const AI_PHOTO_TOTAL_MAX_BYTES = 12 * 1024 * 1024;
@@ -3888,6 +3897,19 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       if (project.sent_at || project.status === 'sent') {
         return res.status(422).json({ error: 'This report was already delivered — a payment hold can only apply before the first send', code: 'hold_after_send' });
       }
+      // The automatic release re-validates every required certificate field
+      // with no operator present (releaseHeldProjectReport), and a readiness
+      // override accepted here is not persisted — so a hold armed over
+      // missing soft fields would collect payment and then never deliver.
+      // Refuse the hold up front (dry_run included, so the operator learns at
+      // preview): complete the certificate, or send it now without the hold.
+      if (project.project_type === 'pre_treatment_termite_certificate' && readiness.missing.length > 0) {
+        return res.status(422).json({
+          error: 'Hold-until-paid needs a complete certificate — the automatic release re-checks every required field, so a held certificate with missing details would never deliver. Fill in the missing fields, or send now without the hold.',
+          code: 'hold_requires_complete_certificate',
+          missing: readiness.missing,
+        });
+      }
       const holdCols = await db('projects').columnInfo().catch(() => ({}));
       if (!reportHoldColumnsPresent(holdCols)) {
         return res.status(422).json({ error: 'Report hold columns are not migrated yet', code: 'hold_columns_missing' });
@@ -4967,7 +4989,7 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       project_id: project.id,
       s3_key: key,
       category: req.body.category || null,
-      caption: req.body.caption || null,
+      caption: clampPhotoCaption(req.body.caption),
       visit: req.body.visit === 'followup' ? 'followup' : 'primary',
       uploaded_by_tech_id: req.technicianId,
     }).returning('*');
@@ -5038,7 +5060,9 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
     if (!(await requireProjectAccess(req, res, project))) return;
     const updates = {};
     for (const f of ['caption', 'category', 'sort_order']) {
-      if (req.body[f] !== undefined) updates[f] = req.body[f];
+      if (req.body[f] !== undefined) {
+        updates[f] = f === 'caption' ? clampPhotoCaption(req.body[f]) : req.body[f];
+      }
     }
     if (Object.keys(updates).length === 0) return res.json({ ok: true });
     await db('project_photos')

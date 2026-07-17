@@ -686,6 +686,59 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'))).toHaveLength(0);
   });
 
+  it('treats an already-paid completion invoice as report-only — no second collection', async () => {
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.endsWith('/admin/projects/cert-1')) {
+        return jsonResponse({
+          project: { report_payment_hold_available: true },
+          closeoutPreview: {
+            billing: {
+              required: true, resolved: true, reason: 'invoice_exists', invoiceStatus: 'paid',
+            },
+          },
+        });
+      }
+      if (u.endsWith('/admin/projects/cert-1/send')) return jsonResponse({ sent: true });
+      return baseFetch(url, opts);
+    }));
+    const onCreated = vi.fn();
+    renderCertificateSheet({ onCreated });
+    fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send certificate & finish service' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'closed' }),
+      expect.objectContaining({ completed: true }),
+    ));
+    expect(screen.queryByRole('button', { name: 'Send invoice & hold certificate' })).toBeNull();
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'))).toHaveLength(0);
+  });
+
+  it('keeps the invoice-first path when the existing invoice is still unpaid', async () => {
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.endsWith('/admin/projects/cert-1')) {
+        return jsonResponse({
+          project: { report_payment_hold_available: true },
+          closeoutPreview: {
+            billing: {
+              required: true, resolved: true, reason: 'invoice_exists', invoiceStatus: 'sent',
+            },
+          },
+        });
+      }
+      return baseFetch(url, opts);
+    }));
+    renderCertificateSheet();
+    fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
+
+    expect(await screen.findByRole('button', { name: 'Send invoice & hold certificate' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Send certificate & finish service' })).toBeNull();
+  });
+
   it('does not treat a saved bank account alias as a chargeable card', async () => {
     const baseFetch = fetch;
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
