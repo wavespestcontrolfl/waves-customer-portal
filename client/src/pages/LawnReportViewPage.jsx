@@ -97,7 +97,7 @@ function StatusPill({ label }) {
 
 function NotFoundCard() {
   return (
-    <SectionCard style={{ textAlign: 'center', marginTop: 40 }}>
+    <SectionCard role="alert" style={{ textAlign: 'center', marginTop: 40 }}>
       <SectionTitle>This lawn report isn&apos;t available</SectionTitle>
       <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.

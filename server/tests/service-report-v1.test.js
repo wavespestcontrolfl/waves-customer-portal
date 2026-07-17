@@ -402,6 +402,21 @@ describe('service report v1', () => {
     expect(context.targets.map((target) => target.key)).toEqual(['exterior']);
   });
 
+  test('no clock-time anchor (date-only service_date) → no re-entry context at all', () => {
+    // A date-only service_date parses to UTC midnight; using it as the
+    // anchor fabricated ready-at times (usually an instant "ready") for
+    // legacy records with no real timestamp (audit 2026-07-16 P3). No true
+    // clock anchor → no re-entry block, which the page renders honestly.
+    const context = buildReentryContextFromRecord({
+      id: 'service-date-only',
+      service_date: '2026-05-16',
+      areas_serviced: JSON.stringify(['Exterior perimeter']),
+      applications: [],
+      advisory: { exterior_reentry_min: 30, interior_reentry_min: 120 },
+    }, new Date('2026-05-16T13:25:00.000Z'));
+    expect(context).toBeUndefined();
+  });
+
   describe('structured action scope drives interior re-entry', () => {
     const advisory = { exterior_reentry_min: 30, interior_reentry_min: 120, irrigation_hold_hr: 24 };
     const exteriorAreas = JSON.stringify(['Exterior perimeter']);

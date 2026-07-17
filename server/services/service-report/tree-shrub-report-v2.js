@@ -319,11 +319,17 @@ function buildTreeShrubReportV2({
   // Peace-of-mind line (Task layout §1). Honest: monitoring count, no urgency unless real.
   const monitorCount = issues.length;
   const hasUrgent = insights.some((i) => i.status === 'urgent' || i.status === 'needs_attention');
+  // Treatment claims are gated on `treatment` (null when nothing was applied):
+  // an inspection-only visit must not say "completed treatment".
   const peaceOfMind = hasUrgent
-    ? `We found ${monitorCount} item${monitorCount === 1 ? '' : 's'} to address today and completed treatment for ${monitorCount === 1 ? 'it' : 'them'}.`
+    ? (treatment
+      ? `We found ${monitorCount} item${monitorCount === 1 ? '' : 's'} to address today and completed treatment for ${monitorCount === 1 ? 'it' : 'them'}.`
+      : `We found ${monitorCount} item${monitorCount === 1 ? '' : 's'} to address today and documented ${monitorCount === 1 ? 'it' : 'them'} below.`)
     : monitorCount > 0
       ? `No urgent plant decline was found today. We noted ${monitorCount} item${monitorCount === 1 ? '' : 's'} to monitor and will recheck ${monitorCount === 1 ? 'it' : 'them'} on future visits.`
-      : 'No urgent plant decline was found today. Your scheduled treatment is complete and your landscape plants are protected.';
+      : (treatment
+        ? 'No urgent plant decline was found today. Your scheduled treatment is complete and your landscape plants are protected.'
+        : 'No urgent plant decline was found today. We completed a full inspection of your landscape plants.');
 
   const snapshot = {
     overallScore,

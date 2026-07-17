@@ -165,7 +165,11 @@ function buildTreeShrubInsightCards({
       headline: `${group.label}: ${gstatus === 'needs_attention' ? 'needs a closer look' : 'one item to watch'}`,
       whatWeSaw: group.finding || 'We noted something worth monitoring in this area.',
       whyItMatters: 'Tracking issues by plant group lets us treat the right area, not the whole property.',
-      wavesAction: group.wavesAction || 'Treated this area today and will continue monitoring it.',
+      // Only claim a treatment when one actually happened this visit — an
+      // inspection-only visit must not report "Treated this area today".
+      wavesAction: group.wavesAction || (treatmentKinds.length
+        ? 'Treated this area today and will continue monitoring it.'
+        : 'Inspected this area today and will continue monitoring it.'),
       nextVisitPlan: 'Recheck this area next visit.',
     });
   }

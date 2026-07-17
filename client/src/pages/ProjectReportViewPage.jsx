@@ -129,11 +129,20 @@ function formatCustomerPhone(phone) {
   return String(phone || '').trim();
 }
 
+// Date-only values are pinned to UTC noon (never `T12:00:00` local — a
+// far-east viewer's local noon is still the PRIOR calendar day in NY, which
+// rendered the FDACS inspection date a day early). Same anchor the server's
+// report-page-metadata uses.
+function dateOnlyToNoonUtc(dateOnlyValue) {
+  const [y, m, d] = dateOnlyValue.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 12));
+}
+
 function formatReportDate(value) {
   if (!value) return '';
   const raw = String(value);
   const dateOnlyValue = dateOnly(raw);
-  const date = dateOnlyValue ? new Date(`${dateOnlyValue}T12:00:00`) : new Date(raw);
+  const date = dateOnlyValue ? dateOnlyToNoonUtc(dateOnlyValue) : new Date(raw);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
 }
@@ -142,7 +151,7 @@ function formatAppointmentDate(value) {
   if (!value) return '';
   const raw = String(value);
   const dateOnlyValue = dateOnly(raw);
-  const date = dateOnlyValue ? new Date(`${dateOnlyValue}T12:00:00`) : new Date(raw);
+  const date = dateOnlyValue ? dateOnlyToNoonUtc(dateOnlyValue) : new Date(raw);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
 }
@@ -391,9 +400,24 @@ export default function ProjectReportViewPage() {
       .catch(() => { setLoadError(true); setLoading(false); });
   }, [token, loadAttempt]);
 
+  // Paid-but-unswept: without this, the 402 card sits static after the
+  // customer pays in another tab. Quietly re-check every 30s and swap the
+  // report in once it unlocks. Safe to poll: the server 402s before any
+  // view-stamp/activity write, and non-OK re-checks change nothing here.
+  useEffect(() => {
+    if (data?.code !== 'report_payment_required') return undefined;
+    const id = window.setInterval(() => {
+      fetch(`${API_BASE}/reports/project/${token}/data`)
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => { if (d && !d.error) setData(d); })
+        .catch(() => {});
+    }, 30000);
+    return () => window.clearInterval(id);
+  }, [data?.code, token]);
+
   if (loading) return (
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: FONT_BODY }}>
-      <div style={{ ...cardStyle, width: 'min(420px, calc(100% - 40px))' }}>
+      <div role="status" aria-label="Loading your report" style={{ ...cardStyle, width: 'min(420px, calc(100% - 40px))' }}>
         <div style={{ height: 12, width: 120, background: B.offWhite, borderRadius: 6 }} />
         <div style={{ height: 32, width: '70%', background: B.offWhite, borderRadius: 6, marginTop: 16 }} />
         <div style={{ height: 14, width: '50%', background: B.offWhite, borderRadius: 6, marginTop: 12 }} />
@@ -415,9 +439,9 @@ export default function ProjectReportViewPage() {
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
       <div style={{ ...cardStyle, maxWidth: 440, textAlign: 'center' }}>
         <div style={{ color: ESTIMATE_MUTED }}><Icon name="lock" size={32} strokeWidth={1.75} /></div>
-        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, marginTop: 8 }}>
+        <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>
           Your {data.reportTypeLabel || 'inspection'} report is ready
-        </div>
+        </h1>
         <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           {data.payerBilled
             ? 'This inspection is billed directly to the requesting party. As soon as their invoice is paid, your official report is emailed automatically and unlocks right here.'
@@ -444,7 +468,7 @@ export default function ProjectReportViewPage() {
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
       <div style={{ ...cardStyle, maxWidth: 420, textAlign: 'center' }}>
         <div style={{ color: ESTIMATE_MUTED }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
-        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, marginTop: 8 }}>Report unavailable</div>
+        <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>Report unavailable</h1>
         <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
@@ -741,7 +765,7 @@ export default function ProjectReportViewPage() {
             </div>
             {data.followupCompletedAt && (
               <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
-                {new Date(data.followupCompletedAt).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                {formatReportDate(data.followupCompletedAt)}
               </div>
             )}
             {data.followupFindings && Object.keys(data.followupFindings).length > 0 && (

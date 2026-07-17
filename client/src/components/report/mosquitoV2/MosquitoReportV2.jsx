@@ -130,7 +130,10 @@ export function MosquitoStatusHero({ status, statusSummary, supportingMetric, ai
       <div data-gt="eyebrow" style={eyebrow}>Today’s mosquito protection</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ width: 12, height: 12, borderRadius: '50%', background: t.color, flexShrink: 0, boxShadow: `0 0 0 4px ${t.color}22` }} />
-        <h2 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 25, color: TEXT, margin: 0 }}>{status.label}</h2>
+        {/* sr-v2-hero-title marks this as the V2 hero so glass hides the
+            eyebrow above it (the ReportViewPage :has() rule) — lawn/tree get
+            this via a direct-sibling h2; here the h2 sits in a flex wrapper. */}
+        <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 25, color: TEXT, margin: 0 }}>{status.label}</h2>
       </div>
       {statusSummary ? (
         <p style={{ fontSize: 15, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
@@ -299,7 +302,9 @@ export function MosquitoHabitatMap({ habitat, print = false }) {
       `}</style>
       <div data-gt="eyebrow" style={eyebrow}>Where we protected</div>
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 2px' }}>
-        {treated ? 'Today’s treatment is working across your yard' : 'We’re watching the spots mosquitoes use'}
+        {/* Observational, not an efficacy promise — say what we DID, not that
+            the treatment "is working" (same standard the AI copy guard enforces). */}
+        {treated ? 'We treated the key areas across your yard today' : 'We’re watching the spots mosquitoes use'}
       </h3>
       {habitat.summary ? <p style={{ fontSize: 14, color: MUTED, margin: '0 0 6px' }}>{habitat.summary}</p> : null}
 
@@ -422,7 +427,11 @@ export function MosquitoOutlook({ outlook }) {
       ) : null}
       {m ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, border: `1px solid ${BORDER}`, borderRadius: 12, padding: '10px 12px' }}>
-          <span style={{ fontSize: 22, lineHeight: 1, flexShrink: 0 }} aria-hidden="true">{m.emoji || '🦟'}</span>
+          {/* No emoji fallback — a plain accent dot matches the V2 marker
+              system when the outlook payload doesn't carry its own icon. */}
+          {m.emoji
+            ? <span style={{ fontSize: 22, lineHeight: 1, flexShrink: 0 }} aria-hidden="true">{m.emoji}</span>
+            : <span style={{ width: 12, height: 12, borderRadius: '50%', background: '#0A7EC2', flexShrink: 0 }} aria-hidden="true" />}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: 14, fontWeight: 700, color: TEXT }}>{m.label}</span>

@@ -166,3 +166,43 @@ describe('orchestrate.js — pressure_index mirror source-text regression guard 
     expect(src).toMatch(/persisted\s*&&\s*persisted\.displayed_score\s*!=\s*null/);
   });
 });
+
+describe('loadHistoryForCustomer — same-day sibling trim (audit 2026-07-16 P3)', () => {
+  const { loadHistoryForCustomer } = require('../services/pest-pressure/store');
+
+  // Store ships DESC by service_date; 202 is a LATER visit on the same day
+  // as this report's own row (201).
+  const rows = [
+    { service_record_id: 202, service_date: '2026-07-10', displayed_score: 4.1 },
+    { service_record_id: 201, service_date: '2026-07-10', displayed_score: 3.2 },
+    { service_record_id: 105, service_date: '2026-06-01', displayed_score: 2.8 },
+  ];
+
+  function historyKnex() {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.orderBy = jest.fn(() => chain);
+    chain.limit = jest.fn(() => chain);
+    chain.select = jest.fn(async () => [...rows]);
+    return jest.fn(() => chain);
+  }
+
+  test('token-scoped history trims a later same-day sibling at the report own row', async () => {
+    const out = await loadHistoryForCustomer(historyKnex(), 9, {
+      limit: 8, beforeOrOnServiceDate: '2026-07-10', currentServiceRecordId: 201,
+    });
+    expect(out.map((r) => r.service_record_id)).toEqual([201, 105]);
+  });
+
+  test('legacy report with no stored row keeps the plain date bound', async () => {
+    const out = await loadHistoryForCustomer(historyKnex(), 9, {
+      limit: 8, beforeOrOnServiceDate: '2026-07-10', currentServiceRecordId: 999,
+    });
+    expect(out.map((r) => r.service_record_id)).toEqual([202, 201, 105]);
+  });
+
+  test('admin callers without currentServiceRecordId are unchanged', async () => {
+    const out = await loadHistoryForCustomer(historyKnex(), 9, { limit: 8 });
+    expect(out).toHaveLength(3);
+  });
+});

@@ -389,24 +389,35 @@ async function listAuditEvents(knex, { limit = 50 } = {}) {
     .select('id', 'actor_type', 'actor_id', 'action', 'resource_type', 'resource_id', 'metadata', 'created_at');
 }
 
-async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null } = {}) {
+async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null } = {}) {
   const q = knex('pest_pressure_scores')
     .where('customer_id', customerId)
     .orderBy('service_date', 'desc')
-    .limit(limit);
+    // Over-fetch when a same-day trim is requested so the trim can't starve
+    // the window below `limit`.
+    .limit(currentServiceRecordId ? limit + 8 : limit);
   if (serviceLine) q.where('service_line', serviceLine);
   // Token-scoped callers (customer-facing report views) must pass
   // beforeOrOnServiceDate set to the report's own service_date so a
   // long-lived `/api/reports/:token` bearer can't reveal later visits
   // recorded after the report was generated.
   if (beforeOrOnServiceDate) q.where('service_date', '<=', beforeOrOnServiceDate);
-  return q.select(
+  const rows = await q.select(
     'id', 'service_record_id', 'service_date', 'service_line',
     'displayed_score', 'calculated_score', 'label_key', 'label_name',
     'trend', 'trend_delta', 'data_completeness', 'is_overridden',
     'override_reason', 'overridden_by', 'overridden_at',
     'calculation_version', 'calculated_at',
   );
+  // The date bound alone leaks same-day sibling visits: viewing the earlier
+  // report after a later same-day visit completes would chart the later
+  // score. Trim at this report's own row whenever it's stored (mirrors
+  // activity-scores-store); the legacy no-row fallback keeps the date bound.
+  if (currentServiceRecordId) {
+    const currentIdx = rows.findIndex((row) => String(row.service_record_id) === String(currentServiceRecordId));
+    return (currentIdx >= 0 ? rows.slice(currentIdx) : rows).slice(0, limit);
+  }
+  return rows;
 }
 
 module.exports = {
