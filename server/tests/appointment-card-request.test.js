@@ -139,6 +139,12 @@ describe('requestCardForAppointment — gate and visit eligibility', () => {
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     expect(res.reason).toBe('visit_in_past');
   });
+
+  test("a 'rescheduled' visit is LIVE (customer reschedule request, schedule.js) — the funnel still runs", async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'rescheduled' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent' });
+  });
 });
 
 describe('check 1 — policy exemption (before any capture machinery)', () => {
@@ -571,6 +577,14 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
   });
 
+  test("a 'rescheduled' visit (customer reschedule request) still completes — the capture is not refused", async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'rescheduled' });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_stripe_9', expect.anything());
+    expect(mockEnrollConsentedMethod).toHaveBeenCalled();
+  });
+
   test('payer attached since page load → no_longer_needed (never the wrong party)', async () => {
     mockResolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-7' });
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
@@ -818,6 +832,12 @@ describe('loadSecureCardPageData — page state machine', () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('closed');
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test("a 'rescheduled' visit keeps the page OPEN — the link must survive a customer reschedule request", async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'rescheduled' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res).toMatchObject({ state: 'ready', clientSecret: 'cs_1', setupIntentId: 'seti_1' });
   });
 
   test('a payer attached after the link was minted → closed before the form renders', async () => {

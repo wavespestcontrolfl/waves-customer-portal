@@ -82,6 +82,7 @@ const {
   recordCardHoldHeld,
   chargeCardHoldOnCompletion,
   chargeCardHoldForRecapCompletion,
+  chargeNoShowFee,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
 } = require('../services/estimate-card-holds');
@@ -130,13 +131,17 @@ describe('isCardHoldEnabled — dark by default', () => {
 describe('completion charge reconciliation outcomes', () => {
   const hold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1' };
   const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: 75 };
+  // The accepted-amount cap reads scheduled_services.estimated_price before
+  // the claim — these tests exercise the post-cap charge outcomes, so the
+  // visit's accepted amount comfortably covers the invoice.
+  const visit = { estimated_price: 100 };
   const paymentMethod = { id: 'pm-row-1' };
 
   test.each([
     ['STRIPE_CHARGED_DB_FAILED', { stripePaymentIntentId: 'pi-orphan-1' }],
     ['STRIPE_AMBIGUOUS_OUTCOME', {}],
   ])('parks invoice and card hold for terminal %s', async (code, extra) => {
-    stubDb([hold, invoice, paymentMethod]);
+    stubDb([hold, invoice, visit, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('reconcile me'), { code, ...extra }));
 
     await expect(chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' }))
@@ -149,7 +154,7 @@ describe('completion charge reconciliation outcomes', () => {
   });
 
   test('restores a fresh concurrent claim collision for retry without exposing another rail', async () => {
-    stubDb([hold, invoice, paymentMethod]);
+    stubDb([hold, invoice, visit, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('first attempt declined'), {
       code: 'STRIPE_CHARGE_IN_PROGRESS',
     }));
@@ -162,6 +167,90 @@ describe('completion charge reconciliation outcomes', () => {
     ]));
     expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'charge_review' })]));
     expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'processing' })]));
+  });
+});
+
+describe('completion charge accepted-amount cap — never collect above what was accepted', () => {
+  const hold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1' };
+  const paymentMethod = { id: 'pm-row-1' };
+
+  test('an invoice retotaled ABOVE the accepted amount is NOT charged — review alert, hold stays held', async () => {
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 600, total: 600 };
+    stubDb([hold, invoice, { estimated_price: 250 }]);
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: false, reason: 'above_accepted_amount' });
+    expect(mockChargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('above accepted amount'),
+      expect.stringContaining('NOT charged'),
+      expect.objectContaining({ link: '/admin/customers/cust-1' }),
+    );
+    // The hold is never claimed or moved — it stays 'held' (un-charged,
+    // reviewable), so no status write of any kind lands.
+    expect(mockDbUpdates).toEqual([]);
+  });
+
+  test('at the accepted amount → charges exactly as before', async () => {
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 250, total: 250 };
+    stubDb([hold, invoice, { estimated_price: 250 }, paymentMethod]);
+    mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 250 });
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: true });
+    expect(mockChargeInvoiceWithSavedCard).toHaveBeenCalledWith('inv-1', 'pm-row-1');
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'charged_completion' }),
+    ]));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('under the accepted amount → charges', async () => {
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 199, total: 199 };
+    stubDb([hold, invoice, { estimated_price: 250 }, paymentMethod]);
+    mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 199 });
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: true });
+  });
+
+  test('the comparator nets a recorded discount off the grossed-up subtotal (manual-discount accepts)', async () => {
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 300, discount_amount: 50, total: 250 };
+    stubDb([hold, invoice, { estimated_price: 250 }, paymentMethod]);
+    mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 250 });
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: true });
+  });
+
+  test('tax on top of the accepted base does not trip the cap (subtotal is the comparator)', async () => {
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 250, tax_amount: 17.5, total: 267.5 };
+    stubDb([hold, invoice, { estimated_price: 250 }, paymentMethod]);
+    mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 267.5 });
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: true });
+  });
+
+  test('FAILS CLOSED when no accepted amount is on file — not charged, review alert', async () => {
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 250, total: 250 };
+    stubDb([hold, invoice, { estimated_price: null }]);
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: false, reason: 'no_accepted_amount' });
+    expect(mockChargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('no accepted amount'),
+      expect.stringContaining('NOT charged'),
+      expect.anything(),
+    );
+    expect(mockDbUpdates).toEqual([]);
+  });
+
+  test('FAILS CLOSED when the accepted-amount lookup errors', async () => {
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 250, total: 250 };
+    stubDb([hold, invoice, new Error('db timeout')]);
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: false, reason: 'no_accepted_amount' });
+    expect(mockChargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -418,6 +507,54 @@ describe('handleCardHoldCancellation — fee guardrails', () => {
   });
 });
 
+describe('chargeNoShowFee — staleness guard (fee only for a FRESH missed visit)', () => {
+  const HOUR = 3600000;
+  const HELD = { id: 'h1', customer_id: 'cust1', stripe_payment_method_id: 'pm_s', no_show_fee_amount: 49, estimate_id: 'e1' };
+
+  it('refuses the fee and RELEASES the hold when the visit start is more than 48h past', async () => {
+    stubDb([HELD]); // hold lookup; releaseCardHold is an update, not a first()
+    mockApptTime.mockResolvedValue(new Date(Date.now() - 72 * HOUR));
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc1', reason: 'no_show' });
+    expect(r).toEqual(expect.objectContaining({ charged: false, reason: 'no_show_stale_start', released: true }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'released' })]));
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'charging' })]));
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('No-show fee not charged'),
+      expect.stringContaining('NOT charged'),
+      expect.objectContaining({ link: '/admin/customers/cust1' }),
+    );
+  });
+
+  it('charges the fee when the visit start is inside the 48h bound', async () => {
+    stubDb([HELD, { id: 'pmrow1' }]); // hold, then attach self-heal card-on-file check
+    mockApptTime.mockResolvedValue(new Date(Date.now() - 5 * HOUR));
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc1', reason: 'no_show' });
+    expect(r).toEqual(expect.objectContaining({ charged: true, amount: 49 }));
+    expect(mockChargeOffSession).toHaveBeenCalledTimes(1);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('an unresolvable start refuses the fee (never charge against a timeline we cannot justify)', async () => {
+    stubDb([HELD]);
+    mockApptTime.mockRejectedValue(new Error('appt lookup down'));
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc1', reason: 'no_show' });
+    expect(r).toEqual(expect.objectContaining({ charged: false, reason: 'no_show_start_unresolved' }));
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it('a caller-supplied fresh serviceStart skips the lookup and charges', async () => {
+    stubDb([HELD, { id: 'pmrow1' }]);
+    mockChargeOffSession.mockResolvedValue({ id: 'pi_fee', status: 'succeeded' });
+    const r = await chargeNoShowFee({ scheduledServiceId: 'svc1', reason: 'late_cancel', serviceStart: new Date(Date.now() - 1 * HOUR) });
+    expect(r).toEqual(expect.objectContaining({ charged: true }));
+    expect(mockApptTime).not.toHaveBeenCalled();
+  });
+});
+
 describe('verifyCardHoldIntent — accept gate', () => {
   it('satisfied directly by an already-held card', async () => {
     stubDb({ id: 'h1', stripe_payment_method_id: 'pm_held', stripe_setup_intent_id: 'si_held' });
@@ -479,8 +616,8 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
 
   it('mints the completion invoice and charges the held card, OMITTING taxRate so create() auto-computes (commercial+business)', async () => {
     // queue: held(recap) → scheduled_service(prepaid check) → invoice-by-SR(none)
-    // → invoice-by-SS(none) → held(charge) → invoice → pm row
-    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    // → invoice-by-SS(none) → held(charge) → invoice → visit(accepted cap) → pm row
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { estimated_price: 49 }, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     const arg = mockCreateFromService.mock.calls[0][1];
@@ -490,8 +627,8 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
   });
 
   it('reuses an existing invoice (by service_record_id) instead of minting a duplicate', async () => {
-    // held → scheduled_service(prepaid check) → invoice-by-SR FOUND → held(charge) → invoice → pm
-    stubDb([HELD, { prepaid_amount: null }, { id: 'inv_recap' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    // held → scheduled_service(prepaid check) → invoice-by-SR FOUND → held(charge) → invoice → visit(cap) → pm
+    stubDb([HELD, { prepaid_amount: null }, { id: 'inv_recap' }, HELD, COLLECTIBLE_INVOICE, { estimated_price: 49 }, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(mockCreateFromService).not.toHaveBeenCalled();
@@ -499,8 +636,8 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
   });
 
   it('reuses a pre-mint invoice linked only by scheduled_service_id (back-links it)', async () => {
-    // held → scheduled_service(prepaid check) → invoice-by-SR(none) → invoice-by-SS FOUND → held → invoice → pm
-    stubDb([HELD, { prepaid_amount: null }, null, { id: 'inv_premint', service_record_id: null }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    // held → scheduled_service(prepaid check) → invoice-by-SR(none) → invoice-by-SS FOUND → held → invoice → visit(cap) → pm
+    stubDb([HELD, { prepaid_amount: null }, null, { id: 'inv_premint', service_record_id: null }, HELD, COLLECTIBLE_INVOICE, { estimated_price: 49 }, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(mockCreateFromService).not.toHaveBeenCalled();
@@ -525,7 +662,7 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
   });
 
   it('alerts the office when the card charge fails (stranded draft, no pay-link UI)', async () => {
-    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { estimated_price: 49 }, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('card_declined'), { type: 'StripeCardError', payment_intent: { id: 'pi_x' } }));
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(r.reason).toBe('charge_failed');

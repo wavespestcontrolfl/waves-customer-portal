@@ -46,7 +46,14 @@ const { callBookingDateOnly } = require('./call-booking-catalog');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 const TEMPLATE_KEY = 'secure_appointment_card';
-const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
+// 'rescheduled' is a live pre-arrival status, not a terminal one: the
+// customer-portal reschedule request (routes/schedule.js) sets it on the
+// visit while the office re-slots, and the tech-track / reschedule-public /
+// dispatch classifiers all treat it as upcoming. Every consumer of this
+// list (funnel eligibility, the /secure page, capture completion) reads
+// non-membership as "nothing needed here", so leaving it out closed the
+// capture for a visit that is still happening.
+const LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 // Lease for both claim mechanics (the visit's card_link_sent_at send claim
 // and the request row's pending → completing completion claim): a claim
 // older than this with no durable outcome marker belongs to a dead worker

@@ -362,6 +362,29 @@ async function claimHoldForCharge(holdId) {
   return claimed > 0;
 }
 
+// Office-review alert when the completion charge is withheld by the
+// accepted-amount cap below — same style as the per-application autopay
+// lane's review alerts (admin-dispatch). Best-effort: the withheld charge
+// itself is the guard; the alert is how a human picks it up.
+async function alertCompletionChargeNeedsReview({ hold, scheduledServiceId, invoiceId, netInvoiceSubtotal, acceptedAmount }) {
+  const overCap = acceptedAmount != null;
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      overCap
+        ? 'Card-hold charge above accepted amount — review'
+        : 'Card-hold charge skipped — no accepted amount on file',
+      overCap
+        ? `A completed one-time visit's invoice ($${netInvoiceSubtotal.toFixed(2)} before tax, net of discounts) exceeds the amount accepted at booking ($${acceptedAmount.toFixed(2)}). The saved card was NOT charged — review and bill manually or adjust the invoice.`
+        : 'A completed one-time visit has an invoice but no accepted amount on file to cap the saved-card charge against. The saved card was NOT charged — review and bill manually or stamp the amount.',
+      {
+        link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+        metadata: { scheduledServiceId, invoiceId, invoiceSubtotal: netInvoiceSubtotal, acceptedAmount },
+      },
+    );
+  } catch (e) { logger.warn('[estimate-card-holds] completion cap review alert failed', { error: e.message }); }
+}
+
 // ── Phase 2: charge the held card on completion ──────────────────────────
 // Charge the saved hold card the final total of the completed-visit invoice,
 // reusing chargeInvoiceWithSavedCard (surcharge/tax/ledger/receipt). Pre-checks
@@ -384,6 +407,46 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
     await db('estimate_card_holds').where({ id: hold.id, status: 'held' })
       .update({ status: 'released', updated_at: db.fn.now() });
     return { charged: false, reason: 'invoice_not_collectible' };
+  }
+
+  // Accepted-amount cap (mirrors the per-application autopay lane's guard in
+  // admin-dispatch, owner ruling: an auto-charge may only collect what the
+  // customer accepted). The one-time total the customer accepted is stamped
+  // onto scheduled_services.estimated_price inside the accept transaction;
+  // the comparator is the invoice's pre-tax SUBTOTAL net of any recorded
+  // discount — tax rides the invoice and the surcharge is added by the
+  // single surcharge authority inside chargeInvoiceWithSavedCard, so base
+  // compares against base. Manual-discount accepts gross the service line up
+  // and bring it back with a negative discount line, so subtotal is netted
+  // by discount_amount (deposit credits are prior payment, never part of
+  // discount_amount, so they don't relax the cap). Over the cap — or with no
+  // accepted amount on file to cap against (fail CLOSED), or an unreadable
+  // stamp — NOTHING is charged: the hold stays 'held' (un-charged and
+  // reviewable), the office gets a review alert, and the caller's normal
+  // invoice/pay-link fallback proceeds exactly as if no card were saved.
+  let acceptedAmount = null;
+  try {
+    const visit = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('estimated_price');
+    if (visit?.estimated_price != null && Number(visit.estimated_price) > 0) {
+      acceptedAmount = Number(visit.estimated_price);
+    }
+  } catch (err) {
+    logger.error('[estimate-card-holds] accepted-amount lookup failed — completion charge routed to review', { scheduledServiceId, error: err.message });
+  }
+  const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
+  const invoiceDiscount = Math.max(0, Number(invoice.discount_amount) || 0);
+  const netInvoiceSubtotal = Math.round((invoiceSubtotal - invoiceDiscount) * 100) / 100;
+  if (acceptedAmount == null) {
+    logger.warn('[estimate-card-holds] completion charge withheld — no accepted amount on file to cap against', { scheduledServiceId, invoiceId, netInvoiceSubtotal });
+    await alertCompletionChargeNeedsReview({ hold, scheduledServiceId, invoiceId, netInvoiceSubtotal, acceptedAmount: null });
+    return { charged: false, reason: 'no_accepted_amount' };
+  }
+  if (netInvoiceSubtotal > acceptedAmount + 0.005) {
+    logger.warn('[estimate-card-holds] completion charge withheld — invoice exceeds accepted amount', { scheduledServiceId, invoiceId, netInvoiceSubtotal, acceptedAmount });
+    await alertCompletionChargeNeedsReview({ hold, scheduledServiceId, invoiceId, netInvoiceSubtotal, acceptedAmount });
+    return { charged: false, reason: 'above_accepted_amount' };
   }
 
   if (!(await claimHoldForCharge(hold.id))) return { charged: false, reason: 'not_held' };
@@ -567,11 +630,50 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
 // Charge the flat fee against the held card (face value, off-session). The fee
 // is read from the FROZEN hold row, not live constants. Idempotent on the hold
 // row; never throws into the host flow.
-async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show' }) {
+async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date() }) {
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   const hold = await heldCardForScheduledService(scheduledServiceId);
   if (!hold) return { charged: false, reason: 'no_hold' };
   const feeAmount = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
+
+  // Staleness guard (sibling of the cancel branch's post-start grace — see
+  // CARD_HOLD_POST_START_GRACE_MS): the fee is for a FRESH missed visit.
+  // Resolve the appointment's start from the trusted shared helper when the
+  // caller didn't supply it; a start older than NO_SHOW_FEE_MAX_AGE_MS — or
+  // one that can't be resolved at all (never charge a fee we can't justify
+  // against a real timeline, same direction as handleCardHoldCancellation) —
+  // refuses the fee, releases the hold free, and gives the office a
+  // heads-up so a legitimate fee can still be billed manually.
+  let start = serviceStart;
+  if (!start) {
+    try {
+      const { scheduledServiceApptTime } = require('./appointment-reminders');
+      start = await scheduledServiceApptTime(scheduledServiceId);
+    } catch (err) {
+      logger.warn('[estimate-card-holds] appt-time resolution for no-show fee failed — releasing free', { error: err.message });
+    }
+  }
+  const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  const startMs = startDate && !Number.isNaN(startDate.getTime()) ? startDate.getTime() : null;
+  if (startMs == null || now.getTime() - startMs > NO_SHOW_FEE_MAX_AGE_MS) {
+    const staleReason = startMs == null ? 'no_show_start_unresolved' : 'no_show_stale_start';
+    const release = await releaseCardHold({ scheduledServiceId, reason: staleReason });
+    logger.warn('[estimate-card-holds] no-show fee refused — hold released instead', { scheduledServiceId, reason: staleReason });
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'No-show fee not charged — hold released',
+        startMs == null
+          ? 'A visit was marked no-show but its scheduled time could not be resolved — the saved-card fee was NOT charged and the hold was released. Bill manually if the fee applies.'
+          : `A visit was marked no-show more than ${Math.round(NO_SHOW_FEE_MAX_AGE_MS / 3600000)} hours after its scheduled time — the saved-card fee was NOT charged and the hold was released. Bill manually if the fee applies.`,
+        {
+          link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
+          metadata: { scheduledServiceId, reason: staleReason },
+        },
+      );
+    } catch (e) { logger.warn('[estimate-card-holds] stale no-show release alert failed', { error: e.message }); }
+    return { charged: false, reason: staleReason, released: release.released };
+  }
 
   if (!(await claimHoldForCharge(hold.id))) return { charged: false, reason: 'not_held' };
 
@@ -666,6 +768,14 @@ async function releaseCardHold({ scheduledServiceId, reason = 'released' }) {
 // far outside it.
 const CARD_HOLD_POST_START_GRACE_MS = 2 * 3600000;
 
+// How long after the scheduled start a no_show flip may still draw the fee
+// (sibling of the post-start grace above, guarding the other charge leg).
+// Marking a weeks-old stuck visit no_show during row cleanup is bookkeeping,
+// not a fresh missed appointment — past this age the fee is refused and the
+// hold releases free with an office heads-up, so cleanup can never bill a
+// customer for ancient history. Threshold is owner-tunable.
+const NO_SHOW_FEE_MAX_AGE_MS = 48 * 3600000;
+
 // Whether a cancellation lands INSIDE the fee window (fee applies) vs outside
 // (free release). serviceStart is the appointment's scheduled start instant
 // (window_start). The fee window is (start − effectiveWindow, start +
@@ -722,7 +832,10 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
     }
   }
   if (start && isWithinCancelWindow({ hold, serviceStart: start, now })) {
-    return chargeNoShowFee({ scheduledServiceId, reason: 'late_cancel' });
+    // Pass the start this branch just verified: an in-window cancel is fresh
+    // by construction, so the fee path's staleness guard sees the same
+    // instant instead of re-resolving (or failing to resolve) it.
+    return chargeNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
   }
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
   const startPassed = startDate && !Number.isNaN(startDate.getTime()) && startDate.getTime() <= now.getTime();
