@@ -202,6 +202,12 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee\n\n$250 deposit due'))
       .toBe('Inspection fee\n\n$250 deposit due');
   });
+  test('a money-noun proper name inside a street address never breaks the cue', () => {
+    expect(redactInspectionFeeCues('Inspection fee for the property at 123 Price Street is $250'))
+      .toBe('Inspection fee for the property at 123 Price Street is [fee removed]');
+    expect(redactInspectionFeeCues('Inspection fee at 42 Value Lane: USD 250'))
+      .toBe('Inspection fee at 42 Value Lane: [fee removed]');
+  });
   test('a pre-cue fee never triggers a forward match on a later amount', () => {
     expect(redactInspectionFeeCues('The $250 inspection fee was collected at closing with $400 held in escrow.'))
       .toBe('The [fee removed] inspection fee was collected at closing with $400 held in escrow.');

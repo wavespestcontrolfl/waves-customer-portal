@@ -100,6 +100,13 @@ const AMOUNT_LINE_BREAK = '\\r?\\n(?=[ \\t]*(?:\\$|USD\\b|US\\$|\\d))';
 const PARTY_AGENT_PHRASE =
   '\\b(?:by|from)\\s+(?:the\\s+)?(?:buyers?|sellers?|owners?|tenants?|landlords?|realtors?|lenders?|title\\s+compan(?:y|ies))\\b';
 
+// A street address is consumed atomically so a proper name inside it that
+// happens to match a money noun never breaks the cue — "the property at
+// 123 Price Street is $250" must still redact the fee. Number + capitalized
+// words + a street suffix.
+const STREET_ADDRESS_PHRASE =
+  '\\d+\\s+[A-Z][\\w\\-]*(?:\\s+[A-Z][\\w\\-]*){0,3}\\s+(?:Street|St|Avenue|Ave|Road|Rd|Lane|Ln|Boulevard|Blvd|Drive|Dr|Court|Ct|Way|Place|Pl|Terrace|Ter|Circle|Cir|Trail|Trl|Parkway|Pkwy)\\b\\.?';
+
 // Amount-FIRST constructions name their subject right after the number —
 // "$400,000 purchase price", "$400 balance remains". An amount directly
 // followed by a money-subject noun is that subject's amount, never the fee,
@@ -172,7 +179,7 @@ const RANGE_CONTINUATION =
 
 const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
-  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${CONTAINER_PHRASE}|${FEE_SCOPE_PHRASE}|${PARTY_AGENT_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
+  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${STREET_ADDRESS_PHRASE}|${CONTAINER_PHRASE}|${FEE_SCOPE_PHRASE}|${PARTY_AGENT_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
   + `(?:${AMOUNT_PATTERN})`
   + RANGE_CONTINUATION
   // (?![,.]?\d) forbids backtracking into a partial number ("$400" out of

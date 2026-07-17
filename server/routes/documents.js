@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
-const { getProjectType, customerSafeServiceNotes } = require('../services/project-types');
+const { getProjectType, customerSafeServiceNotes, redactInspectionFeeCuesForType } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
@@ -795,7 +795,11 @@ router.get('/', authenticate, async (req, res, next) => {
       return {
         id: `project_${p.id}`,
         documentType,
-        title: p.title || (isCertificate ? label : `${label} Report`),
+        // same type-gated fee scrub as the report page headline — covers a
+        // legacy title (or a CAS-skipped concurrent write) at this egress
+        // (codex #2817)
+        title: (p.title ? redactInspectionFeeCuesForType(p.title, p.project_type) : null)
+          || (isCertificate ? label : `${label} Report`),
         description: p.sent_at ? `Report sent ${formatDate(p.sent_at)}` : label,
         fileName: `${label.replace(/\s+/g, '_')}_${p.sent_at ? new Date(p.sent_at).toISOString().slice(0, 10) : 'report'}.pdf`,
         uploadedBy: 'auto_generated',

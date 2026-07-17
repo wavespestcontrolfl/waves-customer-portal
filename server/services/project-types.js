@@ -1091,7 +1091,9 @@ function filingBinaryMayDiscloseFee(filing) {
 // legitimate disclosure and must not be touched.
 function customerSafeServiceNotes(notes, structuredNotes) {
   if (!notes) return notes || null;
-  const type = structuredNotes?.projectType;
+  let parsed = structuredNotes;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { parsed = null; } }
+  const type = parsed?.projectType;
   return (type && projectTypeHasInternalFindingKeys(type))
     ? redactInspectionFeeCues(notes)
     : notes;
