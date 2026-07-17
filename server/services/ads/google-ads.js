@@ -78,6 +78,19 @@ async function syncCampaigns() {
   try {
     logger.info('[google-ads] Syncing campaigns');
 
+    // Everything mirrored below was observed at/after this instant. A local
+    // writer (advisor apply, budget cron, manual edit, compensating rollback)
+    // that touches a row AFTER this fetch began has fresher state than our
+    // Google snapshot — the upsert skips those rows instead of landing a
+    // stale pre-write observation over them (they bump updated_at inside
+    // their own row-locked transactions). Tomorrow's sync mirrors fresh.
+    // CLOCK CONTRACT: writers stamp updated_at with a JS wall-clock Date at
+    // the moment of the write statement (post-push) — NOT trx.fn.now(), whose
+    // transaction-START semantics would let a slow writer commit with a stamp
+    // older than this fence and get silently overwritten. Both sides of the
+    // comparison use this process's clock, so there is no cross-clock skew.
+    const fetchStartedAt = new Date();
+
     const campaigns = await customer.query(`
       SELECT
         campaign.id,
@@ -113,34 +126,46 @@ async function syncCampaigns() {
         updated_at: new Date(),
       };
 
-      // Upsert — match on platform + platform_campaign_id
-      const existing = await db('ad_campaigns')
-        .where({ platform: 'google_ads', platform_campaign_id: platformId })
-        .first();
+      // Upsert — match on platform + platform_campaign_id. The decide+write
+      // runs under the same FOR UPDATE row lock every budget writer holds,
+      // and is fenced on updated_at so a stale pre-fetch observation can
+      // never land over a local write that committed after our Google fetch
+      // began (e.g. a compensating rollback restoring a failed push).
+      await db.transaction(async (trx) => {
+        const existing = await trx('ad_campaigns')
+          .where({ platform: 'google_ads', platform_campaign_id: platformId })
+          .forUpdate()
+          .first();
 
-      if (existing) {
-        // daily_budget_base is CANONICAL LOCAL STATE (owner-set via
-        // /admin/ads setBudget, seeded on first discovery) — never overwrite
-        // it from the live amount. The live amount can be a capacity
-        // throttle the budget loop pushed (stop = 1% of base), including
-        // one still live after a failed restore-to-base push; trusting it
-        // as the new base would leave the campaign permanently throttled
-        // because a green-capacity run would "restore" to the tiny base.
-        // In 'base' mode we can't tell a failed restore from a legitimate
-        // Ads-Manager edit, so base only changes through /admin/ads and the
-        // reconcile loop enforces it outward. Live amount still lands in
-        // daily_budget_current below — that column IS ground truth.
-        if (existing.daily_budget_base != null) {
-          delete data.daily_budget_base;
+        if (existing) {
+          if (existing.updated_at && new Date(existing.updated_at) >= fetchStartedAt) {
+            logger.info(`[google-ads] sync skipping ${data.campaign_name} — local state changed after this sync's fetch began`);
+            results.push(existing);
+            return;
+          }
+          // daily_budget_base is CANONICAL LOCAL STATE (owner-set via
+          // /admin/ads setBudget, seeded on first discovery) — never overwrite
+          // it from the live amount. The live amount can be a capacity
+          // throttle the budget loop pushed (stop = 1% of base), including
+          // one still live after a failed restore-to-base push; trusting it
+          // as the new base would leave the campaign permanently throttled
+          // because a green-capacity run would "restore" to the tiny base.
+          // In 'base' mode we can't tell a failed restore from a legitimate
+          // Ads-Manager edit, so base only changes through /admin/ads and the
+          // reconcile loop enforces it outward. Live amount still lands in
+          // daily_budget_current below — that column IS ground truth.
+          if (existing.daily_budget_base != null) {
+            delete data.daily_budget_base;
+          }
+          await trx('ad_campaigns').where({ id: existing.id }).update(data);
+          results.push({ ...existing, ...data });
+        } else {
+          const [inserted] = await trx('ad_campaigns')
+            .insert({ id: uuidv4(), ...data, created_at: new Date() })
+            .returning('*');
+          results.push(inserted);
         }
-        await db('ad_campaigns').where({ id: existing.id }).update(data);
-        results.push({ ...existing, ...data });
-      } else {
-        const [inserted] = await db('ad_campaigns')
-          .insert({ id: uuidv4(), ...data, created_at: new Date() })
-          .returning('*');
-        results.push(inserted);
-      }
+      });
     }
 
     logger.info(`[google-ads] Synced ${results.length} campaigns`);
@@ -437,9 +462,13 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
   try {
     logger.info(`[google-ads] Updating budget for campaign ${platformCampaignId} to $${dailyBudgetDollars}/day`);
 
-    // First, get the campaign's budget resource name
+    // First, get the campaign's budget resource name — and the amount it is
+    // running RIGHT NOW: callers' compensating rollbacks restore this observed
+    // pre-mutation amount, not the locally recorded current (which can be
+    // stale after an Ads Manager edit or a prior failed push's committed
+    // intent).
     const [campaignData] = await customer.query(`
-      SELECT campaign.id, campaign.campaign_budget, campaign_budget.explicitly_shared
+      SELECT campaign.id, campaign.campaign_budget, campaign_budget.explicitly_shared, campaign_budget.amount_micros
       FROM campaign
       WHERE campaign.id = ${platformCampaignId}
     `);
@@ -475,7 +504,15 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
     ]);
 
     logger.info(`[google-ads] Budget updated for campaign ${platformCampaignId}: $${dailyBudgetDollars}/day`);
-    return { success: true, platformCampaignId, dailyBudget: dailyBudgetDollars };
+    const previousMicros = campaignData.campaign_budget?.amount_micros;
+    return {
+      success: true,
+      platformCampaignId,
+      dailyBudget: dailyBudgetDollars,
+      // Live amount observed immediately before this mutation (null if the
+      // API omitted it) — the rollback's restore target.
+      previousDailyBudget: previousMicros != null ? Number(previousMicros) / 1_000_000 : null,
+    };
   } catch (err) {
     logger.error(`[google-ads] updateBudget failed: ${err.message}`);
     return null;
