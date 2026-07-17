@@ -276,14 +276,23 @@ function containsInspectionFeeCue(text) {
   return FEE_CUE_TEST_RE.test(str) || PRE_CUE_TEST_RE.test(str);
 }
 
-// Value-based scrub for LEGACY backfills: given the structured fee values a
-// project actually recorded (findings.inspection_fee + archived filing
-// snapshots), remove those specific amounts from free text even when the
-// prose PARAPHRASES the fee without the literal cue ("the quoted $250
-// charge"). Currency-marked matches always redact; a bare number only when
-// it stands alone as an amount (not part of a longer number, price-per-sqft
-// decimal, date, or measurement). Regexes are built at call time — this
-// path runs in migrations/backfills only, never in the browser bundle.
+// Value-based scrub for LEGACY backfills and pre-model prompt inputs: given
+// the structured fee values a project actually recorded
+// (findings.inspection_fee + archived filing snapshots), remove those
+// specific amounts from free text even when the prose PARAPHRASES the fee
+// without the literal cue ("the quoted $250 charge"). Currency-marked
+// matches redact; a bare number only when it stands alone as an amount (not
+// part of a longer number, decimal, date, or measurement). CONTEXT-BOUNDED:
+// an amount whose nearby text names a different money subject ("Repair cost
+// $250", "$250 repair completed") is that subject's amount — skipped even
+// when it numerically equals the fee, so a coincidental match never
+// corrupts legitimate customer text. Regexes are built at call time — this
+// path runs server-side only, never in the browser bundle.
+const VALUE_SCRUB_SUBJECTS =
+  /\b(?:repairs?|re-?treatments?|treatments?|permits?|damages?|estimates?|deductibles?|discounts?|credits?|balance|totals?|subtotal|prices?|costs?|charges?|values?|purchase|escrow|deposits?)\b/i;
+// Fee-context words override the subject skip: "The WDO inspection costs
+// $250" is the fee being paraphrased even though "costs" is a money noun.
+const VALUE_SCRUB_FEE_CONTEXT = /\b(?:inspection|wdo|fee)\b/i;
 function redactSpecificAmounts(text, values) {
   let str = String(text || '');
   if (!str) return str;
@@ -302,7 +311,16 @@ function redactSpecificAmounts(text, values) {
       + `|(?<![\\d.$/:\\-])${num}(?:\\.00?)?\\b(?![.,]?\\d)(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b))`,
       'g',
     );
-    str = str.replace(re, '[fee removed]');
+    str = str.replace(re, (match, offset, whole) => {
+      // replace() passes (match, ...groups, offset, string); this regex has
+      // no capture groups, so the arguments line up as declared. Only the
+      // text BEFORE the amount is checked: "Repair cost $250" skips, while
+      // the fee paraphrase "the quoted $250 charge" (subject AFTER) redacts.
+      const clauseStart = Math.max(0, offset - 50);
+      const before = whole.slice(clauseStart, offset).split(/[.;!?\n]/).pop() || '';
+      if (VALUE_SCRUB_SUBJECTS.test(before) && !VALUE_SCRUB_FEE_CONTEXT.test(before)) return match;
+      return '[fee removed]';
+    });
   }
   return str;
 }

@@ -314,7 +314,9 @@ function buildServiceRecordInsert({
   // inspection-fee scrub at this copy boundary too (codex #2817). Type-gated:
   // only WDO carries the internal fee field.
   const notes = [
-    project.title ? `Project completed: ${project.title}` : 'Project completed.',
+    // the title is customer-facing free text too — a legacy/deploy-window
+    // title carrying the fee must not ride into the notes copy (codex #2817)
+    project.title ? `Project completed: ${redactInspectionFeeCuesForType(String(project.title), project.project_type)}` : 'Project completed.',
     project.recommendations ? redactInspectionFeeCuesForType(String(project.recommendations), project.project_type) : '',
   ].filter(Boolean).join('\n\n');
   const structuredNotes = projectCompletionNotes({

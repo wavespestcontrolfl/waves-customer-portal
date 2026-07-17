@@ -31,6 +31,7 @@ const {
   getProjectType,
   stripInternalFindingKeys,
   redactInspectionFeeCues,
+  redactSpecificAmounts,
   redactInspectionFeeCuesForType,
   redactProjectTitleForWrite,
   projectTypeConfigHasInternalFindingKeys,
@@ -880,24 +881,27 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
   // a legitimate estimate. Gated on the type config: only a type carrying the
   // internal fee field (WDO) gets its free text scrubbed.
   const typeCarriesFee = projectTypeConfigHasInternalFindingKeys(typeCfg);
-  const safeRawRecommendations = typeCarriesFee
-    ? redactInspectionFeeCues(rawRecommendations)
-    : rawRecommendations;
-  // Customer SMS/email/call text can quote the fee ("Is the inspection fee
-  // $250?") and the prompt asks the model to SUMMARIZE that concern — a
-  // paraphrase ("the quoted $250 charge") no longer carries the literal cue
-  // the write/egress scrubs key on, so the fee must be removed BEFORE the
-  // model sees it (codex #2817).
-  const safeCommunicationContext = typeCarriesFee
-    ? redactInspectionFeeCues(communicationContext)
-    : communicationContext;
-  // Photo captions are technician free text too — a caption quoting the fee
-  // would otherwise reach the model verbatim and can be paraphrased into the
-  // narrative without the literal cue the downstream guards key on
-  // (codex #2817).
-  const safePhotoLines = typeCarriesFee
-    ? redactInspectionFeeCues(photoLines)
-    : photoLines;
+  // Two passes on every free-text prompt input: the literal-cue scrub, plus
+  // the VALUE scrub with the fee this project actually recorded — customer
+  // text can mention the amount without the words "inspection fee" ("buyer
+  // asked whether the $250 charge is due"), and once the model paraphrases
+  // it the downstream cue guards can no longer recognize it (codex #2817).
+  let parsedFindingsForFee = findings;
+  if (typeof parsedFindingsForFee === 'string') {
+    try { parsedFindingsForFee = JSON.parse(parsedFindingsForFee); } catch { parsedFindingsForFee = null; }
+  }
+  const recordedFeeValues = typeCarriesFee && parsedFindingsForFee?.inspection_fee != null
+    ? [parsedFindingsForFee.inspection_fee]
+    : [];
+  const scrubPromptInput = (text) => {
+    if (!typeCarriesFee) return text;
+    let safe = redactInspectionFeeCues(text);
+    if (recordedFeeValues.length) safe = redactSpecificAmounts(safe, recordedFeeValues);
+    return safe;
+  };
+  const safeRawRecommendations = scrubPromptInput(rawRecommendations);
+  const safeCommunicationContext = scrubPromptInput(communicationContext);
+  const safePhotoLines = scrubPromptInput(photoLines);
   const findingsLines = Object.entries(stripInternalFindingKeys(findings, { redactValues: typeCarriesFee }) || {})
     .map(([k, v]) => [k, formatFindingForPrompt(v)])
     .filter(([, v]) => v.trim() !== '')

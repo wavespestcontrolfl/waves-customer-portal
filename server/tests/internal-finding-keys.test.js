@@ -76,10 +76,16 @@ describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
   test('removes the recorded fee value even when the prose paraphrases it', () => {
     expect(redactSpecificAmounts('We quoted the $250 charge for this visit.', ['250']))
       .toBe('We quoted the [fee removed] charge for this visit.');
+    expect(redactSpecificAmounts('Buyer asked whether the $250 charge is due at closing.', ['250']))
+      .toBe('Buyer asked whether the [fee removed] charge is due at closing.');
     expect(redactSpecificAmounts('The WDO inspection costs 250 dollars today.', ['$250']))
       .toBe('The WDO inspection costs [fee removed] today.');
-    expect(redactSpecificAmounts('Total $1,250 includes materials.', ['1250']))
-      .toBe('Total [fee removed] includes materials.');
+  });
+  test('a coincidental match with another money subject is never corrupted', () => {
+    expect(redactSpecificAmounts('Repair cost $250 for the sill plate.', ['250']))
+      .toBe('Repair cost $250 for the sill plate.');
+    expect(redactSpecificAmounts('Treatment estimate $250 approved.', ['250']))
+      .toBe('Treatment estimate $250 approved.');
   });
   test('never touches longer numbers, dates, or measurements', () => {
     expect(redactSpecificAmounts('Fee tier 2 applies to 2500 sq ft homes.', ['250']))
