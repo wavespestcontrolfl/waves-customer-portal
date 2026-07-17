@@ -24,6 +24,7 @@ const PRODUCTS = [
   {
     name: 'TriTek Spray Oil Emulsion (OMRI)',
     category: 'insecticide', // lowercase — waveguard-approval-engine matches exactly
+    application_method: 'foliar_spray',
     manufacturer: 'BRANDT',
     active_ingredient: 'Mineral oil 80%',
     epa_reg_number: '48813-1',
@@ -47,6 +48,7 @@ const PRODUCTS = [
   {
     name: 'Azatin O Biological Insecticide',
     category: 'insecticide',
+    application_method: 'foliar_spray',
     manufacturer: 'OHP',
     active_ingredient: 'Azadirachtin 4.5%',
     epa_reg_number: '70051-9-59807',
@@ -67,6 +69,9 @@ const PRODUCTS = [
   {
     name: 'Sequestar 6% Fe EDDHA Soluble Micronutrient',
     category: 'Micronutrient Fertilizer',
+    // Soil-drench corrective — without an explicit method the closeout
+    // would infer granular_broadcast from the 'Fertilizer' category.
+    application_method: 'soil_drench',
     manufacturer: 'BRANDT',
     active_ingredient: '6% Fe (EDDHA chelate)',
     epa_reg_number: 'N/A',
@@ -86,6 +91,7 @@ const PRODUCTS = [
   {
     name: 'Southern Ag Copper Fungicide 27.15%',
     category: 'fungicide',
+    application_method: 'foliar_spray',
     manufacturer: 'Southern Ag',
     active_ingredient: 'Copper diammonia diacetate complex 27.15%',
     epa_reg_number: '10465-3-829',
@@ -107,6 +113,9 @@ const PRODUCTS = [
   {
     name: 'Espoma Organic Soil Acidifier',
     category: 'Soil Amendment',
+    // Granular bed corrective — without an explicit method the closeout
+    // would fall through to the tree/shrub foliar_spray default.
+    application_method: 'granular_broadcast',
     manufacturer: 'Espoma',
     active_ingredient: 'Elemental sulfur 30%',
     epa_reg_number: 'N/A',
@@ -146,6 +155,7 @@ async function ensureProduct(knex, spec) {
       default_rate_per_1000: spec.default_rate_per_1000 ?? null,
       default_rate: spec.default_rate ?? null,
       default_unit: spec.default_unit ?? null,
+      application_method: spec.application_method ?? null,
       container_size: spec.container_size,
       unit_size_oz: spec.unit_size_oz,
       best_price: spec.best_price,
@@ -185,6 +195,18 @@ async function ensureAlias(knex, productId, aliasName) {
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
+
+  // Explicit application method for closeout prefill — SchedulePage's
+  // defaultApplicationMethod honors this before its category/formulation
+  // heuristics, which misclassify the soil products here (EDDHA reads as
+  // granular via 'Fertilizer'; Espoma falls to the T&S foliar default).
+  // Guarded: the column is new with this migration.
+  if (!(await knex.schema.hasColumn('products_catalog', 'application_method'))) {
+    await knex.schema.alterTable('products_catalog', (t) => {
+      t.string('application_method', 50);
+    });
+  }
+
   const hasAliases = await knex.schema.hasTable('product_aliases');
 
   for (const spec of PRODUCTS) {

@@ -985,13 +985,13 @@
         "visit_type": "Granular bed visit + targeted drench if justified",
         "main_goal": "Clean visual start, winter palm nutrition, bed pre-emergent, and documented systemic only where needed.",
         "primary": "Snapshot 2.5TG Q1: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\n8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone where ordinance allows ($5.31)\n13-0-13 ornamental fertilizer: 0.25-0.50 lb N/1,000 sq ft equivalent where needed ($4.32)",
-        "secondary": "Merit 2F drench only for documented scale/whitefly/borer history; log as IRAC 4A ($4.25)\nTriTek spray oil 1.0-1.5% if scale crawlers are active and plant/weather safe ($6.08)\nOrganic acidifier (Espoma) only for high-pH/chlorosis properties ($5.32)",
+        "secondary": "Merit 2F drench only for documented scale/whitefly/borer history; log as IRAC 4A ($4.25)\nTriTek spray oil 1.0-1.5% if scale crawlers are active and plant/weather safe ($6.08)\nOrganic acidifier (Espoma) only for high-pH/chlorosis properties ($17.72)",
         "material_cost": "22.47",
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
         "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos.",
-        "conditional_cost": "4.99"
+        "conditional_cost": "8.09"
       },
       {
         "visit": 2,
@@ -1069,13 +1069,13 @@
         "visit_type": "Granular Snapshot + scout/spot PHC",
         "main_goal": "Keep beds clean during summer while maintaining a zero-N/P route for Sarasota/Manatee.",
         "primary": "Snapshot 2.5TG Q3: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\nScout bed weeds, whitefly, scale crawlers, palm deficiency symptoms, and heat stress\nSarasota/Manatee: zero N/P landscape fertilizer during blackout",
-        "secondary": "Mainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nDistance or Talus for scale crawlers/nymphs ($16.52)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($9.31)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)",
+        "secondary": "Mainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nDistance or Talus for scale crawlers/nymphs ($16.52)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($37.25)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)",
         "material_cost": "17.16",
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
         "notes": "July palm/ornamental N/P fertilizer is blocked on Sarasota/Manatee landscape accounts. Snapshot is fine; 8-2-12 and 13-0-13 are not.",
-        "conditional_cost": "15.47"
+        "conditional_cost": "22.46"
       },
       {
         "visit": 8,
@@ -1124,14 +1124,14 @@
         "month": "Nov",
         "visit_type": "Foliar cleanup + root/add-on work",
         "main_goal": "Cool-season cleanup, micronutrient correction, root support, and diagnosed injection add-on opportunities.",
-        "primary": "TriTek spray oil: 1.0-1.5% if plant/weather safe ($6.08)\nNutriRoot: label rate where site supports root nutrition ($5.65)\nMn Combo: label rate ($1.33)\nOrganic acidifier (Espoma) only where pH/chlorosis data supports it ($5.32)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis sites ($1.73)",
+        "primary": "TriTek spray oil: 1.0-1.5% if plant/weather safe ($6.08)\nNutriRoot: label rate where site supports root nutrition ($5.65)\nMn Combo: label rate ($1.33)\nOrganic acidifier (Espoma) only where pH/chlorosis data supports it ($17.72)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis sites ($1.73)",
         "secondary": "Mn-Jet Fe add-on for diagnosed palm Mn/Fe deficiency pattern ($11.50)\nPalm-Jet Mg add-on for diagnosed Mg deficiency ($12.56)\nPropizol only for labeled diagnosed tree disease ($11.83)\nArtavia or Headway only if label fits and FRAC log allows ($2.11)",
         "material_cost": "7.41",
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "Call this cool-season cleanup, not dormant spray. SWFL ornamentals are not truly dormant like northern landscapes.",
-        "conditional_cost": "2.29"
+        "conditional_cost": "5.39"
       },
       {
         "visit": 12,
