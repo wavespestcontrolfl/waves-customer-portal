@@ -592,11 +592,6 @@ router.post('/:id/send', async (req, res, next) => {
     }
     assertEstimateSendable(estimate, { engineReviewAcknowledged });
 
-    if (!['sms', 'email', 'both'].includes(sendMethod)) {
-      return res.status(400).json({ error: 'Invalid sendMethod' });
-    }
-    assertEstimateSendable(estimate);
-
     if (scheduledAt) {
       const scheduledTime = new Date(scheduledAt);
       if (isNaN(scheduledTime.getTime())) {
