@@ -78,6 +78,14 @@ async function syncCampaigns() {
   try {
     logger.info('[google-ads] Syncing campaigns');
 
+    // Everything mirrored below was observed at/after this instant. A local
+    // writer (advisor apply, budget cron, manual edit, compensating rollback)
+    // that touches a row AFTER this fetch began has fresher state than our
+    // Google snapshot — the upsert skips those rows instead of landing a
+    // stale pre-write observation over them (they bump updated_at inside
+    // their own row-locked transactions). Tomorrow's sync mirrors fresh.
+    const fetchStartedAt = new Date();
+
     const campaigns = await customer.query(`
       SELECT
         campaign.id,
@@ -113,34 +121,46 @@ async function syncCampaigns() {
         updated_at: new Date(),
       };
 
-      // Upsert — match on platform + platform_campaign_id
-      const existing = await db('ad_campaigns')
-        .where({ platform: 'google_ads', platform_campaign_id: platformId })
-        .first();
+      // Upsert — match on platform + platform_campaign_id. The decide+write
+      // runs under the same FOR UPDATE row lock every budget writer holds,
+      // and is fenced on updated_at so a stale pre-fetch observation can
+      // never land over a local write that committed after our Google fetch
+      // began (e.g. a compensating rollback restoring a failed push).
+      await db.transaction(async (trx) => {
+        const existing = await trx('ad_campaigns')
+          .where({ platform: 'google_ads', platform_campaign_id: platformId })
+          .forUpdate()
+          .first();
 
-      if (existing) {
-        // daily_budget_base is CANONICAL LOCAL STATE (owner-set via
-        // /admin/ads setBudget, seeded on first discovery) — never overwrite
-        // it from the live amount. The live amount can be a capacity
-        // throttle the budget loop pushed (stop = 1% of base), including
-        // one still live after a failed restore-to-base push; trusting it
-        // as the new base would leave the campaign permanently throttled
-        // because a green-capacity run would "restore" to the tiny base.
-        // In 'base' mode we can't tell a failed restore from a legitimate
-        // Ads-Manager edit, so base only changes through /admin/ads and the
-        // reconcile loop enforces it outward. Live amount still lands in
-        // daily_budget_current below — that column IS ground truth.
-        if (existing.daily_budget_base != null) {
-          delete data.daily_budget_base;
+        if (existing) {
+          if (existing.updated_at && new Date(existing.updated_at) >= fetchStartedAt) {
+            logger.info(`[google-ads] sync skipping ${data.campaign_name} — local state changed after this sync's fetch began`);
+            results.push(existing);
+            return;
+          }
+          // daily_budget_base is CANONICAL LOCAL STATE (owner-set via
+          // /admin/ads setBudget, seeded on first discovery) — never overwrite
+          // it from the live amount. The live amount can be a capacity
+          // throttle the budget loop pushed (stop = 1% of base), including
+          // one still live after a failed restore-to-base push; trusting it
+          // as the new base would leave the campaign permanently throttled
+          // because a green-capacity run would "restore" to the tiny base.
+          // In 'base' mode we can't tell a failed restore from a legitimate
+          // Ads-Manager edit, so base only changes through /admin/ads and the
+          // reconcile loop enforces it outward. Live amount still lands in
+          // daily_budget_current below — that column IS ground truth.
+          if (existing.daily_budget_base != null) {
+            delete data.daily_budget_base;
+          }
+          await trx('ad_campaigns').where({ id: existing.id }).update(data);
+          results.push({ ...existing, ...data });
+        } else {
+          const [inserted] = await trx('ad_campaigns')
+            .insert({ id: uuidv4(), ...data, created_at: new Date() })
+            .returning('*');
+          results.push(inserted);
         }
-        await db('ad_campaigns').where({ id: existing.id }).update(data);
-        results.push({ ...existing, ...data });
-      } else {
-        const [inserted] = await db('ad_campaigns')
-          .insert({ id: uuidv4(), ...data, created_at: new Date() })
-          .returning('*');
-        results.push(inserted);
-      }
+      });
     }
 
     logger.info(`[google-ads] Synced ${results.length} campaigns`);
