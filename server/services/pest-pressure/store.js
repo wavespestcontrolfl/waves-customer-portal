@@ -400,9 +400,11 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
     // the tie-break — admin recalculation rewrites it, which would re-sort an
     // older recalculated report ahead of its later sibling and leak that
     // sibling (codex P2 #2824 r2). started_at is stamped at visit time and
-    // never rewritten; NULLS LAST keeps legacy no-timestamp rows oldest
-    // within the day; pps.id is the final immutable tie-break.
+    // never rewritten; sr.created_at covers same-day legacy pairs with NULL
+    // started_at (pps.id is a RANDOM UUID, not chronology — codex P2 r4 —
+    // so it survives only as an arbitrary-but-deterministic last resort).
     .orderByRaw('sr.started_at DESC NULLS LAST')
+    .orderByRaw('sr.created_at DESC NULLS LAST')
     .orderBy('pps.id', 'desc')
     // Over-fetch when a same-day trim is requested so the trim can't starve
     // the window below `limit`.
@@ -445,12 +447,29 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
       )
       .first();
     if (currentRow) {
-      const dayKey = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10));
-      const currentDay = dayKey(currentRow.service_date);
-      // Dropping the whole tied day also drops legitimate earlier same-day
-      // siblings — accepted: this branch only fires in the pathological
-      // ≥limit+8-same-day-rows case, and closed beats leaking later visits.
-      const earlierDays = rows.filter((row) => dayKey(row.service_date) !== currentDay);
+      // Query strictly-earlier days directly rather than filtering the
+      // already-fetched window: in this branch the window is saturated by
+      // same-day siblings, so it may contain few or NO earlier-day rows at
+      // all (codex P2 #2824 r4). Dropping the tied day entirely (including
+      // legitimate earlier same-day siblings) stays the accepted tradeoff —
+      // closed beats leaking later visits.
+      const earlierQuery = knex('pest_pressure_scores as pps')
+        .leftJoin('service_records as sr', 'sr.id', 'pps.service_record_id')
+        .where('pps.customer_id', customerId)
+        .where('pps.service_date', '<', currentRow.service_date)
+        .orderBy('pps.service_date', 'desc')
+        .orderByRaw('sr.started_at DESC NULLS LAST')
+        .orderByRaw('sr.created_at DESC NULLS LAST')
+        .orderBy('pps.id', 'desc')
+        .limit(limit);
+      if (serviceLine) earlierQuery.where('pps.service_line', serviceLine);
+      const earlierDays = await earlierQuery.select(
+        'pps.id', 'pps.service_record_id', 'pps.service_date', 'pps.service_line',
+        'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
+        'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
+        'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
+        'pps.calculation_version', 'pps.calculated_at',
+      ).catch(() => []);
       return [currentRow, ...earlierDays].slice(0, limit);
     }
     return rows.slice(0, limit);

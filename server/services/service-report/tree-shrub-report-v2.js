@@ -319,15 +319,18 @@ function buildTreeShrubReportV2({
   // Peace-of-mind line (Task layout §1). Honest: monitoring count, no urgency unless real.
   const monitorCount = issues.length;
   const hasUrgent = insights.some((i) => i.status === 'urgent' || i.status === 'needs_attention');
-  // Treatment claims are gated on `treatment` (null when nothing was applied):
-  // an inspection-only visit must not say "completed treatment".
+  // Treatment claims are gated on actual PRODUCT applications — `treatment`
+  // truthiness is not enough, because an action-only visit (protocol actions
+  // recorded, nothing applied) still returns a truthy focus-carrying object
+  // (codex P2 #2824 r4).
+  const productsApplied = Boolean(treatment && treatment.products.length);
   const peaceOfMind = hasUrgent
-    ? (treatment
+    ? (productsApplied
       ? `We found ${monitorCount} item${monitorCount === 1 ? '' : 's'} to address today and completed treatment for ${monitorCount === 1 ? 'it' : 'them'}.`
       : `We found ${monitorCount} item${monitorCount === 1 ? '' : 's'} to address today and documented ${monitorCount === 1 ? 'it' : 'them'} below.`)
     : monitorCount > 0
       ? `No urgent plant decline was found today. We noted ${monitorCount} item${monitorCount === 1 ? '' : 's'} to monitor and will recheck ${monitorCount === 1 ? 'it' : 'them'} on future visits.`
-      : (treatment
+      : (productsApplied
         ? 'No urgent plant decline was found today. Your scheduled treatment is complete and your landscape plants are protected.'
         : 'No urgent plant decline was found today. We completed a full inspection of your landscape plants.');
 
