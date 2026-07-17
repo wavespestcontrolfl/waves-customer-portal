@@ -1077,6 +1077,104 @@ describe('Agent Estimate property lookup safety', () => {
     ]));
   });
 
+  test('does not authenticate an explicitly negated numeric measurement', async () => {
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    const draftFor = async (quote) => {
+      mockBuildAgentEstimateContext.mockResolvedValueOnce({
+        lead: {
+          id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+        },
+        quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+        calls: [], sms_thread: [], activities: [],
+        customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+      });
+      return executeEstimateTool('create_agent_estimate_draft', {
+        ...INPUT,
+        engineInputs: { homeSqFt: 2000, services: { pest: { frequency: 'quarterly' } } },
+        evidence: [{ source: 'quote_form', quote, decision: 'home square footage' }],
+        propertyFacts: {
+          address: INPUT.propertyFacts.address,
+          homeSqFt: { value: 2000, source: 'operator_confirmation', confidence: 'high' },
+          'services.pest.frequency': INPUT.propertyFacts['services.pest.frequency'],
+        },
+      });
+    };
+
+    const negated = await draftFor('The home is not 2,000 square feet but does want quarterly pest service');
+    expect(negated.lane).toBe('yellow');
+    expect(negated.lane_reasons).toEqual(expect.arrayContaining([
+      'home/building square footage was used for pricing without a matching verified property fact',
+      expect.stringMatching(/homeSqFt lacks a server-verified/i),
+    ]));
+
+    const affirmative = await draftFor('The home is 2,000 square feet and wants quarterly pest service');
+    expect(affirmative.error).toBeUndefined();
+    expect(affirmative.lane).toBe('green');
+  });
+
+  test('a bare article never grounds a legacy lawn track code', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      summary: {
+        recurringMonthlyAfterDiscount: 75,
+        recurringAnnualAfterDiscount: 900,
+        oneTimeTotal: 0,
+      },
+      waveGuard: { tier: 'bronze' },
+      lineItems: [{
+        service: 'lawn_care',
+        annualAfterDiscount: 900,
+        monthlyAfterDiscount: 75,
+        costs: { annualCost: 500 },
+        pricingConfidence: 'high',
+      }],
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    const trackLaneReasons = [
+      expect.stringMatching(/grassTrack lacks a server-verified/i),
+      'services.lawn.track was used for pricing without a matching verified property fact',
+    ];
+    const draftFor = async (quote) => {
+      mockBuildAgentEstimateContext.mockResolvedValueOnce({
+        lead: {
+          id: 'lead-1', customer_id: null, address: INPUT.address, phone: INPUT.customerPhone,
+        },
+        quote_form: { message_fields: [{ field: 'message', text: quote }], extracted_data: {} },
+        calls: [], sms_thread: [], activities: [],
+        customer_account: { recognized: false, existing_service_keys: [], current_services: [] },
+      });
+      return executeEstimateTool('create_agent_estimate_draft', {
+        ...INPUT,
+        engineInputs: { homeSqFt: 2000, services: { lawn: { track: 'A' } } },
+        evidence: [{ source: 'quote_form', quote, decision: 'lawn track' }],
+        propertyFacts: {
+          address: INPUT.propertyFacts.address,
+          grassTrack: { value: 'A', source: 'operator_confirmation', confidence: 'high' },
+        },
+        protocolReview: [{
+          serviceKey: 'lawn', programKey: 'lawn', lawnTrack: 'st_augustine', visitCount: 12,
+        }],
+        inventoryReview: [{
+          serviceKey: 'lawn', productName: 'SpeedZone Southern', status: 'in_stock', onHand: 8,
+        }],
+      });
+    };
+
+    const generic = await draftFor('I need a lawn service for my home');
+    expect(generic.lane_reasons).toEqual(expect.arrayContaining(trackLaneReasons));
+
+    const labeled = await draftFor('The lawn should stay on track A');
+    expect(labeled.lane_reasons).not.toEqual(expect.arrayContaining([trackLaneReasons[0]]));
+    expect(labeled.lane_reasons).not.toEqual(expect.arrayContaining([trackLaneReasons[1]]));
+
+    const species = await draftFor('The lawn is St. Augustine grass');
+    expect(species.lane_reasons).not.toEqual(expect.arrayContaining([trackLaneReasons[0]]));
+    expect(species.lane_reasons).not.toEqual(expect.arrayContaining([trackLaneReasons[1]]));
+  });
+
   test('does not let a low-confidence call extraction masquerade as operator confirmation', async () => {
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       lead: {
@@ -2456,6 +2554,31 @@ describe('Agent Estimate round-7 hardening', () => {
     expect(result).toEqual(expect.objectContaining({ preview_changed: true }));
     expect(result.error).toMatch(/changed after preview/i);
     expect(writes).toEqual([]);
+  });
+
+  test('confirmed persistence accepts an unchanged preview fingerprinted from the safe preview', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    // The proposal/preflight stages fingerprint the SAFE preview (raw
+    // engineResult stripped) while the confirmed run fingerprints the internal
+    // preview, and generateEstimate stamps a fresh generatedAt on every run —
+    // neither may trip preview_changed when the priced content is identical.
+    mockGenerateEstimate.mockReturnValue({ ...ENGINE_RESULT, generatedAt: '2026-07-17T01:00:00.000Z' });
+    const approvedPreview = await executeEstimateTool('create_agent_estimate_draft', INPUT);
+    expect(approvedPreview.engineResult).toBeUndefined();
+    const approvedPreviewFingerprint = agentEstimatePreviewFingerprint(approvedPreview);
+    mockGenerateEstimate.mockReturnValue({ ...ENGINE_RESULT, generatedAt: '2026-07-17T02:00:00.000Z' });
+
+    const result = await executeEstimateTool(
+      'create_agent_estimate_draft',
+      INPUT,
+      { confirmed: true, approvedPreviewFingerprint },
+    );
+
+    expect(result).toEqual(expect.objectContaining({ success: true, estimate_id: 'estimate-1' }));
+    expect(writes.find((write) => write.table === 'estimates')).toBeTruthy();
   });
 
   test('a mixed known/unknown address set keeps the account-wide duplicate block', async () => {

@@ -282,6 +282,10 @@ function invoiceServiceAmount(row = {}) {
 // minted from the schedule carry service_type; standalone setup/prepay
 // invoices don't, so they never pollute this. Falls back to {} on any error
 // so the snapshot still renders from scheduled_services.estimated_price.
+// Keyed ACCOUNT-WIDE: invoices carry no property linkage here, so this newest
+// amount reflects only ONE contract. When a key spans multiple per-property
+// contracts, loadCurrentServiceSpendContext must not stamp it across all of
+// them — it aggregates the per-contract scheduled prices instead.
 async function loadLastPaidSpendByKey(database, customerId) {
   const spend = {};
   try {
@@ -355,10 +359,40 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
   }
 
   const currentServices = [...byKey.entries()].map(([key, serviceRows]) => {
-    const scheduled = serviceRows.find((row) => Number(row.estimated_price) > 0);
     const lastPaid = lastPaidByKey[key] || null;
-    const scheduledPerVisit = scheduled ? round2(scheduled.estimated_price) : null;
-    const currentPerVisit = lastPaid?.amount ?? scheduledPerVisit;
+    // Rows that share a stamped property address are successive visits of ONE
+    // contract (a single per-visit price); distinct addresses are SEPARATE
+    // per-property contracts that must EACH count toward spend — a
+    // multi-property customer's second pest contract is real recurring spend,
+    // not a duplicate visit row. Address grouping is only trusted when every
+    // row is stamped: a mixed known/unknown set could split one contract into
+    // two buckets and double-count it, so it collapses to the single-contract
+    // treatment.
+    const propertySplit = serviceRows.length > 0
+      && serviceRows.every((row) => !!row.effective_service_address);
+    const contractRowsByAddress = new Map();
+    for (const row of serviceRows) {
+      const groupKey = propertySplit ? row.effective_service_address : '';
+      if (!contractRowsByAddress.has(groupKey)) contractRowsByAddress.set(groupKey, []);
+      contractRowsByAddress.get(groupKey).push(row);
+    }
+    const contracts = [...contractRowsByAddress.entries()].map(([address, contractRows]) => {
+      const scheduled = contractRows.find((row) => Number(row.estimated_price) > 0);
+      return {
+        serviceAddress: propertySplit ? address : null,
+        scheduledPerVisit: scheduled ? round2(scheduled.estimated_price) : null,
+        activeScheduledVisits: contractRows.length,
+      };
+    });
+    // The account-wide last-paid amount reflects ONE contract (no property
+    // linkage on invoices), so the invoice basis only applies to a
+    // single-contract key; per-property contracts each use their own
+    // scheduled price rather than one contract's invoice standing in for all.
+    const usableLastPaid = contracts.length === 1 ? lastPaid : null;
+    const scheduledPerVisit = contracts.some((contract) => contract.scheduledPerVisit != null)
+      ? round2(contracts.reduce((sum, contract) => sum + (Number(contract.scheduledPerVisit) || 0), 0))
+      : null;
+    const currentPerVisit = usableLastPaid?.amount ?? scheduledPerVisit;
     const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
     const componentServiceAddresses = {};
     const componentServiceAddressesComplete = {};
@@ -389,9 +423,12 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       componentServiceAddresses,
       componentServiceAddressesComplete,
       currentPerVisit: currentPerVisit ?? null,
-      spendSource: lastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
-      lastPaidAt: lastPaid?.paidAt || null,
+      spendSource: usableLastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
+      lastPaidAt: usableLastPaid?.paidAt || null,
       scheduledPerVisit,
+      // One entry per active per-property contract (a single entry when the
+      // rows aren't property-split) so multi-property spend stays itemized.
+      contracts,
       activeScheduledVisits: serviceRows.length,
       nextScheduledDate: scheduledDates[0] || null,
     };

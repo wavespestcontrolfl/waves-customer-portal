@@ -142,6 +142,113 @@ describe('computeMembershipContext', () => {
     });
   });
 
+  test('the same recurring service at two properties counts BOTH contracts toward spend', async () => {
+    const database = fakeDb({
+      // Newest paid invoice reflects ONE property's contract — it must not
+      // stand in for both, and the second contract must still be counted.
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1', {
+      existingRows: [
+        {
+          id: 'a1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-01-05',
+          estimated_price: 120, effective_service_address: '1 Property A St, Bradenton FL 34208',
+        },
+        {
+          id: 'a2', service_type: 'Quarterly Pest Control', scheduled_date: '2099-04-05',
+          estimated_price: 120, effective_service_address: '1 Property A St, Bradenton FL 34208',
+        },
+        {
+          id: 'b1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-02-05',
+          estimated_price: 95, effective_service_address: '2 Property B St, Venice FL 34285',
+        },
+      ],
+    });
+
+    const pest = spend.currentServices.find((service) => service.key === 'pest_control');
+    // Per-property contracts: $120 (A) + $95 (B). Visit rows at the SAME
+    // property stay one contract (never $120 + $120), and the account-wide
+    // invoice amount is not applied across contracts.
+    expect(pest).toMatchObject({
+      currentPerVisit: 215,
+      scheduledPerVisit: 215,
+      spendSource: 'scheduled_estimate',
+      lastPaidAt: null,
+      activeScheduledVisits: 3,
+    });
+    expect(pest.contracts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        serviceAddress: '1 Property A St, Bradenton FL 34208',
+        scheduledPerVisit: 120,
+        activeScheduledVisits: 2,
+      }),
+      expect.objectContaining({
+        serviceAddress: '2 Property B St, Venice FL 34285',
+        scheduledPerVisit: 95,
+        activeScheduledVisits: 1,
+      }),
+    ]));
+    expect(spend.currentSpendPerVisitTotal).toBe(215);
+  });
+
+  test('a single-property contract still prefers the last-paid invoice basis', async () => {
+    const database = fakeDb({
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1', {
+      existingRows: [
+        {
+          id: 'a1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-01-05',
+          estimated_price: 120, effective_service_address: '1 Property A St, Bradenton FL 34208',
+        },
+        {
+          id: 'a2', service_type: 'Quarterly Pest Control', scheduled_date: '2099-04-05',
+          estimated_price: 120, effective_service_address: '1 Property A St, Bradenton FL 34208',
+        },
+      ],
+    });
+
+    expect(spend.currentServices).toEqual([
+      expect.objectContaining({
+        key: 'pest_control',
+        currentPerVisit: 117,
+        spendSource: 'last_paid_invoice',
+        lastPaidAt: '2026-05-20',
+      }),
+    ]);
+    expect(spend.currentSpendPerVisitTotal).toBe(117);
+  });
+
+  test('mixed stamped/unstamped rows collapse to one contract rather than double-counting', async () => {
+    const database = fakeDb();
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1', {
+      existingRows: [
+        {
+          id: 'a1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-01-05',
+          estimated_price: 120, effective_service_address: '1 Property A St, Bradenton FL 34208',
+        },
+        {
+          id: 'legacy', service_type: 'Quarterly Pest Control', scheduled_date: '2099-02-05',
+          estimated_price: 95, effective_service_address: null,
+        },
+      ],
+    });
+
+    // The unstamped row could be the SAME contract as the stamped one, so the
+    // set is not property-split: one contract, first priced row's rate.
+    expect(spend.currentServices).toEqual([
+      expect.objectContaining({
+        key: 'pest_control',
+        currentPerVisit: 120,
+        spendSource: 'scheduled_estimate',
+      }),
+    ]);
+    expect(spend.currentSpendPerVisitTotal).toBe(120);
+  });
+
   test('existing-service spend is preserved as context while discounts apply only to additions', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),

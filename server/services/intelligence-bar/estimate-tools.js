@@ -37,7 +37,7 @@ const {
   normalizeLawnTrack,
   normalizeProtocolKey,
 } = require('../protocol-reader');
-const { agentEstimatePreviewFingerprint } = require('../agent-estimate-preview');
+const { agentEstimatePreviewFingerprint, agentEngineResultDigest } = require('../agent-estimate-preview');
 const { executeProcurementTool } = require('./procurement-tools');
 
 const PROPERTY_FACT_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -500,6 +500,51 @@ function quoteMatchIsNegated(text, index, valueLength) {
     || /^\s*(?::|=|-)?\s*(?:is\s+)?(?:no|not|false|absent|none)\b/i.test(after);
 }
 
+// English function words that occur constantly in ordinary prose. A
+// categorical value made only of these — or a 1-2 character code such as
+// the legacy lawn tracks A/B/C1/C2/D — must never match as a bare word:
+// "I need a lawn service" would otherwise ground grass track "A".
+const WEAK_CATEGORICAL_TOKENS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'if', 'so', 'as', 'at', 'by', 'for',
+  'from', 'in', 'into', 'of', 'off', 'on', 'onto', 'out', 'over', 'to', 'up',
+  'with', 'without', 'be', 'am', 'is', 'are', 'was', 'were', 'been', 'do',
+  'does', 'did', 'has', 'have', 'had', 'can', 'could', 'will', 'would',
+  'shall', 'should', 'may', 'might', 'must', 'i', 'me', 'my', 'we', 'our',
+  'us', 'you', 'your', 'he', 'she', 'it', 'its', 'they', 'them', 'their',
+  'this', 'that', 'these', 'those', 'there', 'here', 'no', 'not', 'any',
+  'all', 'some', 'such', 'than', 'then', 'too', 'very', 'what', 'when',
+  'where', 'which', 'who', 'how',
+]);
+
+function isWeakCategoricalValue(tokens) {
+  return tokens.join(' ').length <= 2
+    || tokens.every((token) => WEAK_CATEGORICAL_TOKENS.has(token.toLowerCase()));
+}
+
+// A weak value only grounds through canonical domain vocabulary: a labeled
+// code ("track A", "zone A") or an alias the domain already maps to the same
+// value — normalizeLawnTrack ties legacy track letters to their grass
+// species (A -> st_augustine), so naming the species also names the track.
+function weakCategoricalValuePatterns(escapedTokens, value) {
+  const code = escapedTokens.join('[\\s_-]+');
+  const label = '(?:track|zone|type|tier|plan|program|option)';
+  const patterns = [
+    new RegExp(`\\b${label}[\\s:_-]+${code}\\b`, 'gi'),
+    new RegExp(`\\b${code}[\\s:_-]+${label}\\b`, 'gi'),
+  ];
+  const lawnTrack = normalizeLawnTrack(value);
+  const aliasSources = new Set([lawnTrack, grassTypeLabel(lawnTrack)]
+    .filter(Boolean)
+    .map((alias) => String(alias)
+      .split(/[^a-z0-9]+/i)
+      .filter(Boolean)
+      .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('[\\s._-]+'))
+    .filter(Boolean));
+  for (const source of aliasSources) patterns.push(new RegExp(`\\b${source}\\b`, 'gi'));
+  return patterns;
+}
+
 function quoteCategoricalMatchesFact(text, value, semanticPattern) {
   const tokens = String(value || '')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -507,13 +552,17 @@ function quoteCategoricalMatchesFact(text, value, semanticPattern) {
     .filter(Boolean);
   if (!tokens.length) return false;
   const escaped = tokens.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const valuePattern = new RegExp(`\\b${escaped.join('[\\s_-]+')}\\b`, 'gi');
-  return [...String(text || '').matchAll(valuePattern)].some((match) => {
-    const phrase = quotePhraseAt(text, Number(match.index), match[0].length);
-    const semantic = new RegExp(semanticPattern.source, semanticPattern.flags.replace(/g/g, ''));
-    return semantic.test(phrase.text)
-      && !quoteMatchIsNegated(text, Number(match.index), match[0].length);
-  });
+  const valuePatterns = isWeakCategoricalValue(tokens)
+    ? weakCategoricalValuePatterns(escaped, value)
+    : [new RegExp(`\\b${escaped.join('[\\s_-]+')}\\b`, 'gi')];
+  return valuePatterns.some((valuePattern) => (
+    [...String(text || '').matchAll(valuePattern)].some((match) => {
+      const phrase = quotePhraseAt(text, Number(match.index), match[0].length);
+      const semantic = new RegExp(semanticPattern.source, semanticPattern.flags.replace(/g/g, ''));
+      return semantic.test(phrase.text)
+        && !quoteMatchIsNegated(text, Number(match.index), match[0].length);
+    })
+  ));
 }
 
 // Bind a quoted number to the closest dimension label, not merely any label
@@ -1880,8 +1929,13 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
         ));
       } else if (Number.isFinite(Number(fact.value))) {
         const quoteValues = [...quote.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)];
+        // Negation binds per numeric span, mirroring the nearest-label
+        // binding: "not 2,000 square feet" rejects only that expression, so
+        // an explicitly denied measurement can never verify the fact while
+        // other affirmative numbers in the same quote still can.
         groundedValue = quoteValues.some((match) => (
           numericValuesMatch(match[0].replace(/,/g, ''), fact.value)
+          && !quoteMatchIsNegated(quote, Number(match.index), match[0].length)
           && quoteNumberMatchesFact(quote, match, key, semanticPattern)
         ));
       } else {
@@ -2202,6 +2256,10 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     lane: allLaneReasons.length ? 'yellow' : 'green',
     lane_reasons: allLaneReasons.slice(0, 30),
     engineResult,
+    // The raw engineResult never leaves the server (the unconfirmed return
+    // strips it), so the fingerprint binds the persisted prices through this
+    // digest — it must be attached here, where every stage's preview is built.
+    engine_result_digest: agentEngineResultDigest(engineResult),
     propertyFacts: verifiedPropertyFacts,
     inventoryReview: inventoryValidation.rows,
     customer_account: accountPricing.customerAccount,
