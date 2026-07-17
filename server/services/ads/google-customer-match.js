@@ -31,7 +31,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { runExclusive } = require('../../utils/cron-lock');
 const { collectCustomerMembers, collectUnbookedLeadMembers } = require('./meta-audiences')._private;
-const { sha256Hex, normalizeEmail, normalizePhone, cleanNumericId } = require('./data-manager')._private;
+const { sha256Hex, normalizePhone, cleanNumericId } = require('./data-manager')._private;
 
 const DATA_MANAGER_SCOPE = 'https://www.googleapis.com/auth/datamanager';
 const INGEST_URL = 'https://datamanager.googleapis.com/v1/audienceMembers:ingest';
@@ -98,21 +98,11 @@ function isConfigured() {
 }
 
 // ── Google-correct member hashing ────────────────────────────────────
-// Email: lowercase + trim (data-manager.normalizeEmail); gmail/googlemail also drop
-// dots and strip a '+tag' from the local part per Google's formatting guide.
-function canonicalEmail(value) {
-  const email = normalizeEmail(value);
-  if (!email) return null;
-  const at = email.lastIndexOf('@');
-  if (at <= 0) return null;
-  const local = email.slice(0, at);
-  const domain = email.slice(at + 1);
-  if (domain === 'gmail.com' || domain === 'googlemail.com') {
-    const canonicalLocal = local.split('+')[0].replace(/\./g, '');
-    return canonicalLocal ? `${canonicalLocal}@${domain}` : null;
-  }
-  return email;
-}
+// Email: lowercase + trim; gmail/googlemail also drop dots and strip a '+tag'
+// from the local part per Google's formatting guide. The canonicalizer is
+// SHARED with the consent module (ad-audience-consent.canonicalEmail) so a
+// suppression match and the uploaded hash can never diverge on a dot-variant.
+const { canonicalEmail, loadMarketingSuppression } = require('./ad-audience-consent');
 
 // member { key, email, phone } -> [emailSha256, phoneSha256] (hex), or null.
 function hashMember(member) {
@@ -372,18 +362,58 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       if (hasPendingRemove(e.d)) heldAddHashes.add(h); else addEntries.push(e);
     }
 
+    // Identifier hashes of active marketing opt-outs (and wrong_number phones),
+    // hashed exactly like uploaded members (canonical email; phone WITH '+').
+    // A prior row carrying one of these must be removed even when it shares its
+    // OTHER identifier with a current member — shared-identifier retention must
+    // not keep an opted-out email matchable forever via a household phone.
+    const suppression = await loadMarketingSuppression();
+    const suppressedIdHashes = new Set();
+    for (const raw of suppression.rawOptOutEmails) {
+      const email = canonicalEmail(raw);
+      if (email) suppressedIdHashes.add(sha256Hex(email));
+    }
+    for (const raw of suppression.rawOptOutPhones) {
+      const phone = normalizePhone(raw);
+      if (phone) suppressedIdHashes.add(sha256Hex(phone));
+    }
+    const hasSuppressedId = (d) => !!((d[0] && suppressedIdHashes.has(d[0])) || (d[1] && suppressedIdHashes.has(d[1])));
+
     const removeEntries = []; // members we remove this run
     const retained = [];      // can't remove: still shares an identifier with a current member
     const heldRemoves = [];   // can't remove yet: an ingest for an identifier is in flight
+    const removedSuppressedIds = new Set(); // ALL identifiers on consent-removed rows
+    let consentRemovals = 0;
     for (const [h, e] of priorByHash) {
       if (currentByHash.has(h)) continue;
+      if (hasSuppressedId(e.d)) {
+        // Consent removal overrides shared-identifier retention. Still defer
+        // while an ingest for one of its identifiers is in flight (out-of-order
+        // apply could make the remove a no-op) — heldRemoves retries next run.
+        if (hasPendingIngest(e.d)) { heldRemoves.push(e); continue; }
+        removeEntries.push(e);
+        consentRemovals += 1;
+        if (e.d[0]) removedSuppressedIds.add(e.d[0]);
+        if (e.d[1]) removedSuppressedIds.add(e.d[1]);
+        continue;
+      }
       if (!safeToDelete(e.d)) { retained.push(e); continue; }
       if (hasPendingIngest(e.d)) heldRemoves.push(e); else removeEntries.push(e);
     }
     // Optimistic state: current members EXCEPT held adds (so they re-add once the remove
     // settles), plus retained orphans, plus held removes (kept so they remove next run).
+    // Current members sharing an identifier with a consent-removed row are also dropped
+    // from state: the remove matches by ANY identifier and may knock them out; absent
+    // from state they re-add next run, and hasPendingRemove holds that re-add until the
+    // remove settles — guaranteed consent removal, one-cycle flicker for the housemate.
+    let deferredReAdds = 0;
     const persisted = [
-      ...[...currentByHash.values()].filter((e) => !heldAddHashes.has(hashId(e.d))),
+      ...[...currentByHash.values()].filter((e) => {
+        if (heldAddHashes.has(hashId(e.d))) return false;
+        const sharesRemoved = (e.d[0] && removedSuppressedIds.has(e.d[0])) || (e.d[1] && removedSuppressedIds.has(e.d[1]));
+        if (sharesRemoved) { deferredReAdds += 1; return false; }
+        return true;
+      }),
       ...retained,
       ...heldRemoves,
     ];
@@ -402,6 +432,8 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       retained: retained.length,
       heldAdds: heldAddHashes.size,
       heldRemoves: heldRemoves.length,
+      consentRemovals,
+      deferredReAdds,
     };
 
     if (dryRun) {

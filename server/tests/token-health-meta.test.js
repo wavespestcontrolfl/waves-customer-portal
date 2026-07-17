@@ -2,6 +2,8 @@ jest.mock('../models/db', () => {
   const query = {
     where: jest.fn(() => ({ first: jest.fn(async () => null) })),
     insert: jest.fn(async () => {}),
+    whereNotIn: jest.fn(() => ({ del: jest.fn(async () => 0) })),
+    orderBy: jest.fn(async () => []),
   };
   const db = jest.fn(() => query);
   db._query = query;
@@ -330,11 +332,78 @@ describe('token health meta checks', () => {
     expect(result).toMatchObject({ platform: 'meta_ads', status: 'not_configured' });
   });
 
-  test('meta_capi token resolves healthy via debug_token', async () => {
+  test('meta_capi with a valid token but NO pixel configured is not_configured (lane cannot run)', async () => {
     process.env.META_CAPI_ACCESS_TOKEN = 'capi-token';
+    delete process.env.META_CAPI_PIXEL_ID;
+    const tokenHealth = require('../services/token-health');
+    const result = await tokenHealth.checkSingle('meta_capi');
+    expect(result).toMatchObject({ platform: 'meta_capi', status: 'not_configured' });
+    expect(result.lastError).toMatch(/META_CAPI_PIXEL_ID/);
+  });
+
+  test('meta_capi healthy requires debug_token AND a pixel-access probe', async () => {
+    process.env.META_CAPI_ACCESS_TOKEN = 'capi-token';
+    process.env.META_CAPI_PIXEL_ID = '987654321';
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/debug_token')) {
+        return { ok: true, status: 200, json: async () => ({ data: { is_valid: true, expires_at: 0 } }) };
+      }
+      if (text.includes('/987654321?fields=id')) {
+        return { ok: true, status: 200, json: async () => ({ id: '987654321' }) };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
     const tokenHealth = require('../services/token-health');
     const result = await tokenHealth.checkSingle('meta_capi');
     expect(result).toMatchObject({ platform: 'meta_capi', status: 'healthy', lastError: null });
-    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/debug_token'));
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/987654321?fields=id'));
+  });
+
+  test('meta_ads: a valid-but-wrong-account token is NOT healthy (lane probe fails)', async () => {
+    process.env.META_ADS_ACCESS_TOKEN = 'ads-token';
+    process.env.META_ADS_ACCOUNT_ID = '111222333';
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/debug_token')) {
+        return { ok: true, status: 200, json: async () => ({ data: { is_valid: true } }) };
+      }
+      if (text.includes('/act_111222333?fields=')) {
+        // Meta permission error: token valid but no access to THIS ad account.
+        return { ok: false, status: 403, json: async () => ({ error: { message: '(#200) Ads permission required', code: 200 } }) };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+    const result = await tokenHealth.checkSingle('meta_ads');
+    expect(result.status).toBe('error');
+    expect(result.lastError).toMatch(/ad account read probe failed/);
+  });
+
+  test('meta_audiences: valid token without ads_management on the account is NOT healthy', async () => {
+    process.env.META_AUDIENCES_ACCESS_TOKEN = 'aud-token';
+    process.env.META_ADS_ACCOUNT_ID = 'act_111222333';
+    global.fetch = jest.fn(async (url) => {
+      const text = String(url);
+      if (text.includes('/debug_token')) {
+        return { ok: true, status: 200, json: async () => ({ data: { is_valid: true } }) };
+      }
+      if (text.includes('/act_111222333/customaudiences')) {
+        return { ok: false, status: 403, json: async () => ({ error: { message: '(#294) Managing advertisements requires ads_management', code: 294 } }) };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+    const result = await tokenHealth.checkSingle('meta_audiences');
+    expect(result.status).toBe('error');
+    expect(result.lastError).toMatch(/custom audiences access probe failed/);
+  });
+
+  test('getAll RETAINS the three Meta ad lane rows (not purged as unknown platforms)', async () => {
+    const db = require('../models/db');
+    const tokenHealth = require('../services/token-health');
+    await tokenHealth.getAll();
+    const kept = db._query.whereNotIn.mock.calls[0][1];
+    expect(kept).toEqual(expect.arrayContaining(['meta_ads', 'meta_capi', 'meta_audiences']));
   });
 });

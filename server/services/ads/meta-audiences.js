@@ -19,7 +19,7 @@ const logger = require('../logger');
 const { runExclusive } = require('../../utils/cron-lock');
 const { sha256Hex, normalizeEmail, normalizePhone } = require('./data-manager')._private;
 const { whereLiveCustomer } = require('../customer-stages');
-const { filterMarketingSuppressed } = require('./ad-audience-consent');
+const { filterMarketingSuppressed, loadMarketingSuppression } = require('./ad-audience-consent');
 
 const GRAPH = 'https://graph.facebook.com';
 const STATE_TABLE = 'ad_audience_syncs';
@@ -82,7 +82,11 @@ async function collectCustomerMembers() {
     .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
     .select('id', 'email', 'phone');
   const members = rows.map((r) => ({ key: `customer:${r.id}`, email: r.email, phone: r.phone }));
-  return filterMarketingSuppressed(members, { audienceKey: 'customers' });
+  // identifiers-only: this audience is the prospecting EXCLUSION list — an
+  // opted-out customer must STAY in it or they start seeing prospecting ads
+  // again. Only invalid identifiers (wrong_number = a stranger's phone) are
+  // stripped. Google Customer Match shares this collector and semantics.
+  return filterMarketingSuppressed(members, { audienceKey: 'customers', mode: 'identifiers-only' });
 }
 
 async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAYS } = {}) {
@@ -220,19 +224,59 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     }
     const safeToDelete = (d) => !((d[0] && currentHashes.has(d[0])) || (d[1] && currentHashes.has(d[1])));
 
+    // Identifier hashes of active marketing opt-outs (and wrong_number phones),
+    // hashed exactly like uploaded members. A prior row carrying one of these
+    // must be removed even when it shares its OTHER identifier with a current
+    // member — shared-identifier retention must not keep an opted-out email
+    // matchable forever via a household phone. (Gmail dot-variants uploaded
+    // under a different raw string hash differently and can't be derived here;
+    // the collector-level canonical match prevents new ones from uploading.)
+    const suppression = await loadMarketingSuppression();
+    const suppressedIdHashes = new Set();
+    for (const raw of suppression.rawOptOutEmails) {
+      const email = normalizeEmail(raw);
+      if (email) suppressedIdHashes.add(sha256Hex(email));
+    }
+    for (const raw of suppression.rawOptOutPhones) {
+      const phone = normalizePhone(raw);
+      if (phone) suppressedIdHashes.add(sha256Hex(phone.replace(/^\+/, '')));
+    }
+    const hasSuppressedId = (d) => !!((d[0] && suppressedIdHashes.has(d[0])) || (d[1] && suppressedIdHashes.has(d[1])));
+
     const addRows = [];
     for (const [h, e] of currentByHash) if (!priorByHash.has(h)) addRows.push(e.d);
 
     const removeRows = [];
     const retained = []; // uploaded rows no longer current but unsafe to delete now
+    const removedSuppressedIds = new Set(); // ALL identifiers on consent-removed rows
+    let consentRemovals = 0;
     for (const [h, e] of priorByHash) {
       if (currentByHash.has(h)) continue; // still a current member
+      if (hasSuppressedId(e.d)) {
+        // Consent removal overrides shared-identifier retention.
+        removeRows.push(e.d);
+        consentRemovals += 1;
+        if (e.d[0]) removedSuppressedIds.add(e.d[0]);
+        if (e.d[1]) removedSuppressedIds.add(e.d[1]);
+        continue;
+      }
       if (safeToDelete(e.d)) removeRows.push(e.d); else retained.push(e);
     }
 
     // Persist current rows + retained orphans, so a future sync deletes each orphan
     // once its shared identifier leaves the audience (self-healing, no orphan leak).
-    const persisted = [...currentByHash.values(), ...retained];
+    // EXCEPT: a current member sharing an identifier with a consent-removed row is
+    // dropped from state — Meta's DELETE matches by ANY identifier, so the remove
+    // (which runs AFTER this run's adds) may knock them out too; absent from state,
+    // the next sync re-adds them. One-cycle flicker, guaranteed consent removal.
+    const persisted = [];
+    let deferredReAdds = 0;
+    for (const e of currentByHash.values()) {
+      const sharesRemoved = (e.d[0] && removedSuppressedIds.has(e.d[0])) || (e.d[1] && removedSuppressedIds.has(e.d[1]));
+      if (sharesRemoved) { deferredReAdds += 1; continue; }
+      persisted.push(e);
+    }
+    persisted.push(...retained);
 
     const summary = {
       audienceKey,
@@ -245,6 +289,8 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       toAdd: addRows.length,
       toRemove: removeRows.length,
       retained: retained.length,
+      consentRemovals,
+      deferredReAdds,
     };
 
     if (dryRun) {
