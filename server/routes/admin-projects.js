@@ -30,6 +30,7 @@ const {
   isValidProjectType,
   getProjectType,
   stripInternalFindingKeys,
+  redactInspectionFeeCues,
 } = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
@@ -866,9 +867,14 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
   // Internal keys (inspection_fee) must never reach the model — the drafted
   // narrative is returned verbatim as customer-facing `recommendations`.
-  // Stripping the structured findings keeps the fee out of the prompt, so no
-  // new narrative can contain it; legacy fee-bearing narratives fed back on a
-  // re-draft were scrubbed once by migration 20260716150000 (codex P2 #2807).
+  // Stripping the structured findings keeps the fee out of the prompt, and
+  // sanitizing rawRecommendations keeps it out of the free-text input: both
+  // AI-write endpoints default that input to the editable recommendations
+  // field, so an admin note or edit like "Inspection fee $250" would otherwise
+  // reach the model and yield a new customer-facing narrative containing it
+  // (codex #2817 P2). redactInspectionFeeCues removes only fee language, never
+  // a legitimate estimate.
+  const safeRawRecommendations = redactInspectionFeeCues(rawRecommendations);
   const findingsLines = Object.entries(stripInternalFindingKeys(findings) || {})
     .map(([k, v]) => [k, formatFindingForPrompt(v)])
     .filter(([, v]) => v.trim() !== '')
@@ -1002,7 +1008,7 @@ Structured findings:
 ${findingsLines}
 
 Technician's raw recommendations / notes:
-${rawRecommendations || '[none provided]'}
+${safeRawRecommendations || '[none provided]'}
 
 Attached photo review:
 ${photoLines || '[no photos attached]'}

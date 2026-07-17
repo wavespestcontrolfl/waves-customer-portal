@@ -4,25 +4,34 @@
 // row-selection + per-project fee gathering + update behavior is pinned.
 const migration = require('../models/migrations/20260716150000_scrub_inspection_fee_from_project_narratives');
 
-function fakeKnex(rows) {
+function fakeKnex(rows, opts = {}) {
+  // rows is the LIVE store (mutated by CAS writes and by any onSelect hook so
+  // a concurrent edit can be simulated). Each query starts a fresh builder.
   const updates = [];
-  const builder = {
-    _rows: rows,
-    whereNotNull() { return this; },
-    andWhereRaw() { return this; },
-    select() { return Promise.resolve(this._rows); },
-    where(criteria) { this._pending = criteria; return this; },
-    update(patch) {
-      // compare-and-set: only "writes" if the current row still matches the
-      // predicate's recommendations (simulates the concurrent-edit guard)
-      const current = rows.find((r) => r.id === this._pending.id);
-      if (!current || current.recommendations !== this._pending.recommendations) return Promise.resolve(0);
-      updates.push({ id: this._pending.id, patch });
-      return Promise.resolve(1);
-    },
-  };
   const knex = (table) => {
     if (table !== 'projects') throw new Error(`unexpected table ${table}`);
+    let idFilter = null;
+    let pending = null;
+    const builder = {
+      whereNotNull() { return this; },
+      andWhereRaw() { return this; },
+      whereIn(col, ids) { if (col === 'id') idFilter = new Set(ids); return this; },
+      where(criteria) { pending = criteria; return this; },
+      select() {
+        // fire the concurrent-edit hook exactly once, then snapshot the store
+        if (opts.onSelect) { opts.onSelect(); opts.onSelect = null; }
+        const scoped = idFilter ? rows.filter((r) => idFilter.has(r.id)) : rows;
+        // return copies so the migration's in-memory rows can't alias the store
+        return Promise.resolve(scoped.map((r) => ({ ...r })));
+      },
+      update(patch) {
+        const current = rows.find((r) => r.id === pending.id);
+        if (!current || current.recommendations !== pending.recommendations) return Promise.resolve(0);
+        current.recommendations = patch.recommendations; // apply to the store
+        updates.push({ id: pending.id, patch });
+        return Promise.resolve(1);
+      },
+    };
     return builder;
   };
   knex.schema = {
@@ -57,7 +66,7 @@ test('scrubs the fee from a legacy narrative, leaves the rest, and updates only 
       id: 'p-archived-fee',
       findings: JSON.stringify({ wdo_finding: 'None observed' }),
       wdo_sent_filings: JSON.stringify([{ findings: { inspection_fee: '$300' } }]),
-      recommendations: 'Prior charge $300 noted. Re-inspect within 175 days.',
+      recommendations: 'Inspection fee $300 on file. Re-inspect within 175 days.',
     },
     {
       // fee CHANGED $250 -> $300 after the narrative was written; the stale
@@ -95,20 +104,35 @@ test('scrubs the fee from a legacy narrative, leaves the rest, and updates only 
   expect(byId['p-legit-estimate']).toBeUndefined();
 });
 
-test('compare-and-set skips a row edited concurrently between SELECT and UPDATE', async () => {
+test('a concurrent edit that removes the fee is never clobbered', async () => {
   const rows = [{
     id: 'p-raced',
     findings: JSON.stringify({ wdo_finding: 'None observed', inspection_fee: '$250' }),
     wdo_sent_filings: null,
     recommendations: 'Inspection fee $250. Keep mulch back.',
   }];
-  const knex = fakeKnex(rows);
-  // simulate a concurrent admin edit AFTER the bulk SELECT: the live row text
-  // changes, so the CAS predicate no longer matches and nothing is clobbered
-  rows[0].recommendations = 'Admin just rewrote this entirely.';
+  // onSelect fires once, right after the initial read: an admin rewrites the
+  // row (removing the fee) before the first UPDATE lands.
+  const knex = fakeKnex(rows, { onSelect: () => { rows[0].recommendations = 'Admin rewrote this — no fee here.'; } });
   await migration.up(knex);
+  // CAS misses on the stale copy; the retry re-reads the clean text, which
+  // needs no scrub — nothing is written, the admin's edit stands.
   expect(knex._updates).toHaveLength(0);
-  expect(rows[0].recommendations).toBe('Admin just rewrote this entirely.');
+  expect(rows[0].recommendations).toBe('Admin rewrote this — no fee here.');
+});
+
+test('a concurrent edit that STILL bears the fee is re-scrubbed on retry (not left leaking)', async () => {
+  const rows = [{
+    id: 'p-raced-fee',
+    findings: JSON.stringify({ wdo_finding: 'None observed', inspection_fee: '$250' }),
+    wdo_sent_filings: null,
+    recommendations: 'Inspection fee $250. Keep mulch back.',
+  }];
+  // the concurrent edit changes the text but a fee is still present
+  const knex = fakeKnex(rows, { onSelect: () => { rows[0].recommendations = 'Reworded: inspection fee $250 still noted.'; } });
+  await migration.up(knex);
+  // first CAS misses; retry re-reads the new text and scrubs the fee from it
+  expect(rows[0].recommendations).toBe('Reworded: inspection fee [fee removed] still noted.');
 });
 
 test('down is a no-op (a removed internal fee is not restored)', async () => {
