@@ -12,40 +12,18 @@ const { answerProjectReportQuestion } = require('../services/project-report-assi
 const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
-  containsInspectionFeeCue,
   redactInspectionFeeCuesForType,
   projectTypeHasInternalFindingKeys,
+  // A legacy archived FDACS PDF was rendered from RAW findings AND raw photo
+  // captions — if either carries a fee disclosure, the S3 binary discloses
+  // it and cannot be sanitized in place. Those filings are GATED here (the
+  // /data payload stops advertising the PDF; /fdacs-pdf 404s) while the
+  // report page still renders the scrubbed findings and the legal archive
+  // stays intact in S3. Filings stamped pdf_renderer were rendered through
+  // the scrub and always serve. Shared with the admin detail serializer so
+  // the staff preview matches (codex #2817).
+  filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
-
-// A legacy archived FDACS PDF was rendered from RAW findings — if its
-// as-sent snapshot carries a literal fee disclosure, the S3 binary discloses
-// it and cannot be sanitized in place. Those filings are GATED: /data stops
-// advertising the PDF and /fdacs-pdf 404s, while the report page still
-// renders the (scrubbed) findings. The original legal archive stays intact
-// in S3; clean filings — the overwhelming case — stream unchanged
-// (codex #2817).
-function filingFindingsContainFeeCue(rawFindings) {
-  let parsed = rawFindings;
-  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return false; } }
-  const walk = (value) => {
-    if (typeof value === 'string') return containsInspectionFeeCue(value);
-    if (Array.isArray(value)) return value.some(walk);
-    if (value && typeof value === 'object') return Object.values(value).some(walk);
-    return false;
-  };
-  return walk(parsed);
-}
-
-// Only a LEGACY binary can print a raw fee — filings archived with the
-// pdf_renderer marker were rendered through the customer-safe scrub, so a
-// fee cue in their (deliberately raw) snapshot is fine: the PDF itself is
-// clean and must keep serving (codex #2817 — gating those locked customers
-// out of their own signed filing).
-function filingBinaryMayDiscloseFee(filing) {
-  if (!filing) return false;
-  if (filing.pdf_renderer) return false;
-  return filingFindingsContainFeeCue(filing.findings);
-}
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
@@ -607,9 +585,9 @@ router.get('/project/:token/data', async (req, res, next) => {
         if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
       }
       fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket)
-        // legacy binary archived with a raw fee disclosure — gated, see
-        // filingBinaryMayDiscloseFee
-        && !filingBinaryMayDiscloseFee(lastFiling);
+        // legacy binary archived with a raw fee disclosure (findings or
+        // photo captions) — gated, see filingBinaryMayDiscloseFee
+        && !filingBinaryMayDiscloseFee(lastFiling, { photoCaptions: photos.map((ph) => ph.caption) });
     }
 
     // Internal/office-only finding keys must never ride the public JSON — the
@@ -757,10 +735,15 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
       return res.status(404).json({ error: 'Report not found' });
     }
     // Same generic 404 as a missing archive: a LEGACY binary whose snapshot
-    // carries a raw fee disclosure is never served (the /data payload also
-    // stops advertising it — see filingBinaryMayDiscloseFee).
-    if (filingBinaryMayDiscloseFee(lastFiling)) {
-      return res.status(404).json({ error: 'Report not found' });
+    // or photo captions carry a raw fee disclosure is never served (the
+    // /data payload also stops advertising it — see filingBinaryMayDiscloseFee).
+    if (!lastFiling.pdf_renderer) {
+      const photoCaptions = await db('project_photos')
+        .where({ project_id: project.id })
+        .pluck('caption');
+      if (filingBinaryMayDiscloseFee(lastFiling, { photoCaptions })) {
+        return res.status(404).json({ error: 'Report not found' });
+      }
     }
     const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
     const s3 = new S3Client({

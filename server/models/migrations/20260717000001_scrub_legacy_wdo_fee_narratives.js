@@ -28,17 +28,24 @@ exports.up = async function up(knex) {
     .select('id', 'recommendations', 'title');
 
   for (const row of rows) {
-    const updates = {};
+    // Per-field compare-and-swap: Railway runs this in preDeployCommand
+    // while the OLD instance still serves traffic, so an admin edit can land
+    // between the bulk SELECT and this row. The CAS predicate makes such a
+    // row a no-op here instead of clobbering the edit — and that's safe to
+    // skip entirely, because the new instance's write guard scrubs every
+    // subsequent save (and the old instance's window closes with the deploy;
+    // any text it wrote that still carries a cue is covered by the egress
+    // guards until the row is next saved).
     for (const field of ['recommendations', 'title']) {
       const value = row[field];
       if (!value || !containsInspectionFeeCue(value)) continue;
       const scrubbed = redactInspectionFeeCues(value);
-      if (scrubbed !== value) updates[field] = scrubbed;
+      if (scrubbed === value) continue;
+      await knex('projects')
+        .where({ id: row.id })
+        .where(field, value)
+        .update({ [field]: scrubbed, updated_at: knex.fn.now() });
     }
-    if (!Object.keys(updates).length) continue;
-    await knex('projects')
-      .where({ id: row.id })
-      .update({ ...updates, updated_at: knex.fn.now() });
   }
 };
 

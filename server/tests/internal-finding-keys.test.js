@@ -168,6 +168,15 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee has a cost of $250.'))
       .toBe('Inspection fee has a cost of [fee removed].');
   });
+  test('a wrapped amount on the next line redacts; paragraphs stay bounded', () => {
+    expect(redactInspectionFeeCues('Inspection fee:\n$250'))
+      .toBe('Inspection fee:\n[fee removed]');
+    expect(redactInspectionFeeCues('Inspection fee waived\nRepair notes: $1,250 for sill plate'))
+      .toBe('Inspection fee waived\nRepair notes: $1,250 for sill plate');
+    // a blank line (two breaks) always terminates the cue
+    expect(redactInspectionFeeCues('Inspection fee\n\n$250 deposit due'))
+      .toBe('Inspection fee\n\n$250 deposit due');
+  });
   test('an amount BEFORE the cue redacts; a distant amount does not', () => {
     expect(redactInspectionFeeCues('The $250 inspection fee was collected at closing.'))
       .toBe('The [fee removed] inspection fee was collected at closing.');

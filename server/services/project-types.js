@@ -1042,6 +1042,35 @@ function redactInspectionFeeCuesForType(text, projectTypeKey) {
     : text;
 }
 
+// Deep cue detection over a findings object (or JSON string of one).
+function findingsContainFeeCue(rawFindings) {
+  let parsed = rawFindings;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return false; } }
+  const walk = (value) => {
+    if (typeof value === 'string') return containsInspectionFeeCue(value);
+    if (Array.isArray(value)) return value.some(walk);
+    if (value && typeof value === 'object') return Object.values(value).some(walk);
+    return false;
+  };
+  return walk(parsed);
+}
+
+// Whether an archived FDACS binary may print a raw fee. Filings stamped with
+// pdf_renderer were rendered through the customer-safe scrub, so a cue in
+// their (deliberately raw) snapshot is fine — the PDF itself is clean. An
+// UNMARKED legacy binary is unsafe if its findings snapshot OR any photo
+// caption carries a cue (legacy PDFs printed captions raw and the archive
+// entry stores no caption snapshot, so callers pass the project's current
+// captions as the conservative proxy). Shared by the public /data +
+// /fdacs-pdf gates AND the admin detail serializer so the staff preview can
+// never advertise a filing the customer page withholds (codex #2817).
+function filingBinaryMayDiscloseFee(filing, { photoCaptions = [] } = {}) {
+  if (!filing) return false;
+  if (filing.pdf_renderer) return false;
+  return findingsContainFeeCue(filing.findings)
+    || photoCaptions.some((caption) => containsInspectionFeeCue(caption || ''));
+}
+
 // Finding VALUES need the fee scrub too, not just the dedicated internal key
 // — an inspection fee typed into a free-text field (most plausibly the WDO
 // "Comments / financial disclosure notes") would otherwise ride the public
@@ -1100,6 +1129,8 @@ module.exports = {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
   containsInspectionFeeCue,
+  findingsContainFeeCue,
+  filingBinaryMayDiscloseFee,
   redactInspectionFeeCuesForType,
   projectTypeHasInternalFindingKeys,
   projectTypeConfigHasInternalFindingKeys,

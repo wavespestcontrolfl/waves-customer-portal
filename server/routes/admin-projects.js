@@ -33,6 +33,7 @@ const {
   redactInspectionFeeCues,
   redactInspectionFeeCuesForType,
   projectTypeConfigHasInternalFindingKeys,
+  filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
@@ -1334,10 +1335,13 @@ router.get('/:id', async (req, res, next) => {
         // Same computation as the public report page's fdacsPdfAvailable —
         // the customer-preview needs it to mirror the page's WDO findings
         // suppression rule (the raw archive index is stripped above).
+        // Includes the legacy-binary fee gate so staff never see a filing
+        // advertised that the customer page withholds (codex #2817).
         fdacs_pdf_available: (() => {
           const filings = loadWdoFilings(project);
           const lastFiling = filings.length ? filings[filings.length - 1] : null;
-          return Boolean(lastFiling?.s3_key && config.s3?.bucket);
+          return Boolean(lastFiling?.s3_key && config.s3?.bucket)
+            && !filingBinaryMayDiscloseFee(lastFiling, { photoCaptions: photos.map((ph) => ph.caption) });
         })(),
         property_profile: propertyProfile,
         wdo_history: wdoHistory,

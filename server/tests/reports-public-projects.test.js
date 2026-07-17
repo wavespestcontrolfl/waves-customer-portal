@@ -177,6 +177,37 @@ describe('public project reports', () => {
     const projectQueries = [projectRead];
     db.mockImplementation((table) => {
       if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return chain({ pluck: jest.fn().mockResolvedValue([]) });
+      if (table === 'service_records') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/fdacs-pdf`);
+      const body = await res.json();
+      expect(res.status).toBe(404);
+      expect(body.error).toBe('Report not found');
+    });
+  });
+
+  test('WDO: /fdacs-pdf 404s a legacy filing whose PHOTO CAPTION carries the fee', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-2',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        project_type: 'wdo_inspection',
+        status: 'sent',
+        wdo_sent_filings: JSON.stringify([{
+          s3_key: 'wdo/filing.pdf',
+          findings: { comments: 'Clean findings.' },
+        }]),
+      }),
+    });
+    const projectQueries = [projectRead];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return chain({ pluck: jest.fn().mockResolvedValue(['Inspection fee $250 noted at panel']) });
       if (table === 'service_records') return chain();
       throw new Error(`Unexpected table query: ${table}`);
     });

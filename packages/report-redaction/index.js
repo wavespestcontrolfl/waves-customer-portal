@@ -69,6 +69,13 @@ const GAP_ABBREVIATIONS = '(?:approx|appx|est|min|max|incl|excl)';
 // "purchase price $400,000" (no container prep) still breaks.
 const CONTAINER_PHRASE = '\\b(?:in|into|within|under)\\s+(?:\\w+\\s+){0,2}?(?:costs?|prices?|charges?|values?)\\b';
 
+// Textareas wrap: "Inspection fee:\n$250" is one disclosure, so a SINGLE
+// line break is consumable — but only when the next line starts with an
+// amount, so an unrelated next paragraph ("Inspection fee waived\nRepair
+// notes…") keeps the newline boundary. A blank line (two breaks) always
+// terminates.
+const AMOUNT_LINE_BREAK = '\\r?\\n(?=[ \\t]*(?:\\$|USD\\b|US\\$|\\d))';
+
 // Amount-FIRST constructions name their subject right after the number —
 // "$400,000 purchase price", "$400 balance remains". An amount directly
 // followed by a money-subject noun is that subject's amount, never the fee,
@@ -141,7 +148,7 @@ const RANGE_CONTINUATION =
 
 const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
-  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${CONTAINER_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|[^.;!?\\n])){0,160}?)`
+  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${CONTAINER_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
   + `(?:${AMOUNT_PATTERN})`
   + RANGE_CONTINUATION
   // (?![,.]?\d) forbids backtracking into a partial number ("$400" out of
