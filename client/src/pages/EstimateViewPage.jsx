@@ -1102,7 +1102,9 @@ function MembershipCard({ membership }) {
         }}>
           Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} bumps your membership from{' '}
           <strong>{membership.upgrade.fromLabel}</strong> up to <strong>{membership.upgrade.toLabel}</strong>
-          {' '}— an extra {membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.
+          {membership.discountAppliesTo === 'new_services_only'
+            ? ` for this estimate. That tier discounts the new services by up to ${membership.tierDiscountPct}%; your current service prices stay unchanged.`
+            : ` — an extra ${membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.`}
         </div>
       ) : null}
 

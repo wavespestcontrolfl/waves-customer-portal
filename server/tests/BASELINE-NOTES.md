@@ -8,6 +8,20 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-07-16 lawn post-discount 35% margin guard
+
+Recurring lawn now keeps its 35% fully loaded collected-margin floor after
+WaveGuard discounts. Previously the floor shaped list price, but bundle
+discounts could reduce collected revenue below it; only the $600 annual program
+minimum survived the discount pass. The engine now caps the lawn discount at
+the greater of that program minimum and `minimumCollectedAnnualPrice`, without
+ever raising a line above its pre-discount price.
+
+Local baselines were recaptured with `CAPTURE_BASELINE=1 LOCAL=1`. Only four
+core cases and three v1-adapter cases moved, all containing discounted lawn;
+non-lawn line items, tier selection, and pre-discount totals stayed unchanged.
+See `pricing_changelog` entry `codex-2026-07-16` and migration
+`20260716150001_lawn_post_discount_margin_floor_changelog`.
 ## 2026-07-17 lawn spot-reserve fold
 
 Spot-treatment reserves folded into the lawn cost-floor material budgets

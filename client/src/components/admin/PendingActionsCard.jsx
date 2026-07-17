@@ -42,7 +42,7 @@ function paramLines(params) {
     .map(([k, v]) => [k, typeof v === "object" ? JSON.stringify(v) : String(v)]);
 }
 
-export default function PendingActionsCard({ actions, variant = "dark", onResolved }) {
+export default function PendingActionsCard({ actions, variant = "dark", onResolved, touchFriendly = false }) {
   // status per action id: undefined | 'confirming' | 'confirmed' | 'cancelling' | 'cancelled' | 'failed'
   const [statusById, setStatusById] = useState({});
   const [errorById, setErrorById] = useState({});
@@ -156,7 +156,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                     padding: "7px 16px", fontSize: 14, fontWeight: 600,
                     cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
                   } : undefined}
-                  className={dark ? undefined : "bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60"}
+                  className={dark ? undefined : `bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
                 >
                   {status === "confirming" ? statusLabel.confirming : "Confirm"}
                 </button>
@@ -169,7 +169,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                     borderRadius: 8, padding: "7px 16px", fontSize: 14,
                     cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
                   } : undefined}
-                  className={dark ? undefined : "bg-white text-zinc-600 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60"}
+                  className={dark ? undefined : `bg-white text-zinc-600 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
                 >
                   {status === "cancelling" ? statusLabel.cancelling : "Cancel"}
                 </button>

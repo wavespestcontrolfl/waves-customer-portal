@@ -4,9 +4,9 @@
       "tier": "Silver",
       "discount": 0.1,
       "annualBeforeDiscount": 1170,
-      "annualAfterDiscount": 1053,
-      "monthlyTotal": 87.75,
-      "savings": 117,
+      "annualAfterDiscount": 1117.12,
+      "monthlyTotal": 93.09,
+      "savings": 52.88,
       "serviceCount": 2
     },
     "results": {
@@ -58,8 +58,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1152,
-      "year2": 1053
+      "year1": 1216.12,
+      "year2": 1117.12
     }
   },
   "v1adapter_platinum_bundle_4_services_zone_a": {
@@ -67,9 +67,9 @@
       "tier": "Platinum",
       "discount": 0.2,
       "annualBeforeDiscount": 2929,
-      "annualAfterDiscount": 2365.73,
-      "monthlyTotal": 197.14,
-      "savings": 563.27,
+      "annualAfterDiscount": 2557.76,
+      "monthlyTotal": 213.15,
+      "savings": 371.24,
       "serviceCount": 4
     },
     "results": {
@@ -141,8 +141,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2464.73,
-      "year2": 2365.73
+      "year1": 2656.76,
+      "year2": 2557.76
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -485,9 +485,9 @@
       "tier": "Gold",
       "discount": 0.15,
       "annualBeforeDiscount": 1827.7,
-      "annualAfterDiscount": 1553.55,
-      "monthlyTotal": 129.46,
-      "savings": 274.15,
+      "annualAfterDiscount": 1661.49,
+      "monthlyTotal": 138.46,
+      "savings": 166.21,
       "serviceCount": 3
     },
     "results": {
@@ -550,8 +550,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1652.55,
-      "year2": 1553.55
+      "year1": 1760.49,
+      "year2": 1661.49
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
