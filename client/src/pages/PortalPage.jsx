@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
-import { useAuth } from '../hooks/useAuth';
+import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import api from '../utils/api';
@@ -5401,6 +5401,9 @@ function PropertyTab({ customer }) {
   const pendingRef = useRef({});
   const lastSavedRef = useRef(null);
   const saveQueueRef = useRef(Promise.resolve());
+  // Identity these edits belong to. The whole portal tree remounts on any
+  // property/customer change, so capturing once at mount is sufficient.
+  const editsCustomerIdRef = useRef(customer?.id);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -5434,6 +5437,15 @@ function PropertyTab({ customer }) {
     const save = saveQueueRef.current
       .catch(() => {}) // a failed earlier save must not block later ones
       .then(async () => {
+        // The token can be swapped out from under a queued save — a property
+        // switch in ANOTHER tab adopts the new token (useAuth storage
+        // handler) before this tab's portal unmounts and the cleanup flush
+        // below runs. Never write this property's fields under a different
+        // identity: drop the edits instead. A null decode (missing token) is
+        // allowed through — without a valid token the PUT fails auth
+        // server-side, so it can't cross-write either.
+        const tokenId = tokenCustomerId(api.token);
+        if (tokenId !== null && tokenId !== editsCustomerIdRef.current) return;
         const toSave = { ...pendingRef.current };
         if (!Object.keys(toSave).length) return;
         pendingRef.current = {};

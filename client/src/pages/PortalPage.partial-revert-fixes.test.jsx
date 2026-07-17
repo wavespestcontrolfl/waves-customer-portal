@@ -22,6 +22,9 @@ vi.mock('../utils/api', () => ({
 import api from '../utils/api';
 import { PropertyTab, DocumentSection } from './PortalPage';
 
+// Matches the { customerId } session JWT payload tokenCustomerId decodes.
+const fakeJwt = (customerId) => `h.${btoa(JSON.stringify({ customerId }))}.s`;
+
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
   phone: '9415551234', email: 'pat@example.com', tier: null,
@@ -85,6 +88,38 @@ describe('PropertyTab pending-edit flush', () => {
     expect(api.updatePropertyPreferences).toHaveBeenLastCalledWith(
       expect.objectContaining({ sideGateAccess: 'second value' }),
     );
+  });
+
+  it('drops pending edits when the token was swapped to another property', async () => {
+    api.token = fakeJwt('cust-1');
+    const { unmount } = render(<PropertyTab customer={customer} />);
+    const input = await screen.findByLabelText('Side Gate / Backyard Access');
+    fireEvent.change(input, { target: { value: 'gate code 4821' } });
+
+    // Another tab switched properties: the storage handler adopts the new
+    // token before this tab's portal unmounts. The unmount flush must NOT
+    // write cust-1's edits under cust-2's identity.
+    api.token = fakeJwt('cust-2');
+    unmount();
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(api.updatePropertyPreferences).not.toHaveBeenCalled();
+    delete api.token;
+  });
+
+  it('still saves on unmount while the token belongs to this property', async () => {
+    api.token = fakeJwt('cust-1');
+    const { unmount } = render(<PropertyTab customer={customer} />);
+    const input = await screen.findByLabelText('Side Gate / Backyard Access');
+    fireEvent.change(input, { target: { value: 'same identity save' } });
+
+    unmount();
+
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1));
+    expect(api.updatePropertyPreferences).toHaveBeenCalledWith(
+      expect.objectContaining({ sideGateAccess: 'same identity save' }),
+    );
+    delete api.token;
   });
 
   it('still flushes via the property-switching event while mounted', async () => {
