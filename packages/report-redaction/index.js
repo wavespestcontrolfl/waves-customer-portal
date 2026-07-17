@@ -19,16 +19,20 @@
 const INTERNAL_FINDING_KEYS = ['inspection_fee'];
 
 // Words that END the inspection-fee cue's reach inside a clause. Two families:
-// - the fee was waived/paid/comped — it has no (relevant) amount, so whatever
-//   amount follows belongs to something else ("Inspection fee paid separately,
-//   total due $400" must keep the $400);
+// - the fee was waived/comped — it has NO amount of its own, so whatever
+//   amount follows belongs to something else ("Inspection fee waived; repair
+//   $1,250" must keep the $1,250);
 // - a NEW money subject — its amount is legitimate customer-facing text
-//   ("Inspection fee noted, treatment estimate $900").
+//   ("Inspection fee noted, treatment estimate $900"; "Inspection fee paid
+//   separately, total due $400" keeps the $400 because "total" breaks).
 // NOT breakers: "due"/"service" (they bridge the cue to its own amount —
-// "inspection fee is due at time of service: $250" IS the fee).
+// "inspection fee is due at time of service: $250" IS the fee) and
+// paid/collected/settled — a PAID fee still has its own amount ("Inspection
+// fee paid at closing: $250" is the fee and must redact); when the money
+// after a payment-state word belongs to something else, the money-subject
+// breakers below are what identify it.
 const FEE_REACH_BREAKERS = [
-  'waiv\\w*', 'paid', 'collected', 'settled', 'comped', 'complimentary',
-  'free', 'included', 'covered', 'no charge',
+  'waiv\\w*', 'comped', 'complimentary', 'free', 'included', 'covered', 'no charge',
   'repairs?', 're-?treatments?', 'treatments?', 'permits?', 'damages?',
   'estimates?', 'quotes?', 'deductibles?', 'discounts?', 'credits?',
   'balance', 'totals?', 'subtotal', 'amount\\s+due',
@@ -38,17 +42,20 @@ const FEE_REACH_BREAKERS = [
 // amount, a "250 dollars" currency-word amount, or a bare number. The bare
 // form is the corruption-prone one ("Inspection fee for 123 Main Street is
 // $250" must not select the street number), so it only matches when a value
-// introducer — is/was/of/at or a colon/equals — DIRECTLY precedes the digits
+// introducer — is/was/of or a colon/equals — DIRECTLY precedes the digits
 // ("inspection fee is 250", "inspection fee: 250"); an arbitrary mid-clause
 // number can never be selected, and the $ amount later in the clause is still
-// caught by the other forms. It is further fenced: 2+ digits (so "tier 2"
-// survives), not part of a date/time/range ("due 07/24", "at 10:30"), not a
-// duration or unit ("due in 30 days", "10am"), and not a 19xx/20xx year.
+// caught by the other forms. "at" is NOT an introducer — it is a location/
+// time preposition ("the property at 123 Main Street", "at 10:30"), so a
+// number after it is far more likely an address than an amount. Further
+// fences: 2+ digits (so "tier 2" survives), not part of a date/time/range
+// ("due 07/24"), not a duration or unit ("due in 30 days", "10am"), and not
+// a 19xx/20xx year.
 const AMOUNT_PATTERN = [
   '\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
   '(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
   '\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?\\b',
-  '(?:\\b(?:is|was|of|at)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?)\\b)(?![:/\\-]?\\d)',
+  '(?:\\b(?:is|was|of)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?)\\b)(?![:/\\-]?\\d)',
 ].join('|');
 
 // Remove ONLY the literal "inspection fee" phrase + an amount from free text.

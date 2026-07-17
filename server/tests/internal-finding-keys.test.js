@@ -123,6 +123,16 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee collected on site; amount due $150.'))
       .toBe('Inspection fee collected on site; amount due $150.');
   });
+  test("a paid/collected fee's OWN amount still redacts — payment state is not a breaker", () => {
+    expect(redactInspectionFeeCues('Inspection fee paid at closing: $250'))
+      .toBe('Inspection fee paid at closing: [fee removed]');
+    expect(redactInspectionFeeCues('Inspection fee collected on site: $250'))
+      .toBe('Inspection fee collected on site: [fee removed]');
+  });
+  test('"at" is not a bare-number introducer — street numbers survive', () => {
+    expect(redactInspectionFeeCues('The inspection fee for the property at 123 Main Street is $250'))
+      .toBe('The inspection fee for the property at 123 Main Street is [fee removed]');
+  });
   test('redacts currency-word and bare-number amounts, not just $', () => {
     expect(redactInspectionFeeCues('Inspection fee is 250 dollars.'))
       .toBe('Inspection fee is [fee removed].');
