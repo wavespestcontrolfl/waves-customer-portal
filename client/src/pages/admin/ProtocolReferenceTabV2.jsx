@@ -46,7 +46,7 @@ function adminFetch(path, options = {}) {
 }
 
 const CONDITIONAL_LINE_RE =
-  /^if\s|\bif\b|\bonly\b|\bwhere\b|\binstead\b|\brescue\b|\bcurative\b|\bthreshold\b|\bspot treat/i;
+  /^if\s|\bif\b|\bonly\b|\bwhere\b|\binstead\b|\brescue\b|\bcurative\b|\bthreshold\b|\bspot treat|\bpremium\b|\bfor (whitefly|scale|aphid|caterpillar|mite|borer|confirmed)/i;
 
 function parseProductLines(text) {
   if (!text) return [];
@@ -227,6 +227,11 @@ function CalendarLine({ line, muted }) {
         {line.detail && (
           <span className="text-ink-tertiary"> — {line.detail}</span>
         )}
+        {line.description && (
+          <div className="text-10 text-ink-tertiary italic">
+            {line.description}
+          </div>
+        )}
       </div>
       {line.cost != null && (
         <span className="flex-shrink-0 font-mono u-nums text-11 text-ink-primary whitespace-nowrap">
@@ -313,7 +318,7 @@ function CurrentVisitCardV2({ visit, trackName }) {
         <div className="mb-3 rounded-sm border-hairline border-zinc-200 overflow-hidden">
           {" "}
           <div className="text-11 font-medium u-label text-ink-tertiary px-3 py-1.5 bg-zinc-50 border-b border-hairline border-zinc-200">
-            Scheduled Applications
+            Primary Applications
           </div>
           <div className="px-3 py-1">
             {primaryProducts.map((p, i) => (
@@ -376,7 +381,9 @@ function CurrentVisitCardV2({ visit, trackName }) {
           </div>
           {hasNumericCost && (
             <div className="ml-auto text-13 text-ink-primary font-medium font-mono u-nums">
-              Expected: ${expectedTotal.toFixed(2)}
+              {Number.isFinite(laborCost)
+                ? `Expected: $${expectedTotal.toFixed(2)}`
+                : `Materials + reserve: $${expectedTotal.toFixed(2)}`}
             </div>
           )}
         </div>
