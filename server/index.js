@@ -121,6 +121,7 @@ const twilioVoiceWebhookRoutes = require('./routes/twilio-voice-webhook');
 const adminReviewRequestRoutes = require('./routes/admin-review-requests');
 const reviewPublicRoutes = require('./routes/review-public');
 const adminIntelligenceBarRoutes = require('./routes/admin-intelligence-bar');
+const adminAgentEstimateRoutes = require('./routes/admin-agent-estimate');
 const toolHealthRoutes = require('./routes/tool-health');
 
 const app = express();
@@ -438,6 +439,7 @@ app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
 app.use('/api/admin/intelligence-bar', adminIntelligenceBarRoutes);
+app.use('/api/admin/agent-estimate', adminAgentEstimateRoutes);
 app.use('/api/admin/tool-health', toolHealthRoutes);
 app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 // Mounted before adminCustomerRoutes so the customer router doesn't

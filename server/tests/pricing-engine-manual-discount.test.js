@@ -285,9 +285,9 @@ describe('pricing engine manual recurring discount', () => {
     const lawn = estimate.lineItems.find((line) => line.service === 'lawn_care');
     const credit = estimate.summary.serviceSpecificDiscounts.find((row) => row.service === 'lawn_care');
 
-    // Lawn 9x at 4,500 sqft floors at $603/yr; Silver 10% caps at the $600
-    // program minimum (owner directive 2026-07-09).
-    expect(lawn.annualAfterDiscount).toBe(600);
+    // Silver would discount the $621 line below its $617.91 collected-margin
+    // floor, so the margin guard binds above the $600 program minimum.
+    expect(lawn.annualAfterDiscount).toBe(617.91);
     expect(credit).toEqual(expect.objectContaining({
       amount: 0,
       capReason: 'service_line_price',

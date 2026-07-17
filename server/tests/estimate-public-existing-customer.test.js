@@ -8,8 +8,9 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 //     stations → seasonal mosquito ladder instead of "Add Pest Control").
 // Leads (no membership snapshot) keep the original page untouched.
 
-const { renderPage, buildPricingBundle } = require('../routes/estimate-public');
+const { renderPage, buildPricingBundle, clampLawnLadderEntry } = require('../routes/estimate-public');
 const { shouldIncludeWaveGuardSetupFeeForRecurring } = require('../services/estimate-converter');
+const { publicMembershipView } = require('../services/estimate-membership-context');
 
 function lawnEstimate(overrides = {}) {
   return {
@@ -57,15 +58,8 @@ function donMembership(overrides = {}) {
       addedServiceLabels: ['Lawn Care'],
     },
     existingServiceKeys: ['pest_control'],
-    existingServices: [{
-      key: 'pest_control',
-      label: 'Pest Control',
-      extraDiscountPct: 10,
-      perVisitSavings: 11.70,
-      remainingVisits: 3,
-      totalRemainingSavings: 35.10,
-      prepaid: false,
-    }],
+    discountAppliesTo: 'new_services_only',
+    existingServices: [],
     newServices: [{
       key: 'lawn_care',
       label: 'Lawn Care',
@@ -76,6 +70,58 @@ function donMembership(overrides = {}) {
     ...overrides,
   };
 }
+
+test('a monthly lawn floor re-anchors annual billing to the rounded monthly charge', () => {
+  const result = clampLawnLadderEntry({
+    monthlyBase: 50,
+    monthly: 50,
+    annual: 600,
+    perTreatment: 66.67,
+    visits: 9,
+    manualDiscount: null,
+    marginFloorAnnual: 640,
+  });
+
+  expect(result.monthly).toBe(53.34);
+  expect(result.annual).toBe(640.08);
+});
+
+test('an annual-only lawn floor rounds its derived monthly charge upward', () => {
+  const result = clampLawnLadderEntry({
+    monthlyBase: null,
+    monthly: null,
+    annual: 600,
+    perTreatment: 66.67,
+    visits: 9,
+    manualDiscount: null,
+    marginFloorAnnual: 630.85,
+  });
+
+  expect(result.monthly).toBe(52.58);
+  expect(result.annual).toBe(630.85);
+  expect(result.monthly * 12).toBeGreaterThanOrEqual(result.annual);
+});
+
+test('a manual lawn discount cannot lower the accepted price below its cost-derived margin floor', () => {
+  const result = clampLawnLadderEntry({
+    monthlyBase: 60,
+    monthly: 45,
+    annual: 540,
+    perTreatment: 60,
+    visits: 9,
+    manualDiscount: { type: 'FIXED', amount: 180, monthlyAmount: 15 },
+    marginFloorAnnual: 640,
+  });
+
+  expect(result.monthly).toBe(53.34);
+  expect(result.annual).toBe(640.08);
+  expect(result.perTreatment).toBe(71.12);
+  expect(result.manualDiscount).toEqual(expect.objectContaining({
+    amount: 79.92,
+    capped: true,
+    capReason: 'lawn_margin_floor',
+  }));
+});
 
 describe('existing-customer public estimate page', () => {
   test('existing-customer lawn estimate has no setup fee and no prepay option', () => {
@@ -101,15 +147,17 @@ describe('existing-customer public estimate page', () => {
     expect(html).not.toContain('save $6.98/mo');
   });
 
-  test('member card reads as savings copy — upgrade callout + remaining-visit savings', () => {
+  test('member card says the combined tier discounts additions without repricing current service', () => {
     const html = renderPage('existing-token-copy', lawnEstimate(), lawnEstimateData(), donMembership());
 
     expect(html).toContain('Welcome back, Don');
     expect(html).toContain('what your WaveGuard membership saves you on this estimate');
     expect(html).toContain('bumps your membership from <strong>Bronze</strong>');
     expect(html).toContain('up to <strong>Silver</strong>');
-    expect(html).toContain('including the ones you already have');
-    expect(html).toContain('save $11.70/visit on your 3 remaining visits');
+    expect(html).toContain('discounts the new services by up to 10%');
+    expect(html).toContain('your current service prices stay unchanged');
+    expect(html).not.toContain('including the ones you already have');
+    expect(html).not.toContain('Your existing services');
   });
 
   test('no-benefit membership (combined Bronze, 0% discount) renders no member card', () => {
@@ -178,8 +226,14 @@ describe('existing-customer public estimate page', () => {
   });
 
   test('legacy snapshot without tierDiscountPct keeps its card when rows carry benefit', () => {
-    const membership = donMembership();
+    const membership = donMembership({
+      existingServices: [{
+        key: 'pest_control', label: 'Pest Control', extraDiscountPct: 10,
+        perVisitSavings: 11.70, remainingVisits: 3, totalRemainingSavings: 35.10, prepaid: false,
+      }],
+    });
     delete membership.tierDiscountPct;
+    delete membership.discountAppliesTo;
     const html = renderPage('legacy-snapshot-token', lawnEstimate(), lawnEstimateData(), membership);
 
     expect(html).toContain('<section class="card wg-member-card">');
@@ -266,5 +320,73 @@ describe('existing-customer public estimate page', () => {
       recurringServices,
       estimateData: { result: { oneTime: { items: [] } } },
     })).toBe(true);
+  });
+});
+
+// The frozen membershipSnapshot carries the STAFF account context
+// (currentServices with per-property addresses, per-contract prices, payment
+// and visit dates). The unauthenticated token routes must never hand that to
+// whoever holds the link — /data sends publicMembershipView(membership) and
+// the SSR page gets the same projection.
+describe('public boundary: staff account context never escapes the token link', () => {
+  const donMembershipWithStaffContext = () => donMembership({
+    currentServices: [{
+      key: 'pest_control',
+      keys: ['pest_control'],
+      label: 'Pest Control',
+      qualifiesForWaveGuard: true,
+      serviceAddresses: ['999 Secondary Property Ln, Venice, 34285'],
+      serviceAddressesComplete: true,
+      componentServiceAddresses: { pest_control: ['999 Secondary Property Ln, Venice, 34285'] },
+      componentServiceAddressesComplete: { pest_control: true },
+      currentPerVisit: 117,
+      spendSource: 'last_paid_invoice',
+      lastPaidAt: '2026-05-20',
+      scheduledPerVisit: 120,
+      contracts: [{
+        serviceAddress: '999 Secondary Property Ln, Venice, 34285',
+        scheduledPerVisit: 120,
+        activeScheduledVisits: 3,
+      }],
+      activeScheduledVisits: 3,
+      nextScheduledDate: '2026-08-01',
+    }],
+    currentSpendPerVisitTotal: 117,
+  });
+
+  test('the /data membership payload strips every staff field', () => {
+    const view = publicMembershipView(donMembershipWithStaffContext());
+
+    const json = JSON.stringify(view);
+    for (const staffMarker of [
+      'currentServices', 'currentSpendPerVisitTotal', 'serviceAddress', 'contracts',
+      'lastPaidAt', 'currentPerVisit', 'spendSource', 'nextScheduledDate',
+      '999 Secondary Property Ln', '2026-05-20', '2026-08-01',
+    ]) {
+      expect(json).not.toContain(staffMarker);
+    }
+    // The member card's inputs survive.
+    expect(view).toMatchObject({
+      isExistingCustomer: true,
+      firstName: 'Don',
+      tierLabel: 'Silver',
+      existingServiceKeys: ['pest_control'],
+    });
+    expect(view.newServices).toEqual([expect.objectContaining({ key: 'lawn_care', perApplicationSavings: 9.30 })]);
+  });
+
+  test('the SSR page renders no staff context (stale full snapshot or projected view) and keeps the member card', () => {
+    const full = donMembershipWithStaffContext();
+    for (const membership of [full, publicMembershipView(full)]) {
+      const html = renderPage('boundary-token', lawnEstimate(), lawnEstimateData(), membership);
+
+      expect(html).not.toContain('999 Secondary Property Ln');
+      expect(html).not.toContain('2026-05-20');
+      expect(html).not.toContain('2026-08-01');
+      // The customer-visible membership card is unchanged by the projection.
+      expect(html).toContain('Welcome back, Don');
+      expect(html).toContain('save $9.30 per application');
+      expect(html).toContain('up to <strong>Silver</strong>');
+    }
   });
 });
