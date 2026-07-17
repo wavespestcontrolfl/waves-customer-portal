@@ -767,6 +767,20 @@ describe('review fixes', () => {
     expect(idxPriv.addressFromContext(context)).toBeNull();
   });
 
+  test('city comparison survives a formatting-dependent state/ZIP tail', () => {
+    // Missing last comma folds "FL 34205" into the parsed city — the same
+    // unit must still compare equal across formats.
+    expect(idxPriv.sameStreetAddress(
+      '123 Main St, Apt A, Bradenton, FL 34205',
+      '123 Main St, Apt A, Bradenton FL 34205',
+    )).toBe(true);
+    // Genuinely different cities still differ.
+    expect(idxPriv.sameStreetAddress(
+      '123 Main St, Bradenton FL',
+      '123 Main St, Sarasota FL',
+    )).toBe(false);
+  });
+
   test('duplicate guard clears against EVERY open estimate, not just the newest', () => {
     const open = [
       { id: 2, address: '456 Other Property Rd', created_at: '2026-07-16' }, // newest, different property

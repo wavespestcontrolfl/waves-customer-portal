@@ -379,11 +379,26 @@ class SatelliteAnalyzer {
       }
     }
 
-    // String fields — prefer the first available provider result if they disagree
+    // String fields — prefer the first available provider result if they
+    // disagree. Same single-source rule as the numeric/boolean paths: a
+    // categorical fact only one provider returned is uncorroborated, not
+    // settled — it must carry the verify flag and its provenance.
     for (const field of stringFields) {
-      const values = providerResults.map(({ analysis }) => analysis[field]).filter(Boolean);
-      merged[field] = values[0] || null;
-      if (new Set(values).size > 1) fieldVerify.push(field);
+      const values = providerResults
+        .map(({ provider, analysis }) => ({ provider, value: analysis[field] }))
+        .filter((entry) => Boolean(entry.value));
+      merged[field] = values[0]?.value || null;
+      if (!values.length) {
+        confidenceDetails[field] = { values: [], status: 'missing' };
+      } else if (values.length < providerResults.length) {
+        fieldVerify.push(field);
+        confidenceDetails[field] = { values, status: 'single_source' };
+      } else if (new Set(values.map((entry) => entry.value)).size > 1) {
+        fieldVerify.push(field);
+        confidenceDetails[field] = { values, status: 'disagree' };
+      } else {
+        confidenceDetails[field] = { values, status: 'agree' };
+      }
     }
 
     // Notes — combine both

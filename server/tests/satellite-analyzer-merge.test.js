@@ -88,6 +88,25 @@ describe('satellite analyzer per-field confidence', () => {
     expect(result.fieldVerify).not.toContain('shrub_density');
   });
 
+  test('flags a categorical fact reported by only one of multiple providers', () => {
+    const result = satelliteAnalyzer.mergeResults([
+      { provider: 'claude', analysis: { property_type: 'single_family', tree_density: 'heavy' } },
+      { provider: 'openai', analysis: { tree_density: 'heavy' } },
+    ]);
+
+    // Only claude returned property_type — uncorroborated, so it stays
+    // reviewable instead of reading as settled.
+    expect(result.property_type).toBe('single_family');
+    expect(result.fieldVerify).toContain('property_type');
+    expect(result.confidenceDetails.property_type).toEqual({
+      values: [{ provider: 'claude', value: 'single_family' }],
+      status: 'single_source',
+    });
+    // Both providers agreed on tree_density — settled, not flagged.
+    expect(result.fieldVerify).not.toContain('tree_density');
+    expect(result.confidenceDetails.tree_density.status).toBe('agree');
+  });
+
   test('flags a boolean reported by only one of multiple providers', () => {
     const result = satelliteAnalyzer.mergeResults([
       { provider: 'claude', analysis: { has_pool: true } },

@@ -722,13 +722,27 @@ export default function AgentEstimatePage() {
     setSending(true);
     setSendMessage("");
     try {
-      const data = await adminFetch(`/admin/estimates/${draft.id}/send`, {
+      const postSend = (acknowledgeEngineReview = false) => adminFetch(`/admin/estimates/${draft.id}/send`, {
         method: "POST",
         body: JSON.stringify({
           sendMethod,
           idempotencyKey: globalThis.crypto?.randomUUID?.() || `agent-estimate-send-${Date.now()}`,
+          ...(acknowledgeEngineReview ? { acknowledgeEngineReview: true } : {}),
         }),
       });
+      let data;
+      try {
+        data = await postSend();
+      } catch (error) {
+        // Yellow-lane drafts 409 their FIRST send until the operator
+        // acknowledges the engine's review reasons — same confirm-and-retry
+        // contract as the estimates pipeline page.
+        if (error?.code !== "ENGINE_REVIEW_REQUIRED") throw error;
+        if (!window.confirm(`${error.message}\n\nReviewed — send now?`)) {
+          throw new Error("Send cancelled — review the flagged reasons first.");
+        }
+        data = await postSend(true);
+      }
       if (activeLeadRef.current !== sendLeadId) return;
       const label = sendMethod === "sms" ? "SMS" : sendMethod === "email" ? "email" : "SMS and email";
       const channelIssues = Object.entries(data.channels || {})

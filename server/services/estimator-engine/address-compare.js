@@ -67,9 +67,15 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   const [za, zb] = [zip(a), zip(b)];
   if (za && zb && za !== zb) return false;
   // Full-city equality, not token overlap — North Port vs Port Charlotte
-  // share a token but are different parcels.
+  // share a token but are different parcels. Parsed cities can carry a
+  // formatting-dependent state/ZIP tail ("Bradenton FL 34205" when the last
+  // comma is missing) — strip those tokens or the same city compares
+  // unequal across formats.
   const cityString = (s) => normSegment(parsed(s).city)
-    .split(' ').filter(Boolean).join(' ');
+    .split(' ')
+    .filter(Boolean)
+    .filter((t) => t !== 'fl' && t !== 'florida' && !/^\d{5}(\d{4})?$/.test(t))
+    .join(' ');
   const [ca, cb] = [cityString(a), cityString(b)];
   if (ca && cb && ca !== cb) return false;
   return true;
