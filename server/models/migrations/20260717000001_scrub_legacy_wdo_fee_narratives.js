@@ -4,20 +4,61 @@
 // history), but rows written before those guards still hold the fee in
 // projects.recommendations — this one-time pass cleans the stored text so
 // unenumerated readers and future exports don't depend on request-time
-// redaction. Uses the same shared redactor as every boundary
-// (@waves/report-redaction), so at-rest text and served text agree.
+// redaction. Two passes per row, both from @waves/report-redaction so
+// at-rest text and served text agree:
+//   1. cue-based (the literal "inspection fee" phrase), and
+//   2. VALUE-based — legacy AI output can paraphrase the structured fee
+//      ("the quoted $250 charge") without the literal cue, so the amounts
+//      the project actually recorded (findings.inspection_fee + archived
+//      filing snapshots) are scrubbed wherever they appear (codex #2817).
 //
-// Idempotent: a re-run finds no remaining cues. Plain UPDATEs — fires ZERO
-// customer communications. No CAS/retry needed (unlike the retired
-// value-based 20260716150000 design): any concurrent edit is scrubbed by
-// the write guard itself. Down is a no-op — the redaction is deliberate
-// data hygiene, not reversible.
-const { redactInspectionFeeCues, containsInspectionFeeCue } = require('@waves/report-redaction');
+// Idempotent: a re-run finds no remaining cues or values. Plain UPDATEs —
+// fires ZERO customer communications. Per-field CAS: a concurrent edit
+// during the deploy window is skipped, and the new instance's write guard
+// scrubs every subsequent save. Down is a no-op — the redaction is
+// deliberate data hygiene, not reversible.
+const {
+  redactInspectionFeeCues,
+  containsInspectionFeeCue,
+  redactSpecificAmounts,
+} = require('@waves/report-redaction');
 const {
   PROJECT_TYPE_KEYS,
   projectTypeHasInternalFindingKeys,
   PROJECT_TITLE_MAX_LENGTH,
 } = require('../../services/project-types');
+
+function parseMaybeJson(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+// Every fee amount this project ever recorded: the live structured field
+// plus each archived filing's snapshot (a stale draft fee an old narrative
+// quoted may only survive there).
+function projectFeeValues(row) {
+  const values = [];
+  const findings = parseMaybeJson(row.findings);
+  if (findings?.inspection_fee != null) values.push(findings.inspection_fee);
+  const filings = parseMaybeJson(row.wdo_sent_filings);
+  if (Array.isArray(filings)) {
+    for (const filing of filings) {
+      const snap = parseMaybeJson(filing?.findings) || filing?.findings;
+      if (snap && typeof snap === 'object' && snap.inspection_fee != null) {
+        values.push(snap.inspection_fee);
+      }
+    }
+  }
+  return values;
+}
+
+function scrubText(value, feeValues) {
+  let scrubbed = value;
+  if (containsInspectionFeeCue(scrubbed)) scrubbed = redactInspectionFeeCues(scrubbed);
+  if (feeValues.length) scrubbed = redactSpecificAmounts(scrubbed, feeValues);
+  return scrubbed;
+}
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('projects'))) return;
@@ -27,23 +68,21 @@ exports.up = async function up(knex) {
   const feeTypes = PROJECT_TYPE_KEYS.filter(projectTypeHasInternalFindingKeys);
   if (!feeTypes.length) return;
 
+  const hasFilings = await knex.schema.hasColumn('projects', 'wdo_sent_filings');
   const rows = await knex('projects')
     .whereIn('project_type', feeTypes)
-    .select('id', 'recommendations', 'title');
+    .select(['id', 'recommendations', 'title', 'findings'].concat(hasFilings ? ['wdo_sent_filings'] : []));
+
+  // id → recorded fee values, reused by the snapshot pass below.
+  const feeValuesByProject = new Map();
+  for (const row of rows) feeValuesByProject.set(row.id, projectFeeValues(row));
 
   for (const row of rows) {
-    // Per-field compare-and-swap: Railway runs this in preDeployCommand
-    // while the OLD instance still serves traffic, so an admin edit can land
-    // between the bulk SELECT and this row. The CAS predicate makes such a
-    // row a no-op here instead of clobbering the edit — and that's safe to
-    // skip entirely, because the new instance's write guard scrubs every
-    // subsequent save (and the old instance's window closes with the deploy;
-    // any text it wrote that still carries a cue is covered by the egress
-    // guards until the row is next saved).
+    const feeValues = feeValuesByProject.get(row.id) || [];
     for (const field of ['recommendations', 'title']) {
       const value = row[field];
-      if (!value || !containsInspectionFeeCue(value)) continue;
-      let scrubbed = redactInspectionFeeCues(value);
+      if (!value) continue;
+      let scrubbed = scrubText(value, feeValues);
       // the marker is longer than a short amount ("$1" → "[fee removed]"),
       // and projects.title is varchar(200) — clamp so a near-limit title
       // can't abort the migration on the column constraint
@@ -56,27 +95,31 @@ exports.up = async function up(knex) {
     }
   }
 
-  await scrubNoteSnapshots(knex, feeTypes);
+  await scrubNoteSnapshots(knex, feeTypes, feeValuesByProject);
 };
 
 // The completion flow COPIED fee-type narratives into
 // service_records.technician_notes, and invoice creation snapshots those
 // notes again into invoices.tech_notes — served on an UNAUTHENTICATED
 // invoice token (pay-v2). Clean both snapshot columns at rest with the same
-// CAS pattern; the type gate rides on the service record's
-// structured_notes.projectType (codex #2817).
-async function scrubNoteSnapshots(knex, feeTypes) {
+// two passes and CAS pattern; the type gate and project linkage ride on the
+// service record's structured_notes (codex #2817).
+async function scrubNoteSnapshots(knex, feeTypes, feeValuesByProject) {
   if (!(await knex.schema.hasTable('service_records'))) return;
   const hasStructured = await knex.schema.hasColumn('service_records', 'structured_notes');
   if (!hasStructured) return;
 
+  const valuesFor = (structuredNotes) => {
+    const parsed = parseMaybeJson(structuredNotes);
+    return (parsed?.projectId && feeValuesByProject.get(parsed.projectId)) || [];
+  };
+
   const srRows = await knex('service_records')
     .whereNotNull('technician_notes')
     .whereIn(knex.raw("structured_notes->>'projectType'"), feeTypes)
-    .select('id', 'technician_notes');
+    .select('id', 'technician_notes', 'structured_notes');
   for (const row of srRows) {
-    if (!containsInspectionFeeCue(row.technician_notes)) continue;
-    const scrubbed = redactInspectionFeeCues(row.technician_notes);
+    const scrubbed = scrubText(row.technician_notes, valuesFor(row.structured_notes));
     if (scrubbed === row.technician_notes) continue;
     await knex('service_records')
       .where({ id: row.id })
@@ -91,10 +134,9 @@ async function scrubNoteSnapshots(knex, feeTypes) {
     .join('service_records', 'invoices.service_record_id', 'service_records.id')
     .whereNotNull('invoices.tech_notes')
     .whereIn(knex.raw("service_records.structured_notes->>'projectType'"), feeTypes)
-    .select('invoices.id as id', 'invoices.tech_notes as tech_notes');
+    .select('invoices.id as id', 'invoices.tech_notes as tech_notes', 'service_records.structured_notes as structured_notes');
   for (const row of invRows) {
-    if (!containsInspectionFeeCue(row.tech_notes)) continue;
-    const scrubbed = redactInspectionFeeCues(row.tech_notes);
+    const scrubbed = scrubText(row.tech_notes, valuesFor(row.structured_notes));
     if (scrubbed === row.tech_notes) continue;
     await knex('invoices')
       .where({ id: row.id })

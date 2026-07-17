@@ -227,7 +227,10 @@ const PRE_CUE_AMOUNT =
   '(?:\\$\\s?\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?|(?:USD|US\\$)\\s?\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?|\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?\\s?dollars?)';
 const PRE_CUE_RE = new RegExp(
   `(${PRE_CUE_AMOUNT}(?:\\s?(?:to|through|thru|or|and|[-–—/])\\s?${PRE_CUE_AMOUNT})*)`
-  + '(\\s+(?:[\\w\\-]+\\s+){0,2}?inspection\\s+fee)\\b',
+  // The bridge words between the amount and the cue must not be a money
+  // subject OR a clause conjunction — "Treatment is $900 and inspection fee
+  // waived" is two statements, and the $900 belongs to the first one.
+  + `(\\s+(?:(?!\\b(?:${FEE_REACH_BREAKERS}|and|or|but|while|whereas|though|although|however|plus|minus|then)\\b)[\\w\\-]+\\s+){0,2}?inspection\\s+fee)\\b`,
   'gi',
 );
 
@@ -273,8 +276,40 @@ function containsInspectionFeeCue(text) {
   return FEE_CUE_TEST_RE.test(str) || PRE_CUE_TEST_RE.test(str);
 }
 
+// Value-based scrub for LEGACY backfills: given the structured fee values a
+// project actually recorded (findings.inspection_fee + archived filing
+// snapshots), remove those specific amounts from free text even when the
+// prose PARAPHRASES the fee without the literal cue ("the quoted $250
+// charge"). Currency-marked matches always redact; a bare number only when
+// it stands alone as an amount (not part of a longer number, price-per-sqft
+// decimal, date, or measurement). Regexes are built at call time — this
+// path runs in migrations/backfills only, never in the browser bundle.
+function redactSpecificAmounts(text, values) {
+  let str = String(text || '');
+  if (!str) return str;
+  const seen = new Set();
+  for (const value of values || []) {
+    const digits = String(value == null ? '' : value).replace(/[^\d.]/g, '');
+    const intPart = digits.split('.')[0].replace(/^0+(?=\d)/, '');
+    if (!intPart || seen.has(intPart)) continue;
+    seen.add(intPart);
+    const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    const num = `(?:${intPart}|${grouped})`;
+    const re = new RegExp(
+      `(?:\\$\\s?${num}(?:\\.\\d{1,2})?(?!\\d)`
+      + `|(?:USD|US\\$)\\s?${num}(?:\\.\\d{1,2})?(?!\\d)`
+      + `|\\b${num}(?:\\.\\d{1,2})?\\s?dollars?\\b`
+      + `|(?<![\\d.$/:\\-])${num}(?:\\.00?)?\\b(?![.,]?\\d)(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b))`,
+      'g',
+    );
+    str = str.replace(re, '[fee removed]');
+  }
+  return str;
+}
+
 module.exports = {
   INTERNAL_FINDING_KEYS,
   redactInspectionFeeCues,
   containsInspectionFeeCue,
+  redactSpecificAmounts,
 };

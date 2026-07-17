@@ -11,6 +11,7 @@ const {
   projectTypeHasInternalFindingKeys,
   PROJECT_TITLE_MAX_LENGTH,
 } = require('../services/project-types');
+const { redactSpecificAmounts } = require('@waves/report-redaction');
 
 describe('stripInternalFindingKeys', () => {
   test('inspection_fee is an internal key', () => {
@@ -68,6 +69,23 @@ describe('stripInternalFindingKeys', () => {
     const findings = { comments: 'A follow-up inspection fee of $100 applies.' };
     expect(stripInternalFindingKeys(findings, { redactValues: false }))
       .toEqual({ comments: 'A follow-up inspection fee of $100 applies.' });
+  });
+});
+
+describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
+  test('removes the recorded fee value even when the prose paraphrases it', () => {
+    expect(redactSpecificAmounts('We quoted the $250 charge for this visit.', ['250']))
+      .toBe('We quoted the [fee removed] charge for this visit.');
+    expect(redactSpecificAmounts('The WDO inspection costs 250 dollars today.', ['$250']))
+      .toBe('The WDO inspection costs [fee removed] today.');
+    expect(redactSpecificAmounts('Total $1,250 includes materials.', ['1250']))
+      .toBe('Total [fee removed] includes materials.');
+  });
+  test('never touches longer numbers, dates, or measurements', () => {
+    expect(redactSpecificAmounts('Fee tier 2 applies to 2500 sq ft homes.', ['250']))
+      .toBe('Fee tier 2 applies to 2500 sq ft homes.');
+    expect(redactSpecificAmounts('Visit on 07/250 untouched.', ['250']))
+      .toBe('Visit on 07/250 untouched.');
   });
 });
 
@@ -217,6 +235,12 @@ describe('redactInspectionFeeCues', () => {
       .toBe('Inspection fee for the property at 123 Price Street is [fee removed]');
     expect(redactInspectionFeeCues('Inspection fee at 42 Value Lane: USD 250'))
       .toBe('Inspection fee at 42 Value Lane: [fee removed]');
+  });
+  test('a conjunction between amount and cue is two statements — no pre-cue match', () => {
+    expect(redactInspectionFeeCues('Treatment is $900 and inspection fee waived.'))
+      .toBe('Treatment is $900 and inspection fee waived.');
+    expect(redactInspectionFeeCues('Repair is $1,250 while inspection fee is waived.'))
+      .toBe('Repair is $1,250 while inspection fee is waived.');
   });
   test('a pre-cue fee never triggers a forward match on a later amount', () => {
     expect(redactInspectionFeeCues('The $250 inspection fee was collected at closing with $400 held in escrow.'))

@@ -3,7 +3,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact, getServiceContact } = require('./customer-contact');
-const { getProjectType } = require('./project-types');
+const { getProjectType, redactInspectionFeeCuesForType } = require('./project-types');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { invoiceAmountDue } = require('./invoice-helpers');
@@ -82,7 +82,10 @@ function propertyAddress(customer = {}, project = {}) {
     || findings.treatment_address
     || findings.service_address
   );
-  if (projectAddress) return projectAddress;
+  // Free-text finding value on a customer/third-party email — same
+  // type-gated fee scrub as the public payload and the FDACS PDF, so every
+  // report egress serves one representation (codex #2817).
+  if (projectAddress) return redactInspectionFeeCuesForType(projectAddress, project.project_type);
   return [
     customer.address_line1,
     [customer.city, customer.state].filter(Boolean).join(', '),
