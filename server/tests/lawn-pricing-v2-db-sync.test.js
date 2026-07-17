@@ -37,7 +37,7 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
     });
 
     expect(constants.LAWN_PRICING_V2).toMatchObject({
-      pricingVersion: 'LAWN_PRICING_V2_DENSE_35_FLOOR',
+      pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
       pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
       targetCollectedMarginFloor: 0.35,
       laborRateLoaded: 35,
@@ -63,7 +63,7 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
     expect(lawn.costs.total).toBeLessThan(372);
     expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(571);
     expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(572);
-    expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
+    expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_SPOT_RESERVE');
     expect(lawn.pricingSource).toBe('PROGRAM_MINIMUM');
     expect(lawn.pricingBasis).toBe('PROGRAM_MINIMUM_MONTHLY');
     expect(lawn.marketAnnual).toBe(576);

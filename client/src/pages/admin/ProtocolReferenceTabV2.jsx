@@ -264,12 +264,20 @@ function CalendarLine({ line, muted }) {
   );
 }
 
-function CurrentVisitCardV2({ visit, trackName }) {
+function CurrentVisitCardV2({ visit, trackName, isLawnTrack }) {
   if (!visit) return null;
   const primaryProducts = parseProductLines(visit.primary);
   const secondaryProducts = parseProductLines(visit.secondary);
   const materialCost = parseFloat(visit.material_cost);
-  const conditionalCost = parseFloat(visit.conditional_cost);
+  // Lawn material_cost is the 10,000 sqft basis while conditional_cost
+  // reserves derive from ~4,500 sqft inline line costs — normalize before
+  // summing. Service programs (tree_shrub/pest/termite) are per-property
+  // on both fields; no scaling. (This card only renders behind the
+  // isServiceProgram gate today, but stays correct if that ever changes.)
+  const rawConditional = parseFloat(visit.conditional_cost);
+  const conditionalCost = Number.isFinite(rawConditional)
+    ? rawConditional * (isLawnTrack ? 10000 / 4500 : 1)
+    : rawConditional;
   const laborCost = parseFloat(visit.labor_cost);
   const expectedTotal =
     (Number.isFinite(materialCost) ? materialCost : 0) +
@@ -1192,6 +1200,7 @@ export default function ProtocolReferenceTabV2() {
             <CurrentVisitCardV2
               visit={currentVisit}
               trackName={trackData.name}
+              isLawnTrack={isLawnTrack}
             />
           )}
           {!currentVisit && trackData.visits?.length > 0 && (
