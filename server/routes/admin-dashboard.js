@@ -1748,11 +1748,17 @@ router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
   try {
     const { buildLeadFunnel } = require('../services/lead-funnel');
     const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
-    // Effective paid signal mirrors splitFacebookByPaid: a paid click id (Meta
-    // fbclid/_fbc, or Google gclid/wbraid/gbraid) OR the explicit flag —
-    // is_paid alone is NULL on most historical rows (the column postdates them)
-    // and would misfile click-attributed paid traffic as organic.
-    const PAID_SQL = '(asa.is_paid IS TRUE OR asa.fbclid IS NOT NULL OR asa.fbc IS NOT NULL OR asa.gclid IS NOT NULL OR asa.wbraid IS NOT NULL OR asa.gbraid IS NOT NULL)';
+    // Effective paid signal mirrors splitFacebookByPaid: a Meta click id
+    // (fbclid/_fbc) OR the explicit flag — is_paid alone is NULL on most
+    // historical rows and would misfile click-attributed paid Meta as organic.
+    // NOTE: this boolean is consumed by buildLeadFunnel ONLY to split facebook
+    // rows (paid vs facebook_organic); google_ads rows are already paid by their
+    // platform key. So a Google click id must NOT be added here — for a
+    // facebook-keyed row that happens to carry a gclid it would mislabel a Google
+    // click as paid Facebook, and for an organic-keyed row the platform key wins
+    // anyway. Correctly surfacing gclid-only organic rows as paid needs re-keying
+    // them to google_ads, not widening this Facebook-only signal.
+    const PAID_SQL = '(asa.is_paid IS TRUE OR asa.fbclid IS NOT NULL OR asa.fbc IS NOT NULL)';
     // lead_date is an ET DATE column; the window's from/to are ET date
     // strings, so direct comparison is timezone-safe. Parity with the sibling
     // attribution panels: soft-deleted leads drop out (deleting a spam lead
