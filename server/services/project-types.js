@@ -986,8 +986,8 @@ const PROJECT_TYPES = {
         itemLabel: 'Application',
         // Row headers continue the numbering after the primary application.
         itemIndexOffset: 2,
-        addLabel: 'Add another application',
-        description: 'Record each additional product applied on this job (e.g. a wood treatment alongside the soil barrier).',
+        addLabel: 'Add unplanned application',
+        description: 'Applications planned on the scheduled service load here automatically. Add a row only for an extra product applied in the field.',
         fields: [
           { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
           { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', showWhen: { field: 'treatment_method', value: 'Other' } },

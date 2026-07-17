@@ -373,7 +373,85 @@ beforeEach(() => {
   mockGates.wdoReportPaymentHold = true;
 });
 
+describe('scheduled pre-treatment application prefill', () => {
+  test('maps the appointment service defaults into editable product applications', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        return chain({
+          first: jest.fn(async () => ({
+            id: 'sched-55',
+            customer_id: 'customer-1',
+            technician_id: 'tech-1',
+            service_id: 'service-1',
+            service_type: 'Termite Pretreatment Service',
+          })),
+        });
+      }
+      if (table === 'scheduled_service_addons') return chain({ resolvesTo: [] });
+      if (table === 'services') {
+        return chain({
+          resolvesTo: [{
+            id: 'service-1',
+            name: 'Termite Pretreatment Service',
+            default_products: ['Termidor SC', 'Bora-Care'],
+          }],
+        });
+      }
+      if (table === 'products_catalog') {
+        return chain({
+          resolvesTo: [
+            { name: 'Termidor SC', epa_reg_number: '7969-210', active_ingredient: 'fipronil' },
+            { name: 'Bora-Care', epa_reg_number: '64405-1', active_ingredient: 'borate' },
+          ],
+        });
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/scheduled-service/sched-55/application-prefill`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.applications).toEqual([
+        expect.objectContaining({
+          product_name: 'Termidor SC',
+          treatment_method: 'Soil barrier (chemical)',
+          epa_registration: '7969-210',
+        }),
+        expect.objectContaining({
+          product_name: 'Bora-Care',
+          treatment_method: 'Wood treatment (borate)',
+          epa_registration: '64405-1',
+        }),
+      ]);
+    });
+  });
+});
+
 describe('send-with-invoice hold_report_until_paid', () => {
+  test('prepare_invoice returns a durable draft for an explicit card-on-file charge without sending', async () => {
+    const { updates } = mockTables();
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prepare_invoice: true, invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body).toEqual(expect.objectContaining({
+        prepared: true,
+        invoice: expect.objectContaining({ id: 'inv-1', status: 'draft', payer_billed: false }),
+      }));
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect(ProjectEmail.sendProjectReportWithInvoice).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(updates.projects || []).toHaveLength(0);
+    });
+  });
+
   test('self-pay hold: invoice-only delivery, hold stamped, no report artifacts', async () => {
     const { updates } = mockTables();
     await withServer(async (baseUrl) => {

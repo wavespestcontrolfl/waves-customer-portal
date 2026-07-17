@@ -135,6 +135,8 @@ const TYPE_LABELS = {
 };
 const WDO_TYPE = "wdo_inspection";
 const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
+const OFFICIAL_TERMITE_DOCUMENT_TYPES = new Set([WDO_TYPE, CERTIFICATE_TYPE]);
+const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
@@ -150,7 +152,6 @@ const PROJECT_TYPES_WITH_PREP_GUIDES = new Set([
   "rodent_exclusion",
   "rodent_trapping",
   "mosquito_event",
-  "pre_treatment_termite_certificate",
 ]);
 const BOOK_URL = "https://www.wavespestcontrol.com/book/";
 const REQUIRED_RECOMMENDATION_SECTION_HEADINGS = [
@@ -2229,6 +2230,7 @@ export function ProjectDetail({
 
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
   const idPrefix = `project-${projectId}`;
+  const isOfficialTermiteDocument = OFFICIAL_TERMITE_DOCUMENT_TYPES.has(project.project_type);
   const fieldInputId = (key) => `${idPrefix}-finding-${key}`;
   const readiness = evaluateProjectReadiness({
     project: { ...project, title: editTitle },
@@ -2240,6 +2242,7 @@ export function ProjectDetail({
 
   return (
     <div
+      data-official-document-editor={isOfficialTermiteDocument ? project.project_type : undefined}
       style={{
         background: ESTIMATE_BG,
         border: `1px solid ${ESTIMATE_BORDER}`,
@@ -2248,8 +2251,12 @@ export function ProjectDetail({
         flexDirection: "column",
         overflow: "hidden",
         boxShadow: "0 10px 30px rgba(27, 44, 91, 0.08)",
+        fontFamily: isOfficialTermiteDocument ? ROBOTO_FONT : undefined,
       }}
     >
+      {isOfficialTermiteDocument && (
+        <style>{`[data-official-document-editor] *, [data-official-document-editor] input, [data-official-document-editor] select, [data-official-document-editor] textarea, [data-official-document-editor] button { font-family: ${ROBOTO_FONT} !important; }`}</style>
+      )}
       {/* Header */}
       <div
         style={{
@@ -2868,7 +2875,7 @@ export function ProjectDetail({
             </div>
             {billingBlocksClose && (
               <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
-                Send the invoice before closing. Customer payment is not required here; the WDO report stays locked on their side until they pay.
+                Use the completion action to charge an authorized card on file, or send the invoice and hold the customer&apos;s {project.project_type === CERTIFICATE_TYPE ? "certificate" : "report"} until payment.
               </div>
             )}
             {followupBlocksClose && (
@@ -2962,7 +2969,7 @@ export function ProjectDetail({
             Hold report until invoice is paid
           </label>
         )}
-        {canAdminActions && (
+        {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
             onClick={handleSendPortalInvite}
@@ -2979,7 +2986,7 @@ export function ProjectDetail({
             Portal invite
           </button>
         )}
-        {canAdminActions && (
+        {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
             onClick={handleSendPrepGuide}
@@ -2997,7 +3004,7 @@ export function ProjectDetail({
             Prep guide
           </button>
         )}
-        {canAdminActions && project.status !== "closed" && (
+        {canAdminActions && !isOfficialTermiteDocument && project.status !== "closed" && (
           <button
             type="button"
             onClick={handleClose}

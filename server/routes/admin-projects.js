@@ -1155,6 +1155,84 @@ router.get('/applicators', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function parseDefaultProductNames(value) {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = parsed.split(','); }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+}
+
+function pretreatMethodForPlannedProduct(productName, serviceLabel = '') {
+  const value = `${productName || ''} ${serviceLabel || ''}`.toLowerCase();
+  if (/bora[- ]?care|borate|wood treatment/.test(value)) return 'Wood treatment (borate)';
+  if (/trelona|sentricon|bait/.test(value)) return 'Bait system';
+  return 'Soil barrier (chemical)';
+}
+
+// GET /api/admin/projects/scheduled-service/:id/application-prefill
+// The certificate is post-service paperwork, so its application rows begin
+// with the products already planned by the appointment's primary service and
+// add-on lines. They remain editable because the applicator must record what
+// was actually used, not blindly certify the schedule's plan.
+router.get('/scheduled-service/:id/application-prefill', async (req, res, next) => {
+  try {
+    const scheduled = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+    if (!scheduled) return res.status(404).json({ error: 'Scheduled service not found' });
+    if (!isAdmin(req) && String(scheduled.technician_id || '') !== String(req.technicianId || '')) {
+      return res.status(403).json({ error: 'Scheduled service access denied' });
+    }
+
+    const addonRows = await db('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduled.id })
+      .orderBy('created_at', 'asc')
+      .select('service_id', 'service_name')
+      .catch(() => []);
+    const serviceIds = [scheduled.service_id, ...addonRows.map((row) => row.service_id)].filter(Boolean);
+    const libraryRows = serviceIds.length
+      ? await db('services').whereIn('id', serviceIds).select('id', 'name', 'default_products')
+      : [];
+    const libraryById = new Map(libraryRows.map((row) => [String(row.id), row]));
+    const serviceLines = [
+      {
+        serviceId: scheduled.service_id,
+        label: libraryById.get(String(scheduled.service_id || ''))?.name || scheduled.service_type || 'Scheduled service',
+      },
+      ...addonRows.map((row) => ({
+        serviceId: row.service_id,
+        label: libraryById.get(String(row.service_id || ''))?.name || row.service_name || 'Scheduled add-on',
+      })),
+    ];
+    const planned = serviceLines.flatMap((line) => {
+      const library = libraryById.get(String(line.serviceId || ''));
+      return parseDefaultProductNames(library?.default_products).map((productName) => ({
+        productName,
+        serviceLabel: line.label,
+      }));
+    });
+    const productNames = [...new Set(planned.map((row) => row.productName))];
+    const productRows = productNames.length
+      ? await db('products_catalog').whereIn('name', productNames).select('*').catch(() => [])
+      : [];
+    const productByName = new Map(productRows.map((row) => [String(row.name || '').toLowerCase(), row]));
+    const applications = planned.map((row) => {
+      const product = productByName.get(row.productName.toLowerCase()) || {};
+      return {
+        _scheduled_service_label: row.serviceLabel,
+        treatment_method: pretreatMethodForPlannedProduct(row.productName, row.serviceLabel),
+        product_name: row.productName,
+        epa_registration: product.epa_reg_number || product.epa_registration_number || '',
+        active_ingredient: product.active_ingredient || '',
+      };
+    });
+
+    return res.json({ applications, source: 'scheduled_service' });
+  } catch (err) { return next(err); }
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/admin/projects — list (admin dashboard)
 // ---------------------------------------------------------------------------
@@ -2183,10 +2261,27 @@ const WDO_ADDENDUM_CATEGORY_CAPTIONS = Object.freeze({
   other: 'Site condition documented during the WDO inspection.',
 });
 
-function wdoAddendumPhotoCaption(photo = {}) {
+const WDO_ADDENDUM_FINDING_DETAILS = Object.freeze({
+  wdo_evidence: { keys: ['wdo_evidence', 'live_wdo'], prefix: 'Visible WDO evidence' },
+  wdo_damage: { keys: ['wdo_damage'], prefix: 'Visible WDO damage' },
+  inaccessible_area: { keys: ['inaccessible_areas'], prefix: 'Obstruction or inaccessible area' },
+  previous_treatment: { keys: ['previous_treatment_notes'], prefix: 'Previous treatment evidence' },
+  treatment_document: { keys: ['previous_treatment_notes'], prefix: 'Prior treatment document' },
+  notice: { keys: ['notice_location'], prefix: 'Inspection notice location' },
+});
+
+function wdoAddendumPhotoCaption(photo = {}, project = null) {
   const typed = String(photo.caption || '').trim();
   if (typed) return typed;
   const category = String(photo.category || '').trim().toLowerCase();
+  const findings = project ? parseFindings(project) : {};
+  const detailConfig = WDO_ADDENDUM_FINDING_DETAILS[category];
+  const detail = detailConfig?.keys
+    .map((key) => String(findings[key] || '').replace(/\s+/g, ' ').trim())
+    .find(Boolean);
+  if (detail) {
+    return `${detailConfig.prefix}: ${detail}`.slice(0, 300);
+  }
   if (WDO_ADDENDUM_CATEGORY_CAPTIONS[category]) {
     return WDO_ADDENDUM_CATEGORY_CAPTIONS[category];
   }
@@ -2250,7 +2345,7 @@ async function loadWdoAddendumPhotos(project) {
         break;
       }
       totalBytes += buffer.length;
-      out.push({ buffer, contentType, caption: wdoAddendumPhotoCaption(ph) });
+      out.push({ buffer, contentType, caption: wdoAddendumPhotoCaption(ph, project) });
     } catch (err) {
       logger.warn(`[projects] addendum photo fetch failed for ${ph.id}: ${err.message}`);
     }
@@ -3719,6 +3814,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Explicit boolean — a stringified `dry_run: "false"` must NOT read as truthy
     // (and silently preview instead of send), nor `dry_run: 0` send for real.
     const dryRun = req.body?.dry_run === true || req.body?.dry_run === 'true';
+    // Card-on-file completion needs a durable draft invoice id before the
+    // explicit charge. This mode performs all report/readiness/billing checks
+    // but sends nothing and never arms a report hold.
+    const prepareInvoice = req.body?.prepare_invoice === true || req.body?.prepare_invoice === 'true';
 
     // Payment hold ("pay before you get the report"): deliver the invoice +
     // pay link ONLY, and park the report/certificate until the invoice settles
@@ -3745,7 +3844,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       project,
       customer,
       invoiceId: req.body?.invoice_id,
-      dryRun,
+      dryRun: dryRun && !prepareInvoice,
       holdRequested,
     });
 
@@ -3764,6 +3863,20 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       return res.status(422).json({
         error: 'This invoice bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices',
         code: 'hold_statement_accrued',
+      });
+    }
+
+    if (prepareInvoice) {
+      return res.json({
+        prepared: true,
+        invoice: {
+          id: invoice.id,
+          invoice_number: invoice.invoice_number,
+          total: invoice.total,
+          status: invoice.status,
+          created,
+          payer_billed: !!invoice.payer_id,
+        },
       });
     }
 

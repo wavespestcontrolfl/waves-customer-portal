@@ -212,6 +212,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
       const u = String(url);
       if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
       if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (u.includes('/admin/customers/9/cards')) return jsonResponse({ cards: [] });
       if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
         return jsonResponse({ project: { id: 'p-1', project_type: 'wdo_inspection' } });
       }
@@ -280,7 +281,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     fireEvent.click(screen.getByText('mock-sign-saved'));
 
     const saveForLater = await screen.findByRole('button', { name: 'Save for later' });
-    const finish = screen.getByRole('button', { name: 'Send invoice & finish service' });
+    const finish = screen.getByRole('button', { name: 'Send invoice & hold report' });
     expect(finish.style.width).toBe('100%');
     expect(screen.queryByText("Unsigned reports can’t be sent yet.")).toBeNull();
     fireEvent.click(saveForLater);
@@ -292,7 +293,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     await saveIntoSignStep({ allowInvoiceCompletion: false });
     fireEvent.click(screen.getByText('mock-sign-saved'));
     await screen.findByText('Signed — saved for office review and invoice delivery.');
-    expect(screen.queryByRole('button', { name: 'Send invoice & finish service' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send invoice & hold report' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Save for later' })).toBeTruthy();
   });
 
@@ -313,7 +314,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     await saveIntoSignStep({ onCreated, onClose });
     fireEvent.click(screen.getByText('mock-sign-saved'));
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & finish service' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & hold report' }));
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'p-1', status: 'closed' }),
@@ -353,7 +354,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     const onCreated = vi.fn();
     await saveIntoSignStep({ onCreated, onClose: vi.fn() });
     fireEvent.click(screen.getByText('mock-sign-saved'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & finish service' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & hold report' }));
 
     await screen.findByText('Temporary closeout failure');
     fireEvent.click(screen.getByRole('button', { name: 'Finish service' }));
@@ -439,6 +440,27 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
       const u = String(url);
       if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
       if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (u.includes('/admin/customers/9/cards')) return jsonResponse({ cards: [] });
+      if (u.includes('/admin/projects/scheduled-service/55/application-prefill')) {
+        return jsonResponse({
+          applications: [
+            {
+              _scheduled_service_label: 'Termite Pretreatment Service',
+              treatment_method: 'Soil barrier (chemical)',
+              product_name: 'Termidor SC',
+              epa_registration: '7969-210',
+              active_ingredient: 'fipronil',
+            },
+            {
+              _scheduled_service_label: 'Termite Pretreatment Service',
+              treatment_method: 'Wood treatment (borate)',
+              product_name: 'Bora-Care',
+              epa_registration: '64405-1',
+              active_ingredient: 'disodium octaborate tetrahydrate',
+            },
+          ],
+        });
+      }
       if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
         return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
       }
@@ -460,18 +482,28 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     }));
   });
 
+  it('loads planned service products into the primary and additional application rows', async () => {
+    renderCertificateSheet();
+
+    expect(await screen.findByDisplayValue('Termidor SC')).toBeTruthy();
+    expect(screen.getByDisplayValue('Bora-Care')).toBeTruthy();
+    expect(screen.getByText(/2 planned applications found on the scheduled service/)).toBeTruthy();
+    expect(screen.getByText(/Scheduled · Termite Pretreatment Service/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '+ Add unplanned application' })).toBeTruthy();
+  });
+
   it('uses the saved applicator attestation, sends the invoice, holds the certificate, and closes the service', async () => {
     const onCreated = vi.fn();
     const onClose = vi.fn();
     renderCertificateSheet({ onCreated, onClose });
 
     await screen.findByText('Treatment address');
-    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Certificate' }));
 
     await screen.findByText('✓ Certificate saved');
     expect(screen.queryByTestId('sign-pad')).toBeNull();
     expect(screen.getByText(/Applicator attestation saved/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Send invoice & finish service' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send invoice & hold certificate' }));
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'cert-1', status: 'closed' }),
@@ -484,5 +516,129 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     const sendCalls = fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'));
     expect(sendCalls).toHaveLength(2);
     expect(sendCalls.every(([, opts]) => JSON.parse(opts.body).hold_report_until_paid === true)).toBe(true);
+  });
+
+  it('offers a saved-card path that charges once, delivers the certificate, and closes', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (u.includes('/admin/customers/9/cards')) {
+        return jsonResponse({ cards: [{ id: 'pm-card', method_type: 'card', brand: 'visa', last_four: '4242' }] });
+      }
+      if (u.includes('/admin/projects/scheduled-service/55/application-prefill')) return jsonResponse({ applications: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
+      }
+      if (u.includes('/admin/projects/cert-1/send-with-invoice')) {
+        const body = JSON.parse(opts.body || '{}');
+        if (body.prepare_invoice) {
+          return jsonResponse({ prepared: true, invoice: { id: 'inv-card', total: 425, payer_billed: false } });
+        }
+      }
+      if (u.includes('/admin/invoices/inv-card/charge-card-quote')) {
+        return jsonResponse({ quote: { base: 425, surcharge: 12.33, total: 437.33, rateBps: 290, funding: 'credit' } });
+      }
+      if (u.endsWith('/admin/invoices/inv-card/charge-card')) return jsonResponse({ ok: true });
+      if (u.endsWith('/admin/projects/cert-1/send')) return jsonResponse({ sent: true });
+      if (u.includes('/admin/projects/cert-1/close')) {
+        return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate', status: 'closed' } });
+      }
+      return jsonResponse({});
+    }));
+
+    renderCertificateSheet({ onCreated, onClose });
+    await screen.findByRole('button', { name: 'Save Certificate' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Certificate' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Charge Visa •••• 4242 & finish service' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'cert-1', status: 'closed' }),
+      expect.objectContaining({ completed: true, invoice: expect.objectContaining({ id: 'inv-card' }) }),
+    ));
+    expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-card'))).toHaveLength(1);
+    const chargeBody = JSON.parse(fetch.mock.calls.find(([url]) => String(url).endsWith('/charge-card'))[1].body);
+    expect(chargeBody.expectedTotal).toBe(437.33);
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/admin/projects/cert-1/send'))).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer an expired saved card as a completion payment method', async () => {
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (u.includes('/admin/customers/9/cards')) {
+        return jsonResponse({
+          cards: [{
+            id: 'pm-expired', method_type: 'card', brand: 'visa', last_four: '1111', exp_month: 1, exp_year: 2020,
+          }],
+        });
+      }
+      if (u.includes('/admin/projects/scheduled-service/55/application-prefill')) return jsonResponse({ applications: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
+      }
+      return jsonResponse({});
+    }));
+
+    renderCertificateSheet();
+    fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
+
+    expect(await screen.findByRole('button', { name: 'Send invoice & hold certificate' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Charge .*1111/ })).toBeNull();
+  });
+
+  it('retries closeout after payment without charging or delivering twice', async () => {
+    const onCreated = vi.fn();
+    let closeAttempts = 0;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (u.includes('/admin/customers/9/cards')) {
+        return jsonResponse({ cards: [{ id: 'pm-card', method_type: 'card', brand: 'visa', last_four: '4242' }] });
+      }
+      if (u.includes('/admin/projects/scheduled-service/55/application-prefill')) return jsonResponse({ applications: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
+      }
+      if (u.includes('/admin/projects/cert-1/send-with-invoice')) {
+        const body = JSON.parse(opts.body || '{}');
+        if (body.prepare_invoice) {
+          return jsonResponse({ prepared: true, invoice: { id: 'inv-card', total: 425, payer_billed: false } });
+        }
+      }
+      if (u.includes('/admin/invoices/inv-card/charge-card-quote')) {
+        return jsonResponse({ quote: { base: 425, surcharge: 12.33, total: 437.33, rateBps: 290, funding: 'credit' } });
+      }
+      if (u.endsWith('/admin/invoices/inv-card/charge-card')) return jsonResponse({ ok: true });
+      if (u.endsWith('/admin/projects/cert-1/send')) return jsonResponse({ sent: true });
+      if (u.includes('/admin/projects/cert-1/close')) {
+        closeAttempts += 1;
+        if (closeAttempts === 1) {
+          return Promise.resolve({
+            ok: false,
+            json: () => Promise.resolve({ error: 'Temporary closeout failure' }),
+          });
+        }
+        return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate', status: 'closed' } });
+      }
+      return jsonResponse({});
+    }));
+
+    renderCertificateSheet({ onCreated });
+    fireEvent.click(await screen.findByRole('button', { name: 'Save Certificate' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Charge Visa •••• 4242 & finish service' }));
+
+    expect(await screen.findByText('Temporary closeout failure')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Finish service' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/charge-card'))).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/admin/projects/cert-1/send'))).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('/admin/projects/cert-1/close'))).toHaveLength(2);
   });
 });

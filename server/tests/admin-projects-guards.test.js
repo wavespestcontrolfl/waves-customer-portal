@@ -456,4 +456,15 @@ describe('WDO photo addendum captions', () => {
       .toBe('Evidence of previous treatment documented at the inspected property.');
     expect(wdoAddendumPhotoCaption({})).toBe('Site condition documented during the WDO inspection.');
   });
+
+  test('uses the recorded inspection detail when the technician left the caption blank', () => {
+    expect(wdoAddendumPhotoCaption(
+      { category: 'wdo_evidence' },
+      { findings: { wdo_evidence: 'Shelter tubes along the east garage stem wall.' } },
+    )).toBe('Visible WDO evidence: Shelter tubes along the east garage stem wall.');
+    expect(wdoAddendumPhotoCaption(
+      { category: 'inaccessible_area' },
+      { findings: { inaccessible_areas: 'North attic corner blocked by stored materials.' } },
+    )).toBe('Obstruction or inaccessible area: North attic corner blocked by stored materials.');
+  });
 });

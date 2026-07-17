@@ -114,7 +114,6 @@ export default function WdoIntelligenceBar({
     setHistoryLoading(false);
     setHistoryApplied(false);
     setHistoryMsg('');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey]);
 
   // Profile comes from the latest analyze result, or the cached project profile.
