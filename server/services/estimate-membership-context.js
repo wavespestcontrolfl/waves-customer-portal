@@ -648,6 +648,59 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
   }
 }
 
+// Public (unauthenticated estimate-link) projection of the membership
+// snapshot. The stored snapshot keeps the full staff context — currentServices
+// with per-property addresses, per-contract prices, last-payment dates,
+// upcoming visit dates, currentSpendPerVisitTotal — for admin surfaces and
+// accept-time logic, but anyone holding or forwarded the token link can read
+// the public route's JSON, so it gets ONLY the fields the customer page
+// actually renders (EstimateViewPage MembershipCard / estimateAddServiceOffer
+// and the SSR membership block). WHITELIST, never blacklist: an additive
+// snapshot field defaults to staff-only unless it is projected here.
+function publicMembershipView(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  return {
+    isExistingCustomer: snapshot.isExistingCustomer === true,
+    firstName: snapshot.firstName ?? null,
+    tier: snapshot.tier ?? null,
+    tierLabel: snapshot.tierLabel ?? null,
+    tierDiscountPct: snapshot.tierDiscountPct ?? null,
+    discountAppliesTo: snapshot.discountAppliesTo ?? null,
+    // Keys only — the cross-sell picker needs what the account already has,
+    // never where or for how much.
+    existingServiceKeys: Array.isArray(snapshot.existingServiceKeys)
+      ? snapshot.existingServiceKeys.filter(Boolean)
+      : [],
+    upgrade: snapshot.upgrade
+      ? {
+        fromLabel: snapshot.upgrade.fromLabel ?? null,
+        toLabel: snapshot.upgrade.toLabel ?? null,
+        deltaPct: snapshot.upgrade.deltaPct ?? null,
+        addedServiceLabels: Array.isArray(snapshot.upgrade.addedServiceLabels)
+          ? snapshot.upgrade.addedServiceLabels.filter(Boolean)
+          : [],
+      }
+      : null,
+    existingServices: (Array.isArray(snapshot.existingServices) ? snapshot.existingServices : [])
+      .map((service) => ({
+        key: service?.key ?? null,
+        label: service?.label ?? null,
+        extraDiscountPct: service?.extraDiscountPct ?? null,
+        perVisitSavings: service?.perVisitSavings ?? null,
+        remainingVisits: service?.remainingVisits ?? null,
+        prepaid: service?.prepaid ?? null,
+      })),
+    newServices: (Array.isArray(snapshot.newServices) ? snapshot.newServices : [])
+      .map((service) => ({
+        key: service?.key ?? null,
+        label: service?.label ?? null,
+        discountPct: service?.discountPct ?? null,
+        monthlySavings: service?.monthlySavings ?? null,
+        perApplicationSavings: service?.perApplicationSavings ?? null,
+      })),
+  };
+}
+
 // View-time accessor. Returns the membership snapshot that was frozen onto the
 // estimate at save time (estimate_data.membershipSnapshot), so the card can
 // NEVER diverge from the price saved/charged with the estimate. Estimates
@@ -668,4 +721,5 @@ module.exports = {
   buildEstimateMembershipContext,
   computeMembershipContext,
   loadCurrentServiceSpendContext,
+  publicMembershipView,
 };

@@ -2494,6 +2494,14 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
       !== String(phone || '').replace(/\D/g, '')) {
       return { error: 'The selected lead phone changed after the confirmation card was built. Refresh and rebuild the confirmation.' };
     }
+    // Same rule as persistNewAgentDraft: a lead address that agreed at
+    // pricing time but disagrees under the lock means the property changed
+    // after the preview — the revision would keep the old property's engine
+    // result without a lane flag.
+    if (reanchored.input.contactVerification?.addressMismatch
+      && !input.contactVerification?.addressMismatch) {
+      return { error: 'The selected lead address changed after the confirmation card was built. Refresh and rebuild the confirmation.' };
+    }
     const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
     if (!estimate) return { error: 'Agent Estimate draft not found' };
     if (estimate.status !== 'draft' || estimate.source !== 'estimator_engine') {
@@ -2600,6 +2608,17 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
       !== String(phone || '').replace(/\D/g, '')) {
       return { error: 'The selected lead phone changed after the confirmation card was built. Refresh and rebuild the confirmation.' };
     }
+    // The preview priced input.address after the pre-transaction anchor
+    // agreed with the lead. If the LOCKED lead now disagrees where it
+    // previously agreed, the lead moved properties after pricing — the draft
+    // would persist the old property's engine result with no mismatch in the
+    // already-computed lane reasons, so require a fresh confirmation. A
+    // pre-existing mismatch (evidence-backed correction) already carries its
+    // yellow lane and keeps today's behavior.
+    if (reanchored.input.contactVerification?.addressMismatch
+      && !input.contactVerification?.addressMismatch) {
+      return { error: 'The selected lead address changed after the confirmation card was built. Refresh and rebuild the confirmation.' };
+    }
 
     if (lead.estimate_id) {
       const existing = await trx('estimates').where({ id: lead.estimate_id }).first();
@@ -2690,6 +2709,18 @@ async function createAgentEstimateDraft(input, actionContext = {}) {
         },
       },
     });
+    // computeMembershipContext returns null when its snapshot queries fail.
+    // The converter adds the WaveGuard setup fee when the stored snapshot is
+    // absent and the public page can offer annual prepay, so persisting a
+    // proven member's expansion without it would show or charge new-customer
+    // terms after a transient failure — refuse the persistence (the
+    // unconfirmed preview writes nothing and prices from accountPricing, so
+    // it may proceed; the confirmed run recomputes and lands here again).
+    if (actionContext.confirmed === true
+      && !accountPricing.membershipSnapshot
+      && (accountPricing.priorQualifyingServices || []).length) {
+      return { error: 'Existing-member account context could not be loaded. Refresh and rebuild the confirmation.' };
+    }
   }
 
   if (actionContext.confirmed !== true) {

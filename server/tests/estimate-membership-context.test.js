@@ -6,6 +6,7 @@
 const {
   computeMembershipContext,
   loadCurrentServiceSpendContext,
+  publicMembershipView,
 } = require('../services/estimate-membership-context');
 
 // Minimal chainable knex fake: every chain method returns the builder;
@@ -28,7 +29,15 @@ function fakeDb({
       andWhere: () => builder,
       orderBy: () => builder,
       limit: () => builder,
-      columnInfo: async () => ({ is_recurring: {}, estimated_price: {}, annual_prepay_term_id: {} }),
+      columnInfo: async () => ({
+        is_recurring: {},
+        estimated_price: {},
+        annual_prepay_term_id: {},
+        service_address_line1: {},
+        service_address_line2: {},
+        service_address_city: {},
+        service_address_zip: {},
+      }),
       first: async () => {
         if (table === 'customers') return customer;
         if (table === 'annual_prepay_terms') return prepaidTerm;
@@ -651,6 +660,73 @@ describe('computeMembershipContext', () => {
     });
 
     expect(ctx.currentServices[0]).toMatchObject({ currentPerVisit: 117 });
+  });
+
+  test('publicMembershipView: the public link gets ONLY the customer-page whitelist', async () => {
+    const database = fakeDb({
+      scheduledRows: [{
+        id: 'p1',
+        service_type: 'pest_control',
+        scheduled_date: '2099-01-05',
+        estimated_price: 120,
+        service_address_line1: '999 Secondary Property Ln',
+        service_address_city: 'Venice',
+        service_address_zip: '34285',
+      }],
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+    });
+
+    const snapshot = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: lawnEstimateData(),
+    });
+
+    // The frozen snapshot itself KEEPS the staff context — admin surfaces and
+    // accept-time logic read it.
+    expect(snapshot.currentServices[0]).toMatchObject({
+      currentPerVisit: 117,
+      lastPaidAt: '2026-05-20',
+      serviceAddresses: ['999 Secondary Property Ln, Venice, 34285'],
+    });
+    expect(snapshot.currentSpendPerVisitTotal).toBe(117);
+
+    const view = publicMembershipView(snapshot);
+
+    expect(Object.keys(view).sort()).toEqual([
+      'discountAppliesTo', 'existingServiceKeys', 'existingServices', 'firstName',
+      'isExistingCustomer', 'newServices', 'tier', 'tierDiscountPct', 'tierLabel', 'upgrade',
+    ]);
+    const json = JSON.stringify(view);
+    for (const staffMarker of [
+      'currentServices', 'currentSpendPerVisitTotal', 'serviceAddress', 'contracts',
+      'lastPaidAt', 'currentPerVisit', 'scheduledPerVisit', 'spendSource',
+      'nextScheduledDate', 'activeScheduledVisits', '999 Secondary Property Ln', '2026-05-20',
+    ]) {
+      expect(json).not.toContain(staffMarker);
+    }
+    // Everything the customer page renders survives intact.
+    expect(view).toMatchObject({
+      isExistingCustomer: true,
+      firstName: 'Don',
+      tier: 'silver',
+      tierLabel: 'Silver',
+      tierDiscountPct: 10,
+      discountAppliesTo: 'new_services_only',
+      existingServiceKeys: ['pest_control'],
+    });
+    expect(view.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver', deltaPct: 10 });
+    expect(view.newServices).toEqual([expect.objectContaining({
+      key: 'lawn_care',
+      label: 'Lawn Care',
+      discountPct: 10,
+      monthlySavings: 6.98,
+      perApplicationSavings: 9.30,
+    })]);
+  });
+
+  test('publicMembershipView: a missing snapshot projects to null', () => {
+    expect(publicMembershipView(null)).toBeNull();
+    expect(publicMembershipView(undefined)).toBeNull();
   });
 
   test('setup/prepay invoices without service_type never feed the per-visit basis', async () => {

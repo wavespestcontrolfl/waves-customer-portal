@@ -2386,6 +2386,54 @@ describe('Agent Estimate round-6 hardening', () => {
     expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
   });
 
+  test('a proven member whose snapshot recomputation fails is refused instead of persisted as new', async () => {
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: 'customer-1', estimate_id: null, phone: '9415550100', email: 'road@example.com' },
+      customer: { id: 'customer-1', pipeline_stage: 'active' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      is_existing_customer: true,
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        active_plan: true,
+        current_tier: 'Bronze',
+        current_discount_pct: 0,
+        existing_service_keys: ['pest_control'],
+        current_services: [{
+          key: 'pest_control', label: 'Pest Control', currentPerVisit: 117, spendSource: 'last_paid_invoice',
+        }],
+        current_spend_per_visit_total: 117,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: 'add lawn and tree shrub' }] },
+      calls: [{
+        id: 'member-call',
+        transcript: 'I want a monthly 12-month lawn program and tree and shrub treatment. Please bundle the services.',
+      }],
+      sms_thread: [], activities: [],
+    });
+    // Transient snapshot failure: computeMembershipContext resolves null.
+    mockComputeMembershipContext.mockResolvedValueOnce(null);
+    mockGenerateEstimate.mockReturnValueOnce(LAWN_TREE_ENGINE_RESULT);
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        ...INPUT.engineInputs,
+        services: {
+          lawn: { track: 'st_augustine', lawnFreq: 9 },
+          treeShrub: { tier: 'standard' },
+        },
+      },
+      evidence: [{ source: 'call_transcript', quote: 'monthly 12-month lawn program and tree and shrub treatment', decision: 'new services' }],
+    }, { confirmed: true });
+
+    expect(result.error).toMatch(/account context could not be loaded/i);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
+  });
+
   test('an email-only lead that gains a phone before the lock rebuilds instead of inserting unlocked', async () => {
     const initialLead = {
       id: 'lead-1', customer_id: null, estimate_id: null,
@@ -2484,6 +2532,61 @@ describe('Agent Estimate round-6 hardening', () => {
     expect(result.success).toBe(true);
     expect(mockWithPhoneLock).toHaveBeenCalledWith(INPUT.customerPhone, expect.any(Function));
     expect(writes.find((write) => write.table === 'estimates' && write.op === 'update')).toBeTruthy();
+  });
+
+  test('a lead that moves to a different property before the lock rebuilds instead of persisting the old address', async () => {
+    const initialLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      phone: '9415550100', email: 'road@example.com',
+      address: '1 Test St', city: 'Bradenton', zip: '34208',
+    };
+    const { database, writes } = makeDatabase({
+      lead: initialLead,
+      lockedLead: { ...initialLead, address: '99 Relocated Ave', city: 'Venice', zip: '34285' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.error).toMatch(/address changed after the confirmation card was built/i);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
+  });
+
+  test('a revision whose lead moves properties before the lock rebuilds instead of updating', async () => {
+    const existing = {
+      id: 'estimate-old',
+      token: 'old-token',
+      status: 'draft',
+      source: 'estimator_engine',
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-1',
+        engineInputs: INPUT.engineInputs,
+        engineResult: ENGINE_RESULT,
+        estimatorEngine: { origin: 'manual_agent' },
+      }),
+    };
+    const initialLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      phone: '9415550100', email: 'road@example.com',
+      address: '1 Test St', city: 'Bradenton', zip: '34208',
+    };
+    const { database, writes } = makeDatabase({
+      estimate: existing,
+      estimateRows: [],
+      lead: initialLead,
+      lockedLead: { ...initialLead, address: '99 Relocated Ave', city: 'Venice', zip: '34285' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      estimateId: existing.id,
+    }, { confirmed: true });
+
+    expect(result.error).toMatch(/address changed after the confirmation card was built/i);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'update')).toBeUndefined();
   });
 
   test('a revision whose lead phone was removed rebuilds instead of updating under a stale lock', async () => {

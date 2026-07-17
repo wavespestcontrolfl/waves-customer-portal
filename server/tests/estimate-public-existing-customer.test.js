@@ -10,6 +10,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
 const { renderPage, buildPricingBundle, clampLawnLadderEntry } = require('../routes/estimate-public');
 const { shouldIncludeWaveGuardSetupFeeForRecurring } = require('../services/estimate-converter');
+const { publicMembershipView } = require('../services/estimate-membership-context');
 
 function lawnEstimate(overrides = {}) {
   return {
@@ -319,5 +320,73 @@ describe('existing-customer public estimate page', () => {
       recurringServices,
       estimateData: { result: { oneTime: { items: [] } } },
     })).toBe(true);
+  });
+});
+
+// The frozen membershipSnapshot carries the STAFF account context
+// (currentServices with per-property addresses, per-contract prices, payment
+// and visit dates). The unauthenticated token routes must never hand that to
+// whoever holds the link — /data sends publicMembershipView(membership) and
+// the SSR page gets the same projection.
+describe('public boundary: staff account context never escapes the token link', () => {
+  const donMembershipWithStaffContext = () => donMembership({
+    currentServices: [{
+      key: 'pest_control',
+      keys: ['pest_control'],
+      label: 'Pest Control',
+      qualifiesForWaveGuard: true,
+      serviceAddresses: ['999 Secondary Property Ln, Venice, 34285'],
+      serviceAddressesComplete: true,
+      componentServiceAddresses: { pest_control: ['999 Secondary Property Ln, Venice, 34285'] },
+      componentServiceAddressesComplete: { pest_control: true },
+      currentPerVisit: 117,
+      spendSource: 'last_paid_invoice',
+      lastPaidAt: '2026-05-20',
+      scheduledPerVisit: 120,
+      contracts: [{
+        serviceAddress: '999 Secondary Property Ln, Venice, 34285',
+        scheduledPerVisit: 120,
+        activeScheduledVisits: 3,
+      }],
+      activeScheduledVisits: 3,
+      nextScheduledDate: '2026-08-01',
+    }],
+    currentSpendPerVisitTotal: 117,
+  });
+
+  test('the /data membership payload strips every staff field', () => {
+    const view = publicMembershipView(donMembershipWithStaffContext());
+
+    const json = JSON.stringify(view);
+    for (const staffMarker of [
+      'currentServices', 'currentSpendPerVisitTotal', 'serviceAddress', 'contracts',
+      'lastPaidAt', 'currentPerVisit', 'spendSource', 'nextScheduledDate',
+      '999 Secondary Property Ln', '2026-05-20', '2026-08-01',
+    ]) {
+      expect(json).not.toContain(staffMarker);
+    }
+    // The member card's inputs survive.
+    expect(view).toMatchObject({
+      isExistingCustomer: true,
+      firstName: 'Don',
+      tierLabel: 'Silver',
+      existingServiceKeys: ['pest_control'],
+    });
+    expect(view.newServices).toEqual([expect.objectContaining({ key: 'lawn_care', perApplicationSavings: 9.30 })]);
+  });
+
+  test('the SSR page renders no staff context (stale full snapshot or projected view) and keeps the member card', () => {
+    const full = donMembershipWithStaffContext();
+    for (const membership of [full, publicMembershipView(full)]) {
+      const html = renderPage('boundary-token', lawnEstimate(), lawnEstimateData(), membership);
+
+      expect(html).not.toContain('999 Secondary Property Ln');
+      expect(html).not.toContain('2026-05-20');
+      expect(html).not.toContain('2026-08-01');
+      // The customer-visible membership card is unchanged by the projection.
+      expect(html).toContain('Welcome back, Don');
+      expect(html).toContain('save $9.30 per application');
+      expect(html).toContain('up to <strong>Silver</strong>');
+    }
   });
 });

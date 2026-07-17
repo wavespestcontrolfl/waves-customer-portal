@@ -435,11 +435,13 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
   );
 }
 
-function LearningPanel({ leadId, user, memories, onReload }) {
+export function LearningPanel({ leadId, user, memories, onReload }) {
   const [rule, setRule] = useState("");
   const [rationale, setRationale] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [reviewingId, setReviewingId] = useState(null);
+  const [reviewError, setReviewError] = useState(null);
 
   const submitCandidate = async () => {
     if (rule.trim().length < 12) return;
@@ -462,11 +464,19 @@ function LearningPanel({ leadId, user, memories, onReload }) {
   };
 
   const review = async (id, status) => {
-    await adminFetch(`/admin/agent-estimate/memory/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status }),
-    });
-    await onReload();
+    setReviewingId(id);
+    setReviewError(null);
+    try {
+      await adminFetch(`/admin/agent-estimate/memory/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      await onReload();
+    } catch (error) {
+      setReviewError({ id, message: error.message });
+    } finally {
+      setReviewingId(null);
+    }
   };
 
   return (
@@ -509,10 +519,15 @@ function LearningPanel({ leadId, user, memories, onReload }) {
                   <span className="rounded-full bg-zinc-100 px-2 py-1 text-[14px] text-zinc-600">{memory.status}</span>
                 </div>
                 {user?.role === "admin" && memory.status === "pending" && (
-                  <div className="mt-3 flex gap-2">
-                    <button type="button" onClick={() => review(memory.id, "approved")} className="h-11 rounded-sm bg-zinc-900 px-4 text-[14px] font-medium text-white">Approve</button>
-                    <button type="button" onClick={() => review(memory.id, "rejected")} className="h-11 rounded-sm border border-zinc-300 px-4 text-[14px] font-medium text-zinc-800">Reject</button>
-                  </div>
+                  <>
+                    <div className="mt-3 flex gap-2">
+                      <button type="button" disabled={reviewingId !== null} onClick={() => review(memory.id, "approved")} className="h-11 rounded-sm bg-zinc-900 px-4 text-[14px] font-medium text-white disabled:opacity-40">Approve</button>
+                      <button type="button" disabled={reviewingId !== null} onClick={() => review(memory.id, "rejected")} className="h-11 rounded-sm border border-zinc-300 px-4 text-[14px] font-medium text-zinc-800 disabled:opacity-40">Reject</button>
+                    </div>
+                    {reviewError?.id === memory.id && (
+                      <div role="alert" className="mt-2 text-[14px] text-zinc-700">{reviewError.message}</div>
+                    )}
+                  </>
                 )}
               </div>
             ))}

@@ -27,7 +27,7 @@ const {
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateViewed,
 } = require('../services/lead-estimate-link');
-const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+const { buildEstimateMembershipContext, publicMembershipView } = require('../services/estimate-membership-context');
 const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
 const {
   ensureDepositSatisfied,
@@ -7247,7 +7247,10 @@ async function handleEstimateView(req, res, next) {
         noShowFeeAmount: cardHoldOneTimePolicyForView.noShowFeeAmount || CardHolds.cardHoldNoShowFee(),
         cancelWindowHours: cardHoldOneTimePolicyForView.cancelWindowHours || CardHolds.cardHoldCancelWindowHours(),
       } : { enforced: false, requiredForOneTime: false },
-    }, estData, membership, { showYourWork, prepayBaseRate });
+      // Same PUBLIC boundary as /data: renderPage only reads whitelisted
+      // fields today, but projecting here keeps a future SSR embed from
+      // shipping the staff account context to the unauthenticated page.
+    }, estData, publicMembershipView(membership), { showYourWork, prepayBaseRate });
   } catch (err) { next(err); }
 }
 
@@ -16130,7 +16133,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         siteConfirmationHold,
         serviceCategory,
         acceptance,
-        membership,
+        // PUBLIC boundary: anyone holding the token link reads this JSON.
+        // Project the frozen snapshot down to the fields the customer page
+        // renders — the staff account context (per-property addresses,
+        // per-contract prices, payment/visit dates) stays server-side.
+        membership: publicMembershipView(membership),
       },
       pricing: {
         ...pricingBundle,

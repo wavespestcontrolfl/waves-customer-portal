@@ -1,12 +1,20 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { CustomerAccountPanel } from './AgentEstimatePage';
+vi.mock('../../utils/admin-fetch', () => ({
+  adminFetch: vi.fn(),
+}));
 
-afterEach(cleanup);
+import { adminFetch } from '../../utils/admin-fetch';
+import { CustomerAccountPanel, LearningPanel } from './AgentEstimatePage';
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 describe('Agent Estimate recognized customer account', () => {
   it('shows the current tier and paid price for each existing service', () => {
@@ -62,5 +70,45 @@ describe('Agent Estimate recognized customer account', () => {
     expect(screen.getByText('Bronze')).toBeInTheDocument();
     expect(screen.getByText('$117')).toBeInTheDocument();
     expect(screen.getByText('scheduled price fallback')).toBeInTheDocument();
+  });
+});
+
+describe('LearningPanel memory review', () => {
+  const pendingMemory = {
+    id: 'mem-1',
+    rule_text: 'For this HOA, verify irrigated turf area separately.',
+    status: 'pending',
+  };
+
+  it('surfaces an approve failure and leaves the rule pending', async () => {
+    adminFetch.mockRejectedValueOnce(new Error('Rate limited — please slow down for a moment.'));
+    const onReload = vi.fn();
+
+    render(<LearningPanel leadId="" user={{ role: 'admin' }} memories={[pendingMemory]} onReload={onReload} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Rate limited — please slow down for a moment.');
+    expect(screen.getByText('pending')).toBeInTheDocument();
+    expect(onReload).not.toHaveBeenCalled();
+    // The reviewer can retry: both buttons are re-enabled after the failure.
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled();
+  });
+
+  it('reloads memories on a successful review without showing an error', async () => {
+    adminFetch.mockResolvedValueOnce({});
+    const onReload = vi.fn(() => Promise.resolve());
+
+    render(<LearningPanel leadId="" user={{ role: 'admin' }} memories={[pendingMemory]} onReload={onReload} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }));
+
+    await waitFor(() => expect(onReload).toHaveBeenCalledTimes(1));
+    expect(adminFetch).toHaveBeenCalledWith('/admin/agent-estimate/memory/mem-1', {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'rejected' }),
+    });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
