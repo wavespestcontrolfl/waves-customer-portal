@@ -184,7 +184,7 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
 // carries the address or sqft the call lacked. Bounded to the call's end so
 // a reprocessed old call (or a later text about a different property) can't
 // leak post-call messages into the composer's evidence.
-async function loadSmsThread(phone, { limit = 20, before = null } = {}) {
+async function loadSmsThread(phone, { limit = 20, before = null, since = null } = {}) {
   const digits = last10(phone);
   if (!digits) return [];
   try {
@@ -197,6 +197,10 @@ async function loadSmsThread(phone, { limit = 20, before = null } = {}) {
       .orderBy('created_at', 'desc')
       .limit(limit);
     if (before) q = q.where('created_at', '<=', before);
+    // Lookback floor: with only an upper bound, a light texter's "latest 20"
+    // reaches months into the past and stale texts about another property
+    // get labeled as this call's RECENT SMS THREAD for the composer.
+    if (since) q = q.where('created_at', '>=', since);
     const rows = await q;
     return rows.reverse().map((r) => ({
       direction: last10(r.from_phone) === digits ? 'inbound' : 'outbound',
@@ -291,13 +295,15 @@ async function buildCallContext(callLogId) {
     call.recording_duration_seconds || call.duration_seconds || call.duration || 0
   ) || 0;
   const callEndsAt = new Date(new Date(call.created_at).getTime() + callDurationSeconds * 1000);
+  // 30-day lookback floor relative to THIS call — see loadSmsThread.
+  const smsSince = new Date(new Date(call.created_at).getTime() - 30 * 86400000);
 
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
     loadLeadForCall(call, phone, { phoneFallback: !customerMatch.ambiguous }),
     // A shared line with MULTIPLE profiles carries texts, estimates, and
     // leads for other people/properties — none of that history may steer
     // the composer on an ambiguous match.
-    customerMatch.ambiguous ? Promise.resolve([]) : loadSmsThread(phone, { before: callEndsAt }),
+    customerMatch.ambiguous ? Promise.resolve([]) : loadSmsThread(phone, { before: callEndsAt, since: smsSince }),
     customerMatch.ambiguous ? Promise.resolve([]) : loadPriorEstimates(phone),
   ]);
   const lead = leadMatch.lead;

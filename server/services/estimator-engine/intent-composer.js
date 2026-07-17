@@ -41,7 +41,7 @@ SERVICE VOCABULARY (the only keys allowed in "services"):
 - oneTimeMosquito: single mosquito treatment (event, one-off).
 - termite: termite BAIT/MONITORING program only. Options: system=advance, monitoringTier=basic. Active termite TREATMENT (tenting, liquid treatment) is out of scope — skip with reason.
 - flea: flea/tick treatment program.
-- bedBug: bed bug treatment. Options: method (CHEMICAL|HEAT), rooms (1-12), severity (light|moderate|severe), prepStatus (ready|partial|poor|refused — how prepared the home is for treatment), occupancyType (singleFamily|apartment|hotel|studentHousing — default singleFamily for a house).
+- bedBug: CHEMICAL bed bug treatment. Options: method (CHEMICAL), rooms (1-12), severity (light|moderate|severe), prepStatus (ready|partial|poor|refused — how prepared the home is for treatment), occupancyType (singleFamily|apartment|hotel|studentHousing — default singleFamily for a house). HEAT treatment requires an in-house-vs-subcontract equipment decision the call can't establish — a caller specifically wanting heat treatment is out of scope, skip with reason.
 - rodentBait: exterior rodent bait-station program. Rodent TRAPPING/exclusion/remediation is out of scope — skip with reason.
 - stinging: wasp/hornet/bee treatment. Options: species (PAPER_WASP|YELLOW_JACKET|HORNET|HONEY_BEE), tier (1-3), removal (NONE | SMALL small-nest removal | LARGE large-nest removal | HONEYCOMB honeycomb extraction — pick the specific removal discussed, never leave a discussed removal at NONE). LIVE BEE RELOCATION is out of scope — skip with reason.
 

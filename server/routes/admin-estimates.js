@@ -267,11 +267,26 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   };
 }
 
-function assertEstimateSendable(estimate) {
+function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
     err.statusCode = 400;
     throw err;
+  }
+  // Estimator-engine YELLOW drafts carry review reasons (fallback sqft
+  // sources, comps outliers, constraint flags) the operator must see before
+  // the first send — without this gate they read as ordinary priced drafts.
+  // Green lanes stay one-click; a draft that already went out (sent_at) was
+  // already reviewed, so resends/follow-ups don't re-prompt.
+  {
+    const engineReview = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.estimatorEngine;
+    if (engineReview?.lane === 'yellow' && !estimate.sent_at && !engineReviewAcknowledged) {
+      const reasons = (engineReview.laneReasons || []).join('; ');
+      const err = new Error(`This AI draft is flagged for review${reasons ? ` (${reasons})` : ''}. Open AI Draft Review on the estimate, then confirm the send.`);
+      err.statusCode = 409;
+      err.code = 'ENGINE_REVIEW_REQUIRED';
+      throw err;
+    }
   }
   // Some rows have no share token (quote-wizard mirrors, legacy imports).
   // Without this gate the customer link is built by template literal and the
@@ -570,11 +585,12 @@ router.post('/:id/send', async (req, res, next) => {
     const sendMethod = req.body?.sendMethod || 'both';
     const scheduledAt = req.body?.scheduledAt || null;
     const idempotencyKey = req.body?.idempotencyKey || req.body?.idempotency_key || req.body?.sendAttemptId || null;
+    const engineReviewAcknowledged = req.body?.acknowledgeEngineReview === true;
 
     if (!['sms', 'email', 'both'].includes(sendMethod)) {
       return res.status(400).json({ error: 'Invalid sendMethod' });
     }
-    assertEstimateSendable(estimate);
+    assertEstimateSendable(estimate, { engineReviewAcknowledged });
 
     if (!['sms', 'email', 'both'].includes(sendMethod)) {
       return res.status(400).json({ error: 'Invalid sendMethod' });
@@ -641,7 +657,7 @@ router.post('/:id/send', async (req, res, next) => {
 
     let result;
     try {
-      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey });
+      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey, engineReviewAcknowledged });
     } catch (e) {
       await releaseSendClaim();
       throw e;
@@ -658,7 +674,9 @@ router.post('/:id/send', async (req, res, next) => {
     }
     res.json({ success: true, ...result });
   } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    // err.code rides along so the client can distinguish the engine-review
+    // gate (ENGINE_REVIEW_REQUIRED → confirm-and-retry) from other 4xx.
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
 });
@@ -670,7 +688,13 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     err.statusCode = 400;
     throw err;
   }
-  assertEstimateSendable(estimate);
+  // A row in 'scheduled'/'sending' already cleared the request-time gate
+  // (the operator acknowledged the engine review when scheduling/clicking) —
+  // the cron leg must not bounce it at execution time.
+  assertEstimateSendable(estimate, {
+    engineReviewAcknowledged: options.engineReviewAcknowledged === true
+      || ['scheduled', 'sending'].includes(String(estimate.status || '')),
+  });
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const nextExpiresAt = estimateExpiresAt(now);

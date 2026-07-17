@@ -99,6 +99,7 @@ const { sameStreetAddress, addressAddsLocality } = require('./address-compare');
 async function gatherPropertySignals(context, { refreshLookup = false, persistLookup = true } = {}) {
   const address = addressFromContext(context);
   let propertyRecord = null;
+  let enriched = null;
   if (address) {
     try {
       const { performPropertyLookup } = require('../../routes/property-lookup-v2');
@@ -108,6 +109,10 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
         ...(persistLookup ? {} : { persist: false }),
       });
       propertyRecord = lookup?.propertyRecord || null;
+      // The normalized profile carries the pricing feature modifiers the raw
+      // record doesn't (pool/cage, shrub density, landscape complexity,
+      // water adjacency) — dropping it priced known features as absent.
+      enriched = lookup?.enriched || null;
     } catch (err) {
       logger.warn(`[estimator-engine] property lookup failed (continuing without): ${err.message}`);
     }
@@ -128,7 +133,7 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
     }
   }
 
-  return { address, propertyRecord, parcelView, subdivisionMedian };
+  return { address, propertyRecord, enriched, parcelView, subdivisionMedian };
 }
 
 // One-bell + durability: for PROMISED quotes the processor's generic
@@ -265,7 +270,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       }
     }
 
-    const { address, propertyRecord, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
+    const { address, propertyRecord, enriched, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
     result.addressUsed = address;
 
     // An ambiguous shared-phone profile must not size the draft either —
@@ -306,7 +311,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     // the extraction missed). When it differs from — or fills in — the
     // address the property signals were gathered for, re-gather; otherwise
     // the draft is priced off the wrong (or no) parcel.
-    let effectiveSignals = { propertyRecord, parcelView, subdivisionMedian };
+    let effectiveSignals = { propertyRecord, enriched, parcelView, subdivisionMedian };
     let addressRegathered = false;
     if (intent.address
       && (!address || !sameStreetAddress(intent.address, address) || addressAddsLocality(intent.address, address))) {
@@ -364,7 +369,17 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     let engineInput = null;
     let totals = { monthly: 0, annual: 0, oneTime: 0 };
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
-      engineInput = buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices, profileDescribesQuotedProperty });
+      engineInput = buildEngineInput({
+        intent,
+        propertyFacts,
+        context,
+        priorQualifyingServices,
+        profileDescribesQuotedProperty,
+        // Feature modifiers resolved by the lookup of the QUOTED address
+        // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
+        // water adjacency feed real pricing adjustments.
+        lookupEnriched: effectiveSignals.enriched,
+      });
       try {
         engineResult = generateEstimateSafely(engineInput);
         totals = deriveTotals(engineResult);

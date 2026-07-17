@@ -75,7 +75,12 @@ const SERVICE_OPTION_SCHEMAS = {
   bedBug: {
     type: 'object',
     properties: {
-      method: { enum: ['CHEMICAL', 'HEAT'] },
+      // CHEMICAL only. HEAT additionally requires equipment
+      // (INHOUSE|SUBCONTRACT) + heatScope — an operational decision the
+      // caller can't supply, and without them priceBedBugTreatment throws,
+      // so a schema-valid HEAT intent could never price. Heat requests
+      // skip with a reason instead (manual-scope, like termite treatment).
+      method: { enum: ['CHEMICAL'] },
       rooms: { type: 'integer', minimum: 1, maximum: 12 },
       severity: { enum: ['light', 'moderate', 'severe'] },
       // Exactly priceBedBugTreatment's vocab — schema-valid values outside

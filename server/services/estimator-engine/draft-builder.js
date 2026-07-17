@@ -65,7 +65,35 @@ function lineRequiresReview(line = {}) {
 }
 
 // ── Engine input ──────────────────────────────────────────────
-function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], profileDescribesQuotedProperty = false }) {
+
+// Lookup-resolved feature modifiers → the pest pricer's features vocabulary.
+// The enriched profile describes the QUOTED parcel (the lookup ran on the
+// final quoted address), so its pool/cage, shrub density, landscape
+// complexity, and water adjacency feed real per-feature adjustments —
+// without this a caged-pool, heavy-landscaping home green-laned at the
+// bare-property price. Deliberately NOT mapped: tree density and large
+// driveway for pest (retired from pest pricing on main by #2794 — wiring
+// them here would add money that vanishes at merge). treeDensity still
+// flows top-level for the tree & shrub pricer's density-estimate fallback.
+function lookupFeatureModifiers(enriched) {
+  if (!enriched) return null;
+  const up = (v) => String(v || '').toUpperCase();
+  const poolCage = up(enriched.poolCage) === 'YES';
+  return {
+    // 'POSSIBLE' (satellite sees a pool the county doesn't) stays unpriced —
+    // it could be the neighbor's.
+    pool: up(enriched.pool) === 'YES',
+    poolCage,
+    ...(poolCage && enriched.poolCageSize
+      ? { poolCageSize: String(enriched.poolCageSize).toLowerCase() }
+      : {}),
+    ...(enriched.shrubDensity ? { shrubs: enriched.shrubDensity } : {}),
+    ...(enriched.landscapeComplexity ? { complexity: enriched.landscapeComplexity } : {}),
+    nearWater: !['', 'NONE', 'NO', 'UNKNOWN'].includes(up(enriched.nearWater)),
+  };
+}
+
+function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], profileDescribesQuotedProperty = false, lookupEnriched = null }) {
   // profileDescribesQuotedProperty is POSITIVELY established by the caller
   // (the trusted profile's saved address street-matches the final quoted
   // address) — an extraction-supplied different address never re-gathers,
@@ -73,6 +101,7 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
   // Only then may the profile's saved turf measurement / property type
   // steer pricing.
   const isCommercial = intent.is_commercial === true;
+  const featureModifiers = isCommercial ? null : lookupFeatureModifiers(lookupEnriched);
   const homeSqFt = positive(propertyFacts?.home?.value);
   const lotSqFt = positive(propertyFacts?.lot?.value);
   const homeSource = propertyFacts?.home?.source || SQFT_SOURCES.NONE;
@@ -115,6 +144,12 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     lotSizeMeasured: !!lotSqFt && !FALLBACK_SQFT_SOURCES.has(lotSource),
     ...(isCommercial
       ? { buildingSizeMeasured: !!homeSqFt && !FALLBACK_SQFT_SOURCES.has(homeSource) }
+      : {}),
+    // Lookup-resolved feature modifiers (residential — the commercial risk
+    // model prices off footprint/risk-type, not homeowner features).
+    ...(featureModifiers ? { features: featureModifiers } : {}),
+    ...(!isCommercial && lookupEnriched?.treeDensity
+      ? { treeDensity: lookupEnriched.treeDensity }
       : {}),
     stories: positive(propertyFacts?.stories) || 1,
     // Provenance the story-sensitive pricers key their review reasons off —
@@ -221,6 +256,11 @@ async function compsBand({ serviceInterestLabel, category, monthlyTotal, service
       .where('created_at', '>=', since)
       .whereNotNull('monthly_total')
       .where('monthly_total', '>', 0)
+      // Only estimates that actually went out (sent_at is the delivery
+      // stamp) — unsent manual drafts and this engine's own prior drafts
+      // must not feed the band, or several mispriced drafts would shift the
+      // median until the next bad price stops flagging as an outlier.
+      .whereNotNull('sent_at')
       .orderBy('created_at', 'desc')
       .limit(50);
     if (category) q = q.where('category', category);
@@ -587,5 +627,5 @@ module.exports = {
   calibrationWarnings,
   classifyLane,
   createDraftEstimate,
-  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES },
+  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES, lookupFeatureModifiers },
 };

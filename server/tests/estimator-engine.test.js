@@ -776,6 +776,58 @@ describe('review fixes', () => {
     }
   });
 
+  test('bedBug HEAT is not composable — the pricer requires an equipment decision the call cannot supply', () => {
+    const heat = {
+      ...baseIntent(),
+      services: { bedBug: { method: 'HEAT', rooms: 3, severity: 'moderate', prepStatus: 'ready', occupancyType: 'singleFamily' } },
+      service_interest_label: 'Bed Bug Heat Treatment',
+    };
+    expect(validateIntent(heat).valid).toBe(false);
+    const chemical = { ...heat, services: { bedBug: { ...heat.services.bedBug, method: 'CHEMICAL' } } };
+    expect(validateIntent(chemical).valid).toBe(true);
+  });
+
+  test('lookup feature modifiers map to the pest pricing vocabulary from one record', () => {
+    const features = draftPriv.lookupFeatureModifiers({
+      pool: 'YES', poolCage: 'YES', poolCageSize: 'LARGE',
+      shrubDensity: 'HEAVY', landscapeComplexity: 'COMPLEX',
+      nearWater: 'CANAL_ADJACENT', treeDensity: 'HEAVY',
+    });
+    expect(features).toEqual({
+      pool: true, poolCage: true, poolCageSize: 'large',
+      shrubs: 'HEAVY', complexity: 'COMPLEX', nearWater: true,
+    });
+    // Deliberately absent from pest features: trees / largeDriveway —
+    // retired from pest pricing on main (#2794).
+    expect(features.trees).toBeUndefined();
+    expect(features.largeDriveway).toBeUndefined();
+    // A POSSIBLE pool (satellite-only) is never charged; NONE water isn't wet.
+    const uncertain = draftPriv.lookupFeatureModifiers({ pool: 'POSSIBLE', poolCage: 'UNKNOWN', nearWater: 'NONE' });
+    expect(uncertain.pool).toBe(false);
+    expect(uncertain.poolCage).toBe(false);
+    expect(uncertain.nearWater).toBe(false);
+    expect(draftPriv.lookupFeatureModifiers(null)).toBeNull();
+  });
+
+  test('engine input carries lookup features for residential, never commercial', () => {
+    const facts = {
+      home: { value: 1800, source: SQFT_SOURCES.COUNTY_ASSESSED },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    };
+    const enriched = { pool: 'YES', poolCage: 'YES', poolCageSize: 'MEDIUM', treeDensity: 'HEAVY' };
+    const residential = buildEngineInput({ intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched });
+    expect(residential.features).toMatchObject({ pool: true, poolCage: true, poolCageSize: 'medium' });
+    expect(residential.treeDensity).toBe('HEAVY');
+    const commercial = buildEngineInput({
+      intent: { ...baseIntent(), is_commercial: true, category: 'COMMERCIAL', commercial_risk_type: 'office_low' },
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: enriched,
+    });
+    expect(commercial.features).toBeUndefined();
+    expect(commercial.treeDensity).toBeUndefined();
+  });
+
   test('treeShrub accepts a caller-stated treeCount and rejects out-of-range counts', () => {
     const withCount = { ...baseIntent(), services: { treeShrub: { treeCount: 12 } }, service_interest_label: 'Tree & Shrub Care' };
     expect(validateIntent(withCount).valid).toBe(true);
