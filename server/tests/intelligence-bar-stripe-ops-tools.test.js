@@ -164,6 +164,8 @@ describe('intelligence bar Stripe ops tools', () => {
         },
       }],
     }));
+    // Failed-attempt retry sweep — empty
+    global.fetch.mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }));
 
     const result = await executeStripeOpsTool('get_stripe_payment_intents', {});
     expect(result.error).toBeUndefined();
@@ -217,6 +219,8 @@ describe('intelligence bar Stripe ops tools', () => {
         pi('pi_paid', 'succeeded', 3333),
       ],
     }));
+    // Failed-attempt retry sweep — empty
+    global.fetch.mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }));
 
     const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete', amount: 33.33 });
     expect(result.error).toBeUndefined();
@@ -238,6 +242,8 @@ describe('intelligence bar Stripe ops tools', () => {
         next_action: { type: 'verify_with_microdeposits', verify_with_microdeposits: { hosted_verification_url: 'https://payments.stripe.com/x' } },
       }],
     }));
+    // Failed-attempt retry sweep — empty
+    global.fetch.mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }));
 
     const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'requires_action' });
     expect(result.error).toBeUndefined();
@@ -257,13 +263,94 @@ describe('intelligence bar Stripe ops tools', () => {
     }];
     global.fetch
       .mockResolvedValueOnce(jsonResponse({ has_more: true, data: page1 }))
-      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: page2 }));
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: page2 }))
+      // Failed-attempt retry sweep — empty
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }));
 
     const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete' });
     expect(result.error).toBeUndefined();
     expect(result.payment_intents.map(p => p.id)).toEqual(['pi_draft_deep']);
-    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
     expect(String(global.fetch.mock.calls[1][0])).toContain('starting_after=pi_paid_49');
+  });
+
+  test('retry sweep surfaces an older reused intent with a failed attempt in the window, at LIVE state', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const now = Math.floor(Date.now() / 1000);
+    const oldCreated = now - 45 * 24 * 3600; // created far outside any window
+    global.fetch
+      // Main creation-window scan: nothing
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }))
+      // Failed-attempt events in the window reference the old intent
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [{
+          id: 'evt_fail_1',
+          type: 'payment_intent.payment_failed',
+          created: now - 600,
+          data: { object: { id: 'pi_old_retry', object: 'payment_intent', status: 'requires_payment_method' } },
+        }],
+      }))
+      // Live re-fetch returns the CURRENT intent state
+      .mockResolvedValueOnce(jsonResponse({
+        id: 'pi_old_retry', status: 'requires_payment_method', amount: 3333, currency: 'usd',
+        created: oldCreated, payment_method_types: ['card'],
+      }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete' });
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents.map(p => p.id)).toEqual(['pi_old_retry']);
+    expect(result.payment_intents[0].created_before_window).toBe(true);
+    expect(result.total_matched).toBe(1);
+    expect(result.scan_exhaustive).toBe(true);
+    expect(String(global.fetch.mock.calls[1][0])).toContain('type=payment_intent.payment_failed');
+    expect(String(global.fetch.mock.calls[2][0])).toContain('/v1/payment_intents/pi_old_retry');
+  });
+
+  test('retry sweep never re-fetches intents the creation-window scan already covered', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const now = Math.floor(Date.now() / 1000);
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [{
+          id: 'pi_in_window', status: 'requires_payment_method', amount: 3333, currency: 'usd',
+          created: now - 3600, payment_method_types: ['card'],
+        }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        has_more: false,
+        data: [{
+          id: 'evt_fail_2',
+          type: 'payment_intent.payment_failed',
+          created: now - 600,
+          data: { object: { id: 'pi_in_window', object: 'payment_intent', status: 'requires_payment_method' } },
+        }],
+      }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete' });
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents.map(p => p.id)).toEqual(['pi_in_window']);
+    expect(result.total_matched).toBe(1);
+    // List page + event page only — no per-intent lookup
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('matches beyond the display cap still count toward total_matched and clear scan_exhaustive', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const created = Math.floor(Date.now() / 1000) - 3600;
+    const drafts = Array.from({ length: 5 }, (_, i) => ({
+      id: `pi_draft_${i}`, status: 'requires_payment_method', amount: 3333, currency: 'usd', created, payment_method_types: ['card'],
+    }));
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: drafts }))
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }));
+
+    const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'incomplete', limit: 2 });
+    expect(result.error).toBeUndefined();
+    expect(result.payment_intents).toHaveLength(2);
+    expect(result.total_matched).toBe(5);
+    expect(result.scan_exhaustive).toBe(false);
   });
 
   test('get_stripe_payment_intents reports canceled state and unconfigured stays benign', async () => {
@@ -284,6 +371,8 @@ describe('intelligence bar Stripe ops tools', () => {
         canceled_at: canceledAt, cancellation_reason: 'abandoned', payment_method_types: ['card'],
       }],
     }));
+    // Failed-attempt retry sweep — empty
+    global.fetch.mockResolvedValueOnce(jsonResponse({ has_more: false, data: [] }));
     const result = await executeStripeOpsTool('get_stripe_payment_intents', { status: 'canceled' });
     expect(result.payment_intents[0].canceled_at).toBe(new Date(canceledAt * 1000).toISOString());
     expect(result.payment_intents[0].cancellation_reason).toBe('abandoned');

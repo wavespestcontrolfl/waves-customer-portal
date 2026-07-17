@@ -47,6 +47,16 @@ jest.mock('../services/intelligence-bar/estimate-tools', () => ({ ESTIMATE_TOOLS
 jest.mock('../services/intelligence-bar/banking-tools', () => ({
   BANKING_TOOLS: [], BANKING_QUERY_TOOLS: [], executeBankingTool: jest.fn(),
 }));
+// The mocked model "calls" get_stripe_payment_intents below — stub the module
+// so a developer/CI machine with STRIPE_SECRET_KEY exported can never hit the
+// real Stripe API from this suite. The tool NAME is what drives PII handling
+// in the route, so the taint behavior under test is unaffected.
+jest.mock('../services/intelligence-bar/stripe-ops-tools', () => ({
+  STRIPE_OPS_TOOLS: [
+    { name: 'get_stripe_payment_intents', description: 'stub', input_schema: { type: 'object', properties: {} } },
+  ],
+  executeStripeOpsTool: jest.fn(async () => ({ payment_intents: [], total_matched: 0 })),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     req.technician = { id: 'admin-1', role: 'admin' };
