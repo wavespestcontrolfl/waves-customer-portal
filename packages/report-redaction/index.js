@@ -31,7 +31,9 @@ const INTERNAL_FINDING_KEYS = ['inspection_fee'];
 // was paid or "included on invoice: $250" still has its own amount and must
 // redact; when the money after such a word belongs to something else, the
 // money-subject breakers are what identify it.
-const FEE_REACH_BREAKERS = [
+// Money/waiver words — used by BOTH the main gap and the range-qualifier
+// tempering ("for repairs and $500" must never be swallowed as a qualifier).
+const MONEY_SUBJECT_BREAKER_LIST = [
   'waiv\\w*', 'comped', 'complimentary', 'free', 'no charge',
   'repairs?', 're-?treatments?', 'treatments?', 'permits?', 'damages?',
   'estimates?', 'quotes?', 'deductibles?', 'discounts?', 'credits?',
@@ -43,12 +45,26 @@ const FEE_REACH_BREAKERS = [
   // is handled by DIRECT_BRIDGE below — adjacent to the cue it is the fee's
   // own amount, not a new subject.
   'prices?', 'costs?', 'charges?', 'values?', 'purchase',
+];
+// Clause-subject nouns — break the MAIN gap only. Inside a range qualifier
+// ("$175 for block homes and $250 for wood-frame homes") they are ordinary
+// qualifier words, so the qualifier tempering deliberately excludes them.
+const NEW_CLAUSE_BREAKER_LIST = [
   // a bare transaction party starts a NEW payment clause ("…, buyer paid
   // $400 at closing") — its amount is never the fee. As the AGENT of the
   // fee's own payment ("paid by seller: $250") the party is consumed by
   // PARTY_AGENT_PHRASE below, so the breaker never sees it.
   'buyers?', 'sellers?', 'owners?', 'tenants?', 'landlords?', 'realtors?', 'lenders?',
-].join('|');
+  // a bare property noun starts a NEW subject too ("…, the property sold
+  // for $400,000") — as the OBJECT of a preposition ("fee for the property
+  // at 123 Main St") it is consumed by PROPERTY_OBJECT_PHRASE below.
+  'property', 'properties', 'houses?', 'structures?', 'buildings?', 'residences?', 'escrow', 'deposits?',
+  // "home(s)" too — but NOT in the qualifier ("for block homes" is a
+  // qualifier, "the home sold for $400,000" is a subject).
+  'homes?',
+];
+const MONEY_SUBJECT_BREAKERS = MONEY_SUBJECT_BREAKER_LIST.join('|');
+const FEE_REACH_BREAKERS = MONEY_SUBJECT_BREAKER_LIST.concat(NEW_CLAUSE_BREAKER_LIST).join('|');
 
 // Immediately after the cue, cost/charge/price/run read as the VERB stating
 // the fee's own amount ("Inspection fee costs $250", "fee will cost $250",
@@ -100,6 +116,14 @@ const AMOUNT_LINE_BREAK = '\\r?\\n(?=[ \\t]*(?:\\$|USD\\b|US\\$|\\d))';
 const PARTY_AGENT_PHRASE =
   '\\b(?:by|from)\\s+(?:the\\s+)?(?:buyers?|sellers?|owners?|tenants?|landlords?|realtors?|lenders?|title\\s+compan(?:y|ies))\\b';
 
+// "for/of/at/on + (the) property/home/house…" is the OBJECT of a
+// preposition describing WHAT was inspected — a bridge, not a new subject —
+// so it is consumed atomically ("Inspection fee for the property at 123
+// Main Street is $250" redacts). A bare property noun opening its own
+// clause ("…, the property sold for $400,000") still breaks.
+const PROPERTY_OBJECT_PHRASE =
+  '\\b(?:for|of|at|on)\\s+(?:the\\s+|this\\s+|that\\s+|an?\\s+)?(?:property|properties|homes?|houses?|structures?|buildings?|residences?)\\b';
+
 // A street address is consumed atomically so a proper name inside it that
 // happens to match a money noun never breaks the cue — "the property at
 // 123 Price Street is $250" must still redact the fee. Number + capitalized
@@ -142,10 +166,10 @@ const DETERMINED_AMOUNT = '\\b(?:the|this|that|an?)\\s+(?:\\$|USD\\b|US\\$|\\d)'
 // ("due 07/24"), not a duration or unit ("due in 30 days", "10am"), and not
 // a 19xx/20xx year.
 const AMOUNT_PATTERN = [
-  '\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
-  '(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?',
-  '\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?\\b',
-  '(?:\\b(?:is|was|of|from|between)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b)(?![:/\\-]?\\d)',
+  '\\$\\s?\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?',
+  '(?:USD|US\\$)\\s?\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?',
+  '\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?\\s?dollars?\\b',
+  '(?:\\b(?:is|was|of|from|between)\\s{1,3}|[:=]\\s{0,3})(?!(?:19|20)\\d{2}\\b)\\d{2,}(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|dollars?|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b)(?![:/\\-]?\\d)',
 ].join('|');
 
 // Remove ONLY the literal "inspection fee" phrase + an amount from free text.
@@ -167,19 +191,19 @@ const AMOUNT_PATTERN = [
 // "for <words>" phrase, so "and treatment $900" / "for repairs and $500"
 // (a new money subject between) is never swallowed.
 const CONTINUATION_QUALIFIER =
-  `(?:\\s+for\\s+(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)[\\w\\-]+\\s+){0,4}?)?`;
+  `(?:\\s+for\\s+(?:(?!\\b(?:${MONEY_SUBJECT_BREAKERS})\\b)[\\w\\-]+\\s+){0,4}?)?`;
 const RANGE_CONTINUATION =
   `(?:${CONTINUATION_QUALIFIER}\\s?(?:to|through|thru|or|and|[-–—/])\\s?`
   + '(?:'
-  + '\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?'
-  + '|(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?'
-  + '|\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?\\b'
-  + '|\\d{2,}[\\d,]*(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b)(?![:/\\-]?\\d)'
+  + '\\$\\s?\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?'
+  + '|(?:USD|US\\$)\\s?\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?'
+  + '|\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?\\s?dollars?\\b'
+  + '|\\d{2,}(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b)(?![:/\\-]?\\d)'
   + '))*';
 
 const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
-  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${STREET_ADDRESS_PHRASE}|${CONTAINER_PHRASE}|${FEE_SCOPE_PHRASE}|${PARTY_AGENT_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
+  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${STREET_ADDRESS_PHRASE}|${PROPERTY_OBJECT_PHRASE}|${CONTAINER_PHRASE}|${FEE_SCOPE_PHRASE}|${PARTY_AGENT_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
   + `(?:${AMOUNT_PATTERN})`
   + RANGE_CONTINUATION
   // (?![,.]?\d) forbids backtracking into a partial number ("$400" out of
@@ -200,7 +224,7 @@ const FEE_CUE_RE = new RegExp(
 // before the cue ("250 inspection fee"?) has no natural reading worth the
 // corruption risk.
 const PRE_CUE_AMOUNT =
-  '(?:\\$\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|(?:USD|US\\$)\\s?\\d[\\d,]*(?:\\.\\d{1,2})?|\\d[\\d,]*(?:\\.\\d{1,2})?\\s?dollars?)';
+  '(?:\\$\\s?\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?|(?:USD|US\\$)\\s?\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?|\\d(?:[\\d,]*\\d)?(?:\\.\\d{1,2})?\\s?dollars?)';
 const PRE_CUE_RE = new RegExp(
   `(${PRE_CUE_AMOUNT}(?:\\s?(?:to|through|thru|or|and|[-–—/])\\s?${PRE_CUE_AMOUNT})*)`
   + '(\\s+(?:[\\w\\-]+\\s+){0,2}?inspection\\s+fee)\\b',

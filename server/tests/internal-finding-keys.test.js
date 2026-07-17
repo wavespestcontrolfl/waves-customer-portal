@@ -202,6 +202,16 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee\n\n$250 deposit due'))
       .toBe('Inspection fee\n\n$250 deposit due');
   });
+  test('a bare property noun breaks; the prepositional object bridges', () => {
+    expect(redactInspectionFeeCues('Inspection fee paid separately, the property sold for $400,000.'))
+      .toBe('Inspection fee paid separately, the property sold for $400,000.');
+    expect(redactInspectionFeeCues('The inspection fee for the property at 123 Main Street is $250'))
+      .toBe('The inspection fee for the property at 123 Main Street is [fee removed]');
+  });
+  test('a trailing comma is punctuation, not a digit separator', () => {
+    expect(redactInspectionFeeCues('Inspection fee was $250, then the inspection continued.'))
+      .toBe('Inspection fee was [fee removed], then the inspection continued.');
+  });
   test('a money-noun proper name inside a street address never breaks the cue', () => {
     expect(redactInspectionFeeCues('Inspection fee for the property at 123 Price Street is $250'))
       .toBe('Inspection fee for the property at 123 Price Street is [fee removed]');
