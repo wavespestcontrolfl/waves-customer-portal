@@ -390,30 +390,35 @@ async function listAuditEvents(knex, { limit = 50 } = {}) {
 }
 
 async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null } = {}) {
-  const q = knex('pest_pressure_scores')
-    .where('customer_id', customerId)
-    .orderBy('service_date', 'desc')
-    // Deterministic same-day chronology: service_date alone leaves tied rows
-    // in arbitrary order, and the same-day trim below slices at the current
-    // row's position — an undetermined order could leave a later sibling
-    // BEFORE the current row and leak it (codex P2 #2824).
-    .orderBy('calculated_at', 'desc')
-    .orderBy('id', 'desc')
+  const q = knex('pest_pressure_scores as pps')
+    .leftJoin('service_records as sr', 'sr.id', 'pps.service_record_id')
+    .where('pps.customer_id', customerId)
+    .orderBy('pps.service_date', 'desc')
+    // Deterministic same-day chronology, on IMMUTABLE visit time: the trim
+    // below slices at the current row's position, so tied service_date rows
+    // must order by when the visit actually happened. calculated_at can't be
+    // the tie-break — admin recalculation rewrites it, which would re-sort an
+    // older recalculated report ahead of its later sibling and leak that
+    // sibling (codex P2 #2824 r2). started_at is stamped at visit time and
+    // never rewritten; NULLS LAST keeps legacy no-timestamp rows oldest
+    // within the day; pps.id is the final immutable tie-break.
+    .orderByRaw('sr.started_at DESC NULLS LAST')
+    .orderBy('pps.id', 'desc')
     // Over-fetch when a same-day trim is requested so the trim can't starve
     // the window below `limit`.
     .limit(currentServiceRecordId ? limit + 8 : limit);
-  if (serviceLine) q.where('service_line', serviceLine);
+  if (serviceLine) q.where('pps.service_line', serviceLine);
   // Token-scoped callers (customer-facing report views) must pass
   // beforeOrOnServiceDate set to the report's own service_date so a
   // long-lived `/api/reports/:token` bearer can't reveal later visits
   // recorded after the report was generated.
-  if (beforeOrOnServiceDate) q.where('service_date', '<=', beforeOrOnServiceDate);
+  if (beforeOrOnServiceDate) q.where('pps.service_date', '<=', beforeOrOnServiceDate);
   const rows = await q.select(
-    'id', 'service_record_id', 'service_date', 'service_line',
-    'displayed_score', 'calculated_score', 'label_key', 'label_name',
-    'trend', 'trend_delta', 'data_completeness', 'is_overridden',
-    'override_reason', 'overridden_by', 'overridden_at',
-    'calculation_version', 'calculated_at',
+    'pps.id', 'pps.service_record_id', 'pps.service_date', 'pps.service_line',
+    'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
+    'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
+    'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
+    'pps.calculation_version', 'pps.calculated_at',
   );
   // The date bound alone leaks same-day sibling visits: viewing the earlier
   // report after a later same-day visit completes would chart the later

@@ -1025,7 +1025,10 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
     <Card style={compact ? { marginBottom: 0, padding: 16 } : undefined}>
       <CardTitle sub={compact ? undefined : sub}>{title}</CardTitle>
       {compact ? <div style={{ fontSize: 12, color: MUTED, marginTop: -8, marginBottom: 8 }}>{sub}</div> : null}
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label={`${title} trend`} onMouseLeave={() => setActive(null)} style={{ touchAction: 'pan-y' }}>
+      {/* role="group", NOT "img": an img role makes every descendant
+          presentational, which would strip the keyboard-focusable point
+          buttons back out of the accessibility tree (codex P2 #2824 r2). */}
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="group" aria-label={`${title} trend`} onMouseLeave={() => setActive(null)} style={{ touchAction: 'pan-y' }}>
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={accent} stopOpacity="0.28" />

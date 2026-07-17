@@ -406,13 +406,17 @@ export default function ProjectReportViewPage() {
   // view-stamp/activity write, and non-OK re-checks change nothing here.
   useEffect(() => {
     if (data?.code !== 'report_payment_required') return undefined;
+    // `cancelled` invalidates in-flight responses on cleanup — clearing the
+    // interval alone would let a slow response for the PREVIOUS token setData
+    // over the newly-loaded report (codex P2 #2824 r2).
+    let cancelled = false;
     const id = window.setInterval(() => {
       fetch(`${API_BASE}/reports/project/${token}/data`)
         .then(r => (r.ok ? r.json() : null))
-        .then(d => { if (d && !d.error) setData(d); })
+        .then(d => { if (!cancelled && d && !d.error) setData(d); })
         .catch(() => {});
     }, 30000);
-    return () => window.clearInterval(id);
+    return () => { cancelled = true; window.clearInterval(id); };
   }, [data?.code, token]);
 
   if (loading) return (

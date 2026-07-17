@@ -180,8 +180,10 @@ describe('loadHistoryForCustomer — same-day sibling trim (audit 2026-07-16 P3)
 
   function historyKnex() {
     const chain = {};
+    chain.leftJoin = jest.fn(() => chain);
     chain.where = jest.fn(() => chain);
     chain.orderBy = jest.fn(() => chain);
+    chain.orderByRaw = jest.fn(() => chain);
     chain.limit = jest.fn(() => chain);
     chain.select = jest.fn(async () => [...rows]);
     return jest.fn(() => chain);
