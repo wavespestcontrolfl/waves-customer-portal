@@ -1058,17 +1058,20 @@ function findingsContainFeeCue(rawFindings) {
 // Whether an archived FDACS binary may print a raw fee. Filings stamped with
 // pdf_renderer were rendered through the customer-safe scrub, so a cue in
 // their (deliberately raw) snapshot is fine — the PDF itself is clean. An
-// UNMARKED legacy binary is unsafe if its findings snapshot OR any photo
-// caption carries a cue (legacy PDFs printed captions raw and the archive
-// entry stores no caption snapshot, so callers pass the project's current
-// captions as the conservative proxy). Shared by the public /data +
-// /fdacs-pdf gates AND the admin detail serializer so the staff preview can
-// never advertise a filing the customer page withholds (codex #2817).
-function filingBinaryMayDiscloseFee(filing, { photoCaptions = [] } = {}) {
+// UNMARKED legacy binary is unsafe if its findings snapshot carries a cue OR
+// the project has ANY photos: legacy PDFs printed captions raw, the archive
+// entry stores no caption snapshot, and current project_photos rows are
+// MUTABLE (an admin can clear a fee-bearing caption after filing), so
+// current captions can never prove the archived binary clean — photo
+// existence is the conservative gate (codex #2817). A re-send re-archives
+// through the sanitized renderer with the marker, restoring availability.
+// Shared by the public /data + /fdacs-pdf gates AND the admin detail
+// serializer so the staff preview can never advertise a filing the customer
+// page withholds.
+function filingBinaryMayDiscloseFee(filing, { hasPhotos = false } = {}) {
   if (!filing) return false;
   if (filing.pdf_renderer) return false;
-  return findingsContainFeeCue(filing.findings)
-    || photoCaptions.some((caption) => containsInspectionFeeCue(caption || ''));
+  return findingsContainFeeCue(filing.findings) || Boolean(hasPhotos);
 }
 
 // Finding VALUES need the fee scrub too, not just the dedicated internal key

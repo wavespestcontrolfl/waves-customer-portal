@@ -63,11 +63,23 @@ const DIRECT_BRIDGE =
 // these letters ("largest.") fails the leading \b and still terminates.
 const GAP_ABBREVIATIONS = '(?:approx|appx|est|min|max|incl|excl)';
 
-// A money-subject noun preceded by a container preposition is WHERE the fee
-// lives, not a new subject — "included in closing costs: $250" is still the
-// fee. Consumed atomically so the money-noun breaker doesn't fire on it;
-// "purchase price $400,000" (no container prep) still breaks.
-const CONTAINER_PHRASE = '\\b(?:in|into|within|under)\\s+(?:\\w+\\s+){0,2}?(?:costs?|prices?|charges?|values?)\\b';
+// A money-subject noun inside an INCLUSION phrase is WHERE the fee lives,
+// not a new subject — "included in closing costs: $250" is still the fee.
+// Requires the inclusion VERB: a bare preposition over-reached ("properties
+// under a value of $400,000" is a threshold, and its amount must survive —
+// the money-noun breaker fires there instead).
+const CONTAINER_PHRASE = '\\b(?:included|rolled|folded|bundled|reflected|absorbed)\\s+(?:in|into|within)\\s+(?:\\w+\\s+){0,2}?(?:costs?|prices?|charges?|values?)\\b';
+
+// "for the (WDO) treatment/repair/permit/service" directly describes WHICH
+// inspection the fee covers — the treatment word is scope, not a new money
+// subject, so it is consumed atomically ("Inspection fee for the WDO
+// treatment is $250" redacts). The lookahead rejects the token when the
+// scope word actually starts a money phrase ("for the treatment estimate
+// $900" still breaks).
+const FEE_SCOPE_PHRASE =
+  '\\bfor\\s+(?:\\w+\\s+){0,3}?(?:re-?treatments?|treatments?|repairs?|permits?|services?)\\b'
+  + '(?!\\s+(?:estimates?|quotes?|costs?|prices?|charges?|fees?|bills?|invoices?|totals?)\\b)'
+  + '(?!\\s*\\$)(?!\\s*\\d)';
 
 // Textareas wrap: "Inspection fee:\n$250" is one disclosure, so a SINGLE
 // line break is consumable — but only when the next line starts with an
@@ -148,7 +160,7 @@ const RANGE_CONTINUATION =
 
 const FEE_CUE_RE = new RegExp(
   '\\b(inspection\\s+fee)\\b'
-  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${CONTAINER_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
+  + `(${DIRECT_BRIDGE}(?:(?!\\b(?:${FEE_REACH_BREAKERS})\\b)(?!${DETERMINED_AMOUNT})(?:${CONTAINER_PHRASE}|${FEE_SCOPE_PHRASE}|\\b${GAP_ABBREVIATIONS}\\.|${AMOUNT_LINE_BREAK}|[^.;!?\\n])){0,160}?)`
   + `(?:${AMOUNT_PATTERN})`
   + RANGE_CONTINUATION
   // (?![,.]?\d) forbids backtracking into a partial number ("$400" out of

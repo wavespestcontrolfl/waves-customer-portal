@@ -222,6 +222,14 @@ describe('redactInspectionFeeCues', () => {
     expect(redactInspectionFeeCues('Inspection fee $175 and treatment estimate $900.'))
       .toBe('Inspection fee [fee removed] and treatment estimate $900.');
   });
+  test('a threshold amount after under/value survives; scope phrases keep the fee', () => {
+    expect(redactInspectionFeeCues('Inspection fee applies to properties under a value of $400,000.'))
+      .toBe('Inspection fee applies to properties under a value of $400,000.');
+    expect(redactInspectionFeeCues('Inspection fee for the WDO treatment is $250.'))
+      .toBe('Inspection fee for the WDO treatment is [fee removed].');
+    expect(redactInspectionFeeCues('Inspection fee for the treatment estimate $900.'))
+      .toBe('Inspection fee for the treatment estimate $900.');
+  });
   test('an included/covered fee still redacts its own amount', () => {
     expect(redactInspectionFeeCues('Inspection fee included on invoice: $250'))
       .toBe('Inspection fee included on invoice: [fee removed]');

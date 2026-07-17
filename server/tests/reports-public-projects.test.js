@@ -177,7 +177,7 @@ describe('public project reports', () => {
     const projectQueries = [projectRead];
     db.mockImplementation((table) => {
       if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
-      if (table === 'project_photos') return chain({ pluck: jest.fn().mockResolvedValue([]) });
+      if (table === 'project_photos') return chain({ count: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ count: 0 }) });
       if (table === 'service_records') return chain();
       throw new Error(`Unexpected table query: ${table}`);
     });
@@ -190,7 +190,7 @@ describe('public project reports', () => {
     });
   });
 
-  test('WDO: /fdacs-pdf 404s a legacy filing whose PHOTO CAPTION carries the fee', async () => {
+  test('WDO: /fdacs-pdf 404s an unmarked legacy filing whose project has photos — captions are mutable and cannot prove the archive clean', async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
         id: 'project-2',
@@ -207,7 +207,7 @@ describe('public project reports', () => {
     const projectQueries = [projectRead];
     db.mockImplementation((table) => {
       if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
-      if (table === 'project_photos') return chain({ pluck: jest.fn().mockResolvedValue(['Inspection fee $250 noted at panel']) });
+      if (table === 'project_photos') return chain({ count: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ count: 2 }) });
       if (table === 'service_records') return chain();
       throw new Error(`Unexpected table query: ${table}`);
     });
