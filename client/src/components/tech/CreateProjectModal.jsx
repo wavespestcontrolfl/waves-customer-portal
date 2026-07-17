@@ -1509,14 +1509,14 @@ export default function CreateProjectModal({
     return payload;
   }
 
-  async function sendInvoiceAndFinish() {
+  async function sendInvoiceAndFinish(forceNoHold = false) {
     const requiresSignature = signStep?.requiresSignature !== false;
     if (!allowInvoiceCompletion
       || !signStep?.project?.id
       || (requiresSignature && !signStep.signature?.signed && !signStep.invoiceDelivery)) return;
     const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
     const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
-    const holdRequested = signStep.reportHoldAvailable === true;
+    const holdRequested = !forceNoHold && signStep.reportHoldAvailable === true;
     setCompletionBusy(true);
     setCompletionAction('invoice');
     setError(null);
@@ -1577,6 +1577,16 @@ export default function CreateProjectModal({
         invoice: invoiceDelivery.invoice || null,
       });
     } catch (e) {
+      if (holdRequested && e.payload?.code === 'hold_statement_accrued') {
+        // NET-terms payer invoices accrue to a consolidated statement, so
+        // there is no individual pay-before-report lifecycle to wait on. The
+        // server refuses the hold before creating an invoice; retry the same
+        // combined delivery without the hold and keep that mode in the UI if
+        // closeout itself needs a retry.
+        setSignStep(prev => (prev ? { ...prev, reportHoldAvailable: false } : prev));
+        await sendInvoiceAndFinish(true);
+        return;
+      }
       setError(e.message || `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`);
     } finally {
       setCompletionBusy(false);
@@ -2035,7 +2045,7 @@ export default function CreateProjectModal({
               && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.invoiceDelivery) && (
               <button
                 type="button"
-                onClick={sendInvoiceAndFinish}
+                onClick={() => sendInvoiceAndFinish()}
                 disabled={signBusy || completionBusy}
                 style={{
                   minHeight: 52,

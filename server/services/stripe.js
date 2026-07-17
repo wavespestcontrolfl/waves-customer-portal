@@ -2270,6 +2270,7 @@ const StripeService = {
         // concurrent request before our lock is never attributed to this attempt.
         chargeOriginalCreditApplied = Number(lockedInvoice.credit_applied) || 0;
         chargeCreditAppliedTotal = chargeOriginalCreditApplied;
+        let stalePaymentIntentToCancel = null;
         if (lockedInvoice.stripe_payment_intent_id) {
           const activePayment = await trx('payments')
             .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
@@ -2285,7 +2286,12 @@ const StripeService = {
               throw new Error('Invoice has a different active payment');
             }
             if (activeIntent.status !== 'canceled') {
-              await stripe.paymentIntents.cancel(activeIntent.id);
+              // Do not mutate Stripe yet. Account-credit application below can
+              // change the quoted total (including fully covering it), and a
+              // stale expectedTotal must fail while this existing pay-session
+              // PI is still intact. Cancellation happens only after the exact
+              // locked-in total passes the quote check.
+              stalePaymentIntentToCancel = activeIntent;
             }
           }
         }
@@ -2315,6 +2321,9 @@ const StripeService = {
           if (!(invoiceAmountDue(lockedInvoice) > 0)) {
             if (expectedTotal != null && Math.round(Number(expectedTotal) * 100) !== 0) {
               throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
+            }
+            if (stalePaymentIntentToCancel) {
+              await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
             }
             // Fully covered by account credit. COMMIT the credit draw-down +
             // prepaid transition (return, don't throw — a throw would roll back
@@ -2351,6 +2360,9 @@ const StripeService = {
         total = invTotalCents / 100;
         if (expectedTotal != null && Math.round(Number(expectedTotal) * 100) !== invTotalCents) {
           throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
+        }
+        if (stalePaymentIntentToCancel) {
+          await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
         }
 
         const invSurchargeDetails = buildSurchargeAmountDetails(invSurchargeCents);

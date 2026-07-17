@@ -15,6 +15,8 @@ const {
   hasMembership,
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
+  projectIsExplicitlyNoCharge,
+  projectReportPaymentIsHeld,
   projectFollowupSuggestion,
   projectReviewedForPortalAttachment,
   serviceRecordMatchesScheduledService,
@@ -169,6 +171,27 @@ describe('project completion helpers', () => {
     expect(prepaidCoversAmount({ prepaid_amount: '350.00', prepaid_method: 'annual_prepay_invoice' }, 350)).toBe(false);
     // other out-of-band methods still covered numerically.
     expect(prepaidCoversAmount({ prepaid_amount: '350.00', prepaid_method: 'cash' }, 350)).toBe(true);
+  });
+
+  test('recognizes only an explicit zero WDO fee as no-charge', () => {
+    expect(projectIsExplicitlyNoCharge({
+      project_type: 'wdo_inspection',
+      findings: { inspection_fee: '$0.00 — comped' },
+    })).toBe(true);
+    expect(projectIsExplicitlyNoCharge({
+      project_type: 'wdo_inspection',
+      findings: { inspection_fee: '' },
+    })).toBe(false);
+    expect(projectIsExplicitlyNoCharge({
+      project_type: 'pre_treatment_termite_certificate',
+      findings: { inspection_fee: '0' },
+    })).toBe(false);
+  });
+
+  test('treats held and releasing reports as portal-hidden payment holds', () => {
+    expect(projectReportPaymentIsHeld({ report_hold_status: 'held' })).toBe(true);
+    expect(projectReportPaymentIsHeld({ report_hold_status: 'releasing' })).toBe(true);
+    expect(projectReportPaymentIsHeld({ report_hold_status: 'released' })).toBe(false);
   });
 
   test('project follow-up suggestion uses profile policy and default interval', () => {
@@ -589,6 +612,21 @@ describe('resolveProjectCompletionBilling — annual-prepay term-link coverage',
       knex: knexNoExistingInvoice(),
     });
     expect(result).toMatchObject({ required: true, resolved: false, reason: 'invoice_required', amount: 55 });
+  });
+
+  test('explicit-zero WDO closes as no-charge even when the linked visit still has a price', async () => {
+    const result = await resolveBilling({
+      project: {
+        project_type: 'wdo_inspection',
+        findings: JSON.stringify({ inspection_fee: '0' }),
+      },
+      scheduledService: { id: 'ss-comped', estimated_price: '250.00' },
+      customer: { monthly_rate: '99.00' },
+      knex: knexNoExistingInvoice(),
+    });
+    expect(result).toEqual({ required: false, resolved: true, amount: 0, reason: 'wdo_no_charge' });
+    expect(coversVisit).not.toHaveBeenCalled();
+    expect(payerResolve).not.toHaveBeenCalled();
   });
 
   test('other-method prepayment (cash) still covered via the numeric gate', async () => {

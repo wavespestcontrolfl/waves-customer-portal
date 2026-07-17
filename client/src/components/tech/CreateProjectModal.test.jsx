@@ -426,6 +426,46 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(invoiceBodies.every((body) => body.hold_report_until_paid !== true)).toBe(true);
   });
 
+  it('retries statement-billed delivery without a payment hold', async () => {
+    const baseFetch = fetch;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (String(url).includes('/admin/projects/p-1/send-with-invoice')) {
+        const body = JSON.parse(opts.body || '{}');
+        if (body.hold_report_until_paid === true) {
+          return Promise.resolve({
+            ok: false,
+            json: () => Promise.resolve({
+              code: 'hold_statement_accrued',
+              error: 'This service bills on the payer monthly statement',
+            }),
+          });
+        }
+        if (body.dry_run) return jsonResponse({ invoice: { id: 'inv-statement', total: 250 } });
+        return jsonResponse({
+          sent: true,
+          report_held: false,
+          invoice: { id: 'inv-statement', invoice_number: 'INV-NET-1' },
+        });
+      }
+      return baseFetch(url, opts);
+    }));
+    const onCreated = vi.fn();
+    await saveIntoSignStep({ onCreated });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & hold report' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'closed' }),
+      expect.objectContaining({ completed: true }),
+    ));
+    const invoiceBodies = fetch.mock.calls
+      .filter(([url]) => String(url).includes('/send-with-invoice'))
+      .map(([, request]) => JSON.parse(request.body || '{}'));
+    expect(invoiceBodies).toHaveLength(3);
+    expect(invoiceBodies[0].hold_report_until_paid).toBe(true);
+    expect(invoiceBodies.slice(1).every((body) => body.hold_report_until_paid !== true)).toBe(true);
+  });
+
   it('accepts immediate report delivery when account credit fully covers the invoice', async () => {
     const baseFetch = fetch;
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {

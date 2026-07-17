@@ -127,6 +127,17 @@ function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {} }
   return 0;
 }
 
+function projectIsExplicitlyNoCharge(project = {}) {
+  if (!project || project.project_type !== 'wdo_inspection') return false;
+  const findings = parseJsonObject(project.findings);
+  const match = String(findings.inspection_fee ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
+  return match != null && Number(match[1]) === 0;
+}
+
+function projectReportPaymentIsHeld(project = {}) {
+  return ['held', 'releasing'].includes(String(project?.report_hold_status || '').toLowerCase());
+}
+
 function prepaidCoversAmount(scheduledService = {}, amount = 0) {
   // annual-prepay stamps are governed EXCLUSIVELY by annualPrepayCoversVisit
   // (which revalidates the term/invoice against refunds). A STALE
@@ -173,8 +184,16 @@ async function resolveProjectCompletionBilling({
   scheduledService,
   serviceRecord = null,
   customer = {},
+  project = null,
   knex = db,
 } = {}) {
+  // The WDO filing owns its one-time inspection price. An explicit $0 is a
+  // deliberate comp/no-charge statement (distinct from a blank fee, which
+  // uses the default), so the linked visit's stale scheduled price or monthly
+  // fallback must not reintroduce a closeout bill after report-only delivery.
+  if (projectIsExplicitlyNoCharge(project)) {
+    return { required: false, resolved: true, amount: 0, reason: 'wdo_no_charge' };
+  }
   const invoiceAmount = projectCompletionInvoiceAmount({ scheduledService, customer });
   if (!(invoiceAmount > 0)) {
     return { required: false, resolved: true, amount: 0, reason: 'not_billable' };
@@ -600,8 +619,11 @@ async function completeProjectBackedService({
     const recurringCustomer = await isRecurringCustomer(customer, trx);
     const portalAllowedByPolicy = shouldAttachProjectToPortal({ profile, customer, recurringCustomer });
     const portalReviewed = projectReviewedForPortalAttachment(project);
-    const portalAttached = portalAllowedByPolicy && portalReviewed;
-    const portalAttachReason = portalAttached
+    const paymentHeld = projectReportPaymentIsHeld(project);
+    const portalAttached = !paymentHeld && portalAllowedByPolicy && portalReviewed;
+    const portalAttachReason = paymentHeld
+      ? 'report_payment_held'
+      : portalAttached
       ? 'policy_allowed'
       : portalAllowedByPolicy && !portalReviewed
         ? 'report_not_sent'
@@ -631,6 +653,7 @@ async function completeProjectBackedService({
       scheduledService,
       serviceRecord,
       customer,
+      project,
       knex: trx,
     });
     if (billing.required && !billing.resolved) {
@@ -850,8 +873,11 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
     ? shouldAttachProjectToPortal({ profile, customer, recurringCustomer })
     : false;
   const portalReviewed = projectReviewedForPortalAttachment(project);
-  const portalAttached = portalAllowedByPolicy && portalReviewed;
-  const portalReason = portalAttached
+  const paymentHeld = projectReportPaymentIsHeld(project);
+  const portalAttached = !paymentHeld && portalAllowedByPolicy && portalReviewed;
+  const portalReason = paymentHeld
+    ? 'report_payment_held'
+    : portalAttached
     ? 'policy_allowed'
     : portalAllowedByPolicy && !portalReviewed
       ? 'report_not_sent'
@@ -879,6 +905,7 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
       scheduledService,
       serviceRecord,
       customer,
+      project,
       knex,
     })
     : {
@@ -1000,6 +1027,8 @@ module.exports = {
   pickExistingColumns,
   prepaidCoversAmount,
   projectCompletionInvoiceAmount,
+  projectIsExplicitlyNoCharge,
+  projectReportPaymentIsHeld,
   projectFollowupSuggestion,
   projectReviewedForPortalAttachment,
   resolveProjectCompletionBilling,
