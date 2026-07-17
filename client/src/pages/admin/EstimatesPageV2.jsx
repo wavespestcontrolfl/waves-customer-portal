@@ -155,7 +155,11 @@ function summarizeEstimateSend(data) {
   return parts.join(" / ");
 }
 
-async function sendEstimateFromPipeline(id, sendMethod = "both") {
+async function sendEstimateFromPipeline(
+  id,
+  sendMethod = "both",
+  { acknowledgeEngineReview = false } = {},
+) {
   const r = await fetch(`${API_BASE}/admin/estimates/${id}/send`, {
     method: "POST",
     headers: {
@@ -167,11 +171,21 @@ async function sendEstimateFromPipeline(id, sendMethod = "both") {
       idempotencyKey:
         globalThis.crypto?.randomUUID?.() ||
         `estimate-send-${Date.now()}-${Math.random()}`,
+      ...(acknowledgeEngineReview ? { acknowledgeEngineReview: true } : {}),
     }),
   });
   const data = await r.json().catch(() => ({}));
+  // Engine-review gate: a yellow-lane AI draft's first send returns 409 with
+  // the review reasons. Surface them and retry with the acknowledgment only
+  // on the operator's explicit confirm.
+  if (r.status === 409 && data?.code === "ENGINE_REVIEW_REQUIRED" && !acknowledgeEngineReview) {
+    if (window.confirm(`${data.error}\n\nReviewed — send now?`)) {
+      return sendEstimateFromPipeline(id, sendMethod, { acknowledgeEngineReview: true });
+    }
+    throw new Error("Send cancelled — review the AI draft first (open AI Review on the estimate).");
+  }
   const summary = summarizeEstimateSend(data);
-  if (!r.ok) throw new Error(summary || `HTTP ${r.status}`);
+  if (!r.ok) throw new Error(summary || data?.error || `HTTP ${r.status}`);
   if (data.partialFailure) window.alert(`Send had issues: ${summary}`);
   return data;
 }
