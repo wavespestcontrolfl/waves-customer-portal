@@ -2570,6 +2570,18 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     const reanchored = anchorAgentEstimateContact(input, lead);
     if (reanchored.error) return reanchored;
     const lockedInput = reanchored.input;
+    // The advisory lock (or the decision to run without one) was keyed on the
+    // pre-transaction phone. If the re-anchored phone differs, the duplicate
+    // check and insert below would run against a number this sequence holds
+    // no lock for, so a concurrent confirmation on that number could pass the
+    // same check and create a second open estimate. The preview fingerprint
+    // cannot catch this — recipients are not part of the priced preview — so
+    // fail closed and make the operator rebuild the card against the
+    // corrected contact.
+    if (String(lockedInput.customerPhone || '').replace(/\D/g, '')
+      !== String(phone || '').replace(/\D/g, '')) {
+      return { error: 'The selected lead phone changed after the confirmation card was built. Refresh and rebuild the confirmation.' };
+    }
 
     if (lead.estimate_id) {
       const existing = await trx('estimates').where({ id: lead.estimate_id }).first();

@@ -2,7 +2,7 @@
   "baseline_single_family_zone_a_quarterly_pest_enhanced_lawn": {
     "summary": {
       "recurringAnnualAfterDiscount": 1039.11,
-      "recurringMonthlyAfterDiscount": 86.59,
+      "recurringMonthlyAfterDiscount": 86.6,
       "year1Total": 1039
     },
     "waveGuard": {
@@ -112,7 +112,7 @@
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
       "recurringAnnualAfterDiscount": 4621.61,
-      "recurringMonthlyAfterDiscount": 385.13,
+      "recurringMonthlyAfterDiscount": 385.14,
       "year1Total": 4622
     },
     "waveGuard": {

@@ -221,6 +221,56 @@ describe('computeMembershipContext', () => {
     expect(spend.currentSpendPerVisitTotal).toBe(117);
   });
 
+  test('differently formatted stamps of one property collapse to a single contract', async () => {
+    const database = fakeDb();
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1', {
+      existingRows: [
+        {
+          id: 'v1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-01-05',
+          estimated_price: 120, effective_service_address: '123 Main Street, Bradenton, 34208',
+        },
+        {
+          id: 'v2', service_type: 'Quarterly Pest Control', scheduled_date: '2099-04-05',
+          estimated_price: 120, effective_service_address: '123 Main St, Bradenton, 34208',
+        },
+      ],
+    });
+
+    // '123 Main Street' vs '123 Main St' is formatting drift on ONE contract —
+    // the per-visit price counts once, never once per spelling.
+    const pest = spend.currentServices.find((service) => service.key === 'pest_control');
+    expect(pest.contracts).toHaveLength(1);
+    expect(pest).toMatchObject({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+      activeScheduledVisits: 2,
+    });
+    expect(spend.currentSpendPerVisitTotal).toBe(120);
+  });
+
+  test('explicit different units at the same street stay separate contracts', async () => {
+    const database = fakeDb();
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1', {
+      existingRows: [
+        {
+          id: 'u1', service_type: 'Quarterly Pest Control', scheduled_date: '2099-01-05',
+          estimated_price: 120, effective_service_address: '500 Gulf Blvd Unit 101, Venice, 34285',
+        },
+        {
+          id: 'u2', service_type: 'Quarterly Pest Control', scheduled_date: '2099-02-05',
+          estimated_price: 95, effective_service_address: '500 Gulf Blvd Unit 102, Venice, 34285',
+        },
+      ],
+    });
+
+    const pest = spend.currentServices.find((service) => service.key === 'pest_control');
+    expect(pest.contracts).toHaveLength(2);
+    expect(pest).toMatchObject({ currentPerVisit: 215, spendSource: 'scheduled_estimate' });
+    expect(spend.currentSpendPerVisitTotal).toBe(215);
+  });
+
   test('mixed stamped/unstamped rows collapse to one contract rather than double-counting', async () => {
     const database = fakeDb();
 

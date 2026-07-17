@@ -275,9 +275,11 @@ describe('commercial safety gate in generateEstimate', () => {
     expect(estimate.summary).toMatchObject({
       recurringAnnualBeforeDiscount: 1089,
       // Silver discounts pest to 421.20. Lawn would fall to 558.90, so the
-      // 35% collected-margin guard caps it at 617.91: total 1039.11.
+      // 35% collected-margin guard caps it at 617.91: total 1039.11. With the
+      // lawn floor binding the monthly CEILs (617.91/12 has fractional cents;
+      // 86.59 × 12 = 1039.08 would rebuild 3¢ under the protected total).
       recurringAnnualAfterDiscount: 1039.11,
-      recurringMonthlyAfterDiscount: 86.59,
+      recurringMonthlyAfterDiscount: 86.6,
       year1Total: 1039,
       year2Annual: 1039,
       year2Monthly: 86.59,

@@ -69,9 +69,18 @@ function toQualifyingKeys(raw) {
   // priorQualifyingServices and unlock WaveGuard discounts on future estimates.
   if (s.includes('commercial')) return [];
   const keys = new Set();
-  if (s.includes('pest')) keys.add('pest_control');
+  // Rodent-led names ("Rodent Pest Control" — rodent_general_one_time's
+  // canonical label) are rodent service rows, not pest coverage. Mirror
+  // detectServiceLine / recurring-appointment-seeder's serviceKeyFor: only a
+  // "pest ... rodent" combined name ("Pest & Rodent Control") is pest-primary.
+  const rodentService = /\b(rodent|rats?|mouse|mice)\b/.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+  if (s.includes('pest') && !rodentService) keys.add('pest_control');
   if (s.includes('lawn') || s.includes('turf')) keys.add('lawn_care');
-  if (s.includes('tree') || s.includes('shrub') || s.includes('ornamental')) keys.add('tree_shrub');
+  // A palm token ("Palm Tree Injections") names the non-qualifying palm
+  // service and beats tree/shrub wording, same as detectServiceLine.
+  // (\bpalms?\b never matches "palmetto", so palmetto-bug pest names pass.)
+  const palmService = /\bpalms?\b/.test(s);
+  if (!palmService && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) keys.add('tree_shrub');
   if (s.includes('mosquito')) keys.add('mosquito');
   if (s.includes('termite') && s.includes('bait')) keys.add('termite_bait');
   return [...keys];

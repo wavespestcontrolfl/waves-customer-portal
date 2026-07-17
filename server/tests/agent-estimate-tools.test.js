@@ -2384,6 +2384,46 @@ describe('Agent Estimate round-6 hardening', () => {
     expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
   });
 
+  test('an email-only lead that gains a phone before the lock rebuilds instead of inserting unlocked', async () => {
+    const initialLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      phone: null, email: 'road@example.com',
+    };
+    const { database, writes } = makeDatabase({
+      lead: initialLead,
+      lockedLead: { ...initialLead, phone: '9415550199' },
+    });
+    mockDb.mockImplementation(database);
+    mockDb.transaction.mockImplementation(async (callback) => callback(database));
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      customerPhone: null,
+    }, { confirmed: true });
+
+    expect(result.error).toMatch(/phone changed after the confirmation card was built/i);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
+  });
+
+  test('a lead whose phone is removed before the lock rebuilds instead of inserting under a stale lock', async () => {
+    const initialLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      phone: '9415550100', email: 'road@example.com',
+    };
+    const { database, writes } = makeDatabase({
+      lead: initialLead,
+      lockedLead: { ...initialLead, phone: null },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.error).toMatch(/phone changed after the confirmation card was built/i);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
+  });
+
   test('a revision invalidates authored proposal data when engine pricing changes', async () => {
     const existing = {
       id: 'estimate-old',

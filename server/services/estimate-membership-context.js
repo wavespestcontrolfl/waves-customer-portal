@@ -30,6 +30,7 @@
 // ============================================================
 
 const logger = require('./logger');
+const { sameStreetAddress } = require('./estimator-engine/address-compare');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
 const {
   toQualifyingKey,
@@ -370,16 +371,30 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     // treatment.
     const propertySplit = serviceRows.length > 0
       && serviceRows.every((row) => !!row.effective_service_address);
-    const contractRowsByAddress = new Map();
+    // Clustered with the canonical street/unit comparator, never raw string
+    // equality — '123 Main Street' vs '123 Main St' (or a stamp corrected
+    // between generated visits) is formatting drift on ONE contract and must
+    // not add its price once per spelling, while two explicit different units
+    // at the same street are separate contracts. Each group keeps its first
+    // row's raw stamp for display.
+    const contractGroups = [];
     for (const row of serviceRows) {
-      const groupKey = propertySplit ? row.effective_service_address : '';
-      if (!contractRowsByAddress.has(groupKey)) contractRowsByAddress.set(groupKey, []);
-      contractRowsByAddress.get(groupKey).push(row);
+      const group = propertySplit
+        ? contractGroups.find((candidate) => sameStreetAddress(candidate.address, row.effective_service_address))
+        : contractGroups[0];
+      if (group) {
+        group.rows.push(row);
+      } else {
+        contractGroups.push({
+          address: propertySplit ? row.effective_service_address : null,
+          rows: [row],
+        });
+      }
     }
-    const contracts = [...contractRowsByAddress.entries()].map(([address, contractRows]) => {
+    const contracts = contractGroups.map(({ address, rows: contractRows }) => {
       const scheduled = contractRows.find((row) => Number(row.estimated_price) > 0);
       return {
-        serviceAddress: propertySplit ? address : null,
+        serviceAddress: address,
         scheduledPerVisit: scheduled ? round2(scheduled.estimated_price) : null,
         activeScheduledVisits: contractRows.length,
       };
