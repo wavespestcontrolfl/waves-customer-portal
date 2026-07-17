@@ -298,8 +298,13 @@ export default function WdoIntelligenceBar({
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-        <label
-          style={{
+        {[
+          { label: 'Take prior treatment photo', source: 'camera', capture: 'environment' },
+          { label: 'Choose prior treatment photo', source: 'library' },
+        ].map((option) => (
+          <label
+            key={option.source}
+            style={{
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -312,18 +317,20 @@ export default function WdoIntelligenceBar({
             fontWeight: 800,
             cursor: disabled || analyzing ? 'default' : 'pointer',
             opacity: disabled || analyzing ? 0.55 : 1,
-          }}
-        >
-          Prior treatment photo
-          <input
-            type="file"
-            accept="image/*"
-            capture="environment"
-            disabled={disabled || analyzing}
-            onChange={handlePhotoChange}
-            style={{ display: 'none' }}
-          />
-        </label>
+            }}
+          >
+            {option.label}
+            <input
+              type="file"
+              accept="image/*"
+              {...(option.capture ? { capture: option.capture } : {})}
+              data-wdo-intelligence-photo-source={option.source}
+              disabled={disabled || analyzing}
+              onChange={handlePhotoChange}
+              style={{ display: 'none' }}
+            />
+          </label>
+        ))}
         {photo && (
           <span style={{ fontSize: 11, color: P.muted }}>
             {compactFileName(photo)}

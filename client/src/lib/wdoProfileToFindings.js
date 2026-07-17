@@ -1,5 +1,5 @@
 // Map a resolved property profile (from the WDO Intelligence lookup —
-// construction, foundation, roof, year built, sq ft, stories) onto WDO
+// construction, foundation, roof, year built, stories) onto WDO
 // inspection findings fields. Suggestions only: the tech reviews and applies,
 // and everything stays editable for on-site verification.
 
@@ -52,7 +52,6 @@ export function applyProfileToWdoFindings(prev, profile, { overwrite = false } =
     next[k] = cur ? `${cur}\n${line}` : line;
   };
 
-  if (profile.squareFootage) set('structure_sqft', String(profile.squareFootage));
   // structures_inspected is the FDACS list of structures actually inspected
   // (main home, attached garage, shed…) and is entered by the tech — the
   // property profile only knows construction material, which belongs in the

@@ -2154,6 +2154,38 @@ const MAX_ADDENDUM_PHOTOS = 16; // 8 addendum pages (2 per page)
 const MAX_ADDENDUM_RAW_PHOTO_BYTES = 32 * 1024 * 1024;
 const MAX_ADDENDUM_TOTAL_BYTES = 14 * 1024 * 1024;
 
+const WDO_ADDENDUM_CATEGORY_CAPTIONS = Object.freeze({
+  wdo_evidence: 'Visible WDO evidence documented at the inspected property.',
+  wdo_damage: 'Visible WDO damage documented at the inspected property.',
+  inaccessible_area: 'Obstruction or inaccessible area documented during the inspection.',
+  previous_treatment: 'Evidence of previous treatment documented at the inspected property.',
+  notice: 'Inspection or treatment notice documented at the inspected property.',
+  treatment_document: 'Prior treatment document reviewed during the inspection.',
+  exterior: 'Exterior condition documented at the inspected structure.',
+  interior: 'Interior condition documented at the inspected structure.',
+  living_area: 'Living-area condition documented during the inspection.',
+  kitchen: 'Kitchen-area condition documented during the inspection.',
+  bathroom: 'Bathroom-area condition documented during the inspection.',
+  garage: 'Garage condition documented during the inspection.',
+  attic: 'Attic condition documented during the inspection.',
+  crawlspace: 'Crawlspace condition documented during the inspection.',
+  other: 'Site condition documented during the WDO inspection.',
+});
+
+function wdoAddendumPhotoCaption(photo = {}) {
+  const typed = String(photo.caption || '').trim();
+  if (typed) return typed;
+  const category = String(photo.category || '').trim().toLowerCase();
+  if (WDO_ADDENDUM_CATEGORY_CAPTIONS[category]) {
+    return WDO_ADDENDUM_CATEGORY_CAPTIONS[category];
+  }
+  if (category) {
+    const label = category.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return `${label.charAt(0).toUpperCase()}${label.slice(1)} documented during the WDO inspection.`;
+  }
+  return 'Site condition documented during the WDO inspection.';
+}
+
 // Fetch the project's photos from S3 for the PDF photo addendum, ordered the
 // way the tech arranged them, normalizing each (normalizeAddendumPhoto:
 // EXIF rotation baked in, bounded JPEG). When normalization can't decode the
@@ -2207,7 +2239,7 @@ async function loadWdoAddendumPhotos(project) {
         break;
       }
       totalBytes += buffer.length;
-      out.push({ buffer, contentType, caption: ph.caption || '' });
+      out.push({ buffer, contentType, caption: wdoAddendumPhotoCaption(ph) });
     } catch (err) {
       logger.warn(`[projects] addendum photo fetch failed for ${ph.id}: ${err.message}`);
     }
@@ -2295,13 +2327,8 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
 // (findings.inspection_fee) — WDO pricing varies by construction (wood frame),
 // new build, prior termite history, etc. That entry always wins. If it's
 // left blank, the fee is $250 FLAT (owner decision 2026-07-12 — Q8 of the
-// universal one-time services plan replaced the old ≤2500/$150 · ≤3500/$200
-// · >3500/$250 structure-sqft tiers so every fee source agrees). Tier shape
-// kept so resolveWdoInspectionFee is untouched; we never price on
-// customers.property_sqft (that's lawn area).
-const WDO_FEE_TIERS = [
-  { maxSqFt: Infinity, price: 250 },
-];
+// universal one-time services plan replaced the old structure-sqft tiers so
+// every fee source agrees).
 function parseWdoFee(value) {
   const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
   const n = m ? Number(m[1]) : 0;
@@ -2322,13 +2349,7 @@ function resolveWdoInspectionFee(findings) {
   // inspection is no-charge — resolve 0 so the invoice paths refuse to bill
   // it, instead of falling through to the blank-fee default.
   if (wdoFeeIsExplicitZero(findings?.inspection_fee)) return 0;
-  const sqft = Number(String(findings?.structure_sqft ?? '').replace(/[^0-9.]/g, '')) || 0;
-  if (sqft > 0) {
-    for (const tier of WDO_FEE_TIERS) {
-      if (sqft <= tier.maxSqFt) return tier.price;
-    }
-  }
-  return 250; // nothing picked or measured — top tier, operator adjusts in dry-run
+  return 250; // flat WDO fee when the operator did not enter an override
 }
 
 function isReusableInvoice(inv) {
@@ -2339,7 +2360,7 @@ const WDO_INVOICE_LINE_DESCRIPTION = 'WDO Inspection (FDACS-13645 Wood-Destroyin
 
 // If a reused invoice is still the auto-created WDO draft (untouched: draft
 // status, our title + single WDO line item) and the resolved fee has since
-// changed (the tech edited inspection_fee / structure_sqft between the dry-run
+// changed (the tech edited inspection_fee between the dry-run
 // and the send), reprice its line item so we never bill the stale amount. A
 // manually edited invoice (different title/lines) is left untouched.
 async function maybeRepriceWdoDraft(invoice, project) {
@@ -4848,6 +4869,7 @@ router._private = {
   dropStaleCertTreatmentDate,
   reportHoldBackoffMinutes,
   resolveWdoInspectionFee,
+  wdoAddendumPhotoCaption,
   wdoFeeIsExplicitZero,
 };
 

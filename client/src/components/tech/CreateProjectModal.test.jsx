@@ -9,9 +9,8 @@
  *
  * Prefill: the manufactured/mobile construction mapping
  * (customers.property_type) and the inspection fee (the linked visit's NET
- * price) seed blank fields only — hand-typed values always win. The
- * structure footprint is NEVER seeded from customers.property_sqft: that
- * column is treated lawn area, not the building footprint (Codex P1).
+ * price) seed blank fields only — hand-typed values always win. The retired
+ * structure-footprint helper is not rendered; WDO pricing is flat by default.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
@@ -63,6 +62,7 @@ function jsonResponse(payload) {
 
 beforeEach(() => {
   customerPayload = { ...baseCustomer };
+  vi.stubGlobal('confirm', vi.fn(() => true));
   vi.stubGlobal('fetch', vi.fn((url) => {
     const u = String(url);
     if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
@@ -91,6 +91,7 @@ function renderWdoSheet(overrides = {}) {
       defaultInspectionFee={175}
       defaultProjectType="wdo_inspection"
       allowedProjectTypes={['wdo_inspection']}
+      allowInvoiceCompletion
       onClose={() => {}}
       onCreated={() => {}}
       {...overrides}
@@ -123,16 +124,25 @@ describe('CreateProjectModal WDO inspection date', () => {
 });
 
 describe('CreateProjectModal WDO Property & scope prefill', () => {
-  it('prefills the fee from the visit price and keeps lawn sqft out of the footprint', async () => {
-    // property_sqft is the customer's treated LAWN area — it must never be
-    // copied into the FDACS structure-footprint field (Codex P1).
+  it('prefills the fee from the visit price and omits the retired footprint helper', async () => {
     customerPayload.property_sqft = 8000;
     renderWdoSheet();
     await waitFor(() => expect(field('inspection_fee')).toBeTruthy());
     await waitFor(() => expect(field('inspection_fee').value).toBe('175'));
-    expect(field('structure_sqft').value).toBe('');
+    expect(field('structure_sqft')).toBeNull();
     // Construction is not derivable for a single-family home — never guessed.
     expect(field('structure_type').value).toBe('');
+  });
+
+  it('offers both camera and photo-library sources for prior-treatment extraction', async () => {
+    renderWdoSheet();
+    await waitFor(() => expect(field('previous_treatment_notes')).toBeTruthy());
+    const camera = document.querySelector('input[data-wdo-prior-treatment-source="camera"]');
+    const library = document.querySelector('input[data-wdo-prior-treatment-source="library"]');
+    expect(camera).toBeTruthy();
+    expect(camera.getAttribute('capture')).toBe('environment');
+    expect(library).toBeTruthy();
+    expect(library.hasAttribute('capture')).toBe(false);
   });
 
   it('maps a manufactured/mobile property_type onto the construction select', async () => {
@@ -205,6 +215,20 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
       if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
         return jsonResponse({ project: { id: 'p-1', project_type: 'wdo_inspection' } });
       }
+      if (u.includes('/admin/projects/p-1/send-with-invoice')) {
+        const body = JSON.parse(opts.body || '{}');
+        if (body.dry_run) {
+          return jsonResponse({ invoice: { id: null, total: 250, created: true } });
+        }
+        return jsonResponse({
+          sent: true,
+          report_held: true,
+          invoice: { id: 'inv-1', invoice_number: 'INV-1001', total: 250 },
+        });
+      }
+      if (u.includes('/admin/projects/p-1/close')) {
+        return jsonResponse({ project: { id: 'p-1', project_type: 'wdo_inspection', status: 'closed' } });
+      }
       if (u.includes('/admin/projects/p-1')) return jsonResponse({ project: detailPayload });
       return jsonResponse({});
     }));
@@ -246,7 +270,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('a saved signature flips the exit to Done via the pad-reported outcome (no refetch)', async () => {
+  it('a saved signature reveals invoice-first completion via the pad-reported outcome', async () => {
     const onCreated = vi.fn();
     const onClose = vi.fn();
     await saveIntoSignStep({ onCreated, onClose });
@@ -255,22 +279,92 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     // there is no detail refetch to race or fail (Codex P2).
     fireEvent.click(screen.getByText('mock-sign-saved'));
 
-    const done = await screen.findByRole('button', { name: 'Done' });
+    const saveForLater = await screen.findByRole('button', { name: 'Save for later' });
+    const finish = screen.getByRole('button', { name: 'Send invoice & finish service' });
+    expect(finish.style.width).toBe('100%');
     expect(screen.queryByText("Unsigned reports can’t be sent yet.")).toBeNull();
-    fireEvent.click(done);
+    fireEvent.click(saveForLater);
     expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps invoice completion admin-only while allowing a technician to save the signed draft', async () => {
+    await saveIntoSignStep({ allowInvoiceCompletion: false });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    await screen.findByText('Signed — saved for office review and invoice delivery.');
+    expect(screen.queryByRole('button', { name: 'Send invoice & finish service' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save for later' })).toBeTruthy();
   });
 
   it('a cleared signature flips the exit back to Sign later', async () => {
     await saveIntoSignStep({ onCreated: vi.fn(), onClose: vi.fn() });
 
     fireEvent.click(screen.getByText('mock-sign-saved'));
-    await screen.findByRole('button', { name: 'Done' });
+    await screen.findByRole('button', { name: 'Save for later' });
 
     fireEvent.click(screen.getByText('mock-sign-cleared'));
     await screen.findByRole('button', { name: 'Sign later' });
     expect(screen.getByText("Unsigned reports can’t be sent yet.")).toBeTruthy();
+  });
+
+  it('sends the invoice, arms the customer-side hold, closes the service, and skips the legacy editor handoff', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & finish service' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'p-1', status: 'closed' }),
+      expect.objectContaining({
+        completed: true,
+        invoice: expect.objectContaining({ id: 'inv-1' }),
+      }),
+    ));
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    const calls = fetch.mock.calls.filter(([url]) => String(url).includes('/admin/projects/p-1'));
+    const holdSend = calls.find(([url, opts]) => (
+      String(url).includes('/send-with-invoice')
+      && JSON.parse(opts.body || '{}').hold_report_until_paid === true
+      && !JSON.parse(opts.body || '{}').dry_run
+    ));
+    expect(holdSend).toBeTruthy();
+    expect(calls.some(([url]) => String(url).includes('/admin/projects/p-1/close'))).toBe(true);
+  });
+
+  it('retries only closeout after the invoice was delivered — never sends a duplicate invoice', async () => {
+    const baseFetch = fetch;
+    let closeAttempts = 0;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (String(url).includes('/admin/projects/p-1/close')) {
+        closeAttempts += 1;
+        if (closeAttempts === 1) {
+          return Promise.resolve({
+            ok: false,
+            json: () => Promise.resolve({ error: 'Temporary closeout failure' }),
+          });
+        }
+      }
+      return baseFetch(url, opts);
+    }));
+
+    const onCreated = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose: vi.fn() });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send invoice & finish service' }));
+
+    await screen.findByText('Temporary closeout failure');
+    fireEvent.click(screen.getByRole('button', { name: 'Finish service' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'closed' }),
+      expect.objectContaining({ completed: true }),
+    ));
+    expect(closeAttempts).toBe(2);
+    const invoiceCalls = fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'));
+    expect(invoiceCalls).toHaveLength(2); // one preview + one real send, no retry send
   });
 
   it('closing from the sign step still reports the created project', async () => {

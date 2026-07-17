@@ -235,7 +235,6 @@ const FIELD_LABELS = {
   previous_treatment_evidence: 'Evidence of previous treatment',
   previous_treatment_notes: 'Previous treatment observations',
   notice_location: 'Notice of Inspection location',
-  structure_sqft: 'Structure footprint (approx. sq ft)',
   inspection_fee: 'Inspection fee',
   treated_at_inspection: 'Treated at time of inspection',
   organism_treated: 'Organism treated',

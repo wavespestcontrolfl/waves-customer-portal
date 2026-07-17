@@ -342,7 +342,7 @@ function closeoutBillingLabel(billing = {}) {
     if (billing.invoiceId) return `Invoice ready ${money(billing.amount)}`;
     return `Billing resolved ${money(billing.amount)}`;
   }
-  return `Billing required ${money(billing.amount)}`;
+  return `Invoice not sent ${money(billing.amount)}`;
 }
 
 function closeoutFollowupLabel(followup = {}) {
@@ -2868,7 +2868,7 @@ export function ProjectDetail({
             </div>
             {billingBlocksClose && (
               <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
-                Resolve billing before closing. The project can stay in review until the invoice or prepaid coverage exists.
+                Send the invoice before closing. Customer payment is not required here; the WDO report stays locked on their side until they pay.
               </div>
             )}
             {followupBlocksClose && (
@@ -3002,7 +3002,7 @@ export function ProjectDetail({
             disabled={saving || closeoutBlocksClose}
             title={
               billingBlocksClose
-                ? "Resolve billing before closing"
+                ? "Send the invoice before closing"
                 : followupBlocksClose
                   ? "Resolve follow-up automation before closing"
                   : previewBlocksClose
@@ -3012,7 +3012,7 @@ export function ProjectDetail({
             style={{ ...btnSecondary, opacity: saving || closeoutBlocksClose ? 0.5 : 1 }}
           >
             {billingBlocksClose
-              ? "Resolve billing first"
+              ? "Send invoice first"
               : followupBlocksClose
                 ? "Resolve follow-up first"
                 : previewBlocksClose
@@ -3072,11 +3072,15 @@ export function ProjectDetail({
                 wdoNeedsSignature
                   ? "Capture the licensee signature first"
                   : project.project_type === WDO_TYPE
-                    ? "Send the filled FDACS-13645 report and an invoice together via email + text"
+                    ? holdReportUntilPaid
+                      ? "Send the invoice and payment link now; release the FDACS-13645 report automatically after payment"
+                      : "Send the filled FDACS-13645 report and an invoice together via email + text"
                     : "Send the report and an invoice together via email + text"
               }
             >
-              Send report + invoice
+              {project.project_type === WDO_TYPE && holdReportUntilPaid
+                ? "Send invoice & hold report"
+                : "Send report + invoice"}
             </button>
           )}
       </div>{" "}

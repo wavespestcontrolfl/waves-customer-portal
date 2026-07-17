@@ -158,12 +158,6 @@ function formatStructuresInspected(customer) {
   return 'Single-family residential structure';
 }
 
-// NOTE: structure_sqft is deliberately NOT prefilled from the customer
-// record. customers.property_sqft is the treated LAWN area (initial schema),
-// not the building footprint — the WDO invoice path refuses it for the same
-// reason (admin-projects resolveWdoInspectionFee). Footprint comes from the
-// WDO Intelligence property lookup or the tech on site.
-
 // Construction type is only derivable from the customer record for
 // manufactured/mobile homes (property_type says so, and it's a
 // WDO_CONSTRUCTION_OPTIONS entry). CBS vs wood frame is never guessed here —
@@ -267,6 +261,10 @@ export default function CreateProjectModal({
   defaultProjectType = '',
   allowedProjectTypes = null,
   allowAiDraft = false,
+  // Invoice delivery + project close endpoints are admin-only. Dispatch sets
+  // this true; the technician portal keeps the signed draft for office review
+  // instead of exposing an action that would inevitably 403.
+  allowInvoiceCompletion = false,
   theme = 'dark',
   // 'modal' = the floating ad-hoc dialog. 'sheet' = the Complete Service
   // frame (owner ask 2026-07-13): full-height edge-docked sheet, visit
@@ -379,6 +377,10 @@ export default function CreateProjectModal({
   // exit holds until it settles, or the modal could unmount mid-mutation and
   // hand the parent stale signed/unsigned state (Codex P2).
   const [signBusy, setSignBusy] = useState(false);
+  // Invoice-first WDO completion is two durable server actions: deliver the
+  // invoice/arm the customer-side report hold, then close the linked service.
+  // Keep its own lock so no sign-step exit can unmount either request.
+  const [completionBusy, setCompletionBusy] = useState(false);
 
   // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
   // company's treatment sticker/notice (or visible evidence) into the
@@ -1173,6 +1175,16 @@ export default function CreateProjectModal({
         treatmentExtractAppliedRef.current = record;
         return next;
       });
+      // The same photo is included in the statutory addendum. Carry the
+      // reviewed extraction into its caption so the PDF does not show a bare
+      // "Photo N -" line or force the tech to type the same details twice.
+      if (notes) {
+        setPhotoQueue(prev => prev.map(item => (
+          item.id === started.photoId
+            ? { ...item, caption: `Previous treatment evidence: ${notes}` }
+            : item
+        )));
+      }
       // Pass the AI's own caveats through (e.g. a smudged handwritten year)
       // so the tech sees WHICH detail needs confirming, not just a generic
       // verify reminder.
@@ -1324,15 +1336,100 @@ export default function CreateProjectModal({
     setSignStep(prev => (prev ? { ...prev, signature: meta } : prev));
   }
 
+  async function readProjectAction(response, fallbackMessage) {
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(payload?.error || fallbackMessage);
+      error.payload = payload;
+      throw error;
+    }
+    return payload;
+  }
+
+  async function sendWdoInvoiceAndFinish() {
+    if (!allowInvoiceCompletion || !signStep?.project?.id || (!signStep.signature?.signed && !signStep.invoiceDelivery)) return;
+    setCompletionBusy(true);
+    setError(null);
+    let invoiceDelivery = signStep.invoiceDelivery || null;
+    try {
+      if (!invoiceDelivery) {
+        const previewResponse = await adminFetch(
+          `/admin/projects/${signStep.project.id}/send-with-invoice`,
+          {
+            method: 'POST',
+            body: { dry_run: true, hold_report_until_paid: true },
+          },
+        );
+        const preview = await readProjectAction(previewResponse, 'Could not prepare the WDO invoice');
+        const amount = Number(preview?.invoice?.total || 0).toLocaleString('en-US', {
+          style: 'currency',
+          currency: 'USD',
+        });
+        if (!confirm(
+          `Send the ${amount} invoice now and finish this service?\n\n` +
+          'The customer receives the invoice and payment link now. Their WDO report stays locked until payment, then emails and unlocks automatically.',
+        )) return;
+
+        const sendResponse = await adminFetch(
+          `/admin/projects/${signStep.project.id}/send-with-invoice`,
+          {
+            method: 'POST',
+            body: {
+              ...(preview?.invoice?.id ? { invoice_id: preview.invoice.id } : {}),
+              hold_report_until_paid: true,
+            },
+          },
+        );
+        const sent = await readProjectAction(sendResponse, 'Could not send the WDO invoice');
+        if (!sent.sent || !sent.report_held) {
+          throw new Error('The invoice was not delivered, so the report was not placed on hold. Please retry.');
+        }
+        invoiceDelivery = sent;
+        // Persist this boundary in local UI state before attempting close. If
+        // closeout fails, Retry finishes the service without emailing a second
+        // invoice.
+        setSignStep(prev => (prev ? { ...prev, invoiceDelivery: sent } : prev));
+      }
+
+      const closeResponse = await adminFetch(`/admin/projects/${signStep.project.id}/close`, {
+        method: 'POST',
+        body: {},
+      });
+      const closed = await readProjectAction(
+        closeResponse,
+        invoiceDelivery
+          ? 'The invoice was sent and the report is locked, but the service could not be closed. Tap Finish service to retry.'
+          : 'Could not finish the WDO service',
+      );
+      finishSignStep({
+        project: closed.project || signStep.project,
+        completed: true,
+        invoice: invoiceDelivery.invoice || null,
+      });
+    } catch (e) {
+      setError(e.message || 'Could not finish the WDO service');
+    } finally {
+      setCompletionBusy(false);
+    }
+  }
+
   // The only exit from the sign step — signed or not, the draft is already
   // saved, so leaving always reports the created project to the parent
   // (which refreshes its lists and may open the report) and closes. Held
   // while the pad's mutation is in flight.
-  function finishSignStep() {
-    if (signBusy) return;
-    const project = signStep?.project;
+  function finishSignStep(options = {}) {
+    // The invoice workflow calls this from inside its own busy window after
+    // both server actions have succeeded; user-driven exits remain locked.
+    if (signBusy || (completionBusy && !options?.completed)) return;
+    const project = options?.project || signStep?.project;
     setSignStep(null);
-    if (onCreated && project) onCreated(project);
+    if (onCreated && project) {
+      if (options?.completed) {
+        onCreated(project, { completed: true, invoice: options.invoice || null });
+      } else {
+        onCreated(project);
+      }
+    }
     onClose?.();
   }
 
@@ -1371,7 +1468,7 @@ export default function CreateProjectModal({
       }}
     >
       <div style={isSheet ? {
-        width: '100%', maxWidth: 640, margin: 0,
+        width: '100%', maxWidth: 640, height: '100dvh', maxHeight: '100dvh', margin: 0,
         background: isEstimateStyle ? P.bg : P.card,
         borderLeft: `1px solid ${P.border}`,
         display: 'flex', flexDirection: 'column',
@@ -1447,7 +1544,7 @@ export default function CreateProjectModal({
             )}
             <button
               type="button"
-              onClick={() => !saving && (signStep ? finishSignStep() : onClose?.())}
+              onClick={() => !saving && !completionBusy && (signStep ? finishSignStep() : onClose?.())}
               aria-label="Close"
               style={{
                 background: 'transparent', border: 'none', color: P.muted,
@@ -1473,47 +1570,91 @@ export default function CreateProjectModal({
             </div>
             <div style={{ fontSize: 13, color: P.muted, lineHeight: 1.45, fontFamily: P.bodyFont }}>
               {signStep.signature?.signed
-                ? 'Signed — the report is ready for review and sending.'
+                ? signStep.invoiceDelivery
+                  ? `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} sent. The customer’s report is locked until payment; finish the service without sending anything again.`
+                  : allowInvoiceCompletion
+                    ? 'Signed — send the invoice now. The customer’s report stays locked until payment, then emails and unlocks automatically.'
+                    : 'Signed — saved for office review and invoice delivery.'
                 : 'Sign now to finish in one step — the FDACS-13645 report can’t be sent until the licensee signs. You can also sign later from the saved report.'}
             </div>
-            <WdoSignaturePad
-              projectId={signStep.project.id}
-              signature={signStep.signature}
-              defaultSignerName={signStep.applicator?.name || ''}
-              defaultSignerIdCard={signStep.applicator?.idCardNo || ''}
-              onChanged={applySignatureOutcome}
-              onBusyChange={setSignBusy}
-            />
+            {error && (
+              <div style={{
+                padding: '9px 12px',
+                background: `${P.red}12`,
+                border: `1px solid ${P.red}`,
+                borderRadius: 8,
+                color: P.red,
+                fontSize: 13,
+                lineHeight: 1.4,
+              }}>
+                {error}
+              </div>
+            )}
+            {!signStep.invoiceDelivery && (
+              <WdoSignaturePad
+                projectId={signStep.project.id}
+                signature={signStep.signature}
+                defaultSignerName={signStep.applicator?.name || ''}
+                defaultSignerIdCard={signStep.applicator?.idCardNo || ''}
+                onChanged={applySignatureOutcome}
+                onBusyChange={setSignBusy}
+              />
+            )}
           </div>
           <div style={{
             padding: isEstimateStyle ? '16px 24px 20px' : '12px 16px',
             borderTop: `1px solid ${P.border}`,
             background: P.card,
-            display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center',
+            display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'stretch',
             ...(isSheet ? { paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
           }}>
             {!signStep.signature?.signed && (
-              <span style={{ fontSize: 12, color: P.muted, marginRight: 'auto', fontFamily: P.bodyFont }}>
+              <span style={{ fontSize: 12, color: P.muted, fontFamily: P.bodyFont }}>
                 Unsigned reports can’t be sent yet.
               </span>
+            )}
+            {allowInvoiceCompletion && (signStep.signature?.signed || signStep.invoiceDelivery) && (
+              <button
+                type="button"
+                onClick={sendWdoInvoiceAndFinish}
+                disabled={signBusy || completionBusy}
+                style={{
+                  minHeight: 52,
+                  width: '100%',
+                  padding: '0 18px',
+                  borderRadius: 10,
+                  fontSize: 14,
+                  fontWeight: wStrong,
+                  background: P.accent,
+                  color: P.accentText,
+                  border: 'none',
+                  cursor: signBusy || completionBusy ? 'default' : 'pointer',
+                  opacity: signBusy || completionBusy ? 0.6 : 1,
+                }}
+              >
+                {completionBusy
+                  ? signStep.invoiceDelivery ? 'Finishing service…' : 'Sending invoice…'
+                  : signStep.invoiceDelivery ? 'Finish service' : 'Send invoice & finish service'}
+              </button>
             )}
             <button
               type="button"
               onClick={finishSignStep}
-              disabled={signBusy}
+              disabled={signBusy || completionBusy}
               style={{
                 minHeight: isEstimateStyle || isSheet ? 48 : undefined,
+                width: '100%',
                 padding: isEstimateStyle ? '0 18px' : '10px 18px',
                 borderRadius: isEstimateStyle ? 10 : 8,
                 fontSize: isEstimateStyle ? 14 : 13,
                 fontWeight: wStrong,
-                background: signStep.signature?.signed ? P.accent : 'transparent',
-                color: signStep.signature?.signed ? P.accentText : P.text,
-                border: signStep.signature?.signed ? 'none' : `1px solid ${P.border}`,
-                cursor: signBusy ? 'default' : 'pointer',
-                opacity: signBusy ? 0.5 : 1,
+                background: 'transparent',
+                color: P.text,
+                border: `1px solid ${P.border}`,
+                cursor: signBusy || completionBusy ? 'default' : 'pointer',
+                opacity: signBusy || completionBusy ? 0.5 : 1,
               }}
-            >{signBusy ? 'Saving…' : signStep.signature?.signed ? 'Done' : 'Sign later'}</button>
+            >{signBusy ? 'Saving…' : signStep.signature?.signed ? 'Save for later' : 'Sign later'}</button>
           </div>
           </>
         ) : (
@@ -1799,7 +1940,14 @@ export default function CreateProjectModal({
                   {field.section && field.section !== typeCfg.findingsFields[fieldIndex - 1]?.section && (
                     <div style={sectionHeaderStyle}>{field.section}</div>
                   )}
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    marginBottom: 6,
+                    ...(field.key === 'previous_treatment_notes' ? { flexWrap: 'wrap' } : {}),
+                  }}>
                     {/* A field whose label IS its section name (the applications
                         repeater) would stutter under the section header. */}
                     {field.label !== field.section && (
@@ -1824,11 +1972,17 @@ export default function CreateProjectModal({
                       </button>
                     )}
                     {projectType === 'wdo_inspection' && field.key === 'previous_treatment_notes' && (
-                      /* Camera-to-field: photograph a prior company's
-                         treatment sticker (or visible evidence) and let AI
-                         transcribe it into this box. */
-                      <label
-                        style={{
+                      /* Both sources feed the exact same extraction + evidence
+                         queue. `capture` belongs only on Camera; applying it to
+                         the sole input forced iOS to skip the photo library. */
+                      <div style={{ display: 'flex', gap: 10, marginLeft: 'auto' }}>
+                        {[
+                          { label: 'Camera', source: 'camera', capture: 'environment' },
+                          { label: 'Library', source: 'library' },
+                        ].map((option) => (
+                        <label
+                          key={option.source}
+                          style={{
                           background: 'transparent',
                           border: 'none',
                           color: P.accent,
@@ -1838,22 +1992,25 @@ export default function CreateProjectModal({
                           opacity: (saving || aiWriting || treatmentExtract.status === 'working') ? 0.55 : 1,
                           padding: 0,
                           whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {treatmentExtract.status === 'working' ? 'Reading photo…' : 'Extract from photo'}
-                        <input
-                          type="file"
-                          accept="image/*"
-                          capture="environment"
-                          disabled={saving || aiWriting || treatmentExtract.status === 'working'}
-                          onChange={(e) => {
-                            const f = e.target.files?.[0] || null;
-                            e.target.value = '';
-                            if (f) handleTreatmentPhotoExtract(f);
                           }}
-                          style={{ display: 'none' }}
-                        />
-                      </label>
+                        >
+                          {treatmentExtract.status === 'working' ? 'Reading…' : option.label}
+                          <input
+                            type="file"
+                            accept="image/*"
+                            {...(option.capture ? { capture: option.capture } : {})}
+                            data-wdo-prior-treatment-source={option.source}
+                            disabled={saving || aiWriting || treatmentExtract.status === 'working'}
+                            onChange={(e) => {
+                              const f = e.target.files?.[0] || null;
+                              e.target.value = '';
+                              if (f) handleTreatmentPhotoExtract(f);
+                            }}
+                            style={{ display: 'none' }}
+                          />
+                        </label>
+                        ))}
+                      </div>
                     )}
                     {projectType !== 'wdo_inspection' && field.key === addressFieldKey && formatCustomerAddress(selectedCustomer) && (
                       <button
@@ -2090,6 +2247,10 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
     setQueue(q => q.filter(item => item.id !== id));
   }
 
+  function updateCaption(id, caption) {
+    setQueue(q => q.map(item => (item.id === id ? { ...item, caption } : item)));
+  }
+
   const addButtonStyle = {
     flex: 1,
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
@@ -2155,6 +2316,20 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
                 <div style={{ fontSize: 10, color: P.muted }}>
                   {item.category.replace(/_/g, ' ')} · {(item.file.size / 1024).toFixed(0)} KB
                 </div>
+                <input
+                  type="text"
+                  value={item.caption || ''}
+                  onChange={(e) => updateCaption(item.id, e.target.value)}
+                  placeholder="Describe what this shows and where"
+                  aria-label={`Photo description for ${item.file.name}`}
+                  style={{
+                    ...inputStyle,
+                    width: '100%',
+                    marginTop: 6,
+                    padding: '7px 9px',
+                    fontSize: 11,
+                  }}
+                />
               </div>
               <button
                 type="button"
