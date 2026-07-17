@@ -31,6 +31,9 @@ const mockCampaignUpdate = jest.fn().mockResolvedValue(1);
 const mockLogInsert = jest.fn().mockResolvedValue([]);
 let campaignRows = [];
 let campaignFirstRow = null;
+// Row returned by the rollback's newer-writer audit lookup (null = no real
+// writer committed since the operation started).
+let mockNewerAuditRow = null;
 
 const mockDb = jest.fn((table) => {
   if (table === 'ad_campaigns') {
@@ -48,7 +51,12 @@ const mockDb = jest.fn((table) => {
     return { first: jest.fn(() => Promise.resolve({})) };
   }
   if (table === 'ad_budget_log') {
-    return { insert: mockLogInsert };
+    const b = {
+      insert: mockLogInsert,
+      where: jest.fn(() => b),
+      first: jest.fn(() => Promise.resolve(mockNewerAuditRow)),
+    };
+    return b;
   }
   throw new Error(`Unexpected table in test: ${table}`);
 });
@@ -77,6 +85,7 @@ describe('BudgetManager live Google Ads push', () => {
     jest.clearAllMocks();
     campaignRows = [];
     campaignFirstRow = null;
+    mockNewerAuditRow = null;
     // 99% utilization → above the default orange max (95) → mode 'stop'
     // (a change from 'base'), so every adjustBudgets test exercises a write.
     jest.spyOn(BudgetManager, 'getCapacityForArea')
@@ -585,6 +594,7 @@ describe('in-lock rechecks (requireLivePush)', () => {
     jest.clearAllMocks();
     campaignRows = [];
     campaignFirstRow = null;
+    mockNewerAuditRow = null;
   });
 
   test('setMode: applying the already-current mode throws mode_noop before any push', async () => {
@@ -699,6 +709,7 @@ describe('rollbackAfterLivePush r9', () => {
     jest.clearAllMocks();
     campaignRows = [];
     campaignFirstRow = null;
+    mockNewerAuditRow = null;
   });
 
   test('a sync mirror of OUR failed push is restored, not treated as superseded', async () => {
@@ -770,5 +781,63 @@ describe('rollbackAfterLivePush r9', () => {
     // Push (0.4) then compensating restore (40).
     expect(mockUpdateBudget).toHaveBeenLastCalledWith('1234567890', 40);
     mockDb.transaction = realTransaction;
+  });
+
+  test('a newer audit row since the op started forces superseded — even when the row looks like a mirror', async () => {
+    campaignFirstRow = { ...baseCampaign(), daily_budget_current: '0.4' }; // mirror signature
+    mockNewerAuditRow = { id: 'log-1' }; // a REAL writer committed meanwhile
+    mockIsConfigured.mockReturnValue(true);
+
+    const err = await BudgetManager.rollbackAfterLivePush(baseCampaign(), new Error('db down'), 0.4, new Date('2026-07-17T01:00:00Z'));
+
+    expect(err.code).toBe('live_push_rolled_back');
+    expect(err.message).toMatch(/newer budget change/);
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+  });
+
+  test('null-base snapshot: a sync mirror that wrote BOTH base and current is restored, base cleared back', async () => {
+    // Snapshot: base null, current $40 (bound came from current). The sync
+    // mirrored our failed $30 push into base AND current.
+    campaignFirstRow = { ...baseCampaign(), daily_budget_base: '30', daily_budget_current: '30' };
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+
+    const snapshot = { ...baseCampaign(), daily_budget_base: null, daily_budget_current: '40' };
+    const err = await BudgetManager.rollbackAfterLivePush(snapshot, new Error('db down'), 30, new Date('2026-07-17T01:00:00Z'));
+
+    expect(err.code).toBe('live_push_rolled_back');
+    expect(err.message).toMatch(/rolled back/);
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
+    expect(mockCampaignUpdate).toHaveBeenCalledWith({ daily_budget_current: 40, daily_budget_base: null });
+  });
+
+  test('manual (legacy) setBudget: commit failure after an accepted push takes the compensating rollback', async () => {
+    campaignFirstRow = baseCampaign();
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+    const realTransaction = mockDb.transaction;
+    let firstTrx = true;
+    mockDb.transaction = async (cb) => {
+      const r = await cb(mockDb);
+      if (firstTrx) { firstTrx = false; throw new Error('commit failed'); }
+      return r;
+    };
+
+    await expect(BudgetManager.setBudget('c-1', 50, 'test'))
+      .rejects.toMatchObject({ code: 'live_push_rolled_back' });
+
+    expect(mockUpdateBudget).toHaveBeenLastCalledWith('1234567890', 40);
+    mockDb.transaction = realTransaction;
+  });
+
+  test('oversized reasons are bounded to 255 chars at the manager, covering the manual routes', async () => {
+    campaignFirstRow = baseCampaign();
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+
+    await BudgetManager.setMode('c-1', 'stop', 'z'.repeat(600));
+
+    const inserted = mockLogInsert.mock.calls[0][0];
+    expect(inserted.reason.length).toBeLessThanOrEqual(255);
   });
 });
