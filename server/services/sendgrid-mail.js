@@ -160,6 +160,23 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
   return { messageId: res.headers.get('x-message-id') || null };
 }
 
+// A SendGrid "blocked" event adds the recipient to the provider's Blocks
+// suppression list even when the mailbox is healthy and our sending IP/content
+// caused the rejection. Remove only that provider-block entry before a bounded
+// retry; this endpoint cannot clear bounces, spam reports, or unsubscribes.
+async function clearBlockedAddress(email) {
+  if (!email) throw new Error('clearBlockedAddress: email required');
+  const res = await fetch(`${API_BASE}/suppression/blocks/${encodeURIComponent(email)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (res.ok || res.status === 404) return { cleared: res.ok };
+  const text = await res.text();
+  const err = new Error(`SendGrid block removal ${res.status}: ${text}`);
+  err.status = res.status;
+  throw err;
+}
+
 /**
  * Send a campaign blast. SendGrid's `personalizations` array supports
  * up to 1000 recipients per request, each with their own `to`, `subject`,
@@ -317,6 +334,7 @@ async function sendBroadcast(args) {
 module.exports = {
   isConfigured,
   sendOne,
+  clearBlockedAddress,
   sendBatch,
   sendTemplated,
   sendBroadcast,

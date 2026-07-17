@@ -1,7 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const path = require('path');
-const fs = require('fs');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const PDFDocument = require('pdfkit');
@@ -10,6 +8,7 @@ const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
+const { answerProjectReportQuestion } = require('../services/project-report-assistant');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
@@ -116,7 +115,7 @@ const {
   putReportPdf,
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
   mosquitoReportV2PdfSignature,
   buildMosquitoReportV2,
@@ -396,6 +395,7 @@ async function findProjectByReportSegment(segment) {
     .select(
       'p.*',
       'c.first_name', 'c.last_name', 'c.email as customer_email', 'c.phone as customer_phone',
+      'c.has_left_google_review',
       'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
       't.name as technician_name',
     );
@@ -565,13 +565,17 @@ router.get('/project/:token/data', async (req, res, next) => {
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
       // Customer email/phone for the hero contact lines — the report hero
       // mirrors the customer estimate, which prints the recipient's own
-      // contact block under the headline. NEVER on a WDO: sendWdoReportCopies
-      // emails this same public link to the third parties named on the FDACS
-      // form (realtor/title company), and a link the system itself hands to
-      // outsiders must not carry the homeowner's direct contact details.
-      // Every other project type's link is sent to the customer only.
-      customerEmail: project.project_type === 'wdo_inspection' ? null : (project.customer_email || null),
-      customerPhone: project.project_type === 'wdo_inspection' ? null : (project.customer_phone || null),
+      // contact block under the headline. Owner EXPLICIT ruling 2026-07-16:
+      // every report shows name/email/phone/address, WDO included — decided
+      // with the trade-off in view (sendWdoReportCopies emails this link to
+      // the realtor/title company on the FDACS form, so those third parties
+      // can now see the homeowner's contact lines). Supersedes the earlier
+      // WDO-only withholding.
+      customerEmail: project.customer_email || null,
+      customerPhone: project.customer_phone || null,
+      // gates the "How did today's visit go?" ask (owner 2026-07-16) — same
+      // self-suppression as the service report once a review is recorded
+      hasLeftGoogleReview: !!project.has_left_google_review,
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
       // Full service address for the hero — the report page mirrors the
       // customer estimate, which shows the street address under the headline.
@@ -606,6 +610,59 @@ router.get('/project/:token/data', async (req, res, next) => {
 // emailed (same source the /data viewer reads its as-sent snapshot from), so
 // the downloadable form can never diverge from what was filed. The token gates
 // access; the S3 object itself is private and streamed through the server.
+// POST /api/reports/project/:token/ask — deterministic Waves AI for project
+// reports (owner ask 2026-07-16). Paper compliance documents (WDO +
+// pre-construction certificate) are exempt and 404 here — their pages never
+// mount the bar. The payment hold gates BEFORE any content-derived answer.
+router.post('/project/:token/ask', async (req, res, next) => {
+  if (!extractProjectReportTokenLookup(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    const question = String(req.body?.question || '').trim();
+    if (!question) return res.status(400).json({ error: 'question_required' });
+    if (question.length > 500) return res.status(400).json({ error: 'question_too_long' });
+
+    const project = await findProjectByReportSegment(req.params.token);
+    if (!project) return res.status(404).json({ error: 'Report not found' });
+    if (project.project_type === 'wdo_inspection' || project.project_type === 'pre_treatment_termite_certificate') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    const heldContext = await heldReportPaymentContext(project);
+    if (heldContext) {
+      return res.status(402).json({ error: 'Report pending payment', code: 'report_payment_required' });
+    }
+
+    const upcomingAppointment = await findReportFollowupAppointment({
+      customerId: project.customer_id,
+      scheduledServiceId: project.scheduled_service_id,
+    }).catch(() => null);
+
+    const answer = answerProjectReportQuestion({
+      question,
+      project,
+      payload: {
+        upcomingAppointment: upcomingAppointment
+          ? { serviceType: upcomingAppointment.service_type, scheduledDate: upcomingAppointment.scheduled_date }
+          : null,
+        followupDate: project.followup_date || null,
+        followupCompletedAt: project.followup_completed_at || null,
+      },
+    });
+    try {
+      await db('activity_log').insert({
+        customer_id: project.customer_id,
+        action: 'project_report_question_asked',
+        description: `Project report question asked (${project.project_type})`,
+        metadata: { project_id: project.id, project_type: project.project_type, question_length: question.length },
+      });
+    } catch (err) {
+      logger.warn(`[reports-public] project ask activity_log insert failed: ${err.message}`);
+    }
+    return res.json({ answer });
+  } catch (err) { next(err); }
+});
+
 router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
   if (!extractProjectReportTokenLookup(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
@@ -1133,16 +1190,11 @@ router.get('/:token', async (req, res, next) => {
       return res.send(pdf);
     }
 
-    // Check if pre-generated PDF exists
-    if (service.report_pdf_path) {
-      const fullPath = path.join(__dirname, '..', '..', service.report_pdf_path);
-      if (fs.existsSync(fullPath)) {
-        await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
-        return fs.createReadStream(fullPath).pipe(res);
-      }
-    }
+    // Legacy pre-generated PDF files (report_pdf_path) are deliberately NOT
+    // served anymore: they were written with raw technician_notes (gate
+    // codes, billing notes) before the 2026-07-16 owner ruling and a stored
+    // file can't be sanitized in place — regenerate on the fly instead, which
+    // routes notes through technicianReportCustomerCopy (codex P1 #2797).
 
     // Generate PDF on-the-fly
     const products = await db('service_products').where({ service_record_id: service.id });
@@ -1288,7 +1340,9 @@ router.get('/:token/data', async (req, res, next) => {
       technicianName: service.technician_name,
       customerName: `${service.first_name} ${service.last_name}`,
       cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
-      notes: service.technician_notes,
+      // technician_notes is internal (owner ruling 2026-07-16): only the
+      // reviewed WHAT WE DID / WHAT WE FOUND parse may reach the customer.
+      notes: technicianReportCustomerCopy(service.technician_notes)?.body || '',
       products: products.map(p => ({
         name: p.product_name, category: p.product_category,
         activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
@@ -1354,11 +1408,13 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
     doc.moveDown(1);
   }
 
-  // Tech notes
-  if (service.technician_notes) {
+  // Tech notes — raw technician_notes is internal (owner ruling 2026-07-16);
+  // print only the reviewed WHAT WE DID / WHAT WE FOUND parse, or nothing.
+  const reviewedNotes = technicianReportCustomerCopy(service.technician_notes)?.body;
+  if (reviewedNotes) {
     doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
     doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(service.technician_notes, { width: 512, lineGap: 3 });
+    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(reviewedNotes, { width: 512, lineGap: 3 });
     doc.moveDown(1);
   }
 

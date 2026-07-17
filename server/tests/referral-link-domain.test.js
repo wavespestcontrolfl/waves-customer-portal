@@ -31,3 +31,18 @@ describe('referral link domain normalization', () => {
     )).toBe('https://portal.wavespestcontrol.com/r/WAVES-J4KM');
   });
 });
+
+describe('referral phone normalization', () => {
+  const { normalizePhone } = referralEngine._internals;
+
+  test('returns canonical E.164 for valid North American numbers', () => {
+    expect(normalizePhone('(941) 555-0123')).toBe('+19415550123');
+    expect(normalizePhone('+1 941 555 0123')).toBe('+19415550123');
+  });
+
+  test('rejects alphabetic, too-short, and empty values', () => {
+    expect(normalizePhone('abcdefg')).toBeNull();
+    expect(normalizePhone('12345')).toBeNull();
+    expect(normalizePhone('')).toBeNull();
+  });
+});

@@ -1,4 +1,5 @@
-const CACHE_NAME = 'waves-v10-admin-activation-stable';
+const APP_CACHE_PREFIX = 'waves-customer-';
+const CACHE_NAME = 'waves-customer-v11-shell-atomic';
 const OFFLINE_URL = '/';
 
 const OFFLINE_FALLBACK_HTML = `<!doctype html>
@@ -30,17 +31,48 @@ const OFFLINE_FALLBACK_HTML = `<!doctype html>
   setTimeout(() => { if (navigator.onLine) location.reload(); }, 4000);
 </script></body></html>`;
 
+function shellAssetUrls(html) {
+  const urls = new Set();
+  const re = /(?:src|href)=["'](\/assets\/[^"']+)["']/g;
+  let match;
+  while ((match = re.exec(String(html || '')))) urls.add(match[1]);
+  return [...urls];
+}
+
+async function cacheCompleteShellResponse(shellResponse) {
+  const cache = await caches.open(CACHE_NAME);
+  if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
+
+  const html = await shellResponse.clone().text();
+  const assets = shellAssetUrls(html);
+  if (!assets.length) throw new Error('Shell contains no build assets');
+
+  // Fetch every hashed dependency before storing the new HTML. If any fetch
+  // fails, installation rejects and the previous worker/cache remains active;
+  // customers never receive an offline shell whose entry chunk is missing.
+  const assetResponses = await Promise.all(assets.map(async assetUrl => {
+    const response = await fetch(new Request(assetUrl, { cache: 'reload' }));
+    if (!response.ok) throw new Error(`Shell asset failed (${response.status}): ${assetUrl}`);
+    return [assetUrl, response];
+  }));
+  await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, response)));
+  await cache.put(OFFLINE_URL, shellResponse);
+}
+
+async function precacheCompleteShell() {
+  const shellRequest = new Request(OFFLINE_URL, { cache: 'reload' });
+  const shellResponse = await fetch(shellRequest);
+  await cacheCompleteShellResponse(shellResponse);
+}
+
 self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.add(new Request(OFFLINE_URL, { cache: 'reload' }))).catch(() => {})
-  );
-  self.skipWaiting();
+  event.waitUntil(precacheCompleteShell().then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys => Promise.all(
-      keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))
+      keys.filter(k => k.startsWith(APP_CACHE_PREFIX) && k !== CACHE_NAME).map(k => caches.delete(k))
     )).then(() => self.clients.claim())
   );
 });
@@ -60,15 +92,16 @@ self.addEventListener('fetch', event => {
     event.respondWith((async () => {
       try {
         const response = await fetch(event.request);
-        // Stash a copy of the SPA shell so we have an offline fallback that
-        // references the same hashed assets we already have cached.
+        // Refresh the offline shell only after all of the HTML's hashed assets
+        // are available. Keep serving the current page immediately; if this
+        // background refresh fails, the last complete shell remains intact.
         if (response && response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(OFFLINE_URL, clone)).catch(() => {});
+          event.waitUntil(cacheCompleteShellResponse(response.clone()).catch(() => {}));
         }
         return response;
       } catch {
-        const cached = (await caches.match(OFFLINE_URL)) || (await caches.match(event.request));
+        const currentCache = await caches.open(CACHE_NAME);
+        const cached = (await currentCache.match(OFFLINE_URL)) || (await currentCache.match(event.request));
         if (cached) return cached;
         return new Response(OFFLINE_FALLBACK_HTML, {
           status: 200,
@@ -82,7 +115,7 @@ self.addEventListener('fetch', event => {
   // Hashed assets (/assets/index-CRewFOq2.js) — cache forever, they're immutable
   if (url.pathname.startsWith('/assets/')) {
     event.respondWith(
-      caches.match(event.request).then(cached => {
+      caches.open(CACHE_NAME).then(cache => cache.match(event.request)).then(cached => {
         if (cached) return cached;
         return fetch(event.request).then(response => {
           if (response.ok) {
@@ -111,10 +144,17 @@ self.addEventListener('fetch', event => {
 self.addEventListener('push', event => {
   const data = event.data?.json() || {};
   const requireInteraction = data.priority === 'urgent';
+  let destination = '/';
+  try {
+    const candidate = new URL(data.url || '/', self.location.origin);
+    if (candidate.origin === self.location.origin) {
+      destination = `${candidate.pathname}${candidate.search}${candidate.hash}`;
+    }
+  } catch { /* default to the app root */ }
   event.waitUntil(
     self.registration.showNotification(data.title || 'Waves Pest Control', {
       body: data.body || '', icon: '/waves-logo.png', badge: '/waves-logo.png',
-      tag: data.tag || 'waves', data: { url: data.url || '/' },
+      tag: data.tag || 'waves', data: { url: destination },
       actions: data.actions || [],
       vibrate: data.vibrate || [200, 100, 200],
       silent: !!data.silent,

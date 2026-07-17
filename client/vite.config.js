@@ -13,7 +13,9 @@ const capShimAlias = capShim ? {
   '@capacitor/core': shim('core.js'),
   '@capacitor/app': shim('app.js'),
   '@capacitor/camera': shim('camera.js'),
+  '@capacitor/filesystem': shim('filesystem.js'),
   '@capacitor/push-notifications': shim('push.js'),
+  '@capacitor/share': shim('share.js'),
   '@aparajita/capacitor-biometric-auth': shim('biometric.js'),
 } : {};
 
@@ -25,6 +27,35 @@ export default defineConfig({
   // every customer surface.
   test: {
     setupFiles: ['./src/test-setup.js'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json-summary'],
+      // Keep this gate on customer-app shell code with executable unit tests.
+      // PortalPage remains a large mixed-responsibility module and its current
+      // render tests do not justify a low, misleading repo-wide percentage.
+      // Split that page before adding it here; lowering this floor to include
+      // thousands of unexercised lines would turn the gate into theatre.
+      include: [
+        'src/components/BiometricGate.jsx',
+        'src/components/InstallPrompt.jsx',
+        'src/components/NotificationBell.jsx',
+        'src/components/brand/CustomerDialogHost.jsx',
+        'src/glass/glass-engine.js',
+        'src/hooks/useAuth.jsx',
+        'src/native/nativeLinks.js',
+        'src/native/nativePush.js',
+        'src/pages/LoginPage.jsx',
+      ],
+      // Measured 2026-07-16 baseline: 81.33 statements/lines, 64.37
+      // branches, 64.13 functions. These rounded-down floors leave normal
+      // instrumentation variance while preventing an untested regression.
+      thresholds: {
+        statements: 80,
+        branches: 60,
+        functions: 60,
+        lines: 80,
+      },
+    },
   },
   server: {
     port: 5173,

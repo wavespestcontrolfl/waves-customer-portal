@@ -68,13 +68,28 @@ describe('pure mappers', () => {
     });
   });
 
-  test('sumActions counts lead/purchase action types only', () => {
-    const actions = [
+  test('sumActions dedupes roll-up totals against their component events', () => {
+    // Real Meta payload: the `lead` roll-up already includes the pixel lead, so
+    // the aggregate wins — 2, not 2 + 3 = 5 (the old double-count).
+    expect(sumActions([
       { action_type: 'lead', value: '2' },
       { action_type: 'offsite_conversion.fb_pixel_lead', value: '3' },
       { action_type: 'landing_page_view', value: '99' },
-    ];
-    expect(sumActions(actions)).toBe(5);
+    ])).toBe(2);
+
+    // No aggregate present → fall back to summing the component events.
+    expect(sumActions([
+      { action_type: 'offsite_conversion.fb_pixel_lead', value: '3' },
+      { action_type: 'onsite_conversion.lead_grouped', value: '1' },
+    ])).toBe(4);
+
+    // Leads + purchases across groups add together; each group deduped.
+    expect(sumActions([
+      { action_type: 'lead', value: '2' },
+      { action_type: 'omni_purchase', value: '5' },
+      { action_type: 'purchase', value: '5' },
+    ])).toBe(7);
+
     expect(sumActions(undefined)).toBe(0);
   });
 

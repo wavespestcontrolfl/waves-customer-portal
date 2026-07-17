@@ -188,7 +188,7 @@ function MosquitoPressureRating({ metric, token, live, onRefreshed }) {
   }, [token, metric && metric.submittedRating]);
   if (!metric || metric.kind !== 'pressure') return null;
   if (submitted) {
-    return <div style={{ marginTop: 12, fontSize: 13, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
+    return <div style={{ marginTop: 12, fontSize: 14, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
   }
   if (!metric.rating || !token || !live) return null;
   const submit = async (n) => {
@@ -212,7 +212,7 @@ function MosquitoPressureRating({ metric, token, live, onRefreshed }) {
   };
   return (
     <div style={{ marginTop: 14, padding: '12px 14px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: TEXT, marginBottom: 8 }}>{metric.rating.question}</div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: TEXT, marginBottom: 8 }}>{metric.rating.question}</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
         {[0, 1, 2, 3, 4, 5].map((n) => (
           <button key={n} type="button" disabled={busy} onClick={() => submit(n)} aria-label={`Rating ${n} of 5`}
@@ -301,7 +301,7 @@ export function MosquitoHabitatMap({ habitat, print = false }) {
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 2px' }}>
         {treated ? 'Today’s treatment is working across your yard' : 'We’re watching the spots mosquitoes use'}
       </h3>
-      {habitat.summary ? <p style={{ fontSize: 13, color: MUTED, margin: '0 0 6px' }}>{habitat.summary}</p> : null}
+      {habitat.summary ? <p style={{ fontSize: 14, color: MUTED, margin: '0 0 6px' }}>{habitat.summary}</p> : null}
 
       <div style={{ width: '100%', maxWidth: 360, margin: '0 auto' }}>
         <svg viewBox="0 0 320 232" width="100%" role="img" aria-label="Diagram of mosquito treatment coverage across your yard" style={{ display: 'block' }}>
@@ -371,7 +371,7 @@ export function MosquitoHabitatMap({ habitat, print = false }) {
           node landing in live mode */}
       <div style={{ display: 'grid', gap: 6, marginTop: 4 }}>
         {treatment ? (
-          <div className="mosq-legend-row" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, animationDelay: '0.35s' }}>
+          <div className="mosq-legend-row" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 14, animationDelay: '0.35s' }}>
             <span style={{ color: ringColor, fontWeight: 800, lineHeight: 1.2 }} aria-hidden="true">〰</span>
             <span style={{ color: BODY }}><strong style={{ color: TEXT }}>{treatment.label}</strong> — <span style={{ color: treated ? COLORS.green : COLORS.orange, fontWeight: 700 }}>{treated ? 'Applied' : 'Monitored'}</span>{treatment.detail ? ` · ${treatment.detail}` : ''}</span>
           </div>
@@ -379,7 +379,7 @@ export function MosquitoHabitatMap({ habitat, print = false }) {
         {placed.map((n, i) => {
           const color = NODE_COLOR[n.status] || COLORS.grayMid;
           return (
-            <div key={n.key} className="mosq-legend-row" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, animationDelay: `${nodeDelay(i) + 0.1}s` }}>
+            <div key={n.key} className="mosq-legend-row" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 14, animationDelay: `${nodeDelay(i) + 0.1}s` }}>
               <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, marginTop: 4, flexShrink: 0 }} aria-hidden="true" />
               <span style={{ color: BODY }}><strong style={{ color: TEXT }}>{n.label}</strong> — <span style={{ color, fontWeight: 700 }}>{NODE_WORD[n.status] || 'Tracking'}</span>{n.detail ? ` · ${n.detail}` : ''}</span>
             </div>
@@ -398,7 +398,7 @@ export function MosquitoNextStep({ primaryMove }) {
       <div data-gt="eyebrow" style={eyebrow}>Your next step</div>
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 6px' }}>{primaryMove.title}</h3>
       {primaryMove.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{primaryMove.why}</p> : null}
-      {primaryMove.impact ? <p style={{ fontSize: 13, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
+      {primaryMove.impact ? <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
       {primaryMove.dueLabel ? (
         <span style={{ display: 'inline-block', marginTop: 10, padding: '4px 10px', background: COLORS.blueLight, color: COLORS.glassNavy, borderRadius: 999, fontSize: 12, fontWeight: 700 }}>{primaryMove.dueLabel}</span>
       ) : null}
@@ -436,7 +436,7 @@ export function MosquitoOutlook({ outlook }) {
         </div>
       ) : null}
       {outlook.conditions ? (
-        <div style={{ marginTop: m ? 10 : 0, fontSize: 13, color: BODY, lineHeight: 1.5 }}>
+        <div style={{ marginTop: m ? 10 : 0, fontSize: 14, color: BODY, lineHeight: 1.5 }}>
           {outlook.conditions.headline ? <strong style={{ color: TEXT }}>{outlook.conditions.headline}</strong> : null}
           {outlook.conditions.headline && outlook.conditions.body ? ' ' : ''}
           {outlook.conditions.body || ''}

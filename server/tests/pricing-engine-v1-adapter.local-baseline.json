@@ -66,10 +66,10 @@
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 2917,
-      "annualAfterDiscount": 2356.13,
-      "monthlyTotal": 196.34,
-      "savings": 560.87,
+      "annualBeforeDiscount": 2893,
+      "annualAfterDiscount": 2336.93,
+      "monthlyTotal": 194.74,
+      "savings": 556.07,
       "serviceCount": 4
     },
     "results": {
@@ -92,19 +92,19 @@
       ],
       "pestTiers": [
         {
-          "mo": 44,
+          "mo": 42,
           "apps": 4,
           "recommended": true,
           "label": "Quarterly"
         },
         {
-          "mo": 56.1,
+          "mo": 53.55,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 92.4,
+          "mo": 88.2,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -141,8 +141,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2455.13,
-      "year2": 2356.13
+      "year1": 2435.93,
+      "year2": 2336.93
     }
   },
   "v1adapter_boracare_attic_2000sf": {

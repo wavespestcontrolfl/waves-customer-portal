@@ -177,7 +177,10 @@ describe('public project reports', () => {
   // report links, but a WDO link is also emailed to the third parties named
   // on the FDACS form (sendWdoReportCopies) — the payload must withhold the
   // homeowner's direct contact details there.
-  test('customer email/phone serve on customer-only types but never on WDO', async () => {
+  // Owner EXPLICIT ruling 2026-07-16 (destination acknowledged: WDO links go
+  // to the realtor/title company on the FDACS form): every report shows the
+  // full identity block — WDO included. Supersedes the earlier withholding.
+  test('customer email/phone serve on every project type, WDO included', async () => {
     const baseRow = {
       id: 'project-1',
       customer_id: 'customer-1',
@@ -195,7 +198,7 @@ describe('public project reports', () => {
 
     for (const [projectType, expectedEmail, expectedPhone] of [
       ['pest_inspection', 'georgia@example.com', '9415550100'],
-      ['wdo_inspection', null, null],
+      ['wdo_inspection', 'georgia@example.com', '9415550100'],
     ]) {
       const projectRead = chain({
         first: jest.fn().mockResolvedValue({ ...baseRow, project_type: projectType }),

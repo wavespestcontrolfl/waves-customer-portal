@@ -8,6 +8,7 @@ const mockLogger = {
 
 let mockSequenceExists = false;
 let mockPriorRecurringSeries = null;
+let mockPriorServicedVisit = null;
 let mockPriorServiceRecord = null;
 let mockDueSequences = [];
 let mockStaleSequences = [];
@@ -23,9 +24,9 @@ let mockUpdates = [];
 const mockDb = jest.fn((table) => {
   const wheres = [];
   const chain = {
-    where: jest.fn((arg) => { wheres.push(arg); return chain; }),
+    where: jest.fn((...args) => { wheres.push(args.length === 1 ? args[0] : args); return chain; }),
     whereNot: jest.fn(() => chain),
-    whereIn: jest.fn(() => chain),
+    whereIn: jest.fn((col, vals) => { wheres.push({ whereIn: col, vals }); return chain; }),
     whereNotNull: jest.fn(() => chain),
     limit: jest.fn(async () => {
       if (table === 'sms_sequences') {
@@ -38,6 +39,24 @@ const mockDb = jest.fn((table) => {
     }),
     first: jest.fn(async () => {
       if (table === 'scheduled_services') {
+        // By-id lookups (triggering-row created_at fetch, delivery-time
+        // appointment check) return the explicit row; candidacy queries are
+        // told apart by their filters, honoring the created_at scope the
+        // gate applies when excludeServiceId is passed.
+        const byId = wheres.find((w) => w && typeof w === 'object' && !Array.isArray(w) && 'id' in w);
+        if (byId) return mockScheduledServiceRow;
+        const scope = wheres.find((w) => Array.isArray(w) && w[0] === 'created_at' && w[1] === '<');
+        const inScope = (row) => {
+          if (!row) return null;
+          if (scope && row.created_at != null && !(new Date(row.created_at) < new Date(scope[2]))) return null;
+          return row;
+        };
+        if (wheres.some((w) => w && typeof w === 'object' && !Array.isArray(w) && 'is_recurring' in w)) {
+          return inScope(mockPriorRecurringSeries);
+        }
+        if (wheres.some((w) => w && typeof w === 'object' && w.whereIn === 'status')) {
+          return inScope(mockPriorServicedVisit);
+        }
         return mockScheduledServiceRow !== null
           ? mockScheduledServiceRow
           : mockPriorRecurringSeries;
@@ -127,6 +146,7 @@ describe('new recurring welcome SMS', () => {
     jest.clearAllMocks();
     mockSequenceExists = false;
     mockPriorRecurringSeries = null;
+    mockPriorServicedVisit = null;
     mockPriorServiceRecord = null;
     mockDueSequences = [];
     mockStaleSequences = [];
@@ -150,6 +170,38 @@ describe('new recurring welcome SMS', () => {
     mockPriorServiceRecord = null;
     mockPriorRecurringSeries = { id: 'series-1' };
     await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(false);
+  });
+
+  test('completed/on_site scheduled_services history disqualifies even with empty service_records', async () => {
+    // Imported/legacy customers: visits live only in scheduled_services —
+    // service_records has nothing for them (2026-07-16 misfire shape).
+    mockPriorServicedVisit = { id: 'visit-1', created_at: new Date('2026-04-07T04:00:00Z') };
+    await expect(service.isNewRecurringSignupCandidate('customer-1')).resolves.toBe(false);
+  });
+
+  test('excludeServiceId scopes prior history to rows created before the booking batch', async () => {
+    const bookingCreatedAt = new Date('2026-07-16T17:42:13.035Z');
+    mockScheduledServiceRow = { created_at: bookingCreatedAt };
+
+    // A series created weeks before this booking → existing customer, no welcome.
+    mockPriorRecurringSeries = { id: 'series-old', created_at: new Date('2026-06-06T03:54:15.522Z') };
+    await expect(
+      service.isNewRecurringSignupCandidate('customer-1', { excludeServiceId: 'svc-anchor' })
+    ).resolves.toBe(false);
+
+    // Only the booking's own batch (rows share the insert's created_at):
+    // the new series must not disqualify itself → still a candidate.
+    mockPriorRecurringSeries = { id: 'series-sibling', created_at: bookingCreatedAt };
+    await expect(
+      service.isNewRecurringSignupCandidate('customer-1', { excludeServiceId: 'svc-anchor' })
+    ).resolves.toBe(true);
+  });
+
+  test('excludeServiceId that resolves to no row fails closed', async () => {
+    mockScheduledServiceRow = null;
+    await expect(
+      service.isNewRecurringSignupCandidate('customer-1', { excludeServiceId: 'svc-ghost' })
+    ).resolves.toBe(false);
   });
 
   test('queues the welcome with a delivery delay instead of sending inline', async () => {

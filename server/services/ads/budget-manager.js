@@ -9,6 +9,23 @@ const { isEnabled } = require('../../config/feature-gates');
 let _googleAds;
 function getGoogleAds() { return _googleAds || (_googleAds = require('./google-ads')); }
 
+// ad_campaigns.daily_budget_base / daily_budget_current are decimal(10,2), so
+// the largest storable value is 99,999,999.99. A budget above that (a typo like
+// 100000000) could be accepted by Google BEFORE the local write, then fail the
+// DB update — leaving the live campaign changed but the DB out of sync. Reject
+// it up front, before any push. (Google itself enforces its own maxima too.)
+const MAX_DAILY_BUDGET = 99999999.99;
+
+// ad_budget_log.reason is a varchar(255). A caller-supplied reason longer than
+// that would make the ad_budget_log insert fail AFTER the live Google push (and,
+// in setBudget, after the campaign write) — losing the audit row and 500-ing an
+// otherwise-successful change. Bound it up front so the audit insert can't fail
+// on length. Cron-generated reasons are short by construction.
+const MAX_REASON_LEN = 255;
+function boundReason(reason) {
+  return String(reason == null ? '' : reason).slice(0, MAX_REASON_LEN);
+}
+
 class BudgetManager {
   /**
    * Core budget adjustment — runs every 2 hours via cron.
@@ -275,23 +292,14 @@ class BudgetManager {
     };
   }
 
-  async getTechCountForArea(area, dateStr) {
-    // Get active technicians
+  async getTechCountForArea(_area, _dateStr) {
+    // Capacity is driven by the real active-technician count. There is no
+    // per-area tech roster in the data (one field crew covers the whole service
+    // area), so every area uses the same live count — the old hardcoded
+    // {area: [names]} map invented 2–3 phantom techs per zone and overstated
+    // capacity, holding budgets at full base while the real schedule was full.
     const techs = await db('technicians').where({ active: true });
-    if (!area || area === 'general') return techs.length;
-
-    // Filter by service area (simplified — techs cover zones)
-    const areaMap = {
-      'Lakewood Ranch': ['Adam', 'Jose'],
-      'LWR': ['Adam', 'Jose'],
-      'Parrish': ['Jacob'],
-      'Sarasota': ['Adam', 'Jose'],
-      'Venice': ['Jacob'],
-      'Bradenton': ['Adam', 'Jose', 'Jacob'],
-    };
-
-    const techNames = areaMap[area] || techs.map(t => t.name);
-    return techNames.length;
+    return techs.length;
   }
 
   /**
@@ -397,10 +405,7 @@ class BudgetManager {
    * the advisor route passes 'advisor').
    */
   async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, trigger = 'manual' } = {}) {
-    // ad_budget_log.reason is varchar(255); an oversized caller reason must
-    // not fail the audit insert AFTER a live push (source-level bound — the
-    // manual routes pass operator/model prose unchecked).
-    reason = String(reason || 'manual').slice(0, 255);
+    reason = boundReason(reason);
     // Anchor for the rollback's newer-writer audit check, and this
     // operation's identity stamp on its own audit row (lets the rollback
     // recognize a lost-COMMIT-ack as "actually committed").
@@ -734,8 +739,7 @@ class BudgetManager {
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual').
    */
   async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, trigger = 'manual' } = {}) {
-    // Same varchar(255) bound as setMode — see there.
-    reason = String(reason || 'manual').slice(0, 255);
+    reason = boundReason(reason);
     const opStartedAt = new Date();
     const opId = randomUUID();
     // Validate the amount up front — a non-positive / NaN / non-finite base would
@@ -743,11 +747,27 @@ class BudgetManager {
     // collapse to the $20 fallback), and the 2-hourly reconcile would keep
     // re-pushing it. A daily budget must be strictly positive; use mode 'stop'
     // to throttle. parseFloat is deliberately avoided so '50junk' is rejected.
-    const base = typeof newBaseBudget === 'number'
+    let base = typeof newBaseBudget === 'number'
       ? newBaseBudget
       : (typeof newBaseBudget === 'string' && newBaseBudget.trim() !== '' ? Number(newBaseBudget) : NaN);
     if (!Number.isFinite(base) || base <= 0) {
       throw new Error(`Invalid budget "${newBaseBudget}" — must be a number > 0`);
+    }
+    // Cap at the storable maximum BEFORE the Google push, so an over-large value
+    // can't change the live campaign and then fail the decimal(10,2) DB write.
+    if (base > MAX_DAILY_BUDGET) {
+      throw new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
+    }
+    // Round to cents so Google receives EXACTLY what the decimal(10,2) columns
+    // store — a value like 50.001 would otherwise push exact micros to Google
+    // while the DB rounds to 50.00, re-creating the live/local drift this path
+    // is meant to prevent.
+    base = Math.round(base * 100) / 100;
+    // Re-check after rounding: a sub-cent input like 0.004 passes the > 0 check
+    // above but rounds to 0, which would push an invalid $0 to Google / persist a
+    // 0 base. The minimum daily budget is one cent.
+    if (base <= 0) {
+      throw new Error(`Invalid budget "${newBaseBudget}" — rounds to $0; the minimum is $0.01`);
     }
 
     if (requireLivePush) {
@@ -956,3 +976,4 @@ class BudgetManager {
 }
 
 module.exports = new BudgetManager();
+module.exports.MAX_DAILY_BUDGET = MAX_DAILY_BUDGET;

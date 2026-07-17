@@ -154,7 +154,10 @@ function normalizeCoverageStatus(status, actionTypes = []) {
   if (/\b(follow up|follow-up|return visit)\b/.test(combined)) return 'needs_follow_up';
   if (/\b(skip|skipped|weather)\b/.test(combined)) return 'skipped';
   if (/\b(not serviced|not included)\b/.test(combined)) return 'not_serviced';
-  if (/\b(inspect|inspection|no activity found|entry point found)\b/.test(combined)) return 'inspected';
+  // inspect(?:ed|ion)? — the bare \binspect\b form never matched the plain
+  // status "inspected" (word boundary fails before "ed"), so those areas
+  // fell through to 'completed' (audit 2026-07-16)
+  if (/\b(inspect(?:ed|ion)?|no activity found|entry point found)\b/.test(combined)) return 'inspected';
   if (/\b(station checked|device checked|checked|monitor)\b/.test(combined)) return 'checked';
   if (/\b(treat|treated|spot treated)\b/.test(combined)) return 'treated';
   if (/\b(fertil|weed control|insect treatment|disease treatment|bait replaced|baited|service|serviced|complete|completed|applied|placed)\b/.test(combined)) return 'completed';
@@ -252,7 +255,19 @@ function customerDescriptionForItem({
       : templates.inaccessible || 'Technician could not access this area.';
   }
   if (normalizedStatus === 'needs_attention') return 'Technician noted an issue that may need attention.';
+  if (normalizedStatus === 'needs_follow_up') return 'Technician flagged this area for follow-up.';
   if (normalizedStatus === 'skipped') return reason ? `Service was skipped because ${reason}.` : 'Service was skipped for this area.';
+  if (normalizedStatus === 'not_serviced') return 'This area was not serviced on this visit.';
+
+  if (serviceLine === 'termite') {
+    if (normalizeText(location.status).includes('bait')) return templates.termite_bait_replaced || 'Bait replaced and station checked.';
+    if (key === 'station' || normalizedStatus === 'checked') return templates.termite_station_checked || 'Station checked.';
+    if (normalizedStatus === 'inspected') return 'Inspection completed.';
+  }
+  // Inspected/checked areas must never fall through to the line-specific
+  // "…treatment completed" copy — an inspected zone was looked at, not
+  // treated, and the chip beside this text already says "Inspected".
+  if (normalizedStatus === 'inspected' || normalizedStatus === 'checked') return `${areaName} inspected.`;
 
   if (serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') {
     if (key === 'perimeter') return templates.pest_perimeter_treated || 'Exterior perimeter service completed.';
@@ -263,13 +278,7 @@ function customerDescriptionForItem({
     if (statusText.includes('weed')) return templates.lawn_weed_control || 'Weed control applied.';
     return templates.lawn_fertilized || 'Lawn treatment completed.';
   }
-  if (serviceLine === 'termite') {
-    if (normalizeText(location.status).includes('bait')) return templates.termite_bait_replaced || 'Bait replaced and station checked.';
-    if (key === 'station' || normalizedStatus === 'checked') return templates.termite_station_checked || 'Station checked.';
-    if (normalizedStatus === 'inspected') return 'Inspection completed.';
-  }
   if (serviceLine === 'tree_shrub') return templates.tree_shrub_treated || 'Plant health treatment completed.';
-  if (normalizedStatus === 'inspected') return `${areaName} inspected.`;
   if (normalizedStatus === 'treated') return `${areaName} treatment completed.`;
   return `${areaName} service completed.`;
 }
@@ -355,6 +364,9 @@ function summaryFromItems(items = []) {
     if (item.status === 'inspected' || item.status === 'checked') summary.inspectedCount += 1;
     else if (item.status === 'inaccessible') summary.inaccessibleCount += 1;
     else if (item.status === 'needs_attention' || item.status === 'needs_follow_up') summary.needsAttentionCount += 1;
+    // skipped / not-serviced areas are NOT completed work — counting them as
+    // "Completed" told the customer a skipped zone was done (audit 2026-07-16)
+    else if (item.status === 'skipped' || item.status === 'not_serviced') summary.skippedCount += 1;
     else summary.completedCount += 1;
     return summary;
   }, {
@@ -362,6 +374,7 @@ function summaryFromItems(items = []) {
     inspectedCount: 0,
     inaccessibleCount: 0,
     needsAttentionCount: 0,
+    skippedCount: 0,
   });
 }
 

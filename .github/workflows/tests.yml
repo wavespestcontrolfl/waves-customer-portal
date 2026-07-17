@@ -65,6 +65,12 @@ jobs:
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2
+      - name: Customer backend coverage floor
+        # A focused, measured threshold for customer-app auth, pricing,
+        # autopay, notification, and upload-validation logic. The broad suite
+        # above still runs every server test; this step adds the coverage gate.
+        working-directory: server
+        run: npm run test:customer-coverage
       - name: DB-gated suites (serial, against the migrated database)
         working-directory: server
         env:
@@ -99,7 +105,66 @@ jobs:
       - run: npm ci
       - name: Client tests (vitest)
         working-directory: client
-        run: npx vitest run --silent
+        run: npm run test:coverage
+      - name: Customer app production build
+        # Vite production compilation catches chunking, CSS/import, and
+        # service-worker asset failures that the jsdom test runtime cannot.
+        run: npm run build
+
+  native-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The bootstrap scripts suppress IDE launch only in CI mode.
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Generate and sync the pinned Android app
+        run: bash scripts/mobile/bootstrap-android.sh
+      - name: Compile Android debug app
+        working-directory: client/android
+        run: ./gradlew assembleDebug --no-daemon
+
+  native-ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      # macos-15 currently ships CocoaPods 1.16.2 and Xcode 16.4. Pin the
+      # selected Xcode so an image-default change cannot silently move builds.
+      CI: "true"
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Verify pinned iOS toolchain
+        run: |
+          xcodebuild -version
+          pod --version
+      - name: Generate and sync the pinned iOS app
+        run: bash scripts/mobile/bootstrap-ios.sh
+      - name: Compile iOS simulator app without signing
+        working-directory: client/ios/App
+        run: >-
+          xcodebuild
+          -workspace App.xcworkspace
+          -scheme App
+          -configuration Debug
+          -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO
+          build
 
   # The prebuild gates + errors-only lint, moved off deploy-time/local-hook
   # enforcement so a violation fails the PR instead of killing every Railway

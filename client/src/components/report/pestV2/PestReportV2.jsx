@@ -198,7 +198,7 @@ function PestPressureRating({ metric, token, live, onRefreshed }) {
   }, [token, metric && metric.submittedRating]);
   if (!metric || metric.kind !== 'pressure') return null;
   if (submitted) {
-    return <div style={{ marginTop: 12, fontSize: 13, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
+    return <div style={{ marginTop: 12, fontSize: 14, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
   }
   if (!metric.rating || !token || !live) return null;
   const submit = async (n) => {
@@ -224,7 +224,7 @@ function PestPressureRating({ metric, token, live, onRefreshed }) {
   };
   return (
     <div style={{ marginTop: 14, padding: '12px 14px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: TEXT, marginBottom: 8 }}>{metric.rating.question}</div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: TEXT, marginBottom: 8 }}>{metric.rating.question}</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
         {[0, 1, 2, 3, 4, 5].map((n) => (
           <button key={n} type="button" disabled={busy} onClick={() => submit(n)} aria-label={`Rating ${n} of 5`}
@@ -360,7 +360,7 @@ export function PestProtectionMap({ defense, print = false }) {
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 2px' }}>
         {perimeterActive ? 'A protective barrier is active around your home' : 'We’re building protection around your home'}
       </h3>
-      <p style={{ fontSize: 13, color: MUTED, margin: '0 0 6px' }}>Where we treated and what we’re keeping an eye on this visit.</p>
+      <p style={{ fontSize: 14, color: MUTED, margin: '0 0 6px' }}>Where we treated and what we’re keeping an eye on this visit.</p>
 
       <div style={{ width: '100%', maxWidth: 360, margin: '0 auto' }}>
         <svg viewBox="0 0 320 232" width="100%" role="img" aria-label="Diagram of treatment coverage around your home" style={{ display: 'block' }}>
@@ -497,7 +497,7 @@ export function PestProtectionMap({ defense, print = false }) {
         {perimeter ? (
           <div
             className="pest-legend-row"
-            style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, animationDelay: '0.35s' }}
+            style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 14, animationDelay: '0.35s' }}
           >
             <span style={{ color: ringColor, fontWeight: 800, lineHeight: 1.2 }} aria-hidden="true">〰</span>
             <span style={{ color: BODY }}><strong style={{ color: TEXT }}>Exterior perimeter</strong> — <span style={{ color: perimeterActive ? COLORS.green : COLORS.orange, fontWeight: 700 }}>{perimeterActive ? 'Treated' : 'Monitored'}</span>{perimeter.detail ? ` · ${perimeter.detail}` : ''}</span>
@@ -509,7 +509,7 @@ export function PestProtectionMap({ defense, print = false }) {
             <div
               key={n.key}
               className="pest-legend-row"
-              style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, animationDelay: `${nodeDelay(i) + 0.1}s` }}
+              style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 14, animationDelay: `${nodeDelay(i) + 0.1}s` }}
             >
               <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, marginTop: 4, flexShrink: 0 }} aria-hidden="true" />
               <span style={{ color: BODY }}><strong style={{ color: TEXT }}>{n.label}</strong> — <span style={{ color, fontWeight: 700 }}>{NODE_WORD[n.status] || 'Tracking'}</span>{n.detail ? ` · ${n.detail}` : ''}</span>
@@ -529,7 +529,7 @@ export function PestPrimaryMove({ primaryMove }) {
       <div data-gt="eyebrow" style={eyebrow}>Your next step</div>
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 6px' }}>{primaryMove.title}</h3>
       {primaryMove.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{primaryMove.why}</p> : null}
-      {primaryMove.impact ? <p style={{ fontSize: 13, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
+      {primaryMove.impact ? <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
       {primaryMove.dueLabel ? (
         <span style={{ display: 'inline-block', marginTop: 10, padding: '4px 10px', background: COLORS.blueLight, color: COLORS.glassNavy, borderRadius: 999, fontSize: 12, fontWeight: 700 }}>{primaryMove.dueLabel}</span>
       ) : null}
@@ -571,9 +571,9 @@ export function PestBugFiles({ bugFiles = [], print = false }) {
                 <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.green, background: '#ECFDF3', borderRadius: 999, padding: '2px 8px' }}>Identified on-site</span>
               ) : null}
             </div>
-            {bug.whereSeen ? <div style={{ fontSize: 13, color: BODY, marginTop: 4 }}>Where: {bug.whereSeen}</div> : null}
+            {bug.whereSeen ? <div style={{ fontSize: 14, color: BODY, marginTop: 4 }}>Where: {bug.whereSeen}</div> : null}
             <details open={print} style={{ marginTop: 8 }}>
-              <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#0A7EC2', listStyle: 'none' }}>More about this pest</summary>
+              <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 600, color: '#0A7EC2', listStyle: 'none' }}>More about this pest</summary>
               <div style={{ marginTop: 8, display: 'grid', gap: 6 }}>
                 {bug.whyItMatters ? <Line label="Why it matters" value={bug.whyItMatters} /> : null}
                 {bug.whatWeDid ? <Line label="What we did" value={bug.whatWeDid} /> : null}
@@ -591,7 +591,7 @@ function Line({ label, value }) {
   return (
     <div>
       <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</span>
-      <div style={{ fontSize: 13, color: BODY, lineHeight: 1.45 }}>{value}</div>
+      <div style={{ fontSize: 14, color: BODY, lineHeight: 1.45 }}>{value}</div>
     </div>
   );
 }

@@ -159,6 +159,12 @@ describe('write-body validation (admin role)', () => {
     expect((await call('post', '/api/admin/ads/campaigns/c-1/budget', { budget: '50junk' })).status).toBe(400);
   });
 
+  test('POST /campaigns/:id/budget rejects an amount above the storable maximum', async () => {
+    const res = await call('post', '/api/admin/ads/campaigns/c-1/budget', { budget: 100000000 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/≤|maximum/);
+  });
+
   test('PUT /targets rejects an out-of-range capacity threshold', async () => {
     const res = await call('put', '/api/admin/ads/targets', { capacity_green_max: 200 });
     expect(res.status).toBe(400);
@@ -173,5 +179,34 @@ describe('write-body validation (admin role)', () => {
   test('PUT /targets rejects a non-integer max_services_per_tech', async () => {
     const res = await call('put', '/api/admin/ads/targets', { max_services_per_tech: 2.5 });
     expect(res.status).toBe(400);
+  });
+
+  test('PUT /targets rejects a null threshold that breaks the effective ordering', async () => {
+    // Clearing green to null persists null → cron reads its default (70); with
+    // yellow=60 that violates green<yellow, so it must be rejected up front.
+    const res = await call('put', '/api/admin/ads/targets', {
+      capacity_green_max: null, capacity_yellow_max: 60, capacity_orange_max: 90,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/green < yellow < orange/);
+  });
+
+  test('POST /campaigns rejects an invalid initial status', async () => {
+    const res = await call('post', '/api/admin/ads/campaigns', { campaign_name: 'X', platform: 'google_ads', status: 'bogus' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/status/);
+  });
+
+  test('PUT /campaigns/:id accepts status (retiring manual/LSA campaigns is not forbidden)', async () => {
+    // Passes sanitization (status is allowed on update); the stub db has no such
+    // campaign, so it 404s rather than being rejected as a forbidden field.
+    const res = await call('put', '/api/admin/ads/campaigns/c-1', { status: 'paused' });
+    expect(res.status).toBe(404);
+  });
+
+  test('PUT /campaigns/:id still rejects an invalid status value', async () => {
+    const res = await call('put', '/api/admin/ads/campaigns/c-1', { status: 'bogus' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/status/);
   });
 });

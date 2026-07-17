@@ -1,30 +1,164 @@
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const REFRESH_LOCK_NAME = 'waves-customer-refresh';
+const REFRESH_LEASE_KEY = 'waves_refresh_lease';
+const REFRESH_LEASE_MS = 15 * 1000;
+const REFRESH_ACQUIRE_MS = 12 * 1000;
 
-class ApiClient {
+function tokenSessionIdentity(token) {
+  if (!token || typeof token !== 'string') return null;
+  try {
+    const segment = token.split('.')[1];
+    if (!segment) return null;
+    const b64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
+    if (!payload?.customerId) return null;
+    return {
+      customerId: String(payload.customerId),
+      sessionId: payload.sessionId == null ? null : String(payload.sessionId),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameRequestSession(left, right) {
+  return Boolean(left && right
+    && left.customerId === right.customerId
+    // Access tokens minted before durable refresh sessions shipped have no
+    // sessionId. Their first successful refresh upgrades them into a durable
+    // family, so null -> family is safe when the customer is unchanged. Once
+    // an access token has a family, keep matching it strictly so a concurrent
+    // logout/login or property-session replacement can never inherit a retry.
+    && (left.sessionId === null || left.sessionId === right.sessionId));
+}
+
+function isTrustedCustomerRequestUrl(url) {
+  try {
+    const pageHref = typeof window !== 'undefined' && window.location?.href
+      ? window.location.href
+      : 'http://localhost/';
+    const target = new URL(String(url), pageHref);
+    const page = new URL(pageHref);
+    const api = new URL(API_BASE, pageHref);
+    const sameAuthority = (left, right) => left.protocol === right.protocol
+      && left.hostname === right.hostname
+      && left.port === right.port;
+    // URL.origin is the literal string "null" for Capacitor/custom schemes,
+    // so comparing origins would accidentally trust every other opaque-origin
+    // URL. Compare protocol + network authority explicitly instead.
+    return sameAuthority(target, page) || sameAuthority(target, api);
+  } catch {
+    return false;
+  }
+}
+
+export class ApiClient {
   constructor() {
     this.token = localStorage.getItem('waves_token');
     this.refreshToken = localStorage.getItem('waves_refresh_token');
+    this.tokenGeneration = 0;
     this.getCache = new Map();
     this.inflightGets = new Map();
     this.getCacheTtlMs = 60 * 1000;
   }
 
   setTokens(token, refreshToken) {
+    this.tokenGeneration += 1;
     this.token = token;
     this.refreshToken = refreshToken;
     this.getCache.clear();
     this.inflightGets.clear();
-    localStorage.setItem('waves_token', token);
+    // Storage events fire once per key. Publish the refresh credential first
+    // so another tab reacting to the access-token event can never pair the new
+    // access token with the already-consumed refresh token.
     if (refreshToken) localStorage.setItem('waves_refresh_token', refreshToken);
+    else localStorage.removeItem('waves_refresh_token');
+    localStorage.setItem('waves_token', token);
   }
 
   clearTokens() {
+    this.tokenGeneration += 1;
     this.token = null;
     this.refreshToken = null;
     this.getCache.clear();
     this.inflightGets.clear();
     localStorage.removeItem('waves_token');
     localStorage.removeItem('waves_refresh_token');
+  }
+
+  adoptTokens(token, refreshToken) {
+    this.tokenGeneration += 1;
+    this.token = token || null;
+    this.refreshToken = refreshToken || null;
+    this.getCache.clear();
+    this.inflightGets.clear();
+  }
+
+  /**
+   * Authenticated fetch that preserves the raw Response (PDFs and other
+   * non-JSON bodies need it). `url` may be relative or absolute and is used
+   * exactly as supplied; API-relative JSON callers should keep using request.
+   * Customer credentials are attached only to the app or configured API
+   * origin; other absolute URLs remain ordinary unauthenticated fetches.
+   * The 401 refresh/retry behavior and session-switch guard deliberately live
+   * here so every customer Bearer request follows one path.
+   */
+  async fetchRaw(url, options = {}) {
+    const requestSession = tokenSessionIdentity(this.token);
+    const trustedForCustomerAuth = isTrustedCustomerRequestUrl(url);
+    const headers = {
+      ...(trustedForCustomerAuth && this.token && { Authorization: `Bearer ${this.token}` }),
+      ...options.headers,
+    };
+    const fetchOptions = () => {
+      const { bodyFactory, ...requestOptions } = options;
+      return {
+        ...requestOptions,
+        ...(typeof bodyFactory === 'function' ? { body: bodyFactory() } : {}),
+        headers,
+      };
+    };
+    const performFetch = async () => {
+      try {
+        return await fetch(url, fetchOptions());
+      } catch (err) {
+        throw new Error(err?.message || 'Network request failed. Check your connection and try again.');
+      }
+    };
+
+    let response = await performFetch();
+
+    if (response.status === 401 && trustedForCustomerAuth && this.refreshToken) {
+      const outcome = await this.attemptRefresh();
+      if (outcome === 'refreshed') {
+        // A different property or login can replace tokens while this request
+        // is waiting on refresh. Never replay the old request under it.
+        if (!sameRequestSession(requestSession, tokenSessionIdentity(this.token))) {
+          const superseded = new Error('Request canceled because the active account changed.');
+          superseded.requestSuperseded = true;
+          throw superseded;
+        }
+        headers.Authorization = `Bearer ${this.token}`;
+        response = await performFetch();
+      } else if (outcome === 'rejected') {
+        // Only an explicit refresh rejection ends the saved session. Preserve
+        // the return path so a fresh login lands back on the current page.
+        this.clearTokens();
+        const path = window.location.pathname;
+        const next = path.startsWith('/login') ? '' : `${path}${window.location.search}`;
+        window.location.href = next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login';
+        const sessionErr = new Error('Session expired. Please sign in again.');
+        sessionErr.status = 401;
+        sessionErr.sessionExpired = true;
+        throw sessionErr;
+      } else {
+        // Network/5xx/429 refresh failures say nothing about the 30-day
+        // credential. Keep it and surface a retryable error.
+        throw new Error('Unable to reach the server. Check your connection and try again.');
+      }
+    }
+
+    return response;
   }
 
   async request(path, options = {}) {
@@ -42,49 +176,11 @@ class ApiClient {
 
     const headers = {
       'Content-Type': 'application/json',
-      ...(this.token && { Authorization: `Bearer ${this.token}` }),
       ...options.headers,
     };
 
     const execute = async () => {
-      let response;
-      try {
-        response = await fetch(url, { ...options, headers });
-      } catch (err) {
-        throw new Error(err?.message || 'Network request failed. Check your connection and try again.');
-      }
-
-      // Handle token expiry — attempt refresh
-      if (response.status === 401 && this.refreshToken) {
-        const outcome = await this.attemptRefresh();
-        if (outcome === 'refreshed') {
-          headers.Authorization = `Bearer ${this.token}`;
-          response = await fetch(url, { ...options, headers });
-        } else if (outcome === 'rejected') {
-          // The server refused the refresh token — the session is really
-          // over. Force logout, preserving the return path so re-login
-          // lands back on this page (mirrors ProtectedRoute).
-          this.clearTokens();
-          // Never carry /login itself as the return target — LoginPage
-          // honors `next` after verification, and bouncing back to /login
-          // (which renders null once authenticated) strands the customer
-          // on a blank page.
-          const path = window.location.pathname;
-          const next = path.startsWith('/login') ? '' : `${path}${window.location.search}`;
-          window.location.href = next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login';
-          const sessionErr = new Error('Session expired. Please sign in again.');
-          sessionErr.status = 401;
-          sessionErr.sessionExpired = true;
-          throw sessionErr;
-        } else {
-          // Transient refresh failure (offline, 5xx, 429): the 30-day
-          // refresh token may still be perfectly valid — keep the tokens
-          // and surface a retryable error. Deliberately NOT status 401 /
-          // sessionExpired, so useAuth's pending/retry path preserves the
-          // session instead of treating it as an auth rejection.
-          throw new Error('Unable to reach the server. Check your connection and try again.');
-        }
-      }
+      const response = await this.fetchRaw(url, { ...options, headers });
 
       if (!response.ok) {
         const contentType = response.headers.get('content-type') || '';
@@ -122,11 +218,97 @@ class ApiClient {
     // (30/15min) and could turn a 429 into a spurious forced logout. All
     // concurrent 401s now share one in-flight refresh.
     if (!this.refreshPromise) {
-      this.refreshPromise = this._doRefresh().finally(() => {
+      const submittedRefreshToken = this.refreshToken;
+      this.refreshPromise = this._coordinateRefresh(submittedRefreshToken).finally(() => {
         this.refreshPromise = null;
       });
     }
     return this.refreshPromise;
+  }
+
+  _adoptPublishedRotation(previousRefreshToken) {
+    try {
+      const storedRefresh = localStorage.getItem('waves_refresh_token');
+      const storedAccess = localStorage.getItem('waves_token');
+      if (!storedRefresh || !storedAccess || storedRefresh === previousRefreshToken) return false;
+      this.adoptTokens(storedAccess, storedRefresh);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async _waitForPublishedRotation(previousRefreshToken, timeoutMs = 2000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this._adoptPublishedRotation(previousRefreshToken)) return 'refreshed';
+      await new Promise((resolve) => { setTimeout(resolve, 25); });
+    }
+    return this._adoptPublishedRotation(previousRefreshToken) ? 'refreshed' : 'transient';
+  }
+
+  async _coordinateRefresh(previousRefreshToken) {
+    const refreshUnderLock = async () => {
+      if (this._adoptPublishedRotation(previousRefreshToken)) return 'refreshed';
+      return this._doRefresh();
+    };
+
+    // Web Locks is a browser-wide mutex for this origin. The second tab waits,
+    // then adopts the winner's refresh-first localStorage publication instead
+    // of submitting the consumed credential and triggering replay defense.
+    if (typeof navigator !== 'undefined' && navigator.locks?.request) {
+      try {
+        return await navigator.locks.request(REFRESH_LOCK_NAME, { mode: 'exclusive' }, refreshUnderLock);
+      } catch {
+        // Older embedded webviews can expose a partial/broken Locks API. The
+        // storage lease below keeps them coordinated too.
+      }
+    }
+
+    return this._withStorageRefreshLease(previousRefreshToken, refreshUnderLock);
+  }
+
+  async _withStorageRefreshLease(previousRefreshToken, refreshUnderLock) {
+    let storageAvailable = true;
+    const owner = globalThis.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const deadline = Date.now() + REFRESH_ACQUIRE_MS;
+
+    while (Date.now() < deadline) {
+      if (this._adoptPublishedRotation(previousRefreshToken)) return 'refreshed';
+      try {
+        const now = Date.now();
+        let lease = null;
+        try { lease = JSON.parse(localStorage.getItem(REFRESH_LEASE_KEY) || 'null'); } catch { lease = null; }
+        if (!lease?.owner || Number(lease.expiresAt) <= now) {
+          localStorage.setItem(REFRESH_LEASE_KEY, JSON.stringify({ owner, expiresAt: now + REFRESH_LEASE_MS }));
+          // Confirm after a short contention window. If another tab wrote a
+          // competing claim, only the final owner proceeds.
+          await new Promise((resolve) => { setTimeout(resolve, 40 + Math.floor(Math.random() * 30)); });
+          let confirmed = null;
+          try { confirmed = JSON.parse(localStorage.getItem(REFRESH_LEASE_KEY) || 'null'); } catch { confirmed = null; }
+          if (confirmed?.owner === owner) {
+            try {
+              return await refreshUnderLock();
+            } finally {
+              try {
+                const latest = JSON.parse(localStorage.getItem(REFRESH_LEASE_KEY) || 'null');
+                if (latest?.owner === owner) localStorage.removeItem(REFRESH_LEASE_KEY);
+              } catch { /* lease expiry recovers it */ }
+            }
+          }
+        }
+      } catch {
+        storageAvailable = false;
+        break;
+      }
+      await new Promise((resolve) => { setTimeout(resolve, 50); });
+    }
+
+    // If storage itself is unavailable, there is no shared persisted token to
+    // coordinate across tabs. Otherwise fail transiently rather than ever
+    // double-submit a credential behind a live lease.
+    return storageAvailable ? 'transient' : this._doRefresh();
   }
 
   // Resolves to 'refreshed' | 'rejected' | 'transient'. Only 'rejected'
@@ -134,13 +316,30 @@ class ApiClient {
   // session — a network drop or /auth/refresh 5xx/429 says nothing about
   // whether the 30-day refresh token is still valid.
   async _doRefresh() {
+    const submittedRefreshToken = this.refreshToken;
+    const submittedGeneration = this.tokenGeneration;
     try {
       const res = await fetch(`${API_BASE}/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken: this.refreshToken }),
+        body: JSON.stringify({ refreshToken: submittedRefreshToken }),
       });
 
+      // Logout, property switching, another tab's rotation, or a new login may
+      // have changed credentials while this request was in flight. Never let
+      // the stale response repopulate cleared storage or overwrite a newer
+      // session.
+      if (this.tokenGeneration !== submittedGeneration
+        || this.refreshToken !== submittedRefreshToken) {
+        return this.token && this.refreshToken ? 'refreshed' : 'rejected';
+      }
+
+      if (res.status === 409) {
+        const conflict = await res.json().catch(() => null);
+        if (conflict?.code === 'REFRESH_TOKEN_ALREADY_ROTATED') {
+          return this._waitForPublishedRotation(submittedRefreshToken);
+        }
+      }
       if (res.status === 401 || res.status === 403) return 'rejected';
       if (!res.ok) return 'transient';
 
@@ -179,7 +378,10 @@ class ApiClient {
   selectAuthProperty(customerId) {
     return this.request('/auth/select-property', {
       method: 'POST',
-      body: JSON.stringify({ customerId }),
+      // Rebuild on a 401 retry: attemptRefresh rotates the credential before
+      // retrying, so replaying a pre-serialized old token would revoke the
+      // whole family under the server's reuse detection.
+      bodyFactory: () => JSON.stringify({ customerId, refreshToken: this.refreshToken }),
     });
   }
 
@@ -222,8 +424,8 @@ class ApiClient {
   }
 
   // ---- Billing ----
-  getPayments(limit = 20) {
-    return this.request(`/billing?limit=${limit}`);
+  getPayments(limit = 50, cursor = 0) {
+    return this.request(`/billing?limit=${limit}&cursor=${cursor}`);
   }
 
   getBalance() {

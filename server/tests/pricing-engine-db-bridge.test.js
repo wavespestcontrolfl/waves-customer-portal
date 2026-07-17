@@ -42,6 +42,7 @@ describe('pricing engine DB bridge', () => {
   const originalPestBase = constants.PEST.base;
   const originalPestFloor = constants.PEST.floor;
   const originalEnforceFloor = constants.PEST.enforceFloorPostDiscount;
+  const originalPestAdditionalAdjustments = { ...constants.PEST.additionalAdjustments };
 
   afterEach(() => {
     constants.PEST.pestInitialRoach = originalInitialRoach;
@@ -76,6 +77,10 @@ describe('pricing engine DB bridge', () => {
     constants.PEST.base = originalPestBase;
     constants.PEST.floor = originalPestFloor;
     constants.PEST.enforceFloorPostDiscount = originalEnforceFloor;
+    for (const key of Object.keys(constants.PEST.additionalAdjustments)) {
+      delete constants.PEST.additionalAdjustments[key];
+    }
+    Object.assign(constants.PEST.additionalAdjustments, originalPestAdditionalAdjustments);
   });
 
   test('program-floor kill switch: absent key restores the enabled default on every sync', async () => {
@@ -104,6 +109,23 @@ describe('pricing engine DB bridge', () => {
       data: { value: constants.GLOBAL.LABOR_RATE },
     }]))).resolves.toBe(true);
     expect(constants.PEST.enforceFloorPostDiscount).toBe(true);
+  });
+
+  test('ignores retired pest tree-density and large-driveway config keys', async () => {
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'pest_features',
+      data: {
+        trees_heavy: 600,
+        trees_moderate: 500,
+        trees_light: -400,
+        large_driveway: 300,
+      },
+    }]))).resolves.toBe(true);
+
+    expect(constants.PEST.additionalAdjustments).not.toHaveProperty('trees_heavy');
+    expect(constants.PEST.additionalAdjustments).not.toHaveProperty('trees_moderate');
+    expect(constants.PEST.additionalAdjustments).not.toHaveProperty('trees_light');
+    expect(constants.PEST.additionalAdjustments).not.toHaveProperty('largeDriveway');
   });
 
   test('preserves cents on DB-synced initial roach pricing brackets', async () => {

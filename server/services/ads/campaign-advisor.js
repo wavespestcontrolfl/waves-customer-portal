@@ -170,9 +170,9 @@ SEO/GSC RULES:
 - For GBP, recommend specific actions per location (photos, posts, review responses)
 
 BUSINESS CONTEXT:
-- Waves Pest Control, 4 locations in SWFL (Lakewood Ranch, Parrish, Sarasota, Venice)
-- Main site: wavespestcontrol.com + 9 domain-specific microsites
-- 3 technicians (Adam, Jose, Jacob), max ~8 services per tech per day
+- Waves Pest Control, SWFL (Manatee / Sarasota / Charlotte counties), 5 staffed offices (Bradenton, Sarasota, Venice, Parrish, Lakewood Ranch)
+- Main site: wavespestcontrol.com + a 15-site hub-and-spoke network
+- 1 field technician (Adam), max ~${targets?.max_services_per_tech || 8} services per tech per day — capacity is tight, so weigh scaling recommendations against it
 - WaveGuard membership tiers: Bronze/Silver/Gold/Platinum with 0/10/15/20% discounts
 - Recurring lawn services use $35/hr loaded labor cost and a 45% fully loaded floor
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}

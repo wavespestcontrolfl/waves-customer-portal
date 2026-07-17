@@ -1232,9 +1232,17 @@ describe('email template send history webhook updates', () => {
     { event: 'blocked', response: 'rate limited' },
     { event: 'bounce', type: 'blocked', reason: 'Spamhaus SBL' },
   ])('provider block is a retryable failure, not a recipient bounce: $event/$type', (event) => {
-    expect(computeEmailMessageEventUpdates(event, fresh(), now)).toEqual({
+    const tracked = fresh({
+      recipient_email_snapshot: 'customer@example.com',
+      subject_snapshot: 'Tracked transactional email',
+      suppression_group_key_snapshot: 'service_operational',
+      provider_retry_count: 0,
+    });
+    expect(computeEmailMessageEventUpdates(event, tracked, now)).toEqual({
       status: 'failed',
       error_message: event.reason || event.response || event.type,
+      provider_retry_next_at: new Date(now.getTime() + (10 * 60 * 1000)),
+      provider_retry_exhausted_at: null,
       updated_at: now,
     });
   });

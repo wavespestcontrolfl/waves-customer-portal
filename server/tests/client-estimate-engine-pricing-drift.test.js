@@ -77,7 +77,7 @@ function loadClientEstimator(source) {
     logLevel: 'silent',
   });
   const module = { exports: {} };
-  // eslint-disable-next-line no-new-func
+   
   new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
   return module.exports;
 }
@@ -88,7 +88,7 @@ function loadAdminPreviewOneTimeHelpers(source) {
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
   const helperSource = source.slice(start, end);
-  // eslint-disable-next-line no-new-func
+   
   return new Function('serviceDetailText', 'fmtInt', `
     ${helperSource}
     return { oneTimePestChoiceRowsForCustomerPreview };
@@ -168,6 +168,41 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(source).toContain('const cageAdjBySize = { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 };');
   });
 
+  test('tree density and large driveway do not affect client-fallback pest pricing or labels', () => {
+    const baseInput = {
+      homeSqFt: 3000,
+      stories: 1,
+      lotSqFt: 12000,
+      propertyType: 'single_family',
+      shrubDensity: 'MODERATE',
+      landscapeComplexity: 'MODERATE',
+      treeDensity: 'MODERATE',
+      hasLargeDriveway: false,
+      svcPest: true,
+      pestFreq: 4,
+      urgency: 'NONE',
+      isAfterHours: false,
+      isRecurringCustomer: false,
+    };
+    const neutral = calculateEstimate(baseInput);
+
+    for (const variant of [
+      { treeDensity: 'LIGHT', hasLargeDriveway: false },
+      { treeDensity: 'MODERATE', hasLargeDriveway: true },
+      { treeDensity: 'HEAVY', hasLargeDriveway: true },
+    ]) {
+      const estimate = calculateEstimate({ ...baseInput, ...variant });
+      expect(estimate.results.pest).toEqual(neutral.results.pest);
+      expect(estimate.recurring).toEqual(neutral.recurring);
+      expect(estimate.modifiers.filter((modifier) => modifier.service === 'pest'))
+        .not.toEqual(expect.arrayContaining([
+          expect.objectContaining({ label: expect.stringMatching(/trees|driveway/i) }),
+        ]));
+    }
+
+    expect(adminToolViewSource).not.toMatch(/(?:Heavy|Moderate|Light) trees:|Large driveway:/);
+  });
+
   test('mirrors live server pest frequency discounts', () => {
     expect(source).toContain("{ f: 4, label: 'Quarterly', disc: 1.00");
     expect(source).toContain("{ f: 6, label: 'Bi-Monthly', disc: 0.85");
@@ -187,13 +222,14 @@ describe('deprecated client estimator pricing drift guards', () => {
   });
 
   test('client fallback holds a floor-priced Platinum pest line at the program floor', () => {
-    // 800 sf footprint + light shrubs/trees + simple landscape → adj -30 →
-    // pest per-visit clamps to the $89 floor; 4 qualifying services → Platinum 20%.
+    // 800 sf townhome footprint + light shrubs + simple landscape → the
+    // pest per-visit price clamps to the $89 floor; tree density is context
+    // only. Four qualifying services → Platinum 20%.
     const bundle = {
       homeSqFt: 800,
       stories: 1,
       lotSqFt: 10000,
-      propertyType: 'single_family',
+      propertyType: 'townhome_end',
       measuredTurfSf: 4000,
       grassType: 'st_augustine',
       shrubDensity: 'LIGHT',
@@ -246,7 +282,7 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(bigLawn.recurring.savings).toBe(Math.round((bigFullDa - pestShare) * 100) / 100);
 
     // Above the floor (standard 2,000 sf home) the full percent applies untouched.
-    const standard = calculateEstimate({ ...bundle, homeSqFt: 2000, measuredTurfSf: 12000, shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE' });
+    const standard = calculateEstimate({ ...bundle, homeSqFt: 3000, measuredTurfSf: 12000, shrubDensity: 'MODERATE', treeDensity: 'MODERATE', landscapeComplexity: 'MODERATE' });
     expect(standard.error).toBeUndefined();
     expect(standard.recurring.pestProgramFloorApplied).toBe(false);
     const standardRa = standard.recurring.annualBeforeDiscount;

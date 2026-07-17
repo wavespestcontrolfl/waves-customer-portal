@@ -47,9 +47,10 @@ function toFiniteNumber(v) {
 // google_ads is remotely budget-controllable — that guard lives in setBudget/
 // setMode). Matches ad_campaigns.platform's documented set.
 const CAMPAIGN_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
+const CAMPAIGN_STATUSES = ['active', 'paused', 'removed'];
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
-// Settable only at creation (identity); an update must not repoint them.
+// Identity — settable at creation, never repointed on update.
 const CAMPAIGN_CREATE_ONLY_FIELDS = ['platform', 'platform_campaign_id'];
 // Free-form metadata columns editable via either create or update.
 const CAMPAIGN_META_FIELDS = [
@@ -61,7 +62,7 @@ const CAMPAIGN_META_FIELDS = [
 // Returns { ok:true, value } or { ok:false, error }.
 function sanitizeCampaignWrite(body, isUpdate) {
   const forbidden = isUpdate
-    ? [...CAMPAIGN_MANAGED_FIELDS, ...CAMPAIGN_CREATE_ONLY_FIELDS, 'status']
+    ? [...CAMPAIGN_MANAGED_FIELDS, ...CAMPAIGN_CREATE_ONLY_FIELDS]
     : CAMPAIGN_MANAGED_FIELDS;
   for (const f of forbidden) {
     if (body[f] !== undefined) {
@@ -69,7 +70,13 @@ function sanitizeCampaignWrite(body, isUpdate) {
     }
   }
 
-  const allow = isUpdate ? CAMPAIGN_META_FIELDS : [...CAMPAIGN_CREATE_ONLY_FIELDS, ...CAMPAIGN_META_FIELDS];
+  // status is settable on create (honored rather than defaulted to active) and
+  // on update (the only route to pause/remove a manual or google_lsa campaign —
+  // /pause + /enable reject non-google_ads; the route additionally steers a
+  // Google campaign's status change to those synced endpoints).
+  const allow = isUpdate
+    ? ['status', ...CAMPAIGN_META_FIELDS]
+    : [...CAMPAIGN_CREATE_ONLY_FIELDS, 'status', ...CAMPAIGN_META_FIELDS];
   const out = {};
   for (const key of allow) {
     if (body[key] === undefined) continue;
@@ -86,6 +93,10 @@ function sanitizeCampaignWrite(body, isUpdate) {
         && !/^\d+$/.test(String(out.platform_campaign_id))) {
       return { ok: false, error: 'platform_campaign_id must be digits only' };
     }
+  }
+
+  if (out.status !== undefined && !CAMPAIGN_STATUSES.includes(out.status)) {
+    return { ok: false, error: `status must be one of: ${CAMPAIGN_STATUSES.join(', ')}` };
   }
 
   if (out.monthly_budget !== undefined && out.monthly_budget !== null) {
@@ -129,11 +140,21 @@ function sanitizeTargetsWrite(body, existing) {
     if (!Number.isInteger(n) || n < 1) return { ok: false, error: 'max_services_per_tech must be an integer ≥ 1' };
     out.max_services_per_tech = n;
   }
-  // Resolve the effective thresholds against what's already stored, then enforce
-  // strict green < yellow < orange ordering on the merged result.
-  const g = out.capacity_green_max ?? parseFloat(existing?.capacity_green_max ?? 70);
-  const y = out.capacity_yellow_max ?? parseFloat(existing?.capacity_yellow_max ?? 85);
-  const o = out.capacity_orange_max ?? parseFloat(existing?.capacity_orange_max ?? 95);
+  // Enforce strict green < yellow < orange ordering on the values that will
+  // ACTUALLY be in effect for the cron after this write. A field being written
+  // as null (clearing it) persists null, and the cron then reads its hard-coded
+  // default (`targets?.field || DEFAULT`) — so resolve null/blank to that same
+  // default here, not to the old stored value, or a cleared threshold could
+  // violate an ordering the request appeared to pass.
+  const effThreshold = (field, def) => {
+    const has = Object.prototype.hasOwnProperty.call(out, field);
+    const raw = has ? out[field] : existing?.[field];
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? n : def; // null / blank / missing → cron default
+  };
+  const g = effThreshold('capacity_green_max', 70);
+  const y = effThreshold('capacity_yellow_max', 85);
+  const o = effThreshold('capacity_orange_max', 95);
   if (!(g < y && y < o)) {
     return { ok: false, error: 'capacity thresholds must satisfy green < yellow < orange' };
   }
@@ -186,6 +207,17 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
   try {
     const clean = sanitizeCampaignWrite(req.body, true);
     if (!clean.ok) return res.status(400).json({ error: clean.error });
+    // A Google campaign's status must change through /pause + /enable so it syncs
+    // to Google Ads; a direct local flip here would drift from live spend.
+    // Manual / google_lsa campaigns have no synced status route, so PUT is the
+    // way to retire them.
+    if (clean.value.status !== undefined) {
+      const existing = await db('ad_campaigns').where({ id: req.params.id }).first();
+      if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+      if (existing.platform === 'google_ads' && clean.value.status !== existing.status) {
+        return res.status(400).json({ error: "Use /pause or /enable to change a Google campaign's status — they sync Google Ads." });
+      }
+    }
     const [campaign] = await db('ad_campaigns')
       .where({ id: req.params.id })
       .update({ ...clean.value, updated_at: new Date() })
@@ -221,6 +253,9 @@ router.post('/campaigns/:id/budget', requireAdmin, async (req, res, next) => {
     const budget = toFiniteNumber(req.body.budget);
     if (!(budget > 0)) {
       return res.status(400).json({ error: 'budget must be a number > 0' });
+    }
+    if (budget > getBudgetManager().MAX_DAILY_BUDGET) {
+      return res.status(400).json({ error: `budget must be ≤ ${getBudgetManager().MAX_DAILY_BUDGET}` });
     }
     // Only Google campaigns have remote control here — refuse Meta (read-only,
     // managed in Ads Manager) BEFORE mutating local budget, so the local row

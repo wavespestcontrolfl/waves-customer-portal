@@ -60,6 +60,7 @@ import {
 import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
+import useModalFocus from '../../hooks/useModalFocus';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
@@ -102,7 +103,7 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
           <Icon name={icon} size={18} strokeWidth={2} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_BILLING.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
             Auto Pay
           </div>
           <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
@@ -118,7 +119,7 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
       {actionLabel && onAction && (
         <button type="button" onClick={onAction} data-glass="chip" style={{
           alignSelf: 'flex-start',
-          minHeight: 36,
+          minHeight: 44,
           padding: '9px 13px',
           borderRadius: 8,
           border: `1px solid ${PORTAL_BILLING.borderStrong}`,
@@ -442,7 +443,7 @@ export default function AutopayCard({ onStateChange }) {
     border: kind === 'primary' ? 'none' : `1px solid ${PORTAL_BILLING.borderStrong}`,
     background: kind === 'primary' ? PORTAL_BILLING.text : PORTAL_BILLING.surface,
     color: kind === 'primary' ? '#fff' : PORTAL_BILLING.text,
-    minHeight: 36,
+    minHeight: 44,
   });
 
   const errorBanner = err ? (
@@ -458,7 +459,7 @@ export default function AutopayCard({ onStateChange }) {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block', animation: state === 'active' ? 'autopayDotPulse 2s ease-in-out infinite' : 'none' }} />
-            <span style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.text, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            <span style={{ fontSize: 14, fontWeight: 850, color: PORTAL_BILLING.text, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               Auto Pay / {theme.label}
             </span>
           </div>
@@ -532,7 +533,7 @@ export default function AutopayCard({ onStateChange }) {
           modal === 'pause' ? 'Pause Auto Pay' :
           modal === 'card' ? (state === 'disabled' ? 'Set up Auto Pay' : 'Change Auto Pay method') :
           'Change billing day'
-        } onClose={() => { setModal(null); setErr(''); }}>
+        } onClose={() => { setModal(null); setErr(''); }} closeDisabled={saving}>
           {errorBanner}
           {modal === 'manage' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -641,7 +642,7 @@ export default function AutopayCard({ onStateChange }) {
               <input type="number" inputMode="numeric" min={1} max={28} value={selectedDay}
                 onChange={(e) => setSelectedDay(parseInt(e.target.value) || 1)}
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${PORTAL_BILLING.borderStrong}`, borderRadius: 8 }} />
-              <div style={{ fontSize: 12, color: PORTAL_BILLING.muted }}>
+              <div style={{ fontSize: 14, color: PORTAL_BILLING.muted }}>
                 Auto Pay runs on this day each month. Max is the 28th so every month is covered.
               </div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -659,37 +660,55 @@ export default function AutopayCard({ onStateChange }) {
   );
 }
 
-function Modal({ title, children, onClose }) {
+function Modal({ title, children, onClose, closeDisabled = false }) {
   // Mounted only while open, so lock unconditionally — the page behind the
   // scrim shouldn't scroll on iOS while the dialog is up.
   useLockBodyScroll(true);
+  const requestClose = () => {
+    if (!closeDisabled) onClose();
+  };
+  const dialogRef = useModalFocus(true, requestClose);
   // Portaled to <body>: under glass the host card carries backdrop-filter
   // (and a hover transform), which turns it into the containing block for
   // position:fixed children — the scrim would cover only the card.
   return createPortal(
     <div data-glass-scrim="" style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
-    }} onClick={onClose}>
-      <div data-glass="modal" onClick={(e) => e.stopPropagation()} style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: 'max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px))',
+    }} onClick={requestClose}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="autopay-modal-title"
+        data-glass="modal"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+        '--glass-modal-radius': '8px',
         background: PORTAL_BILLING.surface, borderRadius: 8, padding: 20, maxWidth: 460, width: '100%',
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
         border: `1px solid ${PORTAL_BILLING.border}`,
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+        maxHeight: 'calc(100dvh - max(32px, env(safe-area-inset-top, 0px) + env(safe-area-inset-bottom, 0px)))',
+        overflowY: 'auto',
+        overscrollBehavior: 'contain',
+        WebkitOverflowScrolling: 'touch',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: 16, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading }}>{title}</div>
-          <button type="button" aria-label="Close" onClick={onClose} data-glass="chip" style={{
+          <div id="autopay-modal-title" style={{ fontSize: 18, fontWeight: 700, color: PORTAL_BILLING.text, fontFamily: FONTS.heading }}>{title}</div>
+          <button type="button" aria-label="Close" onClick={requestClose} disabled={closeDisabled} data-glass="chip" style={{
             background: PORTAL_BILLING.surface,
             border: `1px solid ${PORTAL_BILLING.borderStrong}`,
             borderRadius: 8,
-            cursor: 'pointer',
+            cursor: closeDisabled ? 'wait' : 'pointer',
             color: PORTAL_BILLING.muted,
-            width: 36,
-            height: 36,
+            width: 44,
+            height: 44,
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
+            flexShrink: 0,
           }}>
             <Icon name="close" size={20} strokeWidth={2} />
           </button>
@@ -700,3 +719,5 @@ function Modal({ title, children, onClose }) {
     document.body
   );
 }
+
+export { Modal };

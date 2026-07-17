@@ -5,7 +5,7 @@ import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
-import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
+import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
@@ -616,7 +616,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (primaryFinding) {
     return {
-      heading: 'we found activity that needs attention.',
+      heading: 'we found activity that needs attention!',
       status: pendingReadyText || 'Follow-up recommended',
       statusTone: pendingReadyText ? 'pending' : 'warning',
       result: pendingReadyText
@@ -634,7 +634,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
     const area = item.areaName || item.name || 'one area';
     const inaccessible = isInaccessibleCoverageStatus(item.status);
     return {
-      heading: inaccessible ? 'one area could not be serviced.' : 'one area needs attention.',
+      heading: inaccessible ? 'one area could not be serviced!' : 'one area needs attention!',
       status: pendingReadyText || (inaccessible ? 'Action needed' : 'Follow-up recommended'),
       statusTone: pendingReadyText ? 'pending' : 'warning',
       result: pendingReadyText
@@ -662,7 +662,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (context.pressureTrend?.direction === 'down') {
     return {
-      heading: 'pest pressure is trending down.',
+      heading: 'pest pressure is trending down!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'ready',
       result: context.pressureTrend.customerSummary || 'Activity has decreased since the last visit.',
@@ -1706,7 +1706,9 @@ function readinessSummary(context, mode = 'live', nowMsOverride) {
     areaType: areaTypes.length ? areaTypes.join(', ') : 'Treatment areas',
     status: targets.length ? (allReady ? 'Ready now' : 'Ready time pending') : 'See advisory',
     badge: targets.length ? (allReady ? 'Ready now' : 'Re-entry timing') : 'Readiness noted',
-    headline: allReady ? `Treated ${areaTypes.join(', ').toLowerCase() || 'areas'} areas are ready now.` : (context?.customerSummary || 'Review the readiness details below.'),
+    headline: allReady
+      ? (areaTypes.length ? `Treated ${areaTypes.join(', ').toLowerCase()} areas are ready now.` : 'Treated areas are ready now.')
+      : (context?.customerSummary || 'Review the readiness details below.'),
     precautions: context?.petAdvisory || 'None listed',
   };
 }
@@ -1742,7 +1744,12 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const smartStatus = smartStatusSummary(data, mode, nowMs);
   const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
   const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
-  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // ALL-CAPS records (older customer rows) title-case for display, same rule
+  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
+  const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
+    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
+    : rawFirstName;
   const serviceLabel = serviceDisplayName(data);
   // "Quarterly Pest Control Service" → "Quarterly Pest Control" so the
   // headline never reads "... Service service is complete".
@@ -1756,8 +1763,8 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   return (
     <section className="service-report-hero" id="service-status">
       <div className="service-report-hero-copy">
-        <div className="section-eyebrow">Service report</div>
-        <h1 className="sr-title">Hey {firstName}, {headline}</h1>
+        <div className="section-eyebrow">Service report{serviceLabel ? ` \u00B7 ${serviceLabel}` : ''}</div>
+        <h1 className="sr-title">Hi {firstName}, {headline}</h1>
         {(() => {
           // Mirrors the estimate header's contact block: each of name / email /
           // phone / address on its own line, rendered mixed-case ("Chris Whitney",
@@ -2044,7 +2051,10 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
       .forEach((i) => { if (QUESTION_BY_CATEGORY[i.category]) add(QUESTION_BY_CATEGORY[i.category]); });
   }
 
-  if (hasReentry) add('Is it safe to re-enter now?');
+  // never the word "safe" on a customer surface (owner rule; the server's own
+  // EXTRA_FORBIDDEN bans it for narrative on this exact page) — "re-enter"
+  // still routes to the assistant's re-entry answer
+  if (hasReentry) add('When can I re-enter treated areas?');
   if (hasCoverage) add('What areas were treated?');
   if (product) add(`Why was ${product} used?`);
   else if ((data.applications || []).length) add('Why were these products used?');
@@ -2303,8 +2313,17 @@ const CHIP_SEPARATOR_STYLE = {
 };
 
 function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
-  const items = typedReport?.findings;
-  if (!Array.isArray(items) || !items.length) return null;
+  const rawItems = typedReport?.findings;
+  const hasTileText = (item) => {
+    const text = item?.customerValueLabel != null && item.customerValueLabel !== ''
+      ? String(item.customerValueLabel)
+      : (item?.value != null ? String(item.value) : '');
+    return !!text.trim();
+  };
+  // all-valueless snapshots hide the whole card, not a header over zero
+  // tiles (codex P3)
+  const items = Array.isArray(rawItems) ? rawItems.filter(hasTileText) : [];
+  if (!items.length) return null;
   return (
     <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-findings">
       <h2>What we found &amp; did</h2>
@@ -2322,7 +2341,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
         {items.map((item) => {
           const text = item.customerValueLabel != null && item.customerValueLabel !== ''
             ? String(item.customerValueLabel)
-            : String(item.value);
+            : (item.value != null ? String(item.value) : '');
           // Chips render ONLY from the snapshot's authoritative mapped
           // parts (multi-select fields persist them at completion) — never
           // from splitting the display text, which would shred customer
@@ -3148,7 +3167,9 @@ function normalizeCoverageStatus(status, actionTypes = []) {
   if (/\b(follow up|follow-up|return visit)\b/.test(raw)) return 'needs_follow_up';
   if (/\b(skip|skipped|weather)\b/.test(raw)) return 'skipped';
   if (/\b(not serviced|not included)\b/.test(raw)) return 'not_serviced';
-  if (/\b(inspect|inspection|no activity found|entry point found)\b/.test(raw)) return 'inspected';
+  // inspect(?:ed|ion)? — bare \binspect\b never matched the plain status
+  // "inspected" (word boundary fails before "ed"), mirroring service-coverage.js
+  if (/\b(inspect(?:ed|ion)?|no activity found|entry point found)\b/.test(raw)) return 'inspected';
   if (/\b(station checked|device checked|checked|monitor)\b/.test(raw)) return 'checked';
   if (/\b(treat|treated|spot treated)\b/.test(raw)) return 'treated';
   return 'completed';
@@ -3396,14 +3417,18 @@ function serviceCoverageDescription(location, { areaName, status, serviceLine })
   const areaKey = coverageAreaKey(areaName);
   if (status === 'inaccessible') return reason ? `Technician could not access this area because ${reason}.` : 'Technician could not access this area.';
   if (status === 'needs_attention') return 'Technician noted an issue that may need attention.';
+  if (status === 'needs_follow_up') return 'Technician flagged this area for follow-up.';
   if (status === 'skipped') return reason ? `Service was skipped because ${reason}.` : 'Service was skipped for this area.';
+  if (status === 'not_serviced') return 'This area was not serviced on this visit.';
+  if (serviceLine === 'termite' && (areaKey === 'station' || status === 'checked')) return 'Station checked.';
+  if (serviceLine === 'termite' && status === 'inspected') return 'Inspection completed.';
+  // mirrors service-coverage.js: inspected/checked never fall through to
+  // the line-specific "…treatment completed" copy
+  if (status === 'inspected' || status === 'checked') return `${areaName} inspected.`;
   if ((serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') && areaKey === 'perimeter') return 'Exterior perimeter service completed.';
   if ((serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') && areaKey === 'entry_points') return 'Entry points inspected and treated.';
   if (serviceLine === 'lawn') return String(location.status || '').toLowerCase().includes('weed') ? 'Weed control applied.' : 'Lawn treatment completed.';
-  if (serviceLine === 'termite' && (areaKey === 'station' || status === 'checked')) return 'Station checked.';
-  if (serviceLine === 'termite' && status === 'inspected') return 'Inspection completed.';
   if (serviceLine === 'tree_shrub') return 'Plant health treatment completed.';
-  if (status === 'inspected') return `${areaName} inspected.`;
   if (status === 'treated') return `${areaName} treatment completed.`;
   return `${areaName} service completed.`;
 }
@@ -3413,6 +3438,8 @@ function serviceCoverageSummary(items = []) {
     if (item.status === 'inspected' || item.status === 'checked') summary.inspectedCount += 1;
     else if (item.status === 'inaccessible') summary.inaccessibleCount += 1;
     else if (item.status === 'needs_attention' || item.status === 'needs_follow_up') summary.needsAttentionCount += 1;
+    // skipped / not-serviced areas are NOT completed work (mirrors service-coverage.js)
+    else if (item.status === 'skipped' || item.status === 'not_serviced') summary.skippedCount += 1;
     else summary.completedCount += 1;
     return summary;
   }, {
@@ -3420,6 +3447,7 @@ function serviceCoverageSummary(items = []) {
     inspectedCount: 0,
     inaccessibleCount: 0,
     needsAttentionCount: 0,
+    skippedCount: 0,
   });
 }
 
@@ -3732,11 +3760,15 @@ function ServiceCoverageMap({
   const projection = useMemo(() => buildCoverageProjection(mapLocations), [mapLocations]);
   const legend = Array.isArray(coverage?.legend) && coverage.legend.length
     ? coverage.legend.map((entry) => {
+      // legend entries built by coverageLegendItems carry TONE keys ('green',
+      // 'orange') in `key` and their own tone/Icon/label; server statusLegend
+      // entries carry STATUS keys. Feeding tone keys to coverageStatusConfig
+      // painted every chip gray (audit 2026-07-16) — trust the entry first.
       const config = coverageStatusConfig(entry.key);
       return {
         key: entry.key,
-        tone: config.tone,
-        Icon: config.Icon,
+        tone: entry.tone || config.tone,
+        Icon: entry.Icon || config.Icon,
         label: entry.label || config.label,
       };
     })
@@ -3820,6 +3852,9 @@ function ServiceCoverageSummary({ summary = {} }) {
     ['Inspected', summary.inspectedCount || 0, 'blue'],
     ['Inaccessible', summary.inaccessibleCount || 0, 'orange'],
     ['Needs Attention', summary.needsAttentionCount || 0, 'orange'],
+    // only when present — the usual four-chip layout is unchanged for
+    // reports with nothing skipped
+    ...(summary.skippedCount ? [['Skipped', summary.skippedCount, 'orange']] : []),
   ];
   return (
     <div className="service-coverage-summary" aria-label="Service coverage summary">
@@ -4890,7 +4925,12 @@ function NotFoundState({ glass = false }) {
 
 function LegacyReport({ data, token, glass = false }) {
   const pdfUrl = `${API_BASE}/reports/${token}`;
-  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // ALL-CAPS records (older customer rows) title-case for display, same rule
+  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
+  const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
+    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
+    : rawFirstName;
   // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
   // sticky header replaces this page-local top bar — rendering both stacked
   // two headers (codex P2, PR #2439). Kept for any standalone render.
@@ -4922,7 +4962,7 @@ function LegacyReport({ data, token, glass = false }) {
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
           </div>
           <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
-            Hey {firstName}, here's your service report.
+            Hi {firstName}, here's your service report!
           </h1>
           {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
         </div>
@@ -5174,7 +5214,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
           display: block;
-          margin: 0 0 16px;
+          /* owner 2026-07-16: the tools card sits almost overlapping the
+             Waves AI strip below it */
+          margin: 0 0 2px;
           padding: 20px 24px;
           background: var(--paper);
           border: 1px solid var(--line);
@@ -7960,6 +8002,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         /* the glass ::before/::after specular layers position against the card */
         html[data-glass-theme] .service-report-v1 [data-glass] { position: relative; }
+        /* the global glass card hover (translateY(-4px) scale(1.016) + 110px
+           shadow) reads as a jarring "pop" on the report's large reading
+           cards (owner-flagged 2026-07-16) — soften to a subtle 1px lift */
+        html[data-glass-theme] .service-report-v1 [data-glass="card"]:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 28px 90px rgba(4, 57, 94, 0.18), 0 5px 18px rgba(4, 57, 94, 0.07),
+            inset 0 1px 0 rgba(255, 255, 255, 0.52), inset 1px 1px 0 rgba(175, 225, 255, 0.32) !important;
+        }
         /* glass layout drops the uppercase eyebrow labels (owner ask 2026-07-05);
            the :has(+ h1) form catches the V2 dashboards' ring-header eyebrows
            ("Overall Lawn Status") without touching their inner list labels */
@@ -7968,6 +8018,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            page — codex P3 on #2567), so match them by class alongside the h1. */
         html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1),
         html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h2.sr-v2-hero-title) { display: none; }
+        /* EXCEPT the hero kicker — owner ruling 2026-07-16: every report leads
+           with "[Report kind] · [the service performed]" above the header,
+           mirroring the project report's kicker. */
+        html[data-glass-theme] .service-report-v1 .service-report-hero .section-eyebrow { display: block; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
@@ -8154,10 +8208,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <>
             {/* marginTop keeps the 20px card rhythm — the V2 timeline card carries
                 only a bottom margin, so without this it sat flush against the
-                Re-enter card above (owner-flagged overlap 2026-07-09). */}
-            <div id="service-timeline" style={{ marginTop: 20 }}>
-              <LawnVisitTimeline timeline={data.visitTimeline || normalizedVisitTimeline} />
-            </div>
+                Re-enter card above (owner-flagged overlap 2026-07-09).
+                Audit 2026-07-16 fixes: (a) the timeline always feeds through
+                normalizeVisitTimeline — the raw server object bypassed the
+                per-event-type config filters; (b) PrintContext rides this
+                mount (the one V2 mount outside its Section wrapper), else PDF
+                capture races the stagger-fade and prints faded/blank rows;
+                (c) the anchor div only renders when the timeline will. */}
+            {normalizedVisitTimeline.enabled && (normalizedVisitTimeline.events || []).length > 0 && (
+              <div id="service-timeline" style={{ marginTop: 20 }}>
+                <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+                  <LawnVisitTimeline timeline={normalizedVisitTimeline} />
+                </LawnPrintContext.Provider>
+              </div>
+            )}
             {mode !== 'live' && (
               <QuickNavigationAndAsk
                 mode={mode}
