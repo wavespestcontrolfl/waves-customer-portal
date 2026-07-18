@@ -17,7 +17,11 @@
  *    cron armed those) are untouched;
  *  - 3 prior attempts = ladder exhausted (mirrors the sweep's
  *    retry_count < 3 window) — no re-arm;
- *  - arming is idempotent (whereNull guards) under webhook redelivery.
+ *  - arming is idempotent (whereNull guards) under webhook redelivery;
+ *  - the invoice-link lookup FAILS CLOSED (Codex #2822 P1): a transient
+ *    DB error rejects the handler (webhook 500s, Stripe redelivers)
+ *    instead of reading as "invoice-less" and arming a ladder that could
+ *    double-collect alongside the invoice/dunning lane.
  */
 jest.mock('stripe', () => jest.fn(() => ({})));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -68,6 +72,7 @@ function resetMockState() {
     processingRow: null,   // payments row matched by { pi, status: 'processing' }
     paymentRow: null,      // payments row matched by { pi } alone
     invoiceRow: null,      // invoices row matched by the PI
+    failInvoiceLookup: false, // invoices .first() throws (fail-closed path)
     priorFailedCount: 0,   // payments count() result (prior attempts)
     customer: { id: 'cust-1', first_name: 'Pat', phone: '+15550001111' },
     recentFailures: 1,     // ach_failure_log count inside the trx
@@ -97,7 +102,10 @@ function mockMakeBuilder(table, sink) {
       if (wantsProcessing) return mockState.processingRow;
       return mockState.paymentRow;
     }
-    if (table === 'invoices') return mockState.invoiceRow;
+    if (table === 'invoices') {
+      if (mockState.failInvoiceLookup) throw new Error('invoice lookup failed');
+      return mockState.invoiceRow;
+    }
     if (table === 'customers') return mockState.customer;
     if (table === 'ach_failure_log') {
       if (b._counted) return { cnt: mockState.recentFailures };
@@ -105,6 +113,11 @@ function mockMakeBuilder(table, sink) {
     }
     return null;
   };
+  // Awaiting the bare builder resolves an empty row list — the real
+  // findConsentedChargeableCard (handleAchFailure's consent-scoped
+  // fallback resolution) lists saved cards this way; no cards here keeps
+  // these tests on the arming contract.
+  b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
   b.update = async (patch) => {
     sink.push({ table, wheres: b._wheres, patch });
     return 1;
@@ -253,6 +266,22 @@ describe('async monthly-autopay bounce arming', () => {
     await armMonthlyAutopayRetryForAsyncFailure(achBouncePI(), processingRow());
 
     expect(armUpdates()).toHaveLength(0);
+  });
+
+  test('invoice-link lookup error fails closed: rejects for redelivery, never arms, no status flip', async () => {
+    const row = processingRow();
+    mockState.processingRow = row;
+    mockState.paymentRow = row;
+    mockState.failInvoiceLookup = true;
+
+    await expect(handlePaymentIntentFailed(achBouncePI(), 'evt_err')).rejects.toThrow('invoice lookup failed');
+
+    // Indeterminate lookup must never arm — the PI might be
+    // invoice-linked, and that lane re-collects via reopen + dunning.
+    expect(armUpdates()).toHaveLength(0);
+    // The failed flip never ran either: the row is still 'processing' on
+    // redelivery, so the retried event re-runs the arming from scratch.
+    expect(mockState.updates.find((u) => u.table === 'payments' && u.patch.status === 'failed')).toBeUndefined();
   });
 
   test('legacy row without a billed_month stamp attributes by payment_date month and still arms', async () => {

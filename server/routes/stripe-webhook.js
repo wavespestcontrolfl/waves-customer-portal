@@ -1738,11 +1738,15 @@ async function armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRo
 
   // Explicit invoice guard (belt over the metadata check): an
   // invoice-linked PI re-collects through invoice reopen + dunning,
-  // never through this ladder.
+  // never through this ladder. The lookup FAILS CLOSED (Codex #2822 P1):
+  // a transient DB error must never read as "invoice-less" — that would
+  // arm this ladder for a PI whose invoice lane also re-collects,
+  // double-collecting the same balance. Let it propagate: this runs
+  // before the failed flip, so the webhook 500s, Stripe redelivers, and
+  // the row is still 'processing' when the retry re-runs the arming.
   const linkedInvoice = await db('invoices')
     .where({ stripe_payment_intent_id: piId })
-    .first()
-    .catch(() => null);
+    .first();
   if (linkedInvoice) {
     logger.info(`[stripe-webhook] PI ${piId} is invoice-linked — invoice lane re-collects, not arming autopay retry`);
     return;
@@ -3095,6 +3099,24 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     const customer = await db('customers').where({ id: payment.customer_id }).first();
     if (!customer) return;
 
+    // Consent-scoped fallback candidate for the >=3-failure escalation
+    // below (Codex #2822 P1): repointing Auto Pay may only select a card
+    // the customer authorized for recurring billing.
+    // findConsentedChargeableCard is the repo's single authority for
+    // that (v8+ consent copy; hold-only sources like estimate_card_hold
+    // excluded; a prior Auto Pay opt-out honored) — selecting by
+    // method_type alone promoted limited-purpose cards (estimate card
+    // holds) into Auto Pay without enrollment consent. Resolved BEFORE
+    // the escalation transaction: consent rows are immutable and
+    // autopay_log is append-only, so the pre-trx read cannot go stale in
+    // a way that matters, and the helper's own db reads never acquire a
+    // second pool connection while the advisory-lock trx holds one.
+    // Lookup errors bubble (the helper's contract) into the outer catch
+    // → webhook 500 → redelivery: a transient DB error fails closed,
+    // never reads as "no consent".
+    const { findConsentedChargeableCard } = require('../services/payment-method-consents');
+    const fallbackCard = await findConsentedChargeableCard(customer.id);
+
     // Insert + count + state-update wrapped in one transaction with a
     // per-customer advisory lock. Two concurrent ACH failures (e.g.,
     // an autopay charge and a one-off invoice failing within seconds
@@ -3163,10 +3185,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
             ach_status: 'suspended',
             ach_failure_count: recentFailures,
           });
-          const cardMethod = await trx('payment_methods')
-            .where({ customer_id: customer.id, method_type: 'card' })
-            .first();
-          if (cardMethod) {
+          if (fallbackCard) {
             // Complete flag flip, mirroring the portal's autopay-method
             // mirror (customer-autopay PUT): the chargeable-method
             // predicate requires BOTH is_default AND autopay_enabled on
@@ -3180,11 +3199,18 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
               .where({ customer_id: customer.id })
               .update({ is_default: false, autopay_enabled: false });
             await trx('payment_methods')
-              .where({ id: cardMethod.id })
+              .where({ id: fallbackCard.id })
               .update({ is_default: true, autopay_enabled: true });
             await trx('customers')
               .where({ id: customer.id })
-              .update({ autopay_payment_method_id: cardMethod.id });
+              .update({ autopay_payment_method_id: fallbackCard.id });
+          } else {
+            // No enrollment-consented card → no fallback: the account is
+            // deliberately left without a chargeable autopay method
+            // rather than charging a card the customer never authorized
+            // for recurring billing; collection's suppression guards
+            // park the balance for manual follow-up.
+            logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} with no enrollment-consented fallback card — leaving autopay without a chargeable method`);
           }
           logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} — 3+ failures in 90 days`);
         } else if (recentFailures >= 2) {
@@ -3220,7 +3246,12 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
       if (customer.phone) {
         let body;
         let messageType;
-        const billingUrl = `${publicPortalUrl()}/billing`;
+        // Deep link into the portal's Billing tab (Codex #2822 P2). The
+        // customer app has no /billing route — tab selection is
+        // query-param driven (readPortalLocation reads ?tab=billing; a
+        // bare path lands on Dashboard) — so this must use the
+        // established /?tab=billing form, same as the billing email CTAs.
+        const billingUrl = `${publicPortalUrl()}/?tab=billing`;
         if (recentFailures >= 3) {
           messageType = 'ach_suspended';
         } else if (recentFailures >= 2) {

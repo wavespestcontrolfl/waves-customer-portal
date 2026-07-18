@@ -10,6 +10,12 @@
  *    the customer-autopay PUT idiom) and customers.autopay_payment_method_id
  *    is repointed — after the flip getChargeableAutopayMethod returns the
  *    card, so collection keeps working;
+ *  - the fallback is CONSENT-SCOPED (Codex #2822 P1): only a card with an
+ *    enrollment-qualifying consent row (v8+, non-hold source, no later
+ *    Auto Pay opt-out — the REAL findConsentedChargeableCard over the db
+ *    mock) is ever promoted; hold-only/legacy-consent cards leave the
+ *    account without a fallback, and a consent-lookup error REJECTS
+ *    (fail closed, webhook redelivers) instead of reading as "no consent";
  *  - notification-side failures (SMS provider, follow-up engine) stay
  *    non-critical: inner-caught, no rethrow;
  *  - replayed events (ach_failure_log event-id dedupe) skip SMS + follow-up
@@ -64,6 +70,9 @@ function resetMockState() {
     achLogRow: null,        // existing ach_failure_log row (replay when set)
     recentFailures: 1,
     paymentMethodRows: [],  // live rows — trx updates are APPLIED to these
+    consentRows: [],        // payment_method_consents rows (real helper reads these)
+    lastAutopayToggle: null, // latest autopay_log enable/disable row
+    failConsentLookup: false, // consent-helper db reads throw (fail-closed path)
     customerUpdates: [],
     trxUpdates: [],
     failCustomerUpdate: false,
@@ -114,18 +123,31 @@ function mockMakeTrxBuilder(table) {
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     const b = { _wheres: [] };
-    ['where', 'whereIn', 'whereNotIn'].forEach((name) => {
+    // whereNull/whereNotNull/orderBy/select are chain-only; the REAL
+    // payment-method-consents helper runs over this mock.
+    ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orderBy', 'select'].forEach((name) => {
       b[name] = (...args) => {
-        if (args.length && typeof args[0] === 'object') b._wheres.push(args[0]);
+        if (args.length && typeof args[0] === 'object' && !Array.isArray(args[0])) b._wheres.push(args[0]);
         return b;
       };
     });
     b.first = async () => {
+      if (table === 'autopay_log' && mockState.failConsentLookup) throw new Error('consent lookup failed');
       if (table === 'payments') return mockState.paymentRow;
       if (table === 'invoices') return mockState.invoiceRow;
       if (table === 'customers') return mockState.customer;
+      if (table === 'autopay_log') return mockState.lastAutopayToggle;
       return null;
     };
+    // Awaiting the bare builder resolves the row LIST — how the real
+    // findConsentedChargeableCard / hasEnrollmentScopedConsent read
+    // saved cards and their consent rows.
+    b.then = (resolve, reject) => (async () => {
+      if (mockState.failConsentLookup) throw new Error('consent lookup failed');
+      if (table === 'payment_methods') return mockState.paymentMethodRows.filter((r) => mockRowMatches(r, b._wheres));
+      if (table === 'payment_method_consents') return mockState.consentRows.filter((r) => mockRowMatches(r, b._wheres));
+      return [];
+    })().then(resolve, reject);
     b.update = async () => 1;
     return b;
   });
@@ -164,6 +186,15 @@ const CARD_ROW = () => ({
   stripe_payment_method_id: 'pm_card_stripe',
   exp_month: 12,
   exp_year: 2031,
+});
+// Enrollment-qualifying consent (v8+ copy, full save-and-charge source).
+// Override version/source to model hold-only or legacy-implicit rows.
+const CARD_CONSENT = (over = {}) => ({
+  customer_id: 'cust-1',
+  stripe_payment_method_id: 'pm_card_stripe',
+  consent_text_version: 'v8_2026-06-08',
+  source: 'pay_page',
+  ...over,
 });
 
 // knex stub over the in-memory payment_methods rows so the REAL
@@ -221,6 +252,7 @@ describe('handleAchFailure — >=3 failures card fallback', () => {
   test('card fallback is complete: flags flipped on both rows, customer repointed, method chargeable', async () => {
     mockState.recentFailures = 3;
     mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT()];
 
     await handleAchFailure(PI, 'R01', 'evt_4');
 
@@ -247,8 +279,13 @@ describe('handleAchFailure — >=3 failures card fallback', () => {
     expect(method.id).toBe('pm-card');
     expect(method.method_type).toBe('card');
 
-    // The suspension SMS lane fired.
-    expect(mockRenderTemplate).toHaveBeenCalledWith('ach_suspended', expect.anything(), expect.anything());
+    // The suspension SMS lane fired, deep-linking the real Billing tab
+    // (query-param routed — the customer app has no /billing path).
+    expect(mockRenderTemplate).toHaveBeenCalledWith(
+      'ach_suspended',
+      expect.objectContaining({ billing_url: 'https://portal.test/?tab=billing' }),
+      expect.anything(),
+    );
   });
 
   test('no card on file: ACH suspended, no flag flip, handler still resolves', async () => {
@@ -279,6 +316,70 @@ describe('handleAchFailure — >=3 failures card fallback', () => {
     expect(mockState.customerUpdates).toContainEqual(
       expect.objectContaining({ ach_status: 'needs_verification' }),
     );
-    expect(mockRenderTemplate).toHaveBeenCalledWith('ach_card_fallback', expect.anything(), expect.anything());
+    expect(mockRenderTemplate).toHaveBeenCalledWith(
+      'ach_card_fallback',
+      expect.objectContaining({ billing_url: 'https://portal.test/?tab=billing' }),
+      expect.anything(),
+    );
+  });
+});
+
+describe('handleAchFailure — consent-scoped fallback (enrollment consent required)', () => {
+  const cardOf = () => mockState.paymentMethodRows.find((r) => r.id === 'pm-card');
+  const bankOf = () => mockState.paymentMethodRows.find((r) => r.id === 'pm-bank');
+
+  test('hold-only consent (estimate_card_hold) never promotes the card into Auto Pay', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT({ source: 'estimate_card_hold' })];
+
+    await expect(handleAchFailure(PI, 'R01', 'evt_7')).resolves.toBeUndefined();
+
+    // No flip anywhere: the hold-only card stays out of Auto Pay and the
+    // account is deliberately left without a fallback.
+    expect(cardOf().is_default).toBe(false);
+    expect(cardOf().autopay_enabled).toBe(false);
+    expect(bankOf().is_default).toBe(true);
+    expect(mockState.customerUpdates).toContainEqual(
+      expect.objectContaining({ ach_status: 'suspended' }),
+    );
+    expect(mockState.customerUpdates.some((p) => p.autopay_payment_method_id)).toBe(false);
+  });
+
+  test('pre-v8 consent copy does not authorize enrollment — no fallback', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT({ consent_text_version: 'v0_implicit_pre_consent' })];
+
+    await handleAchFailure(PI, 'R01', 'evt_8');
+
+    expect(cardOf().autopay_enabled).toBe(false);
+    expect(mockState.customerUpdates.some((p) => p.autopay_payment_method_id)).toBe(false);
+  });
+
+  test('a later Auto Pay opt-out is honored — consented card still not promoted', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT()];
+    mockState.lastAutopayToggle = { event_type: 'autopay_disabled' };
+
+    await handleAchFailure(PI, 'R01', 'evt_9');
+
+    expect(cardOf().autopay_enabled).toBe(false);
+    expect(mockState.customerUpdates.some((p) => p.autopay_payment_method_id)).toBe(false);
+  });
+
+  test('consent lookup error fails closed: rejects for redelivery, no flip, no SMS', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT()];
+    mockState.failConsentLookup = true;
+
+    await expect(handleAchFailure(PI, 'R01', 'evt_10')).rejects.toThrow('consent lookup failed');
+
+    expect(cardOf().autopay_enabled).toBe(false);
+    expect(mockState.customerUpdates).toHaveLength(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
   });
 });
