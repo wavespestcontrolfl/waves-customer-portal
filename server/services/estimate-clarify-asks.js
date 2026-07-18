@@ -120,7 +120,31 @@ async function parkClarifyAsk({
         }).orWhere('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
       })
       .first();
-    if (existing) return { parked: false, skipped: 'open_or_recent_clarify', draftId: existing.id };
+    if (existing) {
+      // Merge, don't discard: a new dead-end can carry items the open draft
+      // doesn't ask yet (service-only draft, then an address-only request)
+      // — dropping them would leave the second question never asked once
+      // the first resolves. Only an unclaimed 'pending' draft is rewritten;
+      // approved/revised are mid-send and a recently-sent one is a cooldown.
+      if (existing.status === 'pending') {
+        let existingFlags = {};
+        try {
+          existingFlags = typeof existing.flags === 'string' ? JSON.parse(existing.flags) : (existing.flags || {});
+        } catch { existingFlags = {}; }
+        const existingMissing = Array.isArray(existingFlags.missing) ? existingFlags.missing : [];
+        const merged = [...new Set([...existingMissing, ...askable])];
+        if (merged.length > existingMissing.length) {
+          await db('message_drafts')
+            .where({ id: existing.id, status: 'pending' })
+            .update({
+              draft_response: composeClarifyBody({ missing: merged, firstName }),
+              flags: JSON.stringify({ ...existingFlags, missing: merged }),
+            });
+          return { parked: false, skipped: 'merged_into_open_clarify', draftId: existing.id };
+        }
+      }
+      return { parked: false, skipped: 'open_or_recent_clarify', draftId: existing.id };
+    }
 
     const body = composeClarifyBody({ missing: askable, firstName });
     let draft;

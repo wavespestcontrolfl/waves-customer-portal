@@ -378,6 +378,11 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
     if (lead && CLOSED_LEAD_STATUSES.has(String(lead.status || ''))) {
       return retire('Clarify draft retired — the linked lead is closed.');
     }
+    if (flags.estimate_id && !estimate) {
+      // Parity with the linked-lead check: deleting the shell estimate is a
+      // deliberate operator action — the clarification is obsolete.
+      return retire('Clarify draft retired — the linked estimate no longer exists.');
+    }
     if (estimate && (estimate.sent_at || estimate.status !== 'draft')) {
       return retire('Clarify draft retired — the linked estimate already moved past draft.');
     }

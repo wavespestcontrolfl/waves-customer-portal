@@ -17,6 +17,10 @@ jest.mock('../models/db', () => {
       whereIn() { return builder; },
       orWhere() { return builder; },
       first: async () => mockState.existingDraft,
+      update: async (payload) => {
+        mockState.updates.push(payload);
+        return 1;
+      },
       insert: (payload) => ({
         returning: async () => {
           if (mockState.insertError) throw mockState.insertError;
@@ -54,7 +58,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { existingDraft: null, inserts: [] };
+  mockState = { existingDraft: null, inserts: [], updates: [] };
   mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
   mockNotifyAdmin.mockResolvedValue({ id: 'bell-1' });
 });
@@ -110,11 +114,44 @@ describe('parkClarifyAsk', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('an open or recently sent clarify on the phone dedupes', async () => {
-    mockState.existingDraft = { id: 'draft-0' };
+  test('an open or recently sent clarify covering the same items dedupes', async () => {
+    mockState.existingDraft = {
+      id: 'draft-0',
+      status: 'pending',
+      flags: JSON.stringify({ missing: ['street_address'] }),
+    };
     const result = await parkClarifyAsk(BASE);
     expect(result).toEqual({ parked: false, skipped: 'open_or_recent_clarify', draftId: 'draft-0' });
     expect(mockState.inserts).toHaveLength(0);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('a new missing item MERGES into the open pending draft instead of being discarded', async () => {
+    // Service-only draft open, address-only request arrives: dropping it
+    // would leave the address never asked once service resolves.
+    mockState.existingDraft = {
+      id: 'draft-0',
+      status: 'pending',
+      flags: JSON.stringify({ missing: ['specific_service'], toPhone: '+19415550142' }),
+    };
+    const result = await parkClarifyAsk(BASE);
+    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0' });
+    expect(mockState.inserts).toHaveLength(0);
+    const update = mockState.updates[0];
+    expect(JSON.parse(update.flags).missing.sort()).toEqual(['specific_service', 'street_address']);
+    expect(update.draft_response).toContain('service address');
+    expect(update.draft_response).toContain('which service');
+  });
+
+  test('claimed (approved) drafts are never rewritten by a merge', async () => {
+    mockState.existingDraft = {
+      id: 'draft-0',
+      status: 'approved',
+      flags: JSON.stringify({ missing: ['specific_service'] }),
+    };
+    const result = await parkClarifyAsk(BASE);
+    expect(result.skipped).toBe('open_or_recent_clarify');
+    expect(mockState.updates).toHaveLength(0);
   });
 
   test('parks a pending estimate_clarify draft with lead-only recipient in flags', async () => {
