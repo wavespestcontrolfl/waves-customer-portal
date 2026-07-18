@@ -598,7 +598,16 @@ const PRO_PRODUCT_TERMS = [
 // Bare word matching P1'd valid prose, so these only count as products when
 // adjacent to a product noun/formulation.
 const AMBIGUOUS_PRODUCT_TERMS = ['phantom', 'premise', 'tandem', 'vendetta'];
-const PRODUCT_NOUN_SRC = '(?:insecticide|termiticide|pesticide|aerosol|foam|gel|bait|granules?|spray|dust|label|sc|wsg|wg|xt)';
+const PRODUCT_NOUN_TERMS = ['insecticide', 'termiticide', 'pesticide', 'aerosol', 'foam', 'gel', 'bait', 'granules?', 'spray', 'dust', 'label', 'sc', 'wsg', 'wg', 'xt'];
+const PRODUCT_NOUN_SRC = `(?:${PRODUCT_NOUN_TERMS.join('|')})`;
+// Round-9 (Codex P2): reading/following the LABEL is the compliance
+// language the writer prompt REQUIRES ("our technicians use the product
+// label to choose safe placement") — never an inventory claim. 'label'
+// stays in PRODUCT_NOUN_SRC for brand adjacency ("the Premise label"),
+// but the inventory branch excludes it, and an inventory noun that is
+// itself modifying "label(s)" ("the product label", "the bait label") is
+// a label reference, not carried inventory.
+const INVENTORY_PRODUCT_NOUN_SRC = `(?:${PRODUCT_NOUN_TERMS.filter((t) => t !== 'label').join('|')})`;
 const ACTIVE_INGREDIENT_TERMS = [
   'indoxacarb', 'fipronil', 'dinotefuran', 'imidacloprid', 'bifenthrin',
   'hydramethylnon', 'abamectin', 'avermectin', 'thiamethoxam', 'clothianidin',
@@ -616,7 +625,7 @@ const INVENTORY_CLAIM_RES = [
   // The product noun must be the OBJECT of the verb (a few determiner/
   // adjective words at most) — "carry more than one bait" blocks, while
   // "use inspection notes to decide where bait should go" stays legal.
-  new RegExp(`\\b(?:our|waves(?:'s?)?)\\s+(?:techs?|technicians?|team|pros?|crews?)\\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\\s+on|rely|relies|prefer|prefers|spray|sprays|trust|trusts)\\b(?:\\s+on)?(?:\\s+[\\w'’-]+){0,3}?\\s+(?:${PRODUCT_NOUN_SRC}|baits?|gels?|products?|formulations?|chemicals?)\\b`, 'i'),
+  new RegExp(`\\b(?:our|waves(?:'s?)?)\\s+(?:techs?|technicians?|team|pros?|crews?)\\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\\s+on|rely|relies|prefer|prefers|spray|sprays|trust|trusts)\\b(?:\\s+on)?(?:\\s+[\\w'’-]+){0,3}?\\s+(?:${INVENTORY_PRODUCT_NOUN_SRC}|baits?|gels?|products?|formulations?|chemicals?)\\b(?!\\s+labels?\\b)`, 'i'),
   // Anaphoric inventory claims — "what our techs carry", "which is what our
   // techs use" — always refer back to a just-named product; keep unconditional.
   /\bwhat\s+(?:our|the)\s+(?:techs?|technicians?|team|pros?)\s+(?:carry|carries|use|uses)\b/i,
@@ -629,7 +638,9 @@ const INVENTORY_CLAIM_RES = [
 // Advion", "grab some Advion", "which is what our techs carry"). Active
 // ingredients get no such carve-out — mechanism-level specifics are never in
 // the facts bank and homeowners don't search them.
-const PRODUCT_CONTEXT_VERBS_SRC = "(?:use[sd]?|using|appl(?:y|ies|ied|ying)|plac(?:e[sd]?|ing)|put(?:s|ting)?\\s+(?:out|down)|grabs?|bu(?:y|ys|ying)|pick(?:s|ing)?\\s+up|recommend\\w*|carr(?:y|ies|ying)|reach(?:es)?\\s+for|lean[s]?\\s+on|trusts?|sprays?|spraying|treats?\\s+with)";
+// choose/select forms (round 9): "Choose Advion for ants" / "select
+// Termidor along the slab" are recommendations by different wording.
+const PRODUCT_CONTEXT_VERBS_SRC = "(?:use[sd]?|using|appl(?:y|ies|ied|ying)|plac(?:e[sd]?|ing)|put(?:s|ting)?\\s+(?:out|down)|grabs?|bu(?:y|ys|ying)|pick(?:s|ing)?\\s+up|recommend\\w*|carr(?:y|ies|ying)|reach(?:es)?\\s+for|lean[s]?\\s+on|trusts?|sprays?|spraying|treats?\\s+with|choos(?:e|es|ing)|chose(?:n)?|select(?:s|ed|ing)?)";
 
 function productClaimFinding(text) {
   const s = String(text || '');
@@ -752,6 +763,17 @@ const NEGATED_PROMISE_CONTEXT_RE = /(?:no\s+(?:honest\s+)?(?:company|one|body|pr
 // us" (hype, "Nothing" deliberately absent) still flag.
 const DIRECT_NEGATION_BEFORE_RE = /(?:\bnot|\bnever|\bno|\bcannot|\bwon['’]?t|\bcan['’]?t|\bdon['’]?t|\bdoesn['’]?t|\bdidn['’]?t|\bisn['’]?t|\baren['’]?t|\bwasn['’]?t|\bweren['’]?t|\bcouldn['’]?t|\bwouldn['’]?t|\bshouldn['’]?t|\bmustn['’]?t)\s+$/i;
 
+// Round-9 (Codex P2): subject-level negation — "No service prevents all
+// ants", "No treatment eliminates ants forever" — is the same honest-
+// disclaimer class: a negated SUBJECT ("no" + up to three subject words)
+// governing a verb-anchored match that starts right at the promise verb.
+// The word chain must be CONTIGUOUS, so punctuation breaks government
+// ("With no contract, our treatment eliminates ants for good" still
+// flags), "no matter …" is excluded ("No matter what our treatment
+// prevents…" is a promise), and "Nothing stops ants like us" promotional
+// inversions stay flaggable ("Nothing" is deliberately not "no <subject>").
+const NEGATED_SUBJECT_BEFORE_RE = /\bno\s+(?!matter\b)(?:[\w'’]+\s+){1,3}$/i;
+
 function preventionPromiseFinding(text) {
   const s = String(text || '');
   for (const src of PREVENTION_PROMISE_SRCS) {
@@ -772,8 +794,9 @@ function preventionPromiseFinding(text) {
       const sentenceBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n'));
       const sameSentence = sentenceBreak >= 0 ? before.slice(sentenceBreak + 1) : before;
       // Directly negated claim ("will not prevent ants from returning",
-      // "cannot prevent every ant") — a disclaimer, exempt (round 8).
-      if (DIRECT_NEGATION_BEFORE_RE.test(sameSentence)) {
+      // "cannot prevent every ant" — round 8) or negated-subject disclaimer
+      // ("No service prevents all ants" — round 9): exempt.
+      if (DIRECT_NEGATION_BEFORE_RE.test(sameSentence) || NEGATED_SUBJECT_BEFORE_RE.test(sameSentence)) {
         if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
         continue;
       }

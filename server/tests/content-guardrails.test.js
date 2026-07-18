@@ -1028,3 +1028,73 @@ describe('prevention-promise guard — round-8 hardening (directly negated claim
     expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
   });
 });
+
+// Round 9 (Codex P2 x3): label-reading compliance copy, choice-verb product
+// recommendations, and subject-negated disclaimers.
+describe('product/prevention guards — round-9 hardening (Codex findings)', () => {
+  test('label-following compliance copy is NOT an inventory claim', () => {
+    for (const body of [
+      'Our technicians use the product label to choose safe placement.',
+      'Our techs use the bait label to set re-entry expectations.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+    }
+  });
+
+  test('real inventory claims still flag after the label carve-out', () => {
+    for (const body of [
+      'Our techs carry more than one bait on every ant call.',
+      'Our technicians use a professional gel in wall voids.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+    }
+  });
+
+  test('ambiguous-brand adjacency keeps "label" ("the Premise label" still flags)', () => {
+    const r = guardrails.evaluate({ body: 'Always read the Premise label before treating.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('choice-verb recommendations of professional products flag', () => {
+    for (const body of [
+      'Choose Advion for ants.',
+      'For sugar ants, select Termidor along the slab.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM' && f.severity === 'P1')).toBe(true);
+    }
+  });
+
+  test('choice verbs without a professional product stay legal', () => {
+    const r = guardrails.evaluate({ body: 'Choose a licensed professional instead of DIY sprays, and select a service cadence that fits your home.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('subject-negated prevention disclaimers are exempt', () => {
+    for (const body of [
+      'No service prevents all ants.',
+      'No treatment eliminates ants forever.',
+      'No single quarterly plan prevents every infestation.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('subject negation does NOT leak past punctuation or "no matter"', () => {
+    for (const body of [
+      'With no contract, our treatment eliminates ants for good.',
+      'No matter what, our treatment gets rid of the ants for good.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+    }
+  });
+
+  test('promotional inversions still flag after the subject-negation carve-out (round-8 pin)', () => {
+    const r = guardrails.evaluate({ body: 'Nothing stops ants from coming back like our quarterly program.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+});

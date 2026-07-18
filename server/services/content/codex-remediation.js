@@ -177,9 +177,11 @@ function findingSeverity(body) {
 /**
  * p2OnlyMergeEligible(prNumber, headSha) → { eligible, p2Count?, rounds?, reason? }
  * eligible=true means: Codex HAS reviewed this exact head (findings tied to
- * it exist), every finding is a P2, and codex_remediation_state shows >= 1
- * remediation round already spent on this PR. Callers still run their own
- * merge guards (deploy-green, hub-only, sha-pinned merge, queue re-checks).
+ * it exist), every current-head finding is a P2, and codex_remediation_state
+ * records BOTH >= 1 remediation round spent AND that the current head IS the
+ * remediation commit this loop last pushed (last_push_sha). Callers still
+ * run their own merge guards (deploy-green, hub-only, sha-pinned merge,
+ * queue re-checks).
  */
 async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   if (!p2MergeEnabled()) return { eligible: false, reason: 'disabled (AUTONOMOUS_CODEX_P2_MERGE=false)' };
@@ -188,17 +190,37 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   const gh = deps.gh || ghDefault;
   const state = await getState(db, prNumber);
   if ((state.rounds || 0) < 1) return { eligible: false, reason: 'no remediation round spent yet' };
+  // Round-9 (Codex P2): rounds counts ATTEMPTS — the no-valid-fix retry
+  // path increments it with nothing pushed, so an outage/truncation streak
+  // must not read as "remediation improved the PR". Improvement means the
+  // head under review IS a remediation commit this loop pushed: require the
+  // SHA the successful push path records (last_push_sha — failed attempts
+  // never write it) to EQUAL the current head. Presence alone is not
+  // enough — a park re-arm resets rounds but keeps last_push_sha as
+  // history, so a stale SHA from a pre-park era plus a failed-attempt
+  // round would otherwise open the bar on a head remediation never
+  // touched.
+  const lastPush = String(state.last_push_sha || '').trim().toLowerCase();
+  if (!lastPush) {
+    return { eligible: false, reason: 'no pushed remediation commit recorded (spent rounds may be failed attempts)' };
+  }
+  if (lastPush !== String(headSha).trim().toLowerCase()) {
+    return { eligible: false, reason: `current head ${shortSha(headSha)} is not the last pushed remediation commit ${shortSha(state.last_push_sha)}` };
+  }
   const reviewComments = await gh.listPrReviewComments(prNumber);
-  let findings = parseCodexFindings(reviewComments, headSha);
+  const findings = parseCodexFindings(reviewComments, headSha);
   // No findings tied to this head = either review still pending or truly
   // clean — both are the normal path's business, never this bar's.
   if (findings.length === 0) return { eligible: false, reason: 'no findings for current head' };
   // A review request can be RE-POSTED for the SAME head (usage-limit bounce
-  // recovery). Findings from the PREVIOUS response must not make the PR
-  // mergeable while the newer review is still pending — mirror
-  // assertCodexReviewClear's request-timestamp posture: only findings
-  // POSTED AFTER the latest current-head request count as its response, and
-  // a request with no response yet is a pending review, not an eligible one.
+  // recovery). Mirror assertCodexReviewClear's request-timestamp posture:
+  // only findings POSTED AFTER the latest current-head request count as its
+  // RESPONSE, and a request with no response yet is a pending review, not
+  // an eligible one. Round-9 (Codex P1): that response filter gates ONLY
+  // the pending check — severity blocking below considers EVERY
+  // current-head finding, because the head hasn't changed: a P0/P1 posted
+  // before a same-head re-request is still an unresolved blocker even when
+  // the re-review adds only P2s or doesn't repeat old comments.
   const h = shortSha(headSha);
   const issueComments = await gh.listIssueComments(prNumber);
   const latestRequestAt = (Array.isArray(issueComments) ? issueComments : [])
@@ -209,8 +231,8 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
     // STRICTLY after: GitHub timestamps have second precision, so a finding
     // stamped in the same second as the re-request is ambiguous — it could
     // be the previous review's output. Fail closed (pending) on ties.
-    findings = findings.filter((f) => (Date.parse(f.created_at || 0) || 0) > latestRequestAt);
-    if (findings.length === 0) {
+    const response = findings.filter((f) => (Date.parse(f.created_at || 0) || 0) > latestRequestAt);
+    if (response.length === 0) {
       return { eligible: false, reason: 'latest same-head review request has no response yet (pending)' };
     }
   }
@@ -1288,7 +1310,10 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     }
   }
 
-  await saveState(db, prNumber, { rounds: round, last_findings: JSON.stringify(findings) });
+  // last_push_sha is the P2-only merge bar's proof that a remediation round
+  // actually PUSHED (round 9) — only this success path may write it; the
+  // no-valid-fix retry path spends rounds without it.
+  await saveState(db, prNumber, { rounds: round, last_push_sha: newHead || null, last_findings: JSON.stringify(findings) });
   await gh.createIssueComment(prNumber, buildReviewRequestBody(newHead));
 
   logger.info(`[codex-remediation] round ${round} pushed for PR #${prNumber}: ${findings.length} finding(s) → ${shortSha(newHead)}`);

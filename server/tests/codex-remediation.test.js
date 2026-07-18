@@ -179,6 +179,9 @@ describe('runRemediationForPr', () => {
     expect(gh._calls.comments[0].body).toContain('newcommit999aaa');
     const st = db._tables.codex_remediation_state[0];
     expect(st.rounds).toBe(1); expect(st.status).toBe('remediating');
+    // Pushed-round proof for the P2-only merge bar (round 9): only the
+    // success path records the pushed commit SHA.
+    expect(st.last_push_sha).toBe('newcommit999aaa');
   });
 
   test('.mdx finding path is edited (not the slug .md fallback)', async () => {
@@ -603,6 +606,9 @@ describe('round-4 hardening', () => {
     const r1 = await runRemediationForPr(CTX, { db: db1, gh: makeGh(), callAnthropic: nullCall, validateFixedBlogFile: PASS });
     expect(r1.skipped).toBe(true); expect(r1.reason).toMatch(/will retry/);
     expect(db1._tables.codex_remediation_state[0].rounds).toBe(1);
+    // The failed attempt spends a round but must NOT record a pushed
+    // remediation SHA — the P2-only merge bar keys off it (round 9).
+    expect(db1._tables.codex_remediation_state[0].last_push_sha).toBeUndefined();
 
     const db2 = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS - 1, status: 'remediating' }] });
     const r2 = await runRemediationForPr(CTX, { db: db2, gh: makeGh(), callAnthropic: nullCall, validateFixedBlogFile: PASS });
@@ -1767,7 +1773,7 @@ describe('p2OnlyMergeEligible (P2-only merge bar)', () => {
   const p1Body = (title) => `**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  ${title}**\n\ndetail`;
 
   test('all-P2 findings for the head + >=1 round spent + submitted review → eligible', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({
       reviewComments: [finding({ body: p2Body('a') }), finding({ body: p2Body('b') })],
       reviews: [codexReview()],
@@ -1779,7 +1785,7 @@ describe('p2OnlyMergeEligible (P2-only merge bar)', () => {
   });
 
   test('any P1 among the findings blocks', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 2, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 2, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') }), finding({ body: p1Body('b') })] });
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
     expect(r.eligible).toBe(false);
@@ -1787,7 +1793,7 @@ describe('p2OnlyMergeEligible (P2-only merge bar)', () => {
   });
 
   test('an unbadged finding fails CLOSED as P1', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({ reviewComments: [finding({ body: 'Fix this broken link please.' })] });
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
     expect(r.eligible).toBe(false);
@@ -1802,7 +1808,7 @@ describe('p2OnlyMergeEligible (P2-only merge bar)', () => {
   });
 
   test('no findings tied to the current head → not eligible (pending/clean is the normal path)', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({ reviewComments: [finding({ body: p2Body('stale'), commit_id: 'oldhead000' })] });
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
     expect(r.eligible).toBe(false);
@@ -1811,7 +1817,7 @@ describe('p2OnlyMergeEligible (P2-only merge bar)', () => {
 
   test('AUTONOMOUS_CODEX_P2_MERGE=false disables the bar', async () => {
     process.env.AUTONOMOUS_CODEX_P2_MERGE = 'false';
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })] });
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
     expect(r.eligible).toBe(false);
@@ -1826,7 +1832,7 @@ describe('p2OnlyMergeEligible — same-head re-request handling (Codex round-2 P
   });
 
   test('findings older than the latest same-head re-request do NOT qualify (pending review)', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({
       reviewComments: [p2At('old finding', '2026-07-17T01:00:00Z')],
       issueComments: [
@@ -1841,7 +1847,7 @@ describe('p2OnlyMergeEligible — same-head re-request handling (Codex round-2 P
   });
 
   test('findings posted after the latest same-head request + completed round qualify', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({
       reviewComments: [p2At('fresh finding', '2026-07-17T02:10:00Z')],
       issueComments: [{ body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' }],
@@ -1853,7 +1859,7 @@ describe('p2OnlyMergeEligible — same-head re-request handling (Codex round-2 P
   });
 
   test('undated findings fail closed when a request timestamp exists', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({
       reviewComments: [p2At('undated finding', null)],
       issueComments: [{ body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' }],
@@ -1865,7 +1871,7 @@ describe('p2OnlyMergeEligible — same-head re-request handling (Codex round-2 P
 
 describe('p2OnlyMergeEligible — timestamp-tie fail-closed (Codex round-3 P2)', () => {
   test('a finding stamped in the SAME second as the re-request does not qualify', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
     const gh = makeGh({
       reviewComments: [finding({ body: '**<sub><sub>![P2 Badge](x)</sub></sub>  tie**\n\nd', created_at: '2026-07-17T02:00:00Z' })],
       issueComments: [{ body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' }],
@@ -1887,7 +1893,7 @@ describe('p2OnlyMergeEligible — round-completion evidence (Codex round-8 P1)',
     created_at,
   });
   const REQUEST = { body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' };
-  const baseDb = () => makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating' }] });
+  const baseDb = () => makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
 
   test('a lone post-request P2 with NO submitted review or summary is still pending — not eligible', async () => {
     const gh = makeGh({
@@ -1982,5 +1988,81 @@ describe('p2OnlyMergeEligible — round-completion evidence (Codex round-8 P1)',
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: baseDb(), gh });
     expect(r.eligible).toBe(false);
     expect(r.reason).toMatch(/review lookup unavailable/);
+  });
+});
+
+// Round-9 hardening:
+//   P1 — a P0/P1 tied to the CURRENT head posted BEFORE a same-head
+//        re-request is still an unresolved blocker; the request-timestamp
+//        filter may only gate pending detection, never severity blocking.
+//   P2 — rounds also counts failed attempts (no push); the bar additionally
+//        requires the recorded SHA of an actually-pushed remediation commit.
+describe('p2OnlyMergeEligible — round-9 hardening (Codex findings)', () => {
+  const sevAt = (sev, title, created_at) => finding({
+    body: `**<sub><sub>![${sev} Badge](https://img.shields.io/badge/${sev}-x?style=flat)</sub></sub>  ${title}**\n\ndetail`,
+    created_at,
+  });
+  const REQUESTS = [
+    { body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T00:50:00Z' },
+    // usage-limit bounce → operator re-requested for the SAME head
+    { body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' },
+  ];
+  const armedDb = () => makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
+
+  test('a pre-re-request same-head P1 still blocks even when the re-review only adds P2s', async () => {
+    const gh = makeGh({
+      reviewComments: [
+        sevAt('P1', 'older same-head blocker', '2026-07-17T01:00:00Z'),
+        sevAt('P2', 'fresh nit', '2026-07-17T02:10:00Z'),
+      ],
+      issueComments: REQUESTS,
+      reviews: [codexReview({ submitted_at: '2026-07-17T02:11:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: armedDb(), gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/blocking findings/);
+  });
+
+  test('pre-re-request same-head P2s stay counted (all-P2 head remains eligible)', async () => {
+    const gh = makeGh({
+      reviewComments: [
+        sevAt('P2', 'older nit', '2026-07-17T01:00:00Z'),
+        sevAt('P2', 'fresh nit', '2026-07-17T02:10:00Z'),
+      ],
+      issueComments: REQUESTS,
+      reviews: [codexReview({ submitted_at: '2026-07-17T02:11:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: armedDb(), gh });
+    expect(r.eligible).toBe(true);
+    expect(r.p2Count).toBe(2);
+  });
+
+  test('rounds spent WITHOUT a recorded pushed remediation → not eligible (failed-attempt rounds)', async () => {
+    // The no-valid-fix retry path increments rounds but never pushes —
+    // last_push_sha stays unset and the bar must stay closed.
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 2, status: 'remediating' }] });
+    const gh = makeGh({
+      reviewComments: [sevAt('P2', 'nit', '2026-07-17T02:10:00Z')],
+      issueComments: [REQUESTS[1]],
+      reviews: [codexReview({ submitted_at: '2026-07-17T02:11:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/no pushed remediation commit/);
+  });
+
+  test('a STALE last_push_sha (≠ current head) does not vouch for the head — not eligible', async () => {
+    // Park re-arm resets rounds but keeps last_push_sha as history. A
+    // pre-park push plus a failed-attempt round on the NEW head must not
+    // open the bar: the head under review must BE the recorded push.
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: 'stalepush000' }] });
+    const gh = makeGh({
+      reviewComments: [sevAt('P2', 'nit', '2026-07-17T02:10:00Z')],
+      issueComments: [REQUESTS[1]],
+      reviews: [codexReview({ submitted_at: '2026-07-17T02:11:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/not the last pushed remediation commit/);
   });
 });
