@@ -1150,8 +1150,6 @@ function RainOutSheet({ service, onClose, onDone }) {
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
   const selected = allOptions.find((opt) => keyOf(opt) === selectedKey) || null;
-  // The SMS offers the best *other-day* option as the reply-2 alternate.
-  const alt = selected ? (options?.days || []).find((opt) => keyOf(opt) !== selectedKey) || null : null;
 
   const handleCommit = async () => {
     if (!selected || busy) return;
@@ -1170,7 +1168,6 @@ function RainOutSheet({ service, onClose, onDone }) {
           reasonCode: reason,
           scope,
           target,
-          alt: alt ? { date: alt.date, window: alt.window } : null,
           notifyCustomer: notify,
         }),
       });
@@ -1301,7 +1298,7 @@ function RainOutSheet({ service, onClose, onDone }) {
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: DARK.text, marginBottom: 16, cursor: 'pointer' }}>
               <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
-              Text customer{scope === 'route' ? 's' : ''} (reply 1 confirms, 2 switches{alt ? ` to ${alt.display}` : ''}; includes local forecast link)
+              Text customer{scope === 'route' ? 's' : ''} (reply 1 confirms; includes reschedule + local forecast links)
             </label>
 
             <button

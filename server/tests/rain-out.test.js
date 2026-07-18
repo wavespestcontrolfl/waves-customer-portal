@@ -14,12 +14,19 @@ jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlook: jest.fn().mockResolvedValue(null),
   forecastLinkForZip: jest.fn((zip) => (zip ? `https://forecast.weather.gov/zipcity.php?inputstring=${zip}` : null)),
 }));
+jest.mock('../services/reschedule-link', () => ({
+  buildRescheduleLink: jest.fn().mockResolvedValue({
+    url: 'https://waves.test/r/tok123',
+    line: 'Need a different time? Reschedule online: https://waves.test/r/tok123\n\n',
+  }),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { getDailyRainOutlook } = require('../services/weather-forecast');
+const { buildRescheduleLink } = require('../services/reschedule-link');
 const RainOut = require('../services/rain-out');
 
 const SERVICE = {
@@ -104,7 +111,7 @@ describe('rain-out service', () => {
       return { logUpdate };
     }
 
-    test('books the tight 1-hour slot but texts the 2-hour arrival window, passes allowLive, alt + forecast link', async () => {
+    test('books the tight 1-hour slot but texts the 2-hour arrival window, passes allowLive, reschedule + forecast links', async () => {
       const { logUpdate } = wireSingle();
 
       const result = await RainOut.commit({
@@ -114,7 +121,6 @@ describe('rain-out service', () => {
         scope: 'job',
         // On-the-hour 1-hour internal slots (what the dispatcher picked).
         target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
-        alt: { date: '2026-06-12', window: { start: '08:00', end: '09:00' } },
         notifyCustomer: true,
       });
 
@@ -132,8 +138,12 @@ describe('rain-out service', () => {
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.weather_phrase).toBe('heavy rain');
       expect(vars.new_option).toContain('1:00 PM - 3:00 PM');
-      expect(vars.alt_clause).toContain('Reply 1 to confirm, or 2 to switch');
-      expect(vars.alt_clause).toContain('8:00 AM - 10:00 AM');
+      // No more reply-2 alternate — the anchor gets reply-1 confirm plus the
+      // same tokenized self-serve link the 72h/24h reminders send.
+      expect(vars.alt_clause).toContain('Reply 1 to confirm.');
+      expect(vars.alt_clause).toContain('Reschedule online: https://waves.test/r/tok123');
+      expect(vars.alt_clause).not.toContain('switch');
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1' });
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
 
@@ -147,10 +157,25 @@ describe('rain-out service', () => {
         date: '2026-06-11',
         window: { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' },
       });
-      expect(notes.option2).toEqual({
-        date: '2026-06-12',
-        window: { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
+      // option2 is gone — other times self-serve via the reschedule link.
+      expect(notes.option2).toBeUndefined();
+    });
+
+    test('no reschedule token falls back to a reply-to-adjust clause', async () => {
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '' });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
       });
+
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.alt_clause).toBe(' Reply 1 to confirm. Need a different time? Reply to this message.');
     });
 
     test('same-day route push shifts siblings by the anchor window delta', async () => {
@@ -174,7 +199,6 @@ describe('rain-out service', () => {
         reasonCode: 'weather_rain',
         scope: 'route',
         target: { date: '2026-06-11', window: { start: '13:00', end: '15:00' } },
-        alt: { date: '2026-06-12', window: { start: '08:00', end: '10:00' } },
         notifyCustomer: true,
       });
 
@@ -333,7 +357,7 @@ describe('rain-out service', () => {
       return { routeChain };
     }
 
-    test('day move shifts all stops to the new date keeping each window; anchor gets the alt', async () => {
+    test('day move shifts all stops to the new date keeping each window; anchor gets reply-1 confirm', async () => {
       wireRoute();
 
       const result = await RainOut.commit({
@@ -342,7 +366,6 @@ describe('rain-out service', () => {
         reasonCode: 'weather_rain',
         scope: 'route',
         target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
-        alt: { date: '2026-06-13', window: { start: '09:00', end: '11:00' } },
         notifyCustomer: true,
       });
 
@@ -357,11 +380,13 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
         'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech', { allowLive: true });
 
-      // Anchor SMS carries reply-2 alt; sibling SMS does not; no-phone
+      // Anchor SMS carries reply-1 confirm; sibling SMS gets the self-serve
+      // link only (its reschedule_log has no option1 attached); no-phone
       // sibling skipped.
       expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
       expect(renderSmsTemplate.mock.calls[0][1].alt_clause).toContain('Reply 1 to confirm');
-      expect(renderSmsTemplate.mock.calls[1][1].alt_clause).toContain('Reply to this message');
+      expect(renderSmsTemplate.mock.calls[1][1].alt_clause).not.toContain('Reply 1');
+      expect(renderSmsTemplate.mock.calls[1][1].alt_clause).toContain('Reschedule online:');
       const noPhone = result.results.find((r) => r.id === 'svc-3');
       expect(noPhone.smsSent).toBe(false);
       expect(noPhone.smsReason).toBe('no_phone');

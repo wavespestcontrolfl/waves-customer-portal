@@ -309,7 +309,7 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
 
 // POST /api/tech/services/:id/rain-out
 // body: { reasonCode, scope: 'job'|'route', target: { date, window?, deltaMinutes? },
-//         alt?: { date, window }, notifyCustomer? }
+//         notifyCustomer? }
 router.post('/:id/rain-out', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services')
@@ -330,7 +330,7 @@ router.post('/:id/rain-out', async (req, res, next) => {
       });
     }
 
-    const { reasonCode, scope, target, alt, notifyCustomer } = req.body || {};
+    const { reasonCode, scope, target, notifyCustomer } = req.body || {};
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
       return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
     }
@@ -342,7 +342,6 @@ router.post('/:id/rain-out', async (req, res, next) => {
       reasonCode,
       scope: scope === 'route' ? 'route' : 'job',
       target,
-      alt,
       notifyCustomer: notifyCustomer !== false,
     });
 
