@@ -2727,12 +2727,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
+          // Booster rows are is_recurring:false — completion treats them as
+          // one-off visits that BILL their own price, never as dues-covered
+          // plan visits, so the member-series stripping must not touch them:
+          // stripping left base-only boosters unpriced, completing unbilled
+          // (or falling back to the dues rate) instead of invoicing the
+          // booster's real price (Codex r6).
           if (cols.estimated_price) {
             if (zeroCallbackPrice) boosterData.estimated_price = 0;
-            else if (memberSeriesCovered) {
-              const addonStamp = addonOnlyTotal(boosterAddonLines);
-              if (addonStamp > 0) boosterData.estimated_price = addonStamp;
-            } else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
+            else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
           }
           if (cols.primary_line_price && pricing.primaryBase != null) boosterData.primary_line_price = pricing.primaryBase;
           if (cols.urgency) boosterData.urgency = urgency || 'routine';
@@ -2752,7 +2755,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
           if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) boosterData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
           if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-          if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = createInvoiceStamp;
+          // Same reasoning: boosters keep the modal's invoice intent even on
+          // a covered member series (identical to createInvoiceStamp for
+          // every non-member booking).
+          if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = createInvoiceEffective;
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
 
           // Mirror only add-ons due on this booster date; one-time and

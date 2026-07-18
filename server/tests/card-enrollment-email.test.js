@@ -253,6 +253,16 @@ describe('charge timing line by billing mode (Codex r3)', () => {
     expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'annual_prepay', monthly_rate: '89.00' }))
       .toBe('Your card is charged for your service invoices as agreed, and you get a receipt every time.');
   });
+
+  test('explicit per-visit accounts get the per-service line even with a lingering monthly rate (Codex r6)', async () => {
+    expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'per_visit', monthly_rate: '89.00' }))
+      .toBe("After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.");
+  });
+
+  test('explicit one-time accounts get the per-service line even with a lingering monthly rate (Codex r6)', async () => {
+    expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'one_time', monthly_rate: '89.00' }))
+      .toBe("After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.");
+  });
 });
 
 describe('card-hold confirmation (gate on)', () => {

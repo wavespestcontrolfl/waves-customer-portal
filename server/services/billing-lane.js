@@ -62,6 +62,11 @@ function resolveBillingLane(customer) {
 // dues-covered no matter what tier/rate fields linger on the row. An explicit
 // 'monthly_membership' stands in for the legacy tier requirement (rate and
 // active autopay are still required — no dues collected means no coverage).
+// The tier requirement uses the same sentinel filter as resolveBillingLane
+// (Codex r6): a 'Commercial'/'One-Time' tier must not dues-cover a visit the
+// lane resolver classifies per_visit — one classifier everywhere. Prod
+// verified 2026-07-17: zero NULL-mode customers carry a sentinel tier with a
+// positive rate, so this alignment changes no live customer's billing.
 // Dues cover a RECURRING plan visit even when the booking flow stamped a
 // per-visit estimated_price on the row — cadence generators stamp display
 // prices routinely, and honoring the stamp double-billed membership
@@ -86,7 +91,7 @@ function membershipDuesCoverVisit({
     && !annualPrepayBilling
     && !!customerAutopayActive
     && (!hasVisitPrice || !!isRecurring)
-    && (explicitMember || !!waveguardTier)
+    && (explicitMember || isMembershipTier(waveguardTier))
     && Number(monthlyRate || 0) > 0;
 }
 

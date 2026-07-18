@@ -116,6 +116,15 @@ describe('dashboard billing honesty', () => {
 
     expect(await screen.findByText('Monthly rate')).toBeInTheDocument();
   });
+
+  it('labels explicit per-visit customers by billing mode, not monthly rate (Codex r6)', async () => {
+    api.getAutopay.mockResolvedValue({ state: 'disabled', billing_mode: 'per_visit' });
+
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+
+    expect(await screen.findByText('Per visit')).toBeInTheDocument();
+    expect(screen.queryByText('Monthly rate')).not.toBeInTheDocument();
+  });
 });
 
 describe('referral reward honesty', () => {

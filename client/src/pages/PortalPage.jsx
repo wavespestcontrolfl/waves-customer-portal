@@ -2000,7 +2000,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   }
                 : billingMode === 'per_application'
                   ? { label: 'Billing', value: 'Per application', sub: tierDiscountSub }
-                  : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
+                  : billingMode === 'per_visit' || billingMode === 'one_time'
+                    ? { label: 'Billing', value: 'Per visit', sub: tierDiscountSub }
+                    : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
               {
                 label: 'Services YTD',
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
@@ -4214,7 +4216,10 @@ function BillingTab({ customer }) {
   // Annual prepay is term-covered — no monthly charge runs; the saved method
   // is used at renewal.
   const annualPrepayBilling = autopay?.billing_mode === 'annual_prepay';
-  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
+  // Explicit per-visit lanes invoice each completed service — the monthly
+  // cron skips them, so monthly projection copy is wrong here too (Codex r6).
+  const perVisitBilling = autopay?.billing_mode === 'per_visit' || autopay?.billing_mode === 'one_time';
+  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling || perVisitBilling;
   const amountDue = Number(autopayState === 'active'
     ? (autopay?.next_charge_amount ?? (nonMonthlyBilling ? 0 : autopay?.monthly_rate) ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
@@ -4286,14 +4291,16 @@ function BillingTab({ customer }) {
         ? 'Auto Pay is on — charged per application'
         : annualPrepayBilling
           ? 'Auto Pay is on — plan prepaid'
-          : autopayMonthlyUnpriced
+          : perVisitBilling
+            ? 'Auto Pay is on — charged per service visit'
+            : autopayMonthlyUnpriced
             ? 'Auto Pay is on — rate being finalized'
             : daysUntilDue === 0
               ? 'Auto Pay is processing today'
               : dueDate
                 ? `Next charge ${money(amountDue)} on ${dueDateLabel}`
                 : `Next charge ${money(amountDue)}`,
-      detail: perApplicationBilling
+      detail: perApplicationBilling || perVisitBilling
         ? 'Your saved payment method is charged for each service visit after it is completed.'
         : annualPrepayBilling
           ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
@@ -4533,13 +4540,13 @@ function BillingTab({ customer }) {
           {[
             // No scheduled date → "Next Not scheduled" reads broken; show a
             // neutral sub instead (eyeball 07-12 finding 3).
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Charged per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.
             {
-              label: perApplicationBilling ? 'Plan billing' : annualPrepayBilling ? 'Plan billing' : 'Monthly plan',
-              value: perApplicationBilling ? 'Per application' : annualPrepayBilling ? 'Prepaid' : money(monthlyRate),
+              label: perApplicationBilling || annualPrepayBilling || perVisitBilling ? 'Plan billing' : 'Monthly plan',
+              value: perApplicationBilling ? 'Per application' : annualPrepayBilling ? 'Prepaid' : perVisitBilling ? 'Per visit' : money(monthlyRate),
               sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan'),
             },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
@@ -4620,7 +4627,7 @@ function BillingTab({ customer }) {
             fontWeight: 850,
             color: B.glassNavy,
             fontFamily: FONTS.ui,
-          }}>{perApplicationBilling ? 'Billed per application' : annualPrepayBilling ? 'Prepaid for the year' : `${money(monthlyRate)}/mo`}</span>
+          }}>{perApplicationBilling ? 'Billed per application' : annualPrepayBilling ? 'Prepaid for the year' : perVisitBilling ? 'Billed per visit' : `${money(monthlyRate)}/mo`}</span>
         </div>
         <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
           {/* Service rows list what the plan covers — no per-service price
@@ -8074,14 +8081,17 @@ function MyPlanTab({ customer, focusService }) {
     ? 'No active plan'
     : (annualPrepayLabel || 'Active plan');
   const perApplicationBilled = billingMode === 'per_application';
+  // Explicit per-visit lanes never show the monthly rate as their plan
+  // billing — the cron does not charge it (Codex r6).
+  const perVisitBilled = billingMode === 'per_visit' || billingMode === 'one_time';
   const planBillingValue = !activeTierName
     ? '—'
     : (annualPrepay
       ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
-      : (perApplicationBilled ? 'Per application' : formatPortalMoney(monthlyRate)));
+      : (perApplicationBilled ? 'Per application' : perVisitBilled ? 'Per visit' : formatPortalMoney(monthlyRate)));
   const planBillingSub = !activeTierName
     ? 'No WaveGuard plan on file'
-    : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : 'per month'));
+    : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : perVisitBilled ? 'Billed per completed visit' : 'per month'));
 
   // Build bundled services one-liner
   const bundleSummary = includedServices.map(s => s.name.replace(/ Program| Barrier Treatment| Control/g, '').replace('Quarterly ', '')).join(' + ');

@@ -253,7 +253,11 @@ export default function AutopayCard({ onStateChange }) {
   // Annual prepay is term-covered — no monthly charge runs either; the saved
   // method is used at renewal.
   const annualPrepayBilling = data.billing_mode === 'annual_prepay';
-  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
+  // Explicit per-visit lanes invoice each completed service (saved method
+  // collects per invoice) — the monthly cron skips them too, so the monthly
+  // projection copy is wrong for them as well (Codex r6).
+  const perVisitBilling = data.billing_mode === 'per_visit' || data.billing_mode === 'one_time';
+  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling || perVisitBilling;
   const nextChargeAmount = Number(next_charge_amount ?? (nonMonthlyBilling ? 0 : monthly_rate) ?? 0);
   // NULL monthly_rate = unpriced (manual quote pending), never a real $0.00
   // charge — the server sends next_charge_amount/date as null and the cron
@@ -468,7 +472,9 @@ export default function AutopayCard({ onStateChange }) {
                 ? 'Auto Pay is on — your saved payment method is charged after each application.'
                 : annualPrepayBilling
                   ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
-                  : monthlyUnpriced
+                  : perVisitBilling
+                    ? 'Auto Pay is on — your saved payment method is charged after each completed service.'
+                    : monthlyUnpriced
                     ? 'Auto Pay is on — your monthly rate is being finalized, so no charge is scheduled yet.'
                     // No date → drop the "on <date>" clause instead of
                     // rendering "on Not scheduled" (eyeball 07-12 finding 4).

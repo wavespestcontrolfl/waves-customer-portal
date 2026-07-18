@@ -70,6 +70,14 @@ describe('membershipDuesCoverVisit — explicit lane authority', () => {
     expect(membershipDuesCoverVisit({ ...member, billingMode: undefined })).toBe(true);
   });
 
+  test('a sentinel tier never dues-covers — one classifier with the lane resolver (Codex r6)', () => {
+    for (const tier of ['Commercial', 'One-Time', 'None', 'N/A', 'Not Set']) {
+      expect(membershipDuesCoverVisit({ ...member, billingMode: null, waveguardTier: tier })).toBe(false);
+    }
+    // Explicit membership still overrides whatever sits in the tier column.
+    expect(membershipDuesCoverVisit({ ...member, billingMode: 'monthly_membership', waveguardTier: 'Commercial' })).toBe(true);
+  });
+
   test('a priced one-off visit still bills its price in every membership shape', () => {
     expect(membershipDuesCoverVisit({ ...member, isRecurring: false })).toBe(false);
     expect(membershipDuesCoverVisit({ ...member, billingMode: 'monthly_membership', isRecurring: false })).toBe(false);

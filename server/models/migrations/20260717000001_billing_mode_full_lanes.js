@@ -8,11 +8,18 @@
  *
  * 1. CHECK gains 'per_visit' and 'one_time' alongside the existing
  *    'monthly_membership' / 'per_application' / 'annual_prepay'.
- * 2. Backfill is EVIDENCE-BASED and minimal: only customers with an actual
- *    collected "WaveGuard Monthly" dues payment are stamped
- *    'monthly_membership' — provably in that lane. Everyone else stays NULL
- *    (legacy inference, behavior-preserving) for the owner to classify via
- *    the new profile control. Rows already carrying a mode are untouched.
+ * 2. Backfill is EVIDENCE-BASED and minimal: customers with a LIVE annual
+ *    prepay term (active/renewal_pending, not yet ended) are stamped
+ *    'annual_prepay' — the same rule the annual-prepay service applies when
+ *    a prepay invoice pays. Then customers with an actual collected
+ *    "WaveGuard Monthly" dues payment are stamped 'monthly_membership' —
+ *    UNLESS any annual term is live or in flight, since a historical dues
+ *    payment must not put a term-covered customer back in the monthly lane
+ *    where the previsit sweep would dun them for "late dues" (Codex r6).
+ *    Everyone else stays NULL (legacy inference, behavior-preserving) for
+ *    the owner to classify via the new profile control. Rows already
+ *    carrying a mode are untouched. Prod dry-run 2026-07-17: 2 annual
+ *    stamps, 4 monthly stamps, zero overlap.
  */
 
 exports.up = async function up(knex) {
@@ -28,6 +35,20 @@ exports.up = async function up(knex) {
     CHECK (billing_mode IS NULL OR billing_mode IN ('monthly_membership', 'per_visit', 'per_application', 'annual_prepay', 'one_time'))
   `);
 
+  const hasTerms = await knex.schema.hasTable('annual_prepay_terms');
+  if (hasTerms) {
+    await knex.raw(`
+      UPDATE customers SET billing_mode = 'annual_prepay'
+      WHERE billing_mode IS NULL
+        AND deleted_at IS NULL
+        AND id IN (
+          SELECT customer_id FROM annual_prepay_terms
+          WHERE status IN ('active', 'renewal_pending')
+            AND term_end >= CURRENT_DATE
+        )
+    `);
+  }
+
   const hasPayments = await knex.schema.hasTable('payments');
   if (!hasPayments) return;
   await knex.raw(`
@@ -39,6 +60,10 @@ exports.up = async function up(knex) {
         WHERE status IN ('paid', 'processing')
           AND description LIKE '%WaveGuard Monthly%'
       )
+      ${hasTerms ? `AND id NOT IN (
+        SELECT customer_id FROM annual_prepay_terms
+        WHERE status IN ('active', 'renewal_pending', 'payment_pending', 'pending')
+      )` : ''}
   `);
 };
 
@@ -54,6 +79,11 @@ exports.down = async function down(knex) {
   // evidence predicate as the backfill, so exactly the rows up() stamped
   // (or hand-set rows that match the identical evidence — for which NULL
   // behaves identically) return to legacy inference (Codex r1).
+  // The annual_prepay stamps are deliberately NOT reversed: the value is in
+  // the restored CHECK, and an evidence-based reversal cannot distinguish
+  // up()'s stamps from the service-stamped annual customers that predate
+  // this migration — nulling those would let legacy tier/rate inference put
+  // prepaid customers back in the monthly-dues cron (double-charge risk).
   await knex('customers').whereIn('billing_mode', ['per_visit', 'one_time']).update({ billing_mode: null });
   const hasPayments = await knex.schema.hasTable('payments');
   if (hasPayments) {

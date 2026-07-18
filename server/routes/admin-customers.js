@@ -2382,6 +2382,42 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           return res.status(400).json({ error: 'Annual prepay requires a PAID active term — the lane stamps automatically when the annual invoice is paid' });
         }
       }
+      if (mode === 'per_visit' || mode === 'one_time') {
+        // These lanes bill each visit's OWN price — completionInvoiceAmount
+        // deliberately never falls back to monthly_rate for them — so a
+        // future visit without a positive price completes uninvoiced with
+        // only a log line. Same "would complete unbilled" prerequisite as
+        // the other lanes (Codex r6): price or cancel those rows first.
+        // Callbacks, always-free service types, and prepaid-stamped visits
+        // are exempt — they complete without an invoice by design in every
+        // lane. An exotic read error fails OPEN (the completion log warning
+        // still backstops) rather than hard-locking the profile save.
+        try {
+          const { etDateString } = require('../utils/datetime-et');
+          const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+          const rows = await db('scheduled_services')
+            .where({ customer_id: req.params.id })
+            .whereIn('status', ['pending', 'confirmed'])
+            .where('scheduled_date', '>=', etDateString())
+            .where(function unpriced() {
+              this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
+            })
+            .where(function notPrepaid() {
+              this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
+            })
+            .select('id', 'service_type', 'is_callback', 'scheduled_date')
+            .orderBy('scheduled_date', 'asc')
+            .limit(100);
+          const billable = rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
+          if (billable.length > 0) {
+            const laneLabel = mode === 'one_time' ? 'One-time' : 'Per visit';
+            const plural = billable.length !== 1;
+            return res.status(400).json({
+              error: `${laneLabel} bills each visit's own price — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`,
+            });
+          }
+        } catch { /* read failure — allow the save; completion logging backstops */ }
+      }
     }
     const updates = {};
     for (const [k, v] of Object.entries(fields)) {
