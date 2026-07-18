@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { addETDays } = require('../utils/datetime-et');
 const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
@@ -37,11 +38,29 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // to that tech. Admin requests are unscoped. Endpoints with no tech surface
 // at all (comms, timeline, credits, pipeline, CRM writes) are requireAdmin
 // outright.
+// Assignment currency — ONE predicate for every technician access path
+// (per-customer proxy AND the directory subquery): dead statuses never
+// authorize, and everything else (pending/confirmed/en_route/on_site/
+// completed) must sit inside the ET date window. Completed visits stay
+// accessible for post-visit paperwork; a stale never-actioned pending row
+// or a years-old completion grants nothing.
+const TECH_ACCESS_DEAD_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
+const TECH_ACCESS_WINDOW_DAYS = 7;
+const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
+
+function currentAssignmentFilter(q, technicianId) {
+  return q
+    .where('scheduled_services.technician_id', technicianId)
+    .whereNotIn('scheduled_services.status', TECH_ACCESS_DEAD_STATUSES)
+    .where('scheduled_services.scheduled_date', '>=', techAccessCutoff());
+}
+
 async function technicianServicesCustomer(req, customerId) {
   if (req.techRole !== 'technician') return true;
-  const assigned = await db('scheduled_services')
-    .where({ customer_id: customerId, technician_id: req.technicianId })
-    .first('id');
+  const assigned = await currentAssignmentFilter(
+    db('scheduled_services').where({ customer_id: customerId }),
+    req.technicianId,
+  ).first('id');
   return !!assigned;
 }
 
@@ -60,6 +79,23 @@ function techSafeListRow(mapped) {
   const out = { ...mapped };
   for (const field of TECH_LIST_STRIPPED_FIELDS) delete out[field];
   return out;
+}
+
+// Filters and sorts a technician token may drive the directory with:
+// identity/service context only. CRM/financial filters (stage, tag, source,
+// cards, hasBalance) and sorts over stripped fields (revenue, lead_score,
+// last_contact) would otherwise leak exactly what techSafeListRow removes —
+// result membership and `total` under `?hasBalance=true` IS the balance
+// field.
+function techSafeListFilters(filters) {
+  const { search, tier, area, city, lastVisited } = filters;
+  return { search, tier, area, city, lastVisited };
+}
+
+const TECH_SAFE_SORTS = new Set(['name', 'rate']);
+
+function techSafeSort(sort) {
+  return TECH_SAFE_SORTS.has(sort) ? sort : 'name';
 }
 
 function dateOnlyForApi(value) {
@@ -1326,22 +1362,27 @@ router.get('/', async (req, res, next) => {
 
     if (stage && !isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
 
-    const filters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited };
-    const healthScoreSelect = latestHealthScoreRaw(await getHealthScoreColumns());
-
     // Technician tokens must not be able to enumerate the customer base:
     // the directory (list + count) is limited to customers with a visit
-    // assigned to the requesting tech, and rows are trimmed below
-    // (techSafeListRow). Admin requests are unscoped.
+    // assigned to the requesting tech, rows are trimmed below
+    // (techSafeListRow), and the drivable filters/sorts are reduced to the
+    // identity/service-safe set (techSafeListFilters / techSafeSort).
+    // Admin requests are unscoped.
     const isTechRequest = req.techRole === 'technician';
     const scopeTechAssigned = (q) => {
       if (isTechRequest) {
-        q.whereIn('customers.id', db('scheduled_services')
-          .select('customer_id')
-          .where('technician_id', req.technicianId));
+        q.whereIn('customers.id', currentAssignmentFilter(
+          db('scheduled_services').select('customer_id'),
+          req.technicianId,
+        ));
       }
       return q;
     };
+
+    const allFilters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited };
+    const filters = isTechRequest ? techSafeListFilters(allFilters) : allFilters;
+    const effectiveSort = isTechRequest ? techSafeSort(sort) : sort;
+    const healthScoreSelect = latestHealthScoreRaw(await getHealthScoreColumns());
 
     let query = scopeTechAssigned(applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters)).select(
       'customers.*',
@@ -1367,14 +1408,14 @@ router.get('/', async (req, res, next) => {
     // on last name or other columns. NULLS LAST keeps blank-first-name
     // rows pinned to the end of the list instead of the top.
     const dir = order === 'desc' ? 'desc' : 'asc';
-    if (sort === 'name') {
+    if (effectiveSort === 'name') {
       query = query.orderByRaw(`LOWER(first_name) ${dir} NULLS LAST`);
-    } else if (sort === 'revenue') {
+    } else if (effectiveSort === 'revenue') {
       // Sort by the computed net, not the writer-less lifetime_revenue column.
       // `dir` is sanitized to asc/desc above.
       query = query.orderByRaw(`lifetime_revenue_net ${dir}`);
     } else {
-      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date' }[sort] || 'first_name';
+      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date' }[effectiveSort] || 'first_name';
       query = query.orderBy(sortCol, dir);
     }
 
@@ -3683,7 +3724,10 @@ router._private = {
   CUSTOMER_STAGES,
   technicianServicesCustomer,
   techSafeListRow,
+  techSafeListFilters,
+  techSafeSort,
   TECH_LIST_STRIPPED_FIELDS,
+  TECH_ACCESS_DEAD_STATUSES,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,

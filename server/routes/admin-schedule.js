@@ -315,12 +315,44 @@ function scopeToAssignedTech(req, q) {
   }
 }
 
+// Assignment currency: a dead or ancient row must not keep authorizing.
+// Statuses below never authorize; everything else (pending/confirmed/
+// en_route/on_site/completed) additionally has to sit inside the ET date
+// window — completed visits stay accessible for post-visit paperwork, and
+// a stale never-actioned pending row from months ago grants nothing.
+const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
+const TECH_ACCESS_WINDOW_DAYS = 7;
+const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
+
+// READ access: a current-or-recent assignment (completed allowed in window).
+function technicianCurrentVisitFilter(req, q) {
+  if (isTechnicianRequest(req)) {
+    q.where('scheduled_services.technician_id', req.technicianId)
+      .whereNotIn('scheduled_services.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+      .where('scheduled_services.scheduled_date', '>=', techAccessCutoff());
+  }
+  return q;
+}
+
+// MUTATION access (prepaid, invoice mint, status): a LIVE visit only — a
+// completed one is settled; corrections on it are office work.
+function technicianLiveVisitFilter(req, q) {
+  if (isTechnicianRequest(req)) {
+    technicianCurrentVisitFilter(req, q)
+      .whereNot('scheduled_services.status', 'completed');
+  }
+  return q;
+}
+
 // Ownership gate for per-visit endpoints. Callers 404 (not 403) on failure
-// so an unowned id doesn't confirm the row exists.
-async function technicianOwnsScheduledService(req, serviceId) {
+// so an unowned id doesn't confirm the row exists. Money endpoints ALSO
+// embed the same predicate in their mutating query — this pre-check alone
+// would leave a read-then-write reassignment race.
+async function technicianOwnsScheduledService(req, serviceId, { forMutation = false } = {}) {
   if (!isTechnicianRequest(req)) return true;
-  const svc = await db('scheduled_services').where({ id: serviceId }).first('technician_id');
-  return !!svc && String(svc.technician_id) === String(req.technicianId);
+  const q = db('scheduled_services').where({ 'scheduled_services.id': serviceId });
+  (forMutation ? technicianLiveVisitFilter : technicianCurrentVisitFilter)(req, q);
+  return !!(await q.first('scheduled_services.id'));
 }
 
 // Legacy wrapper — kept for backwards compat in other code paths
@@ -5075,8 +5107,11 @@ async function generatePrepaidReceiptForService(serviceId) {
 router.post('/:id/prepaid', async (req, res, next) => {
   try {
     // Ownership before money: a technician must not be able to stamp
-    // prepayments (or mint receipts) onto another tech's visits.
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+    // prepayments (or mint receipts) onto another tech's visits, nor onto
+    // their own settled/stale ones. The single-visit UPDATE below embeds
+    // the same predicate, so a reassignment between this check and the
+    // write still matches 0 rows.
+    if (!(await technicianOwnsScheduledService(req, req.params.id, { forMutation: true }))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
     const { amount, method, note, applyToSeries, emailReceipt } = req.body;
@@ -5104,6 +5139,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     }
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
+      .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: amt,
         prepaid_method: method || null,
@@ -5147,7 +5183,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
 // hunt down each prepaid visit individually if the customer asks for a refund.
 router.delete('/:id/prepaid', async (req, res, next) => {
   try {
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+    if (!(await technicianOwnsScheduledService(req, req.params.id, { forMutation: true }))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
     if (req.query.series === '1' || req.query.series === 'true') {
@@ -5173,9 +5209,11 @@ router.delete('/:id/prepaid', async (req, res, next) => {
         .returning(['id']);
       return res.json({ success: true, clearedCount: cleared.length, seriesParentId: parentId });
     }
-    await db('scheduled_services').where({ id: req.params.id }).update({
-      prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
-    });
+    await db('scheduled_services').where({ id: req.params.id })
+      .modify((q) => technicianLiveVisitFilter(req, q))
+      .update({
+        prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
+      });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -5189,11 +5227,12 @@ router.delete('/:id/prepaid', async (req, res, next) => {
 router.post('/:id/invoice', async (req, res, next) => {
   try {
     // Ownership before money: minting the visit's collectible invoice is a
-    // billing action — a technician can only do it for their own visits.
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
-      return res.status(404).json({ error: 'Scheduled service not found' });
-    }
+    // billing action — a technician can only do it for their own LIVE
+    // visits. The predicate rides the SELECT that feeds the mint, so the
+    // svc row the transaction works from is one the tech was authorized
+    // for at read time.
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
+      .modify((q) => technicianLiveVisitFilter(req, q))
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select('scheduled_services.*',
         'customers.monthly_rate as cust_monthly_rate',
@@ -5559,11 +5598,11 @@ router.post('/:id/invoice', async (req, res, next) => {
 // families so downstream reporting can read either shape.
 router.put('/:id/status', async (req, res, next) => {
   try {
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
-      return res.status(404).json({ error: 'Service not found' });
-    }
     const { status: toStatus, notes, requestReview } = req.body;
+    // Technician tokens: LIVE own visits only — the predicate rides the
+    // SELECT the whole transition works from.
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
+      .modify((q) => technicianLiveVisitFilter(req, q))
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'customers.first_name', 'customers.phone as cust_phone',
@@ -7724,17 +7763,13 @@ router.get('/next-visit', async (req, res, next) => {
   try {
     const customerId = req.query.customerId;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
-    // Technicians can only look up customers whose visits are assigned to
-    // them — same boundary as the admin-customers proxy.
-    if (isTechnicianRequest(req)) {
-      const assigned = await db('scheduled_services')
-        .where({ customer_id: customerId, technician_id: req.technicianId })
-        .first('id');
-      if (!assigned) return res.status(404).json({ error: 'Customer not found' });
-    }
     const today = etDateString();
+    // Technician tokens only ever see the customer's next visit ASSIGNED TO
+    // THEM — scoping the lookup itself (rather than gating on any historical
+    // assignment) means dead or ancient assignments grant nothing.
     const row = await db('scheduled_services')
       .where({ customer_id: customerId })
+      .modify((q) => scopeToAssignedTech(req, q))
       .andWhere('scheduled_date', '>', today)
       .whereNotIn('status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'])
       .orderBy('scheduled_date', 'asc')

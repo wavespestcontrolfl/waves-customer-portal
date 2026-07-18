@@ -45,21 +45,46 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 
-// Where-aware fake for the two lookups the guards perform:
-//   scheduled_services.where({ id }).first('technician_id')
-//   scheduled_services.where({ customer_id, technician_id }).first('id')
-// Any write reaching the fake is a test failure (denials must be side-effect
-// free), recorded in state.writes.
+// Where-aware fake for the lookups the guards perform against
+// scheduled_services: object wheres, 3-arg comparisons (scheduled_date
+// cutoffs), and whereNotIn (terminal-status exclusion). Any write reaching
+// the fake is a test failure (denials must be side-effect free), recorded
+// in state.writes.
 jest.mock('../models/db', () => {
   const state = { scheduledServices: [], writes: [] };
-  const matches = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
+  const normCol = (c) => String(c).replace(/^scheduled_services\./, '');
+  const cmp = (a, op, v) => {
+    if (op === '>') return a > v;
+    if (op === '>=') return a >= v;
+    if (op === '<') return a < v;
+    if (op === '<=') return a <= v;
+    return a === v;
+  };
   const dbFn = (table) => {
     const builder = {
       _where: {},
-      where(w) { if (w && typeof w === 'object') Object.assign(builder._where, w); return builder; },
+      _cmp: [],
+      _notIn: [],
+      where(w, op, val) {
+        if (w && typeof w === 'object') Object.assign(builder._where, w);
+        else if (val !== undefined) builder._cmp.push([w, op, val]);
+        else builder._where[w] = op;
+        return builder;
+      },
+      andWhere(...args) { return builder.where(...args); },
+      whereNot(col, val) { builder._notIn.push([col, [val]]); return builder; },
+      whereNotIn(col, vals) { builder._notIn.push([col, vals]); return builder; },
+      whereIn() { return builder; },
+      modify(cb) { cb(builder); return builder; },
+      leftJoin() { return builder; },
+      orderBy() { return builder; },
+      select() { return builder; },
       async first() {
         if (table !== 'scheduled_services') return undefined;
-        const found = state.scheduledServices.find((r) => matches(r, builder._where));
+        const found = state.scheduledServices.find((r) =>
+          Object.entries(builder._where).every(([k, v]) => r[normCol(k)] === v)
+          && builder._cmp.every(([c, op, v]) => cmp(r[normCol(c)], op, v))
+          && builder._notIn.every(([c, vals]) => !vals.includes(r[normCol(c)])));
         return found ? { ...found } : undefined;
       },
       async update(u) { state.writes.push({ table, op: 'update', u }); return 0; },
@@ -76,11 +101,17 @@ jest.mock('../models/db', () => {
 
 const express = require('express');
 const db = require('../models/db');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const scheduleRouter = require('../routes/admin-schedule');
 const customersRouter = require('../routes/admin-customers');
 
 const { scopeToAssignedTech, technicianOwnsScheduledService } = scheduleRouter._test;
-const { technicianServicesCustomer, techSafeListRow, TECH_LIST_STRIPPED_FIELDS } = customersRouter._private;
+const {
+  technicianServicesCustomer, techSafeListRow, techSafeListFilters, techSafeSort,
+  TECH_LIST_STRIPPED_FIELDS,
+} = customersRouter._private;
+
+const daysFromNow = (n) => etDateString(addETDays(new Date(), n));
 
 let server;
 let baseUrl;
@@ -111,8 +142,13 @@ async function call(method, path, body) {
 beforeEach(() => {
   mockCurrentRole = 'technician';
   db.__state.scheduledServices = [
-    { id: 'svc-own', technician_id: 'tech-1', customer_id: 'cust-own' },
-    { id: 'svc-other', technician_id: 'tech-2', customer_id: 'cust-other' },
+    { id: 'svc-own', technician_id: 'tech-1', customer_id: 'cust-own', status: 'pending', scheduled_date: daysFromNow(3) },
+    { id: 'svc-other', technician_id: 'tech-2', customer_id: 'cust-other', status: 'pending', scheduled_date: daysFromNow(3) },
+    // Assignment-currency fixtures:
+    { id: 'svc-recent', technician_id: 'tech-1', customer_id: 'cust-recent', status: 'completed', scheduled_date: daysFromNow(-2) },
+    { id: 'svc-stale', technician_id: 'tech-1', customer_id: 'cust-stale', status: 'completed', scheduled_date: daysFromNow(-45) },
+    { id: 'svc-stale-pending', technician_id: 'tech-1', customer_id: 'cust-stale-pending', status: 'pending', scheduled_date: daysFromNow(-45) },
+    { id: 'svc-dead', technician_id: 'tech-1', customer_id: 'cust-dead', status: 'cancelled', scheduled_date: daysFromNow(3) },
   ];
   db.__state.writes = [];
 });
@@ -129,7 +165,6 @@ describe('schedule per-visit ownership (technician role)', () => {
     ['GET', '/api/admin/schedule/eta/svc-other', undefined],
     ['POST', '/api/admin/schedule/generate-report', { scheduledServiceId: 'svc-other' }],
     ['GET', '/api/admin/schedule/vehicle-location?serviceId=svc-other', undefined],
-    ['GET', '/api/admin/schedule/next-visit?customerId=cust-other', undefined],
   ];
 
   test.each(denials)('%s %s on another tech\'s visit → 404 and no writes', async (method, path, body) => {
@@ -164,6 +199,12 @@ describe('schedule per-visit ownership (technician role)', () => {
     expect(db.__state.writes).toHaveLength(0);
   });
 
+  test('next-visit is scoped to the tech\'s own assignments — another tech\'s customer yields null, not their visit', async () => {
+    const { status, body } = await call('GET', '/api/admin/schedule/next-visit?customerId=cust-other');
+    expect(status).toBe(200);
+    expect(body.nextVisit).toBeNull();
+  });
+
   test('vehicle-location by techId is restricted to the tech\'s own id', async () => {
     const { status, body } = await call('GET', '/api/admin/schedule/vehicle-location?techId=tech-2');
     expect(status).toBe(403);
@@ -192,13 +233,25 @@ describe('technicianOwnsScheduledService', () => {
     await expect(technicianOwnsScheduledService(reqFor('admin'), 'svc-other')).resolves.toBe(true);
   });
 
-  test('technician owns their assigned visit', async () => {
+  test('technician owns their live assigned visit (read and mutation)', async () => {
     await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-own')).resolves.toBe(true);
+    await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-own', { forMutation: true })).resolves.toBe(true);
   });
 
   test('technician does not own another tech\'s visit or a missing one', async () => {
     await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-other')).resolves.toBe(false);
     await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-nope')).resolves.toBe(false);
+  });
+
+  test('a recently completed own visit reads but does not authorize mutation', async () => {
+    await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-recent')).resolves.toBe(true);
+    await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-recent', { forMutation: true })).resolves.toBe(false);
+  });
+
+  test('stale or dead own visits authorize nothing', async () => {
+    await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-stale')).resolves.toBe(false);
+    await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-stale-pending')).resolves.toBe(false);
+    await expect(technicianOwnsScheduledService(reqFor('technician'), 'svc-dead')).resolves.toBe(false);
   });
 });
 
@@ -255,6 +308,36 @@ describe('customer routes: assigned-customer proxy (technician role)', () => {
     await expect(technicianServicesCustomer({ techRole: 'admin' }, 'cust-other')).resolves.toBe(true);
     await expect(technicianServicesCustomer({ techRole: 'technician', technicianId: 'tech-1' }, 'cust-own')).resolves.toBe(true);
     await expect(technicianServicesCustomer({ techRole: 'technician', technicianId: 'tech-1' }, 'cust-other')).resolves.toBe(false);
+  });
+
+  test('only CURRENT assignments authorize: recent completion yes, stale or cancelled no', async () => {
+    const tech = { techRole: 'technician', technicianId: 'tech-1' };
+    // Completed 2 days ago — inside the post-visit paperwork window.
+    await expect(technicianServicesCustomer(tech, 'cust-recent')).resolves.toBe(true);
+    // Completed 45 days ago — a dead assignment grants nothing.
+    await expect(technicianServicesCustomer(tech, 'cust-stale')).resolves.toBe(false);
+    // A never-actioned pending row from 45 days ago is equally dead.
+    await expect(technicianServicesCustomer(tech, 'cust-stale-pending')).resolves.toBe(false);
+    // Cancelled visit — never authorizes, even with a future date.
+    await expect(technicianServicesCustomer(tech, 'cust-dead')).resolves.toBe(false);
+  });
+});
+
+describe('tech directory filter/sort sanitization', () => {
+  test('techSafeListFilters drops CRM/financial filters — membership under ?hasBalance=true IS the stripped field', () => {
+    const sanitized = techSafeListFilters({
+      search: 'lee', stage: 'won', tier: 'gold', tag: 'vip', source: 'ads',
+      area: 'sarasota', city: 'Venice', cards: 'true', hasBalance: 'true', lastVisited: '30',
+    });
+    expect(sanitized).toEqual({ search: 'lee', tier: 'gold', area: 'sarasota', city: 'Venice', lastVisited: '30' });
+  });
+
+  test('techSafeSort clamps sorts over stripped fields to name', () => {
+    expect(techSafeSort('revenue')).toBe('name');
+    expect(techSafeSort('lead_score')).toBe('name');
+    expect(techSafeSort('last_contact')).toBe('name');
+    expect(techSafeSort('name')).toBe('name');
+    expect(techSafeSort('rate')).toBe('rate');
   });
 });
 
