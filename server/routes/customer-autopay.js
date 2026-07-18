@@ -334,6 +334,16 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
       if (updates.autopay_enabled === false) {
         await trx('payment_methods').where({ customer_id: req.customerId }).update({ autopay_enabled: false });
+        // The opt-out EVENT commits with the opt-out STATE: this row is what
+        // enrollConsentedMethod's opted_out_after_authorization guard reads,
+        // so a post-commit best-effort write left a gap where a delayed
+        // webhook enrollment could land after the disable committed but
+        // before (or without) the event row — overwriting a real opt-out.
+        await logAutopay(req.customerId, 'autopay_disabled', {
+          details: {},
+          db: trx,
+          required: true,
+        });
         return;
       }
 
@@ -348,6 +358,9 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
     });
 
     for (const evt of events) {
+      // autopay_disabled already committed INSIDE the transaction above
+      // (guard input, not just audit) — don't write it twice.
+      if (evt.type === 'autopay_disabled') continue;
       await logAutopay(req.customerId, evt.type, {
         paymentMethodId: evt.paymentMethodId || null,
         details: evt.details || {},

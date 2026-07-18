@@ -2737,17 +2737,20 @@ async function handlePaymentMethodDetached(paymentMethod) {
       await trx('customers')
         .where({ id: row.customer_id })
         .update({ autopay_enabled: false, autopay_payment_method_id: null });
+      // The opt-out EVENT commits with the opt-out STATE: autopay_log is
+      // guard input for enrollConsentedMethod's opted_out_after_authorization
+      // check, and a failed insert rolls the whole cleanup back — the
+      // dispatcher 500s and Stripe retries into intact state.
+      await require('../services/autopay-log').logAutopay(row.customer_id, 'autopay_disabled', {
+        details: { source: 'payment_method_detached', payment_method_id: row.id, stripe_payment_method_id: pmId },
+        db: trx,
+        required: true,
+      });
       disabledCustomers.push(row);
     }
   });
 
-  // Audit rows post-commit: logAutopay is internally best-effort (it never
-  // throws), and the state change above is already durable — a missing log
-  // row must not make Stripe re-run a delete that already committed.
   for (const row of disabledCustomers) {
-    await require('../services/autopay-log').logAutopay(row.customer_id, 'autopay_disabled', {
-      details: { source: 'payment_method_detached', payment_method_id: row.id, stripe_payment_method_id: pmId },
-    });
     logger.info(`[stripe-webhook] Auto Pay disabled for customer ${row.customer_id} — in-charge method ${row.id} detached out-of-band`);
   }
 }
