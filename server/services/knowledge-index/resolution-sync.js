@@ -99,7 +99,7 @@ async function syncCallArtifacts({ limit = DEFAULT_BATCH } = {}) {
       .orderBy('c.created_at', 'asc')
       .orderBy('c.id', 'asc')
       .limit(PAGE_SIZE)
-      .select('c.id', 'c.customer_id', 'c.created_at', 'c.call_summary', 'c.ai_extraction_enriched',
+      .select('c.id', 'c.customer_id', 'c.created_at', 'c.call_summary', 'c.disposition', 'c.ai_extraction_enriched',
         'cu.first_name', 'cu.last_name', 'cu.phone');
     if (cursor) query = query.whereRaw('(c.created_at, c.id) > (?, ?)', [cursor.created_at, cursor.id]);
     const calls = await query;
@@ -133,7 +133,7 @@ async function syncCallArtifacts({ limit = DEFAULT_BATCH } = {}) {
  * resolution, not the preliminary disposition. Bounded per run.
  */
 async function refreshCallArtifacts() {
-  const stats = { refreshed: 0 };
+  const stats = { refreshed: 0, retired: 0 };
   const stale = await db('resolution_artifacts as ra')
     .where('ra.source', 'call')
     .where(function () {
@@ -154,7 +154,7 @@ async function refreshCallArtifacts() {
   const calls = await db('call_log as c')
     .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
     .whereIn('c.id', stale.map((r) => r.source_id))
-    .select('c.id', 'c.customer_id', 'c.created_at', 'c.call_summary', 'c.ai_extraction_enriched',
+    .select('c.id', 'c.customer_id', 'c.created_at', 'c.call_summary', 'c.disposition', 'c.ai_extraction_enriched',
       'cu.first_name', 'cu.last_name', 'cu.phone');
   const { triageByCall, actionByCall } = await loadCallSideData(calls.map((c) => c.id));
   for (const call of calls) {
@@ -165,43 +165,50 @@ async function refreshCallArtifacts() {
       finalAction: actionByCall.get(call.id) || null,
       context: { first_name: call.first_name, last_name: call.last_name, phone: call.phone },
     });
-    if (!artifact) continue;
+    if (!artifact) {
+      // Retire: current source data no longer yields an artifact (e.g. a
+      // later terminal disposition stamped it spam) — stale memory must not
+      // keep serving. The next knowledge-index sync drops its chunks.
+      await db('resolution_artifacts').where({ source: 'call', source_id: call.id }).del();
+      stats.retired += 1;
+      continue;
+    }
     await upsertArtifact(artifact);
     stats.refreshed += 1;
   }
   return stats;
 }
 
-// Visit candidates require an existing recommendation, so every selected
-// row maps (mapVisit only nulls when recommendations are absent) — plain
-// limited selects can't stall the way call sweeps could. Kept single-page
-// per invocation; exhausted=true when a short page comes back.
-async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
-  const stats = { examined: 0, mapped: 0, skipped: 0, exhausted: false };
-  // Two recommendation homes: findings rows (service-report flow) and
-  // structured_notes.protocol.recommendations (ordinary completions store
-  // tech-entered recommendations there with finding recommendation NULL).
-  const records = await db('service_records as sr')
-    .leftJoin('customers as cu', 'cu.id', 'sr.customer_id')
-    .where(function () {
-      this.whereExists(function () {
-        this.select(db.raw('1')).from('service_findings as sf')
-          .whereRaw('sf.service_record_id = sr.id').whereNotNull('sf.recommendation');
-      }).orWhereRaw("jsonb_array_length(coalesce(sr.structured_notes->'protocol'->'recommendations', '[]'::jsonb)) > 0");
-    })
-    .whereNotExists(function () {
-      this.select(db.raw('1')).from('resolution_artifacts as ra')
-        .whereRaw("ra.source = 'visit'").whereRaw('ra.source_id = sr.id');
-    })
-    .orderBy('sr.service_date', 'asc')
-    .limit(limit)
-    .select('sr.id', 'sr.customer_id', 'sr.service_date', 'sr.created_at', 'sr.service_type', 'sr.technician_notes', 'sr.structured_notes',
-      'cu.first_name', 'cu.last_name', 'cu.phone');
+// ── Visit-side shared helpers ───────────────────────────────────────
 
-  if (!records.length) { stats.exhausted = true; return stats; }
-  if (records.length < limit) stats.exhausted = true;
+// Recommendations live in three homes (verified against the admin-dispatch
+// completion flow): service_findings.recommendation (service-report flow),
+// structured_notes.recommendations, and service_data.protocol.recommendations
+// (ordinary closeouts persist reportRecommendations at BOTH of the latter).
+function visitRecommendationPredicate() {
+  this.whereExists(function () {
+    this.select(db.raw('1')).from('service_findings as sf')
+      .whereRaw('sf.service_record_id = sr.id').whereNotNull('sf.recommendation');
+  })
+    .orWhereRaw("jsonb_array_length(coalesce(sr.structured_notes->'recommendations', '[]'::jsonb)) > 0")
+    .orWhereRaw("jsonb_array_length(coalesce(sr.service_data->'protocol'->'recommendations', '[]'::jsonb)) > 0");
+}
 
-  const recordIds = records.map((r) => r.id);
+const parseJsonbMaybe = (v) => {
+  if (!v) return {};
+  if (typeof v !== 'string') return v;
+  try { return JSON.parse(v); } catch { return {}; }
+};
+
+function structuredRecommendationsFor(record) {
+  const notes = parseJsonbMaybe(record.structured_notes);
+  const serviceData = parseJsonbMaybe(record.service_data);
+  const fromNotes = Array.isArray(notes?.recommendations) ? notes.recommendations : [];
+  const fromServiceData = Array.isArray(serviceData?.protocol?.recommendations) ? serviceData.protocol.recommendations : [];
+  return [...new Set([...fromNotes, ...fromServiceData].map((r) => String(r || '').trim()).filter(Boolean))];
+}
+
+async function loadVisitSideData(recordIds) {
   const findingRows = await db('service_findings')
     .whereIn('service_record_id', recordIds)
     .select('service_record_id', 'category', 'severity', 'title', 'detail', 'recommendation');
@@ -217,26 +224,101 @@ async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
     .whereNotIn('status', ['hidden'])
     .select('service_record_id', 'summary_json')
     .catch(() => []);
-  const summaryByRecord = new Map(summaries.map((s) => {
-    const parsed = typeof s.summary_json === 'string' ? JSON.parse(s.summary_json) : s.summary_json;
-    return [s.service_record_id, parsed];
-  }));
+  const summaryByRecord = new Map(summaries.map((s) => [s.service_record_id, parseJsonbMaybe(s.summary_json)]));
+  return { findingsByRecord, summaryByRecord };
+}
 
+const VISIT_SELECT = ['sr.id', 'sr.customer_id', 'sr.service_date', 'sr.created_at', 'sr.service_type', 'sr.technician_notes', 'sr.structured_notes', 'sr.service_data',
+  'cu.first_name', 'cu.last_name', 'cu.phone'];
+
+function mapVisitRecord(record, { findingsByRecord, summaryByRecord }) {
+  return mapVisit({
+    record,
+    findings: findingsByRecord.get(record.id) || [],
+    structuredRecommendations: structuredRecommendationsFor(record),
+    aiSummary: summaryByRecord.get(record.id) || null,
+    context: { first_name: record.first_name, last_name: record.last_name, phone: record.phone },
+  });
+}
+
+/**
+ * Keyset-paginated like the call sweep (limit caps MAPPED rows): a page of
+ * candidates whose recommendations all clean to empty strings must advance
+ * the cursor, never respin the same oldest rows forever.
+ */
+async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
+  const stats = { examined: 0, mapped: 0, skipped: 0, exhausted: false };
+  let cursor = null;
+
+  while (stats.mapped < limit) {
+    let query = db('service_records as sr')
+      .leftJoin('customers as cu', 'cu.id', 'sr.customer_id')
+      .where(visitRecommendationPredicate)
+      .whereNotExists(function () {
+        this.select(db.raw('1')).from('resolution_artifacts as ra')
+          .whereRaw("ra.source = 'visit'").whereRaw('ra.source_id = sr.id');
+      })
+      .orderBy('sr.created_at', 'asc')
+      .orderBy('sr.id', 'asc')
+      .limit(PAGE_SIZE)
+      .select(...VISIT_SELECT);
+    if (cursor) query = query.whereRaw('(sr.created_at, sr.id) > (?, ?)', [cursor.created_at, cursor.id]);
+    const records = await query;
+    if (!records.length) { stats.exhausted = true; break; }
+    cursor = { created_at: records[records.length - 1].created_at, id: records[records.length - 1].id };
+
+    const side = await loadVisitSideData(records.map((r) => r.id));
+    for (const record of records) {
+      if (stats.mapped >= limit) break;
+      stats.examined += 1;
+      const artifact = mapVisitRecord(record, side);
+      if (!artifact) { stats.skipped += 1; continue; }
+      await upsertArtifact(artifact);
+      stats.mapped += 1;
+    }
+    if (records.length < PAGE_SIZE && stats.mapped < limit) { stats.exhausted = true; break; }
+  }
+  return stats;
+}
+
+/**
+ * Visit refresh: artifacts whose report summaries or findings changed after
+ * artifacting get re-mapped (summaries generate late; recommendations get
+ * corrected). Null re-map retires the artifact, same as calls.
+ */
+async function refreshVisitArtifacts() {
+  const stats = { refreshed: 0, retired: 0 };
+  const stale = await db('resolution_artifacts as ra')
+    .where('ra.source', 'visit')
+    .where(function () {
+      this.whereExists(function () {
+        this.select(db.raw('1')).from('service_report_ai_summaries as s')
+          .whereRaw('s.service_record_id = ra.source_id')
+          .whereRaw('s.updated_at > ra.updated_at');
+      }).orWhereExists(function () {
+        this.select(db.raw('1')).from('service_findings as sf')
+          .whereRaw('sf.service_record_id = ra.source_id')
+          .whereRaw('sf.created_at > ra.updated_at');
+      });
+    })
+    .limit(REFRESH_BATCH)
+    .select('ra.source_id');
+  if (!stale.length) return stats;
+
+  const records = await db('service_records as sr')
+    .leftJoin('customers as cu', 'cu.id', 'sr.customer_id')
+    .whereIn('sr.id', stale.map((r) => r.source_id))
+    .select(...VISIT_SELECT);
+  const side = await loadVisitSideData(records.map((r) => r.id));
   for (const record of records) {
-    stats.examined += 1;
-    const structuredNotes = typeof record.structured_notes === 'string'
-      ? (() => { try { return JSON.parse(record.structured_notes); } catch { return {}; } })()
-      : (record.structured_notes || {});
-    const artifact = mapVisit({
-      record,
-      findings: findingsByRecord.get(record.id) || [],
-      structuredRecommendations: structuredNotes?.protocol?.recommendations || [],
-      aiSummary: summaryByRecord.get(record.id) || null,
-      context: { first_name: record.first_name, last_name: record.last_name, phone: record.phone },
-    });
-    if (!artifact) { stats.skipped += 1; continue; }
+    const artifact = mapVisitRecord(record, side);
+    if (!artifact) {
+      await db('resolution_artifacts').where({ source: 'visit', source_id: record.id }).del();
+      stats.retired += 1;
+      continue;
+    }
     await upsertArtifact(artifact);
-    stats.mapped += 1;
+    stats.refreshed += 1;
   }
   return stats;
 }
@@ -245,9 +327,10 @@ async function syncResolutionArtifacts(options = {}) {
   const calls = await syncCallArtifacts(options);
   const visits = await syncVisitArtifacts(options);
   const refresh = await refreshCallArtifacts();
-  const summary = { calls, visits, refresh };
+  const visitRefresh = await refreshVisitArtifacts();
+  const summary = { calls, visits, refresh, visitRefresh };
   logger.info(`[resolution-sync] ${JSON.stringify(summary)}`);
   return summary;
 }
 
-module.exports = { syncResolutionArtifacts, syncCallArtifacts, syncVisitArtifacts, refreshCallArtifacts };
+module.exports = { syncResolutionArtifacts, syncCallArtifacts, syncVisitArtifacts, refreshCallArtifacts, refreshVisitArtifacts };

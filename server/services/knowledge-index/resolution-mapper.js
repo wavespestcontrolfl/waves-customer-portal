@@ -83,7 +83,11 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
   if (extraction.meta?.is_spam) return null;
   if (SKIP_NATURES.has(clean(extraction.call_nature))) return null;
 
-  const disposition = clean(extraction.recommended_disposition);
+  // call_log.disposition is the TERMINAL outcome production stamped (layered
+  // spam verdict, whether a booking actually happened); the model's
+  // recommended_disposition is only the fallback for rows never stamped.
+  const recommended = clean(extraction.recommended_disposition);
+  const disposition = clean(call.disposition) || recommended;
   if (SKIP_DISPOSITIONS.has(disposition)) return null;
 
   const summary = clean(extraction.meta?.call_summary || call.call_summary);
@@ -91,6 +95,7 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
 
   const resolutionParts = [];
   if (DISPOSITION_TEXT[disposition]) resolutionParts.push(DISPOSITION_TEXT[disposition]);
+  else if (disposition) resolutionParts.push(`Outcome: ${disposition.replace(/_/g, ' ')}`);
   if (finalAction && finalAction !== disposition) resolutionParts.push(`Action taken: ${clean(finalAction).replace(/_/g, ' ')}`);
   for (const note of triageNotes) {
     if (clean(note.resolution_note)) resolutionParts.push(`Triage (${note.reason_code}): ${redact(note.resolution_note, context)}`);
@@ -114,6 +119,7 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
     resolution: resolutionParts.join('. '),
     outcome: {
       disposition: disposition || null,
+      recommendedDisposition: recommended || null,
       finalAction: finalAction || null,
       triageReasonCodes: triageNotes.map((n) => n.reason_code).filter(Boolean),
     },

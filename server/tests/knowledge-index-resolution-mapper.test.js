@@ -41,6 +41,18 @@ describe('resolution mapper — calls', () => {
     expect(a.outcome.disposition).toBe('booked');
   });
 
+  test('terminal call_log.disposition overrides the model recommendation (codex r2)', () => {
+    // Production stamped it spam even though the model recommended booking.
+    const stamped = { ...CALL, disposition: 'spam_discarded' };
+    expect(mapCall({ call: stamped, extraction: extraction({ recommended_disposition: 'booked' }) })).toBeNull();
+    // And a stamped real outcome wins over a differing recommendation.
+    const booked = { ...CALL, disposition: 'booked' };
+    const a = mapCall({ call: booked, extraction: extraction({ recommended_disposition: 'callback_task_created' }), context: CONTEXT });
+    expect(a.resolution).toContain('Booked the service');
+    expect(a.outcome.disposition).toBe('booked');
+    expect(a.outcome.recommendedDisposition).toBe('callback_task_created');
+  });
+
   test('single-name references are redacted via the context pass (codex P1)', () => {
     const a = mapCall({
       call: CALL,
