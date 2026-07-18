@@ -325,12 +325,18 @@ export function AuthProvider({ children }) {
   };
 
   const refreshProperties = async () => {
+    // Same staleness rule as loadCustomer: a response (or failure) that
+    // started under a superseded session must not overwrite the new
+    // session's property list or surface its error.
+    const epoch = sessionEpochRef.current;
     try {
       const data = await api.getAuthProperties();
+      if (sessionEpochRef.current !== epoch) return false;
       setProperties(data.properties || []);
       setPropertiesError(null);
       return true;
     } catch (err) {
+      if (sessionEpochRef.current !== epoch) return false;
       console.error('Failed to reload service properties:', err);
       setPropertiesError('Other service properties are temporarily unavailable.');
       return false;
