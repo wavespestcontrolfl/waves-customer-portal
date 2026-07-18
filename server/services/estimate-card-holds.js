@@ -216,7 +216,7 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
 // attached to the customer separately (post-commit, retryable) via
 // attachCardHoldPaymentMethod; the pm id is stored here either way so charges
 // can resolve it.
-async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, trx = db }) {
+async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, acceptedAmount = null, trx = db }) {
   // Preserve the terms the customer was SHOWN — frozen on the pending row when
   // /card-hold-intent minted it. Only fall back to live config if that row is
   // somehow absent, so a pricing_config change between modal-open and accept
@@ -235,12 +235,24 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
   const windowHours = existing?.cancel_window_hours != null
     ? Number(existing.cancel_window_hours)
     : (frozenTerms?.cancelWindowHours != null ? Number(frozenTerms.cancelWindowHours) : cardHoldCancelWindowHours());
+  // Freeze the accepted one-time total alongside the fee terms (Codex #2821
+  // P1): the completion-charge cap compares against THIS stamp, never a
+  // charge-time read of scheduled_services.estimated_price — the admin
+  // appointment editors rewrite that field, so a pre-completion staff price
+  // edit would otherwise silently raise the cap past what the customer
+  // consented to at booking. NULL (no readable amount at accept) fails the
+  // cap CLOSED at completion — review alert, nothing charged.
+  const acceptedNum = Number(acceptedAmount);
+  const frozenAccepted = Number.isFinite(acceptedNum) && acceptedNum > 0
+    ? Math.round(acceptedNum * 100) / 100
+    : null;
   const fields = {
     customer_id: customerId,
     scheduled_service_id: scheduledServiceId || null,
     stripe_payment_method_id: paymentMethodId,
     no_show_fee_amount: noShowFee,
     cancel_window_hours: windowHours,
+    accepted_amount: frozenAccepted,
     agreed_at: trx.fn.now(),
     held_at: trx.fn.now(),
     status: 'held',
@@ -376,7 +388,7 @@ async function alertCompletionChargeNeedsReview({ hold, scheduledServiceId, invo
         : 'Card-hold charge skipped — no accepted amount on file',
       overCap
         ? `A completed one-time visit's invoice ($${netInvoiceSubtotal.toFixed(2)} before tax, net of discounts) exceeds the amount accepted at booking ($${acceptedAmount.toFixed(2)}). The saved card was NOT charged — review and bill manually or adjust the invoice.`
-        : 'A completed one-time visit has an invoice but no accepted amount on file to cap the saved-card charge against. The saved card was NOT charged — review and bill manually or stamp the amount.',
+        : 'A completed one-time visit has an invoice but no booking-time accepted amount frozen on its card hold to cap the saved-card charge against. The saved card was NOT charged — review and bill manually.',
       {
         link: hold.customer_id ? `/admin/customers/${hold.customer_id}` : '/admin/dispatch',
         metadata: { scheduledServiceId, invoiceId, invoiceSubtotal: netInvoiceSubtotal, acceptedAmount },
@@ -411,30 +423,25 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
 
   // Accepted-amount cap (mirrors the per-application autopay lane's guard in
   // admin-dispatch, owner ruling: an auto-charge may only collect what the
-  // customer accepted). The one-time total the customer accepted is stamped
-  // onto scheduled_services.estimated_price inside the accept transaction;
-  // the comparator is the invoice's pre-tax SUBTOTAL net of any recorded
+  // customer accepted). The cap reads the BOOKING-TIME amount FROZEN onto
+  // the hold row inside the accept transaction (estimate_card_holds.
+  // accepted_amount, stamped by recordCardHoldHeld) — never a charge-time
+  // read of scheduled_services.estimated_price, which the admin appointment
+  // editors rewrite (Codex #2821 P1: a staff price edit before completion
+  // would move a live-read cap past what the customer consented to). The
+  // comparator is the invoice's pre-tax SUBTOTAL net of any recorded
   // discount — tax rides the invoice and the surcharge is added by the
   // single surcharge authority inside chargeInvoiceWithSavedCard, so base
   // compares against base. Manual-discount accepts gross the service line up
   // and bring it back with a negative discount line, so subtotal is netted
   // by discount_amount (deposit credits are prior payment, never part of
   // discount_amount, so they don't relax the cap). Over the cap — or with no
-  // accepted amount on file to cap against (fail CLOSED), or an unreadable
+  // frozen amount on the hold to cap against (fail CLOSED), or an unreadable
   // stamp — NOTHING is charged: the hold stays 'held' (un-charged and
   // reviewable), the office gets a review alert, and the caller's normal
   // invoice/pay-link fallback proceeds exactly as if no card were saved.
-  let acceptedAmount = null;
-  try {
-    const visit = await db('scheduled_services')
-      .where({ id: scheduledServiceId })
-      .first('estimated_price');
-    if (visit?.estimated_price != null && Number(visit.estimated_price) > 0) {
-      acceptedAmount = Number(visit.estimated_price);
-    }
-  } catch (err) {
-    logger.error('[estimate-card-holds] accepted-amount lookup failed — completion charge routed to review', { scheduledServiceId, error: err.message });
-  }
+  const acceptedRaw = Number(hold.accepted_amount);
+  const acceptedAmount = Number.isFinite(acceptedRaw) && acceptedRaw > 0 ? acceptedRaw : null;
   const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
   const invoiceDiscount = Math.max(0, Number(invoice.discount_amount) || 0);
   const netInvoiceSubtotal = Math.round((invoiceSubtotal - invoiceDiscount) * 100) / 100;

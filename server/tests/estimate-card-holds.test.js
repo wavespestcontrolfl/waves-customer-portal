@@ -4,6 +4,7 @@
 
 let mockDbHandler = () => { throw new Error('db handler not configured'); };
 let mockDbUpdates = [];
+let mockDbInserts = [];
 jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
@@ -68,6 +69,10 @@ jest.mock('../services/stripe', () => ({
   ].includes(err?.code),
 }));
 
+// The db mock itself (a jest.fn taking the table name) — lets the freeze
+// tests assert which TABLES a path consulted, not just what it returned.
+const dbMock = require('../models/db');
+
 const {
   isCardHoldEnabled,
   cardHoldNoShowFee,
@@ -90,6 +95,7 @@ const {
 beforeEach(() => {
   jest.clearAllMocks();
   mockDbUpdates = [];
+  mockDbInserts = [];
   process.env.ONE_TIME_CARD_HOLD = 'true';
 });
 afterEach(() => {
@@ -114,7 +120,10 @@ function stubDb(firstResults) {
       mockDbUpdates.push(payload);
       return Promise.resolve(1);
     });
-    chain.insert = jest.fn(() => Promise.resolve([{}]));
+    chain.insert = jest.fn((payload) => {
+      mockDbInserts.push(payload);
+      return Promise.resolve([{}]);
+    });
     return chain;
   };
 }
@@ -129,19 +138,18 @@ describe('isCardHoldEnabled — dark by default', () => {
 });
 
 describe('completion charge reconciliation outcomes', () => {
-  const hold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1' };
-  const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: 75 };
-  // The accepted-amount cap reads scheduled_services.estimated_price before
+  // The accepted-amount cap reads the amount FROZEN on the hold row before
   // the claim — these tests exercise the post-cap charge outcomes, so the
-  // visit's accepted amount comfortably covers the invoice.
-  const visit = { estimated_price: 100 };
+  // frozen accepted amount comfortably covers the invoice.
+  const hold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1', accepted_amount: 100 };
+  const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: 75 };
   const paymentMethod = { id: 'pm-row-1' };
 
   test.each([
     ['STRIPE_CHARGED_DB_FAILED', { stripePaymentIntentId: 'pi-orphan-1' }],
     ['STRIPE_AMBIGUOUS_OUTCOME', {}],
   ])('parks invoice and card hold for terminal %s', async (code, extra) => {
-    stubDb([hold, invoice, visit, paymentMethod]);
+    stubDb([hold, invoice, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('reconcile me'), { code, ...extra }));
 
     await expect(chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' }))
@@ -154,7 +162,7 @@ describe('completion charge reconciliation outcomes', () => {
   });
 
   test('restores a fresh concurrent claim collision for retry without exposing another rail', async () => {
-    stubDb([hold, invoice, visit, paymentMethod]);
+    stubDb([hold, invoice, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('first attempt declined'), {
       code: 'STRIPE_CHARGE_IN_PROGRESS',
     }));
@@ -170,13 +178,19 @@ describe('completion charge reconciliation outcomes', () => {
   });
 });
 
-describe('completion charge accepted-amount cap — never collect above what was accepted', () => {
-  const hold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1' };
+describe('completion charge accepted-amount cap — frozen at booking, never collect above it', () => {
+  // The cap reads estimate_card_holds.accepted_amount, FROZEN inside the
+  // accept transaction by recordCardHoldHeld — never a charge-time read of
+  // scheduled_services.estimated_price (Codex #2821 P1: the admin editors
+  // rewrite that field, so a live read would follow a staff price edit).
+  const holdWithCap = (acceptedAmount) => ({
+    id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1', accepted_amount: acceptedAmount,
+  });
   const paymentMethod = { id: 'pm-row-1' };
 
-  test('an invoice retotaled ABOVE the accepted amount is NOT charged — review alert, hold stays held', async () => {
+  test('an invoice retotaled ABOVE the frozen accepted amount is NOT charged — review alert, hold stays held', async () => {
     const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 600, total: 600 };
-    stubDb([hold, invoice, { estimated_price: 250 }]);
+    stubDb([holdWithCap(250), invoice]);
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'above_accepted_amount' });
     expect(mockChargeInvoiceWithSavedCard).not.toHaveBeenCalled();
@@ -192,9 +206,22 @@ describe('completion charge accepted-amount cap — never collect above what was
     expect(mockDbUpdates).toEqual([]);
   });
 
-  test('at the accepted amount → charges exactly as before', async () => {
+  test('the cap SURVIVES a staff price edit — scheduled_services is never even consulted at charge time', async () => {
+    // Booking froze $250 on the hold; staff later re-priced the visit AND
+    // its invoice to $600 (admin-schedule editors rewrite estimated_price).
+    // The frozen stamp still caps the charge, and the mutable
+    // scheduled_services row is not read at all on this path.
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 600, total: 600 };
+    stubDb([holdWithCap(250), invoice]);
+    const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
+    expect(r).toEqual({ charged: false, reason: 'above_accepted_amount' });
+    expect(mockChargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(dbMock.mock.calls.map((c) => c[0])).not.toContain('scheduled_services');
+  });
+
+  test('at the frozen accepted amount → charges exactly as before', async () => {
     const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 250, total: 250 };
-    stubDb([hold, invoice, { estimated_price: 250 }, paymentMethod]);
+    stubDb([holdWithCap(250), invoice, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 250 });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: true });
@@ -205,9 +232,9 @@ describe('completion charge accepted-amount cap — never collect above what was
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('under the accepted amount → charges', async () => {
+  test('under the frozen accepted amount → charges', async () => {
     const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 199, total: 199 };
-    stubDb([hold, invoice, { estimated_price: 250 }, paymentMethod]);
+    stubDb([holdWithCap(250), invoice, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 199 });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: true });
@@ -215,7 +242,7 @@ describe('completion charge accepted-amount cap — never collect above what was
 
   test('the comparator nets a recorded discount off the grossed-up subtotal (manual-discount accepts)', async () => {
     const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 300, discount_amount: 50, total: 250 };
-    stubDb([hold, invoice, { estimated_price: 250 }, paymentMethod]);
+    stubDb([holdWithCap(250), invoice, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 250 });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: true });
@@ -223,15 +250,15 @@ describe('completion charge accepted-amount cap — never collect above what was
 
   test('tax on top of the accepted base does not trip the cap (subtotal is the comparator)', async () => {
     const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 250, tax_amount: 17.5, total: 267.5 };
-    stubDb([hold, invoice, { estimated_price: 250 }, paymentMethod]);
+    stubDb([holdWithCap(250), invoice, paymentMethod]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 267.5 });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: true });
   });
 
-  test('FAILS CLOSED when no accepted amount is on file — not charged, review alert', async () => {
+  test('FAILS CLOSED when the hold carries no frozen amount (legacy pre-stamp row) — not charged, review alert', async () => {
     const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 250, total: 250 };
-    stubDb([hold, invoice, { estimated_price: null }]);
+    stubDb([holdWithCap(null), invoice]);
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'no_accepted_amount' });
     expect(mockChargeInvoiceWithSavedCard).not.toHaveBeenCalled();
@@ -244,9 +271,9 @@ describe('completion charge accepted-amount cap — never collect above what was
     expect(mockDbUpdates).toEqual([]);
   });
 
-  test('FAILS CLOSED when the accepted-amount lookup errors', async () => {
+  test('FAILS CLOSED on an unreadable frozen stamp (non-numeric)', async () => {
     const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', subtotal: 250, total: 250 };
-    stubDb([hold, invoice, new Error('db timeout')]);
+    stubDb([holdWithCap('garbage'), invoice]);
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'no_accepted_amount' });
     expect(mockChargeInvoiceWithSavedCard).not.toHaveBeenCalled();
@@ -442,6 +469,40 @@ describe('recordCardHoldHeld — saved-method holds carry no SetupIntent (spec �
   });
 });
 
+describe('recordCardHoldHeld — freezes the accepted amount at booking (Codex #2821 P1)', () => {
+  it('stamps accepted_amount onto a fresh hold row (insert path)', async () => {
+    stubDb([null]); // no existing SI-less held row → insert path
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved', acceptedAmount: 250,
+    });
+    expect(mockDbInserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accepted_amount: 250, status: 'held' }),
+    ]));
+  });
+  it('stamps accepted_amount on the retried-accept update path too', async () => {
+    stubDb([{ id: 'hold-existing' }]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved', acceptedAmount: 199.995,
+    });
+    // Rounded to cents at the stamp, so the cap compares like-for-like.
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accepted_amount: 200 }),
+    ]));
+  });
+  it('an unreadable/absent accepted amount freezes NULL — the completion cap then fails CLOSED, never open', async () => {
+    stubDb([null]);
+    await recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved', acceptedAmount: 'garbage',
+    });
+    expect(mockDbInserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accepted_amount: null }),
+    ]));
+  });
+});
+
 describe('cardHoldCancelPreview — cancel-UI preview', () => {
   const now = new Date('2026-07-06T12:00:00Z');
   const holdRow = { id: 'h1', cancel_window_hours: 24, no_show_fee_amount: 49 };
@@ -599,7 +660,9 @@ describe('verifyCardHoldIntent — accept gate', () => {
 });
 
 describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice gap', () => {
-  const HELD = { id: 'h1', customer_id: 'cust1', stripe_payment_method_id: 'pm_s', stripe_setup_intent_id: 'si', no_show_fee_amount: 49, cancel_window_hours: 24 };
+  // accepted_amount: the booking-time freeze the completion cap reads from
+  // the hold row itself (no scheduled_services read on the charge path).
+  const HELD = { id: 'h1', customer_id: 'cust1', stripe_payment_method_id: 'pm_s', stripe_setup_intent_id: 'si', no_show_fee_amount: 49, cancel_window_hours: 24, accepted_amount: 49 };
   const COLLECTIBLE_INVOICE = { id: 'inv_recap', status: 'draft', total: 49, payer_id: null };
 
   it('no-ops when there is no held card hold', async () => {
@@ -616,8 +679,8 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
 
   it('mints the completion invoice and charges the held card, OMITTING taxRate so create() auto-computes (commercial+business)', async () => {
     // queue: held(recap) → scheduled_service(prepaid check) → invoice-by-SR(none)
-    // → invoice-by-SS(none) → held(charge) → invoice → visit(accepted cap) → pm row
-    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { estimated_price: 49 }, { id: 'pmrow1' }]);
+    // → invoice-by-SS(none) → held(charge) → invoice → pm row
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     const arg = mockCreateFromService.mock.calls[0][1];
@@ -627,8 +690,8 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
   });
 
   it('reuses an existing invoice (by service_record_id) instead of minting a duplicate', async () => {
-    // held → scheduled_service(prepaid check) → invoice-by-SR FOUND → held(charge) → invoice → visit(cap) → pm
-    stubDb([HELD, { prepaid_amount: null }, { id: 'inv_recap' }, HELD, COLLECTIBLE_INVOICE, { estimated_price: 49 }, { id: 'pmrow1' }]);
+    // held → scheduled_service(prepaid check) → invoice-by-SR FOUND → held(charge) → invoice → pm
+    stubDb([HELD, { prepaid_amount: null }, { id: 'inv_recap' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(mockCreateFromService).not.toHaveBeenCalled();
@@ -636,8 +699,8 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
   });
 
   it('reuses a pre-mint invoice linked only by scheduled_service_id (back-links it)', async () => {
-    // held → scheduled_service(prepaid check) → invoice-by-SR(none) → invoice-by-SS FOUND → held → invoice → visit(cap) → pm
-    stubDb([HELD, { prepaid_amount: null }, null, { id: 'inv_premint', service_record_id: null }, HELD, COLLECTIBLE_INVOICE, { estimated_price: 49 }, { id: 'pmrow1' }]);
+    // held → scheduled_service(prepaid check) → invoice-by-SR(none) → invoice-by-SS FOUND → held → invoice → pm
+    stubDb([HELD, { prepaid_amount: null }, null, { id: 'inv_premint', service_record_id: null }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(mockCreateFromService).not.toHaveBeenCalled();
@@ -662,7 +725,7 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
   });
 
   it('alerts the office when the card charge fails (stranded draft, no pay-link UI)', async () => {
-    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { estimated_price: 49 }, { id: 'pmrow1' }]);
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('card_declined'), { type: 'StripeCardError', payment_intent: { id: 'pi_x' } }));
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(r.reason).toBe('charge_failed');
