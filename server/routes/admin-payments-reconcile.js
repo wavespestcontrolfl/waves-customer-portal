@@ -42,10 +42,19 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
     if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
 
     const charges = await stripe.charges.list({ limit: 40 });
+    const chargeIds = charges.data.map(c => c.id).filter(Boolean);
     const linked = await db('invoices')
-      .whereIn('stripe_charge_id', charges.data.map(c => c.id).filter(Boolean))
+      .whereIn('stripe_charge_id', chargeIds)
       .select('stripe_charge_id');
-    const linkedSet = new Set(linked.map(r => r.stripe_charge_id));
+    // Also exclude charges already booked in the payments LEDGER: on-platform
+    // charges (webhook, saved-card, pay page) book a payments row, sometimes
+    // without stamping invoices.stripe_charge_id. Offering one of those here
+    // wastes a result slot on a charge the /reconcile guard below is
+    // guaranteed to 409 — only reconcilable entries should be returned.
+    const booked = await db('payments')
+      .whereIn('stripe_charge_id', chargeIds)
+      .select('stripe_charge_id');
+    const linkedSet = new Set([...linked, ...booked].map(r => r.stripe_charge_id));
 
     const unlinked = charges.data
       .filter(c => c.status === 'succeeded' && !linkedSet.has(c.id))
@@ -152,21 +161,8 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         });
       }
 
-      // Prevent double-linking
-      const already = await db('invoices').where({ stripe_charge_id: stripeChargeId }).first();
-      if (already && already.id !== invoiceId) {
-        return res.status(409).json({ error: `Charge already linked to invoice ${already.invoice_number}` });
-      }
-      // Also check the payments LEDGER, not just invoices.stripe_charge_id:
-      // on-platform charges (webhook, saved-card, pay page) book their own
-      // payments row, sometimes without stamping the invoice column —
-      // reconciling one of those here would record the same money twice.
-      const alreadyBooked = await db('payments').where({ stripe_charge_id: stripeChargeId }).first();
-      if (alreadyBooked) {
-        return res.status(409).json({ error: 'Charge is already recorded in the payments ledger — it cannot be reconciled again' });
-      }
       // Verify the charge belongs to THIS invoice's customer when the charge
-      // carries an identity we can map. Portal-created charges pin
+      // carries an identity. Portal-created charges pin
       // metadata.waves_customer_id and/or a Stripe customer id; Tap-to-Pay
       // charges from the native Terminal app carry neither, so absence of
       // both stays reconcilable (that is this route's whole purpose).
@@ -179,7 +175,15 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         : chargeDetails.customer?.id || null;
       if (chargeStripeCustomer) {
         const owner = await db('customers').where({ stripe_customer_id: chargeStripeCustomer }).first('id');
-        if (owner && String(owner.id) !== String(invoice.customer_id)) {
+        // Fail CLOSED on an identified-but-unmappable Stripe customer
+        // (legacy, deleted, or foreign account): we cannot verify whose
+        // money this is, so it must not be attachable to any invoice. Only
+        // charges carrying NO customer identity at all use the Terminal
+        // exception above.
+        if (!owner) {
+          return res.status(400).json({ error: `Charge's Stripe customer (${chargeStripeCustomer}) is not linked to any portal customer — cannot verify ownership, so it cannot be reconciled` });
+        }
+        if (String(owner.id) !== String(invoice.customer_id)) {
           return res.status(400).json({ error: 'Charge belongs to a different customer than this invoice' });
         }
       }
@@ -224,12 +228,42 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     // the flip left collected money permanently missing on a transient DB
     // failure. Either both commit or the operator gets a retryable error and
     // nothing changed.
-    const updatedRows = await db.transaction(async (trx) => {
+    const txResult = await db.transaction(async (trx) => {
+      if (stripeChargeId) {
+        // Charge-scoped, transaction-scoped advisory lock. Two admins
+        // reconciling the SAME charge against different same-value invoices
+        // lock DIFFERENT invoice rows, so row locks alone don't serialize
+        // them, and payments.stripe_charge_id has no unique constraint —
+        // without this, both could pass the dedupe reads and the charge
+        // would be booked twice (two paid invoices from one payment). The
+        // lock serializes recheck+insert per charge id; the loser blocks
+        // here until the winner commits, then its rechecks below see the
+        // winner's rows and bail. Released automatically at commit/rollback.
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['reconcile.stripe_charge', stripeChargeId]
+        );
+        // Prevent double-linking — checked INSIDE the lock so the read
+        // can't go stale before the insert.
+        const linkedNow = await trx('invoices').where({ stripe_charge_id: stripeChargeId }).first();
+        if (linkedNow && linkedNow.id !== invoiceId) {
+          return { conflict: `Charge already linked to invoice ${linkedNow.invoice_number}` };
+        }
+        // Also check the payments LEDGER, not just invoices.stripe_charge_id:
+        // on-platform charges (webhook, saved-card, pay page) book their own
+        // payments row, sometimes without stamping the invoice column —
+        // reconciling one of those here would record the same money twice.
+        const alreadyBooked = await trx('payments').where({ stripe_charge_id: stripeChargeId }).first();
+        if (alreadyBooked) {
+          return { conflict: 'Charge is already recorded in the payments ledger — it cannot be reconciled again' };
+        }
+      }
+
       const rows = await trx('invoices')
         .where({ id: invoiceId })
         .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
         .update(updates);
-      if (!rows) return 0;
+      if (!rows) return { updated: 0 };
 
       // Payments ledger row so revenue reports pick up the collection
       await trx('payments').insert({
@@ -245,9 +279,12 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
           source: 'admin_payment_reconcile',
         }),
       });
-      return rows;
+      return { updated: rows };
     });
-    if (!updatedRows) {
+    if (txResult.conflict) {
+      return res.status(409).json({ error: txResult.conflict });
+    }
+    if (!txResult.updated) {
       const current = await db('invoices').where({ id: invoiceId }).first('status');
       return res.status(409).json({
         error: `Invoice status changed to '${current?.status || 'unknown'}' while reconciling — no changes applied`,
