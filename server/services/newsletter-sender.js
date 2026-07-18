@@ -901,7 +901,7 @@ async function resumeCampaign(sendId) {
  * can't stampede the others.
  */
 async function processScheduledSends() {
-  const { requiresClaimValidation } = require('../config/newsletter-types');
+  const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
   const { validateNewsletterDraft } = require('../services/newsletter-validator');
 
   const due = await db('newsletter_sends')
@@ -935,9 +935,17 @@ async function processScheduledSends() {
               ? 'scheduled_for is not the current issue Tuesday at 6:00 AM ET'
               : 'missed the Tuesday 6:00–6:14 AM ET delivery window';
           logger.error(`[newsletter-scheduler] flagship send ${row.id} blocked: ${reason}`);
+          // Reverting an approved schedule INVALIDATES the approval: the
+          // state the owner signed off (lineup, target Tuesday) no longer
+          // holds. Clear the proof fields or the now-draft row would carry
+          // stale approval metadata forever — the PATCH invalidation only
+          // covers status='scheduled', so a draft must never hold one.
           const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
             status: 'draft',
             scheduled_for: null,
+            proof_token: null,
+            proof_sent_at: null,
+            proof_approved_at: null,
             updated_at: new Date(),
           });
           if (reverted) {
@@ -946,17 +954,28 @@ async function processScheduledSends() {
           continue;
         }
       }
-      // Validate AI-generated sends (flagship + Pest Insider) before dispatching
-      if (requiresClaimValidation(row.newsletter_type)) {
+      // Validate AI-generated sends (flagship + Pest Insider) before
+      // dispatching. Promoted legacy rows (newsletter_type NULL, flagship
+      // via the calendar link) MUST validate too — keying off the raw type
+      // alone let them ship customer-facing AI copy without the
+      // hallucinated-claim hard block.
+      if (requiresClaimValidation(row.newsletter_type) || eventSelection.flagship) {
+        const typedRow = requiresClaimValidation(row.newsletter_type)
+          ? row
+          : { ...row, newsletter_type: FLAGSHIP_TYPE_KEY };
         const recipientCount = Number(
           (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
         );
-        const { errors } = validateNewsletterDraft(row, { recipientCount });
+        const { errors } = validateNewsletterDraft(typedRow, { recipientCount });
         if (errors.length > 0) {
           logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
+          // Same approval invalidation as the flagship revert above.
           const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
             status: 'draft',
             scheduled_for: null,
+            proof_token: null,
+            proof_sent_at: null,
+            proof_approved_at: null,
             updated_at: new Date(),
           });
           if (!reverted) continue;

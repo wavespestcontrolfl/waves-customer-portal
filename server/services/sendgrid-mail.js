@@ -39,6 +39,16 @@ const { publicPortalUrl } = require('../utils/portal-url');
 
 const API_BASE = 'https://api.sendgrid.com/v3';
 
+// Hard bound on every SendGrid HTTP request. LOAD-BEARING for the newsletter
+// send lifecycle: the stale-claim lease (NEWSLETTER_SENDING_LEASE_MINUTES,
+// min 5) frees a 'sending' campaign for recovery only after a full lease of
+// heartbeat silence — as long as this timeout stays well UNDER the lease, an
+// in-flight /mail/send can never outlive the claim, so recovery can never
+// re-mail a chunk that was actually handed to SendGrid: a stalled request
+// aborts here first, the chunk's rows land 'failed', and resume retries them
+// exactly once. Keep this comfortably below 5 minutes.
+const REQUEST_TIMEOUT_MS = 120_000;
+
 function isConfigured() {
   return !!process.env.SENDGRID_API_KEY;
 }
@@ -53,6 +63,7 @@ async function apiCall(method, path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: authHeaders(),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -139,6 +150,7 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
   const res = await fetch(`${API_BASE}/mail/send`, {
     method: 'POST',
     headers: authHeaders(),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -169,6 +181,7 @@ async function clearBlockedAddress(email) {
   const res = await fetch(`${API_BASE}/suppression/blocks/${encodeURIComponent(email)}`, {
     method: 'DELETE',
     headers: authHeaders(),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (res.ok || res.status === 404) return { cleared: res.ok };
   const text = await res.text();
@@ -249,6 +262,7 @@ async function sendBatch({ recipients, fromEmail, fromName, subject, html, text,
   const res = await fetch(`${API_BASE}/mail/send`, {
     method: 'POST',
     headers: authHeaders(),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
@@ -309,6 +323,7 @@ async function sendTemplated({ to, templateId, dynamicData, fromEmail, fromName,
   const res = await fetch(`${API_BASE}/mail/send`, {
     method: 'POST',
     headers: authHeaders(),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {

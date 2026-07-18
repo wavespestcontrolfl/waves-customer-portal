@@ -21,7 +21,7 @@ const { linkToCustomer, subscribeOrResubscribe, EMAIL_RE } = require('../service
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
-const { isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
+const { isFlagshipType, requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
 const {
   isEligibleForFreshDigest,
   scoreFreshEvent,
@@ -817,12 +817,18 @@ router.post('/sends/:id/send', async (req, res) => {
     // Server-side validation gate for AI-generated sends (flagship +
     // Pest Insider). Hard errors (no subject, no body, hallucinated
     // claims) always block. force=true skips only the 0-recipient check
-    // (existing contract) — not structural errors.
-    if (requiresClaimValidation(send.newsletter_type)) {
+    // (existing contract) — not structural errors. Promoted legacy rows
+    // (newsletter_type NULL, flagship via the calendar link) validate as
+    // flagship — keying off the raw type alone skipped the
+    // hallucinated-claim hard block for them.
+    if (requiresClaimValidation(send.newsletter_type) || eventSelection.flagship) {
+      const typedSend = requiresClaimValidation(send.newsletter_type)
+        ? send
+        : { ...send, newsletter_type: FLAGSHIP_TYPE_KEY };
       const recipientCount = force ? 1 : Number(
         (await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first())?.c || 0
       );
-      const { errors } = validateNewsletterDraft(send, { recipientCount });
+      const { errors } = validateNewsletterDraft(typedSend, { recipientCount });
       if (errors.length > 0) {
         return res.status(400).json({ error: 'Validation failed', errors });
       }
