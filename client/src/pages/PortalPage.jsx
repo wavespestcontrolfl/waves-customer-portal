@@ -8143,12 +8143,13 @@ function MyPlanTab({ customer, focusService }) {
   // Server-resolved lane verdict for NULL modes — see the dashboard summary
   // (Codex r10).
   const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
-  // Cancellation-eligibility signals the visit/rate data above can't carry:
-  // an armed next_charge_date with no monthly rate, and date-exempt
-  // 'rescheduled' rebook intents that the date-bounded schedule list omits
-  // (Codex #2859 r1 P2 — the gate must mirror EVERY server case).
-  const [hasScheduledCharge, setHasScheduledCharge] = useState(false);
-  const [hasOpenRebookIntent, setHasOpenRebookIntent] = useState(false);
+  // Server-computed cancellation-eligibility verdict — the SAME predicate
+  // POST /api/requests enforces (cancellation-eligibility service), served
+  // on /api/schedule. Client-side approximations of it drifted three times
+  // in review (rescheduled date-exemption, armed next_charge_date,
+  // dispatch-owned pending rows), so the gate consumes the server's answer.
+  // null = payload didn't carry the field (older cached bundle mid-deploy).
+  const [serverCancellable, setServerCancellable] = useState(null);
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
@@ -8168,7 +8169,9 @@ function MyPlanTab({ customer, focusService }) {
     ]).then(([nextData, scheduleData, servicesData]) => {
       setNextService(nextData.next || null);
       setUpcomingServices(scheduleData.upcoming || []);
-      setHasOpenRebookIntent(scheduleData.hasOpenRebookIntent === true);
+      setServerCancellable(typeof scheduleData.hasCancellableWork === 'boolean'
+        ? scheduleData.hasCancellableWork
+        : null);
       setServiceHistory(servicesData.services || []);
       setPlanStatus('ready');
     }).catch((err) => {
@@ -8182,7 +8185,6 @@ function MyPlanTab({ customer, focusService }) {
     api.getAutopay().then(d => {
       setBillingMode(d?.billing_mode || null);
       setResolvedNonMonthly(d?.non_monthly_billing === true);
-      setHasScheduledCharge(d?.has_scheduled_charge === true);
     }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
   }, [loadPlan]);
@@ -8215,19 +8217,20 @@ function MyPlanTab({ customer, focusService }) {
     ? Math.max(1, Math.round((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)))
     : 0;
   const tierServiceLimit = activeTierName ? (TIER_SERVICES[activeTierName] || 1) : 0;
-  // Pause/Cancel are only offered when there is something to pause or cancel —
-  // mirrors EVERY case of the server's nothing_to_cancel guard on POST
-  // /api/requests: an active plan, an upcoming visit, live billing
-  // (monthly rate OR an armed next_charge_date), or a date-exempt
-  // 'rescheduled' rebook intent the date-bounded schedule list omits. A
-  // tier-'none' account with only one-time history gets no account-wide
-  // churn control. Rendered only at planStatus 'ready', so
-  // nextService/upcomingServices are loaded.
-  const hasCancellableAccount = !!activeTierName || !!nextService
-    || upcomingServices.length > 0
-    || hasOpenRebookIntent
-    || hasScheduledCharge
-    || Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0) > 0;
+  // Pause/Cancel are only offered when there is something to pause or cancel.
+  // When the schedule payload carries the server's nothing_to_cancel verdict
+  // (same shared predicate POST /api/requests enforces), it is AUTHORITATIVE
+  // both ways — client-visible signals can't reproduce cases like a
+  // live-track-only visit the sweep would never cancel. The client-side belt
+  // exists only for a payload missing the field (mid-deploy cache), so an
+  // obviously-active account never loses the controls. A tier-'none'
+  // account with only one-time history gets no account-wide churn control.
+  // Rendered only at planStatus 'ready', so the schedule data is loaded.
+  const hasCancellableAccount = serverCancellable !== null
+    ? serverCancellable
+    : (!!activeTierName || !!nextService
+      || upcomingServices.length > 0
+      || Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0) > 0);
 
   const detectCatalogServiceId = (service) => {
     for (const svc of SERVICE_CATALOG) {

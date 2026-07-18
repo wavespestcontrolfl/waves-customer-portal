@@ -158,6 +158,36 @@ describe('session epoch guards', () => {
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
   });
 
+  it('DOES supersede on a same-customer NEW-session login from another tab (family change)', async () => {
+    const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const tokenFor = (customerId, sessionId) => `${b64u({ alg: 'none' })}.${b64u({ customerId, sessionId })}.x`;
+    const tokOldSession = tokenFor('cust-a', 'sess-1');
+    const tokNewSession = tokenFor('cust-a', 'sess-2');
+    const store = { waves_token: tokOldSession, waves_refresh_token: 'ref-a' };
+    stubLocalStorage(store);
+    const slowMe = deferred();
+    // Mount-time load under the OLD session stalls...
+    api.getMe.mockReturnValueOnce(slowMe.promise);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+
+    // ...another tab completes a FRESH code login for the same customer
+    // (new session family)...
+    api.getMe.mockResolvedValue({ id: 'cust-a' });
+    await act(async () => {
+      store.waves_token = tokNewSession;
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token', newValue: tokNewSession }));
+    });
+
+    // ...and the OLD session's stalled /auth/me finally fails 401. It must
+    // not clear the newly adopted family's credentials.
+    const staleAuthErr = new Error('Invalid token');
+    staleAuthErr.status = 401;
+    await act(async () => { slowMe.reject(staleAuthErr); });
+
+    expect(api.clearTokens).not.toHaveBeenCalled();
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-a');
+  });
+
   it('ignores a stale 401 from a replaced token instead of clearing the new session', async () => {
     stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
     const slowMe = deferred();

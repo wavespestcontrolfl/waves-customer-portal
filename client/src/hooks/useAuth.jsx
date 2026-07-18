@@ -24,6 +24,23 @@ export function tokenCustomerId(token) {
   }
 }
 
+// Session-family key: a fresh code login mints a NEW sessionId even for the
+// same customer (server generateToken), and responses in flight under the
+// OLD family must not act on the new one — in particular a stale /auth/me
+// 401 must not clear freshly adopted credentials. A same-family access-token
+// rotation keeps the same key. Legacy tokens without a sessionId collapse to
+// the customer id alone (same tolerance as api.js sameRequestSession).
+function tokenSessionKey(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
+    if (payload.customerId == null) return null;
+    return `${payload.customerId}:${payload.sessionId ?? ''}`;
+  } catch {
+    return null;
+  }
+}
+
 function authErrorCopy(err) {
   const msg = String(err?.message || '').trim();
   const looksCurated = msg
@@ -169,11 +186,16 @@ export function AuthProvider({ children }) {
       }
       const nextId = tokenCustomerId(token);
       const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token);
-      // Bump the epoch ONLY on a real identity change: a same-customer
-      // access-token rotation from another tab must not supersede this tab's
-      // in-flight flows (e.g. a property switch mid-await) — the identity
-      // those responses describe is still current (Codex #2859 r1 P2).
-      if (identityChanged) sessionEpochRef.current += 1;
+      // Bump the epoch on any SESSION-FAMILY change — a different customer
+      // OR a fresh login's new sessionId for the same customer — so
+      // in-flight responses from the old family are discarded (a stale
+      // /auth/me 401 must not clear the newly adopted credentials). A
+      // same-family access-token rotation keeps the epoch, so it cannot
+      // supersede this tab's in-flight flows (e.g. a property switch
+      // mid-await) — that identity is still current (Codex #2859 r1+r2).
+      const nextKey = tokenSessionKey(token);
+      const familyChanged = nextKey === null || nextKey !== tokenSessionKey(api.token);
+      if (familyChanged) sessionEpochRef.current += 1;
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not

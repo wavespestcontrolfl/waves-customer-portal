@@ -175,12 +175,6 @@ router.get('/', async (req, res, next) => {
       // cron will never run (Codex r9).
       non_monthly_billing: nonMonthlyBilling,
       next_charge_date: nonMonthlyBilling || !hasMonthlyRate ? null : customer.next_charge_date,
-      // Raw existence signal, deliberately separate from the display field
-      // above (which nulls when projecting a charge would be false): the
-      // cancellation eligibility guard treats ANY armed next_charge_date as
-      // live billing, and the Plan tab's Account Options gate must mirror
-      // that even when monthly_rate is empty.
-      has_scheduled_charge: !!customer.next_charge_date,
       next_charge_amount: nextCharge?.total ?? null,
       next_charge_base_amount: nextCharge?.base ?? null,
       next_charge_surcharge_amount: nextCharge?.surcharge ?? null,

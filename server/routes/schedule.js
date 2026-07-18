@@ -8,6 +8,7 @@ const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+const { hasCancellableWork } = require('../services/cancellation-eligibility');
 
 router.use(authenticate);
 
@@ -48,19 +49,16 @@ router.get('/', async (req, res, next) => {
       )
       .orderBy('scheduled_services.scheduled_date', 'asc');
 
-    // Open rebook intent regardless of date: 'rescheduled' phantom rows keep
-    // their ORIGINAL — often past — date until SmartRebooker actions them
-    // back onto the calendar, so the date-bounded list above can miss them
-    // entirely. The cancellation eligibility guard (POST /api/requests)
-    // treats them as cancellable date-exempt; expose the same signal so the
-    // Plan tab's Account Options mirror the server instead of hiding the
-    // self-serve cancel path from an eligible customer.
-    const openRebookIntent = await db('scheduled_services')
-      .where({ customer_id: req.customerId, status: 'rescheduled' })
-      .first('id');
+    // The SAME cancellation-eligibility verdict POST /api/requests enforces,
+    // so the Plan tab's Account Options gate renders from the server's
+    // answer instead of approximating it from the visit list above — which
+    // deliberately omits rows the guard still counts (date-exempt
+    // 'rescheduled' rebook intents, dispatch-owned pending follow-ups) and
+    // says nothing about billing.
+    const cancellable = await hasCancellableWork(req.customerId);
 
     res.json({
-      hasOpenRebookIntent: !!openRebookIntent,
+      hasCancellableWork: cancellable,
       upcoming: upcoming.map(s => ({
         id: s.id,
         date: s.scheduled_date,

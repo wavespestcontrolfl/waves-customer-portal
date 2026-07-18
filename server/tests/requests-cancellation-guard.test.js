@@ -73,6 +73,15 @@ function builderFor(table) {
     return b;
   });
   b.whereIn = jest.fn((col, vals) => { conds.push((r) => vals.includes(r[col])); return b; });
+  b.whereRaw = jest.fn((sql) => {
+    // The eligibility predicate's live/done track-state exclusion.
+    if (/track_state\s+IS\s+NULL\s+OR\s+track_state\s+NOT\s+IN/i.test(sql)) {
+      const excluded = [...sql.matchAll(/'([a-z_]+)'/gi)].map((m) => m[1]);
+      conds.push((r) => r.track_state == null || !excluded.includes(r.track_state));
+      return b;
+    }
+    throw new Error(`fake db: unsupported whereRaw ${sql}`);
+  });
   for (const method of ['orderBy', 'leftJoin', 'select', 'limit', 'offset']) {
     b[method] = jest.fn(() => b);
   }
@@ -151,6 +160,15 @@ describe('POST /api/requests cancellation guard', () => {
     state.scheduled_services = [{ id: 'svc-2', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-01-01' }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(201);
+  }));
+
+  test('a live-track visit alone is NOT cancellable work — the sweep would never touch it', () => withServer(async (baseUrl) => {
+    state.scheduled_services = [{ id: 'svc-3', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-01-01', track_state: 'en_route' }];
+    const res = await postCancellation(baseUrl);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe('nothing_to_cancel');
+    expect(processCancellationRequest).not.toHaveBeenCalled();
   }));
 
   test('non-cancellation categories are untouched by the guard', () => withServer(async (baseUrl) => {
