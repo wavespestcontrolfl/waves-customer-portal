@@ -28,7 +28,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 // 3 consecutive failed pulls ≈ 3 days broken — early enough to repair a
-// source before it can starve a Thursday digest.
+// source before it can starve Monday's draft for the Tuesday issue.
 const FAILURE_ALERT_THRESHOLD = 3;
 // 7 consecutive empty-but-successful pulls ≈ a week without a single
 // event. Real feeds have quiet days; a quiet WEEK is selector rot or a

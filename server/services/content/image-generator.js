@@ -98,6 +98,13 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
 
 // ── providers ────────────────────────────────────────────────────────
 
+const IMAGE_REQUEST_TIMEOUT_MS = 60_000;
+const imageRequestSignal = () => (
+  typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(IMAGE_REQUEST_TIMEOUT_MS)
+    : undefined
+);
+
 async function callOpenAI({ model, quality, prompt, size }, { fetchFn = fetch } = {}) {
   if (!process.env.OPENAI_API_KEY) {
     return { skipped: true, reason: 'OPENAI_API_KEY not set' };
@@ -110,6 +117,7 @@ async function callOpenAI({ model, quality, prompt, size }, { fetchFn = fetch } 
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ model, prompt, size, quality, n: 1 }),
+      signal: imageRequestSignal(),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -148,6 +156,7 @@ async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch } = 
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig,
         }),
+        signal: imageRequestSignal(),
       }
     );
     if (!res.ok) {

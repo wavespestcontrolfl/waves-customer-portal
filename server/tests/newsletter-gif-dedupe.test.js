@@ -191,7 +191,7 @@ describe('assembleBeehiivNewsletter — no GIF repeats in one issue', () => {
       introText: 'Big week ahead.',
       events: [eventFixture(1)],
     });
-    expect(html).toContain('https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026.gif');
+    expect(html).toContain('https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif');
     expect(html).toContain('width="48"');
     expect(html).not.toContain('media.beehiiv.com');
   });

@@ -27,6 +27,7 @@ const express = require('express');
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const adminNewsletterRouter = require('../routes/admin-newsletter');
+const SEND_UUID = '11111111-2222-4333-8444-555555555555';
 
 function chain({ first } = {}) {
   const q = {};
@@ -65,7 +66,7 @@ describe('admin newsletter test recipient guardrails', () => {
       if (table !== 'newsletter_sends') throw new Error(`Unexpected table ${table}`);
       return chain({
         first: {
-          id: 'send-1',
+          id: SEND_UUID,
           html_body: '<p>Hello</p>',
           text_body: 'Hello',
           subject: 'Test newsletter',
@@ -79,7 +80,7 @@ describe('admin newsletter test recipient guardrails', () => {
 
   test('rejects non-internal test recipients with 400 before SendGrid', async () => {
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/admin/newsletter/sends/send-1/test`, {
+      const response = await fetch(`${baseUrl}/admin/newsletter/sends/${SEND_UUID}/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: 'customer@gmail.com' }),
@@ -97,7 +98,7 @@ describe('admin newsletter test recipient guardrails', () => {
       if (table === 'newsletter_sends') {
         return chain({
           first: {
-            id: 'send-1',
+            id: SEND_UUID,
             html_body: '<p>Hi {{quiz}}</p>',
             text_body: 'Hi {{quiz-text}}',
             subject: 'Test newsletter',
@@ -113,7 +114,7 @@ describe('admin newsletter test recipient guardrails', () => {
     sendgrid.sendOne.mockResolvedValue({ messageId: 'm1' });
 
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/admin/newsletter/sends/send-1/test`, {
+      const response = await fetch(`${baseUrl}/admin/newsletter/sends/${SEND_UUID}/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: 'owner@example.com' }),

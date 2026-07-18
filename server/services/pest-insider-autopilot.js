@@ -2,8 +2,8 @@
  * Pest Insider autopilot — monthly auto-draft of the pest deep-dive.
  *
  * Called by the Tuesday 7AM ET cron in scheduler.js; runs only on the
- * FIRST Tuesday of the month (owner decision 2026-06-11 — Thursdays
- * stay owned by the weekly events guide). Never auto-sends: creates a
+ * FIRST Tuesday of the month (owner decision 2026-06-11). The weekly
+ * Waves Newsletter has its own Tuesday 6:00 AM lane. Never auto-sends: creates a
  * draft in newsletter_sends for admin review + manual send, exactly
  * like the weekly autopilot.
  *

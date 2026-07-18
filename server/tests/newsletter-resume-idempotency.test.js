@@ -32,7 +32,7 @@ jest.mock('../services/conversations', () => ({
 }));
 
 const db = require('../models/db');
-const { sendCampaign, resumeCampaign } = require('../services/newsletter-sender');
+const { sendCampaign, prepareResumeCampaign, resumeCampaign } = require('../services/newsletter-sender');
 
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
 // invoice-receipt-email-idempotency.test.js / portal-url.test.js so the
@@ -66,13 +66,18 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
   return q;
 }
 
-function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate } = {}) {
+function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
       chain({ updated: 1, returning: [{ id: send?.id }] }),// atomic claim
-      chain({ updated: 1 }),                               // final status update
-      chain({ first: null }),                              // social-share re-fetch (null → share skipped)
+      chain({ updated: heartbeatUpdated }),                // pre-batch heartbeat (0 = claim lost to a reclaim)
+      // A lost claim must consume nothing further from this queue.
+      ...(truncateSendsQueueAfterHeartbeat ? [] : [
+        chain({ updated: finalUpdated }),                  // final status update (0 = claim rotated after last batch)
+        // Loser at finalization never re-fetches for the social share.
+        ...(finalUpdated ? [chain({ first: null })] : []),
+      ]),
     ],
     newsletter_subscribers: [
       chain({ count: subscribers.length }),                 // 0-recipient guard
@@ -237,6 +242,65 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(result.skipped_already_sent).toBe(1);
   });
 
+  test('a worker whose claim was reclaimed stops after the chunk and never finalizes', async () => {
+    // Heartbeat returns 0 rows (stale-reclaim rotated sending_claim_token
+    // under a new owner) → the loser must stop: no final status update, no
+    // social-share re-fetch. The strict queue mock proves it — neither entry
+    // is provided, so consuming one would throw.
+    buildDb({
+      send: {
+        id: 'send-1',
+        status: 'draft',
+        html_body: '<p>Body</p>',
+        text_body: 'Body',
+        subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com',
+        from_name: 'Waves',
+        reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: null,
+        subject_b: null,
+      },
+      subscribers: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }],
+      deliveries: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }],
+      heartbeatUpdated: 0,
+      truncateSendsQueueAfterHeartbeat: true,
+    });
+
+    const result = await sendCampaign('send-1');
+    expect(result.lostClaim).toBe(true);
+    // The ownership check runs BEFORE the external call — a reclaimed
+    // worker mails nothing (Codex r3: check before each batch, not after).
+    expect(result.accepted).toBe(0);
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
+  });
+
+  test('a claim lost at FINALIZATION skips calendar/feature/social side effects', async () => {
+    let calendarTouched = false;
+    buildDb({
+      send: {
+        id: 'send-1',
+        status: 'draft',
+        html_body: '<p>Body</p>',
+        text_body: 'Body',
+        subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com',
+        from_name: 'Waves',
+        reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: null,
+        subject_b: null,
+      },
+      subscribers: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }],
+      deliveries: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }],
+      finalUpdated: 0, // token rotated between the last batch and finalization
+      onCalendarUpdate: () => { calendarTouched = true; },
+    });
+
+    const result = await sendCampaign('send-1');
+    expect(result.lostClaim).toBe(true);
+    expect(result.accepted).toBe(1); // the batch had already been accepted
+    expect(calendarTouched).toBe(false); // the reclaiming owner runs the lifecycle
+  });
+
   test('does not overwrite deliveries recovered by processed webhooks when SendGrid rejects', async () => {
     mockSendBroadcast.mockRejectedValueOnce(new Error('lost response'));
     let finalUpdate = null;
@@ -258,6 +322,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
           },
         }),
         chain({ returning: [{ id: 'send-1' }] }),
+        chain({ updated: 1 }), // per-chunk heartbeat (stale-lease keepalive)
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_subscribers: [
@@ -323,6 +388,31 @@ describe('resumeCampaign — preconditions', () => {
     await expect(resumeCampaign('s')).rejects.toMatchObject({ code: 'STILL_SENDING' });
   });
 
+  test("reclaims an expired 'sending' lease after a crash, even before delivery seeding", async () => {
+    const staleSend = {
+      id: 's',
+      status: 'sending',
+      updated_at: new Date(Date.now() - 60 * 60 * 1000),
+      html_body: 'x',
+      text_body: 'x',
+    };
+    const queues = {
+      newsletter_sends: [
+        chain({ first: staleSend }),
+        chain({ returning: [{ id: 's' }] }),
+      ],
+      newsletter_send_deliveries: [chain({ count: 0 })],
+    };
+    db.mockImplementation((table) => queues[table].shift());
+
+    await expect(prepareResumeCampaign('s')).resolves.toEqual({
+      sendId: 's',
+      existingDeliveriesOnly: false,
+      preclaimed: true,
+      claimToken: expect.any(String),
+    });
+  });
+
   test("rejects 'sent' with NOTHING_TO_RESUME when existing rows are all terminal-success", async () => {
     let sendsCalls = 0;
     let deliveriesCalls = 0;
@@ -382,6 +472,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ first: failedSend }),                         // resume fetch
         chain({ returning: [{ id: 's' }], onUpdate: (payload) => { claimUpdate = payload; } }),
         chain({ first: { ...failedSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat (stale-lease keepalive)
         chain({ updated: 1 }),                                // final status update
       ],
       newsletter_send_deliveries: [
@@ -437,6 +528,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ first: sentSend }),                          // resume fetch
         chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
         chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat (stale-lease keepalive)
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_send_deliveries: [
@@ -510,6 +602,8 @@ describe('resumeCampaign — preconditions', () => {
         chain({ first: sentSend }),                          // resume fetch
         chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
         chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        // No heartbeat entry: the self-healed chunk short-circuits (continue)
+        // before the send, so the per-chunk keepalive never fires.
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_send_deliveries: [
@@ -592,6 +686,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ first: sentSend }),                          // resume fetch
         chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
         chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat (stale-lease keepalive)
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_send_deliveries: [
@@ -663,17 +758,22 @@ describe('markEventsFeatured (PR D)', () => {
       throw new Error(`unexpected ${table}`);
     });
     db.transaction = jest.fn(async (cb) => cb(trx));
+    // Raw SQL fragment for the featured → approved demotion (star consumed
+    // on ship); the mock passes the text through for assertion.
+    db.raw = jest.fn((sql) => sql);
 
     await markEventsFeatured({ event_ids: ['e1'] });
+
+    expect(updates[0].admin_status).toContain("WHEN admin_status = 'featured' THEN 'approved'");
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
     // The read locks the row (forUpdate) before the write — no lost increment.
     expect(eventsRaw.length).toBe(0);
     expect(updates).toHaveLength(1);
     expect(updates[0].times_featured).toBe(1);
-    // recurring_series at times_featured=1 → still fresh_series_launch, score 90-10
-    expect(updates[0].freshness_status).toBe('fresh_series_launch');
-    expect(updates[0].freshness_score).toBe(80);
+    // Routine recurring series are always stale under the weekend-guide policy.
+    expect(updates[0].freshness_status).toBe('stale_recurring');
+    expect(updates[0].freshness_score).toBe(10);
     expect(updates[0].last_featured_at).toBeInstanceOf(Date);
   });
 

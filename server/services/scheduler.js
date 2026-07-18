@@ -1026,8 +1026,8 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 4AM — Newsletter event ingestion (P3a). Pulls every enabled
   // RSS source from event_sources, upserts into events_raw. Daily cadence
-  // (vs weekly with the newsletter draft) so events added 6 days before
-  // a Friday send still make it into the dashboard tiles.
+  // (vs weekly with the newsletter draft) so events added shortly before
+  // a Tuesday issue still make it into the dashboard tiles.
   // =========================================================================
   cron.schedule('0 4 * * *', async () => {
     logger.info('Running: Newsletter event ingestion');
@@ -1335,12 +1335,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY THURSDAY 7AM ET — Newsletter autopilot
+  // EVERY MONDAY 7AM ET — Newsletter autopilot
   // Auto-drafts the weekly flagship digest from approved events. Never
   // auto-sends — creates a draft for admin review. Skips if fewer than 3
   // eligible events and notifies admin to approve more.
   // =========================================================================
-  cron.schedule('0 7 * * 4', async () => {
+  cron.schedule('0 7 * * 1', async () => {
     try {
       const { autoDraftFlagship } = require('./newsletter-autopilot');
       const result = await autoDraftFlagship();
@@ -1351,21 +1351,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // THU–SUN 2PM ET — Missed-tick catch-up for the Thursday-7AM autopilot. If
-  // the process was down at 7AM Thursday, the weekly draft never got created.
+  // MONDAY 2PM + TUESDAY 4:30AM ET — Missed-tick catch-up for the Monday-7AM
+  // autopilot. The early-Tuesday recovery still leaves 90 minutes for proof
+  // approval before the exact 6:00AM delivery target; it never auto-approves.
   // Re-run autoDraftFlagship ONLY for a week that was NEVER ATTEMPTED (no
   // calendar row, or status 'planned'). A deliberately-deleted draft (status
   // 'drafted' with a null send_id) is left alone so it can't silently reappear,
   // and drafted/scheduled/sent/skipped weeks are already handled. The autopilot's
   // own advisory lock + dedupe make a catch-up invocation safe if it races the
-  // 7AM run. Runs daily Thu–Sun so a mid-week recovery still lands the draft.
+  // 7AM run.
   // A catch-up that hard-fails preflight persists a 'skipped' row, so the
   // following day's tick retires the week instead of re-running + re-notifying.
   // =========================================================================
-  cron.schedule('0 14 * * 4,5,6,0', async () => {
+  const runNewsletterAutopilotCatchup = async () => {
     try {
-      const { getCurrentNewsletterThursday } = require('./event-freshness');
-      const weekOf = getCurrentNewsletterThursday();
+      const { getActiveNewsletterTuesday } = require('./event-freshness');
+      const weekOf = getActiveNewsletterTuesday();
       const cal = await db('newsletter_calendar').where('week_of', weekOf).first();
       // Only catch up weeks that were never attempted — but a drafted week
       // may still be missing its owner proof (a transient SendGrid failure
@@ -1388,7 +1389,9 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[newsletter-autopilot-catchup] failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('0 14 * * 1', runNewsletterAutopilotCatchup, { timezone: 'America/New_York' });
+  cron.schedule('30 4 * * 2', runNewsletterAutopilotCatchup, { timezone: 'America/New_York' });
 
   // =========================================================================
   // DAILY 6AM ET — Newsletter indexability decay: noindex stale event digests
@@ -1415,7 +1418,7 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 6:15AM ET — Event auto-curation. Classifies never-examined pending
   // events with Claude and approves real consumer events for the digest, so
-  // the Thursday 7AM autopilot has an approved pool without a human working
+  // Monday's 7AM autopilot has an approved pool without a human working
   // the Event Inbox every week (the lane starved at 0 eligible for two weeks
   // when approval was manual-only). Runs after the 4AM ingest → 5AM
   // normalize → 5:30 expiry → 5:45 dedup chain so it judges clean, classified
@@ -1522,7 +1525,7 @@ function initScheduledJobs() {
   // (normalized title + ET day + city — conservative, near-zero false positives)
   // and collapse each cluster into one survivor (highest-priority source, then
   // most complete). Runs after the 5AM normalize + 5:30AM expire, before the
-  // Thursday-7AM autopilot, so the lineup it sees is already de-duplicated.
+  // Monday-7AM autopilot, so the lineup it sees is already de-duplicated.
   // =========================================================================
   cron.schedule('45 5 * * *', async () => {
     try {

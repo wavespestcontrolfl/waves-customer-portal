@@ -106,7 +106,7 @@ const VOICE_PROFILES = {
     // Owner decision 2026-06-11: match what actually shipped in the mature
     // Beehiiv era ("most recent newsletters are the template"), not the
     // earlier "— The Waves crew" draft convention.
-    signoff: '— The Waves Pest Control Team',
+    signoff: '— The Waves Team',
 
     bannedCorporatePhrases: [
       'Dear valued customer',

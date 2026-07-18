@@ -132,6 +132,24 @@ describe('pest-insider assemblePestInsiderNewsletter', () => {
     expect(html).toContain('<strong>P.S.</strong>');
   });
 
+  test('renders the generated issue hero instead of paying for unused artwork', async () => {
+    const html = await assemblePestInsiderNewsletter({
+      ...baseDraft,
+      selectedSubject: 'Mosquitoes Are Back',
+      heroImageUrl: 'https://cdn.example.com/pest-insider.jpg',
+    });
+    expect(html).toContain('src="https://cdn.example.com/pest-insider.jpg"');
+    expect(html).toContain('alt="Mosquitoes Are Back"');
+  });
+
+  test('rejects unsafe hero URLs', async () => {
+    const html = await assemblePestInsiderNewsletter({
+      ...baseDraft,
+      heroImageUrl: 'javascript:alert(1)',
+    });
+    expect(html).not.toContain('javascript:');
+  });
+
   test('P.S. label never doubles when the model writes the prefix itself', async () => {
     const html = await assemblePestInsiderNewsletter({
       ...baseDraft,

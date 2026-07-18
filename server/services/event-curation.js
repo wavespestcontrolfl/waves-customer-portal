@@ -6,10 +6,10 @@
  * events_raw, the normalizer (5am) classifies freshness/type, the
  * expiry sweep (5:30) and dedup (5:45) clean up. But approval was
  * 100% manual — when nobody worked the Event Inbox for two weeks the
- * Thursday autopilot starved at 0 eligible events and the flagship
+ * Monday autopilot starved at 0 eligible events and the flagship
  * lane silently died.
  *
- * This cron (6:15am ET, before the 7am Thursday autopilot) classifies
+ * This cron (6:15am ET, before the 7am Monday autopilot) classifies
  * never-examined pending events with Claude and approves the ones a
  * local reader would actually go to. Hard gates (future-dated, has a
  * URL, normalized, fresh) run in SQL; the model only judges "is this a
@@ -29,6 +29,14 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const {
+  excludeRoutineRecurringFromQuery,
+  isEligibleForFreshDigest,
+} = require('./event-freshness');
+const {
+  filterPreviouslyFeaturedIdentities,
+  filterRepeatedDateIdentities,
+} = require('./newsletter-event-selection');
 
 let Anthropic;
 try {
@@ -56,15 +64,17 @@ function curationEnabled() {
  * by the normalizer, future-dated within the digest horizon, with a
  * link, not merged, not stale/expired/needs_review.
  */
-async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
+function buildCurationCandidateQuery(limit = CURATION_RUN_LIMIT) {
   const etMidnight = parseETDateTime(`${etDateString()}T00:00:00`);
   const horizon = new Date(Date.now() + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-  return db('events_raw as e')
+  const query = db('events_raw as e')
     .leftJoin('event_sources as s', 's.id', 'e.source_id')
     .select(
-      'e.id', 'e.title', 'e.description', 'e.start_at', 'e.venue_name',
-      'e.city', 'e.event_type', 'e.freshness_status', 'e.is_free',
-      'e.family_friendly', 's.name as source_name',
+      'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
+      'e.venue_name', 'e.city', 'e.event_type', 'e.recurrence_type',
+      'e.freshness_status', 'e.times_featured', 'e.last_featured_at',
+      'e.pulled_at', 'e.is_free', 'e.family_friendly', 'e.event_url',
+      'e.admin_status', 'e.merged_into', 's.name as source_name',
     )
     .where('e.admin_status', 'pending')
     .whereNull('e.curated_at')
@@ -75,9 +85,27 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
     .where('e.start_at', '>=', etMidnight)
     .where('e.start_at', '<=', horizon)
     .whereNotIn('e.freshness_status', ['expired', 'stale_recurring', 'needs_review'])
-    .whereNot('e.event_type', 'unknown')
+    .whereNot('e.event_type', 'unknown');
+
+  return excludeRoutineRecurringFromQuery(query)
     .orderBy('e.start_at', 'asc')
     .limit(limit);
+}
+
+async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
+  const rows = await buildCurationCandidateQuery(limit);
+  // The SQL gate handles normalized metadata. Keep the shared text backstop at
+  // this earlier approval boundary too, so mislabeled weekly classes never get
+  // auto-approved and later rely on the digest gate to save them.
+  const nonRepeatedRows = await filterRepeatedDateIdentities(rows);
+  const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows);
+  // ONE editorial gate for approval and delivery: isEligibleForFreshDigest is
+  // the digest's own hard gate, so curation can never approve a row the
+  // digest would reject — and, critically, never DROP a row the digest would
+  // accept. A plain isRoutineRecurringEvent check here silently discarded
+  // fresh_series_launch debuts (the single-use series-debut carve-out),
+  // leaving them pending forever.
+  return historicallyNewRows.filter((row) => isEligibleForFreshDigest(row));
 }
 
 function buildCurationPrompt(events, todayIso) {
@@ -87,11 +115,12 @@ function buildCurationPrompt(events, todayIso) {
     return `- id: ${e.id}\n  title: ${e.title}\n  date: ${date}\n  venue: ${e.venue_name || 'unknown'} (${e.city || 'unknown city'})\n  source: ${e.source_name || 'unknown'}\n  description: ${desc || '(none)'}`;
   });
 
-  return `You curate events for "Fresh This Week" — a punchy, FOMO-driven weekly local events guide for Southwest Florida (North Port to Tampa). Today's date: ${todayIso}.
+  return `You curate the Waves Newsletter's weekly local events issue — a punchy, FOMO-driven guide for Southwest Florida (North Port to Tampa). Today's date: ${todayIso}.
 
-APPROVE events a local reader would actually go to for fun: live music, festivals, markets, food and drink, family activities, arts, outdoors, trivia/karaoke nights, museum and aquarium programs, seasonal happenings.
+APPROVE genuinely new, date-specific events a local reader would actually go to for fun: live music, festivals, one-time markets, food and drink, family activities, arts, outdoors, museum and aquarium programs, and seasonal happenings.
 
 REJECT (leave for human review):
+- Routine or repeating programming: weekly/daily/monthly yoga, fitness classes, trivia, karaoke, markets, meetups, or any "every Tuesday"-style listing
 - Government/civic process: council or committee meetings, agendas, hearings, workshops, procurement notices
 - Business networking, ribbon cuttings, chamber luncheons aimed at members
 - Webinars, virtual-only events, multi-week classes that require enrollment
@@ -243,4 +272,5 @@ module.exports = {
   parseCurationResponse,
   missingDecisionFallbacks,
   curationEnabled,
+  buildCurationCandidateQuery,
 };
