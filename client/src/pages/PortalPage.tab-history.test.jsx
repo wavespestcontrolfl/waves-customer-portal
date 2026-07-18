@@ -26,7 +26,7 @@ vi.mock('../hooks/useAuth', () => ({
   useAuth: () => ({
     customer: {
       id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
-      phone: '9415551234', email: 'pat@example.com', tier: null,
+      phone: '9415551234', email: 'pat@example.com', tier: 'Gold',
       monthlyRate: 89, property: {},
     },
     logout: vi.fn(),
@@ -58,6 +58,7 @@ beforeEach(() => {
   api.getPendingSatisfaction.mockResolvedValue({ pending: [] });
   api.getReferrals.mockResolvedValue({ stats: null });
   api.getTodayTracker.mockResolvedValue({ tracker: null });
+  api.getDocuments.mockResolvedValue({ documents: [] });
 });
 
 afterEach(() => {
@@ -87,6 +88,32 @@ describe('portal tab history sync', () => {
     window.history.back();
     await waitFor(() => expect(window.location.search).toBe(''));
     expect(await screen.findByText(/hello pat/i)).toBeInTheDocument();
+  });
+
+  it('keeps the completed-visits deep link through the Documents shortcut', async () => {
+    render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    await screen.findByText(/hello pat/i);
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Documents' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: /open completed visits/i }));
+
+    // The legacy token survives in the URL, so refresh/share restores the
+    // completed sub-tab instead of defaulting to upcoming.
+    await waitFor(() => expect(window.location.search).toBe('?tab=services'));
+    expect(await screen.findByText(/no completed visits yet/i)).toBeInTheDocument();
+  });
+
+  it('restores the focused plan row when Back returns to a plan deep link', async () => {
+    window.history.replaceState({}, '', '/?tab=plan&service=lawn_care');
+    render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    expect(await screen.findByRole('button', { name: /lawn care program/i, expanded: true })).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Billing' })[0]);
+    await waitFor(() => expect(window.location.search).toBe('?tab=billing'));
+
+    window.history.back();
+    await waitFor(() => expect(window.location.search).toBe('?tab=plan&service=lawn_care'));
+    expect(await screen.findByRole('button', { name: /lawn care program/i, expanded: true })).toBeInTheDocument();
   });
 
   it('re-clicking the active tab does not stack duplicate history entries', async () => {

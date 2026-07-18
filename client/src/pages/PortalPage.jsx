@@ -13005,18 +13005,30 @@ export default function PortalPage() {
   // leaving the app.
   const location = useLocation();
   const navigate = useNavigate();
-  const syncTabUrl = (id) => {
-    const target = id === 'dashboard' ? '/' : `/?tab=${id}`;
+  // urlId is the deep-link token, which may be a LEGACY value ('schedule',
+  // 'services') the initial parser understands — writing it verbatim keeps
+  // a refreshed or shared URL restoring the exact Visits sub-tab.
+  const syncTabUrl = (urlId) => {
+    const target = urlId === 'dashboard' ? '/' : `/?tab=${urlId}`;
     if (window.location.pathname + window.location.search !== target) navigate(target);
   };
-  // Back/forward: adopt the tab the URL names. A no-op when the navigation
-  // came from switchTab (state already matches). Legacy targets map like
-  // the initial parser; the request overlay is never reopened from history.
+  // Back/forward: adopt what the URL names — tab, legacy Visits sub-tab,
+  // and plan service focus — using the same rules as the initial deep-link
+  // parser. A no-op when the navigation came from switchTab (state already
+  // matches). The request overlay is never reopened from history.
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const t = params.get('tab');
     const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
-    const urlTab = t === 'schedule' || t === 'services' ? 'visits' : (t && allowed.includes(t) ? t : 'dashboard');
+    let urlTab;
+    if (t === 'schedule' || t === 'services') {
+      urlTab = 'visits';
+      setVisitsSubTab(t === 'schedule' ? 'upcoming' : 'completed');
+    } else {
+      urlTab = t && allowed.includes(t) ? t : 'dashboard';
+    }
+    const svc = params.get('service');
+    setPlanFocusService(urlTab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null);
     setActiveTab(prev => (prev === urlTab ? prev : urlTab));
   }, [location.search]);
   // Translates legacy 'schedule' / 'services' / 'request' targets into
@@ -13026,8 +13038,8 @@ export default function PortalPage() {
     // Plain nav clears any pending row focus so Plan doesn't keep
     // re-expanding a row the customer already closed.
     setPlanFocusService(null);
-    if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); syncTabUrl('visits'); return; }
-    if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); syncTabUrl('visits'); return; }
+    if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); syncTabUrl('schedule'); return; }
+    if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); syncTabUrl('services'); return; }
     if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
     syncTabUrl(id);
@@ -13035,7 +13047,9 @@ export default function PortalPage() {
   const openPlanService = (svcId) => {
     setPlanFocusService(svcId);
     setActiveTab('plan');
-    syncTabUrl('plan');
+    // Carry the service in the URL so refresh/back restore the focused row.
+    const target = SERVICE_CATALOG.some(s => s.id === svcId) ? `/?tab=plan&service=${svcId}` : '/?tab=plan';
+    if (window.location.pathname + window.location.search !== target) navigate(target);
   };
   const headerNavItems = [...PRIMARY_TABS, ...MORE_TABS];
   const headerNavButton = (tab) => {
@@ -13604,7 +13618,13 @@ export default function PortalPage() {
         <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} />}
-        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
+        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
+          setVisitsSubTab(sub);
+          // Keep the URL's legacy token in step so refresh/share restores the
+          // same sub-tab; replace (not push) so pill toggles don't stack
+          // history entries.
+          navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
+        }} onRequestVisit={() => setShowReportIssue(true)} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
