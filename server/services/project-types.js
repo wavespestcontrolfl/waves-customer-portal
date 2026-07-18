@@ -1137,18 +1137,21 @@ function customerSafeServiceNotes(notes, structuredNotes) {
 // arrays and nested objects — dropping internal KEYS at every depth (a nested
 // { details: { inspection_fee } } must not survive the top-level filter) and
 // scrubbing string values when redactValues is on.
-function sanitizeFindingValue(value, redactValues) {
+function sanitizeFindingValue(value, redactValues, feeValues) {
   if (typeof value === 'string') {
-    return redactValues ? redactInspectionFeeCues(value) : value;
+    if (!redactValues) return value;
+    let safe = redactInspectionFeeCues(value);
+    if (feeValues && feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+    return safe;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizeFindingValue(item, redactValues));
+    return value.map((item) => sanitizeFindingValue(item, redactValues, feeValues));
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
         .filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key))
-        .map(([key, nested]) => [key, sanitizeFindingValue(nested, redactValues)]),
+        .map(([key, nested]) => [key, sanitizeFindingValue(nested, redactValues, feeValues)]),
     );
   }
   return value;
@@ -1160,11 +1163,11 @@ function sanitizeFindingValue(value, redactValues) {
 // Internal KEYS are dropped regardless (they only exist on types that define
 // them, so the filter is free elsewhere). Default fails closed: values are
 // scrubbed.
-function stripInternalFindingKeys(findings, { redactValues = true } = {}) {
+function stripInternalFindingKeys(findings, { redactValues = true, feeValues = [] } = {}) {
   let parsed = findings;
   if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return {}; } }
   if (!parsed || typeof parsed !== 'object') return parsed;
-  return sanitizeFindingValue(parsed, redactValues);
+  return sanitizeFindingValue(parsed, redactValues, feeValues);
 }
 
 function getProjectType(key) {

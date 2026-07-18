@@ -36,7 +36,7 @@ const {
   WAVES_SUPPORT_PHONE_DISPLAY,
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
-const { stripInternalFindingKeys, redactInspectionFeeCues } = require('../project-types');
+const { stripInternalFindingKeys, redactInspectionFeeCues, projectRecordedFeeValues } = require('../project-types');
 
 // The emailed/archived FDACS PDF is a customer deliverable — it gets the
 // same internal-key strip + fee-cue scrub as the public /data payload, or a
@@ -45,8 +45,8 @@ const { stripInternalFindingKeys, redactInspectionFeeCues } = require('../projec
 // the value scrub is unconditional here. The FDACS-13645 form has no fee
 // field of its own, and the disclosure-of-interest statements in comments
 // don't carry amounts, so nothing the form REQUIRES is touched.
-function customerSafeFindings(rawFindings) {
-  return stripInternalFindingKeys(asObject(rawFindings)) || {};
+function customerSafeFindings(rawFindings, feeValues = []) {
+  return stripInternalFindingKeys(asObject(rawFindings), { redactValues: true, feeValues }) || {};
 }
 
 const TEMPLATE_PATH = path.join(__dirname, '..', '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf');
@@ -503,7 +503,7 @@ function resolveApplicator({ project = {}, findings = {} }) {
  */
 async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride, signature, photos = [] } = {}) {
   if (!project) throw new Error('project required for WDO report PDF');
-  const findings = customerSafeFindings(project.findings);
+  const findings = customerSafeFindings(project.findings, projectRecordedFeeValues(project));
   const resolved = resolveApplicator({ project, findings });
   const applicator = {
     name: clean(applicatorOverride?.name) || resolved.name,

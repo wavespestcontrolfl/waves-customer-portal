@@ -29,10 +29,15 @@ function cleanFindings(project) {
   const findings = raw && typeof raw === 'object' ? raw : {};
   const entries = {};
   // A fee typed into a free-text finding (WDO comments) must not surface in
-  // an answer either — same type-gated guard as the /data payload (codex #2817).
+  // an answer either — same type-gated cue+value guard as the /data payload
+  // (codex #2817).
+  const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
+  const feeValues = typeCarriesFee ? projectRecordedFeeValues(project) : [];
   for (const [key, value] of Object.entries(findings)) {
     if (INTERNAL_FINDING_KEY_SET.has(key)) continue;
-    const text = redactInspectionFeeCuesForType(String(value ?? ''), project.project_type).trim();
+    let text = redactInspectionFeeCuesForType(String(value ?? ''), project.project_type);
+    if (feeValues.length) text = redactSpecificAmounts(text, feeValues);
+    text = text.trim();
     if (text) entries[key] = text;
   }
   return entries;

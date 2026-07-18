@@ -7,7 +7,12 @@ const { resolveCompletionProfileForScheduledService } = require('./service-compl
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
-const { redactInspectionFeeCuesForType } = require('./project-types');
+const {
+  redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeHasInternalFindingKeys,
+} = require('./project-types');
 const { createAlertOnce } = require('./dispatch-alerts');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
@@ -313,11 +318,21 @@ function buildServiceRecordInsert({
   // a legacy narrative that predates the create/PUT write guard gets its
   // inspection-fee scrub at this copy boundary too (codex #2817). Type-gated:
   // only WDO carries the internal fee field.
+  // Cue + recorded-value passes, same as the public /data egress — a
+  // legacy/deploy-window title or narrative can carry the fee literally OR
+  // as a bare paraphrased amount, and this copy lands in customer-served
+  // technician_notes (codex #2817).
+  const scrubCompletionText = (text) => {
+    let safe = redactInspectionFeeCuesForType(String(text), project.project_type);
+    if (projectTypeHasInternalFindingKeys(project.project_type)) {
+      const feeValues = projectRecordedFeeValues(project);
+      if (feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+    }
+    return safe;
+  };
   const notes = [
-    // the title is customer-facing free text too — a legacy/deploy-window
-    // title carrying the fee must not ride into the notes copy (codex #2817)
-    project.title ? `Project completed: ${redactInspectionFeeCuesForType(String(project.title), project.project_type)}` : 'Project completed.',
-    project.recommendations ? redactInspectionFeeCuesForType(String(project.recommendations), project.project_type) : '',
+    project.title ? `Project completed: ${scrubCompletionText(project.title)}` : 'Project completed.',
+    project.recommendations ? scrubCompletionText(project.recommendations) : '',
   ].filter(Boolean).join('\n\n');
   const structuredNotes = projectCompletionNotes({
     project,

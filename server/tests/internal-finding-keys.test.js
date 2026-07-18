@@ -97,6 +97,18 @@ describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
       .toBe('Fee tier 2 applies to 2500 sq ft homes.');
     expect(redactSpecificAmounts('Visit on 07/250 untouched.', ['250']))
       .toBe('Visit on 07/250 untouched.');
+    expect(redactSpecificAmounts('Fee tier 2 mentioned, and the $2,250 quote is unrelated.', ['Tier 2 — $250']))
+      .toBe('Fee tier 2 mentioned, and the $2,250 quote is unrelated.');
+  });
+  test('parses the monetary amount out of tier-style labels', () => {
+    expect(redactSpecificAmounts('We quoted the $250 charge for this visit.', ['Tier 2 — $250']))
+      .toBe('We quoted the [fee removed] charge for this visit.');
+  });
+  test('a zero-dollar fee never scrubs legitimate zeros', () => {
+    expect(redactSpecificAmounts('0 live termites observed in 0 areas.', ['$0.00']))
+      .toBe('0 live termites observed in 0 areas.');
+    expect(redactSpecificAmounts('0 live termites observed in 0 areas.', ['0']))
+      .toBe('0 live termites observed in 0 areas.');
   });
 });
 

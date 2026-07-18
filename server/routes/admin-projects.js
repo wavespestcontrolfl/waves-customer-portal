@@ -32,6 +32,7 @@ const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
   redactSpecificAmounts,
+  projectRecordedFeeValues,
   redactInspectionFeeCuesForType,
   redactProjectTitleForWrite,
   projectTypeConfigHasInternalFindingKeys,
@@ -2083,7 +2084,12 @@ function wdoContentHash(project) {
     return value;
   };
   const payload = JSON.stringify({
-    findings: stable(stripInternalFindingKeys(parseFindings(project)) || {}),
+    // identical inputs to the PDF's customerSafeFindings — hash == render,
+    // including the recorded-value pass (codex #2817)
+    findings: stable(stripInternalFindingKeys(parseFindings(project), {
+      redactValues: true,
+      feeValues: projectRecordedFeeValues(project),
+    }) || {}),
     project_date: normalizeDateOnly(project.project_date),
   });
   return crypto.createHash('sha256').update(payload).digest('hex');

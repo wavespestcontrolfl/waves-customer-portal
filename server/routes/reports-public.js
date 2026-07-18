@@ -522,8 +522,17 @@ router.get('/project/:token/data', async (req, res, next) => {
 
     // Computed early: gates every free-text scrub on this route (finding
     // values, recommendations, photo captions). Only a type carrying the
-    // internal fee field (WDO) gets text redacted.
+    // internal fee field (WDO) gets text redacted. feeValues powers the
+    // VALUE pass — a paraphrase without the literal cue ("the $250 charge")
+    // is caught on every one of these surfaces (codex #2817).
     const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
+    const feeValues = typeCarriesFee ? projectRecordedFeeValues(project) : [];
+    const scrubText = (text) => {
+      if (!typeCarriesFee || !text) return text;
+      let safe = redactInspectionFeeCues(text);
+      if (feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+      return safe;
+    };
 
     const photos = await db('project_photos')
       .where({ project_id: project.id })
@@ -548,9 +557,10 @@ router.get('/project/:token/data', async (req, res, next) => {
           url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: CUSTOMER_DWELL_TTL_SECONDS });
         } catch { /* fall through — photo will render as missing */ }
       }
-      // Captions are technician free text — same fee scrub as finding values
-      // (codex #2817: a caption quoting the fee rode the public JSON verbatim).
-      const caption = (typeCarriesFee && ph.caption) ? redactInspectionFeeCues(ph.caption) : ph.caption;
+      // Captions are technician free text — same cue+value scrub as finding
+      // values (codex #2817: a caption quoting the fee rode the public JSON
+      // verbatim; a paraphrased amount would too).
+      const caption = scrubText(ph.caption);
       return { id: ph.id, category: ph.category, caption, visit: ph.visit, url };
     }));
 
@@ -599,7 +609,7 @@ router.get('/project/:token/data', async (req, res, next) => {
     // baked into prose) is handled by the redactInspectionFeeCues guard on
     // `recommendations` below. The value scrub is type-gated via
     // typeCarriesFee (computed above the photos block).
-    viewerFindings = stripInternalFindingKeys(viewerFindings, { redactValues: typeCarriesFee });
+    viewerFindings = stripInternalFindingKeys(viewerFindings, { redactValues: typeCarriesFee, feeValues });
 
     res.json({
       projectType: project.project_type,
@@ -638,17 +648,11 @@ router.get('/project/:token/data', async (req, res, next) => {
       // the literal-cue scrub plus the VALUE scrub with the fee this project
       // recorded, so a paraphrase ("the quoted $250 charge") can't ride the
       // public payload either (codex #2817).
-      recommendations: (() => {
-        if (!typeCarriesFee || !project.recommendations) return project.recommendations;
-        const feeValues = projectRecordedFeeValues(project);
-        let safe = redactInspectionFeeCues(project.recommendations);
-        if (feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
-        return safe;
-      })(),
+      recommendations: scrubText(project.recommendations),
       followupDate: project.followup_date,
       // Follow-up findings are findings-shaped jsonb rendered key→value on
       // the page — same internal-key strip + fee scrub as the main findings.
-      followupFindings: stripInternalFindingKeys(project.followup_findings, { redactValues: typeCarriesFee }),
+      followupFindings: stripInternalFindingKeys(project.followup_findings, { redactValues: typeCarriesFee, feeValues }),
       followupCompletedAt: project.followup_completed_at,
       upcomingAppointment: upcomingAppointment ? {
         serviceType: upcomingAppointment.service_type,

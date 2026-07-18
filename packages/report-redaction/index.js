@@ -306,9 +306,19 @@ function redactSpecificAmounts(text, values) {
   if (!str) return str;
   const seen = new Set();
   for (const value of values || []) {
-    const digits = String(value == null ? '' : value).replace(/[^\d.]/g, '');
-    const intPart = digits.split('.')[0].replace(/^0+(?=\d)/, '');
-    if (!intPart || seen.has(intPart)) continue;
+    // Extract the MONETARY amount from the stored value — a legacy tier
+    // label like "Tier 2 — $250" must yield 250, not a concatenation of
+    // every digit. Prefer a $-marked amount; otherwise the last standalone
+    // number in the string (the amount trails the label in tier shapes).
+    const raw = String(value == null ? '' : value);
+    const dollarMatch = raw.match(/\$\s*([\d,]+(?:\.\d{1,2})?)/);
+    const numberGroups = raw.match(/[\d,]+(?:\.\d{1,2})?/g) || [];
+    const picked = dollarMatch ? dollarMatch[1] : numberGroups[numberGroups.length - 1];
+    if (!picked) continue;
+    const intPart = picked.replace(/,/g, '').split('.')[0].replace(/^0+(?=\d)/, '');
+    // A zero-dollar fee is not a sensitive amount — and scrubbing "0" would
+    // corrupt legitimate prose like "0 live termites observed".
+    if (!intPart || Number(intPart) === 0 || seen.has(intPart)) continue;
     seen.add(intPart);
     const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     const num = `(?:${intPart}|${grouped})`;
@@ -316,7 +326,7 @@ function redactSpecificAmounts(text, values) {
       `(?:\\$\\s?${num}(?:\\.\\d{1,2})?(?!\\d)`
       + `|(?:USD|US\\$)\\s?${num}(?:\\.\\d{1,2})?(?!\\d)`
       + `|\\b${num}(?:\\.\\d{1,2})?\\s?dollars?\\b`
-      + `|(?<![\\d.$/:\\-])${num}(?:\\.00?)?\\b(?![.,]?\\d)(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b))`,
+      + `|(?<![\\d.$/:,\\-])${num}(?:\\.00?)?\\b(?![.,]?\\d)(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b))`,
       'g',
     );
     str = str.replace(re, (match, offset, whole) => {
@@ -326,9 +336,10 @@ function redactSpecificAmounts(text, values) {
       // the fee paraphrase "the quoted $250 charge" (subject AFTER) redacts.
       const clauseStart = Math.max(0, offset - 50);
       const before = whole.slice(clauseStart, offset).split(/[.;!?\n]/).pop() || '';
-      if (VALUE_SCRUB_SUBJECTS.test(before) && !VALUE_SCRUB_FEE_CONTEXT.test(before)) return match;
       const after = (whole.slice(offset + match.length, offset + match.length + 30).split(/[.;!?\n]/)[0] || '');
-      if (VALUE_SCRUB_AFTER_SUBJECTS.test(after) && !VALUE_SCRUB_FEE_CONTEXT.test(before + after)) return match;
+      const feeContext = VALUE_SCRUB_FEE_CONTEXT.test(before + after);
+      if (VALUE_SCRUB_SUBJECTS.test(before) && !feeContext) return match;
+      if (VALUE_SCRUB_AFTER_SUBJECTS.test(after) && !feeContext) return match;
       return '[fee removed]';
     });
   }
