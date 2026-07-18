@@ -340,10 +340,33 @@ async function computeReadiness({ intents, dbi = db } = {}) {
     logger.warn(`[sms-graduation] judge-signal fetch failed: ${err.message}; graduation blocked until it recovers`);
   }
 
+  // Optional sealed-exam requirement (GRAD_REQUIRE_SEALED_EXAM=true, default
+  // OFF): before ANY intent may graduate a rung, the current PROMPT_VERSION
+  // must have passed the locked exam on both provider legs — a version-level
+  // gate layered over the per-intent live signals. Fail CLOSED like the judge
+  // signal: with the flag on, an errored exam fetch blocks graduation rather
+  // than silently waiving the requirement. Version-level by design: the exam
+  // measures the prompt/harness, the live signals measure each intent.
+  let examBlockers = null;
+  if (process.env.GRAD_REQUIRE_SEALED_EXAM === 'true') {
+    try {
+      // Lazy require — sealed-eval reaches the drafter, which reaches
+      // auto-send, which reaches this module.
+      examBlockers = await require('./sms-sealed-eval').evaluateExamGate({ dbi });
+    } catch (err) {
+      examBlockers = ['Sealed exam signal unavailable — graduation blocked while GRAD_REQUIRE_SEALED_EXAM is on.'];
+      logger.warn(`[sms-graduation] sealed-exam gate fetch failed: ${err.message}; graduation blocked until it recovers`);
+    }
+  }
+
   const out = new Map();
   for (const { intent, mode, locked, suggest } of intents) {
     const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
     const verdict = evaluateRung({ mode, locked, judge, suggest, judgeAvailable });
+    if (examBlockers && examBlockers.length && !locked && verdict.nextRung) {
+      verdict.blockers = [...verdict.blockers, ...examBlockers];
+      verdict.eligible = false;
+    }
     // Intents ALREADY at auto_send get the send-time gate's view too, so the
     // UI can't show a no-blocker Auto-send chip while sends are blocked.
     const autoSendHealth = !locked && verdict.currentMode === 'auto_send'

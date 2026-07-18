@@ -432,6 +432,11 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
 
 module.exports = {
   judgeShadowDrafts,
+  // Production export (not just _test): the sealed-eval exam runner judges
+  // its replayed drafts with THIS exact grader — same prompt, same verdict
+  // rubric, same deterministic no-reply branches — so exam scores and live
+  // judge scores stay directly comparable.
+  judgeOne,
   PROMPT_VERSION,
   VERDICTS,
   _test: {
