@@ -3176,7 +3176,10 @@ const InvoiceService = {
     // would leave a gap where a cron worker claims the still-due sequence
     // and sends the old reminder. Compared as calendar dates (the column is
     // a DATE; the editor sends YYYY-MM-DD) so an unchanged date doesn't
-    // re-anchor a send-anchored cadence.
+    // re-anchor a send-anchored cadence. The comparison itself happens
+    // inside runEdit against the LOCKED row — comparing against the
+    // pre-lock `existing` snapshot would let a second admin's stale form
+    // write an older due date back without moving the sequence.
     const asDateOnly = (v) => {
       if (!v) return "";
       const d = new Date(v);
@@ -3184,9 +3187,6 @@ const InvoiceService = {
         ? String(v)
         : d.toISOString().slice(0, 10);
     };
-    const dueDateChanged =
-      data.due_date !== undefined &&
-      asDateOnly(existing.due_date) !== asDateOnly(data.due_date);
 
     const runEdit = async (client) => {
       // Serialize against in-flight dun sends: lock the invoice row FIRST.
@@ -3279,14 +3279,19 @@ const InvoiceService = {
       if (edited.payer_statement_id) {
         await require("./payer-statements").rollupStatement(edited.payer_statement_id, client);
       }
-      if (dueDateChanged) {
+      if (
+        data.due_date !== undefined &&
+        asDateOnly(lockedRow.due_date) !== asDateOnly(data.due_date)
+      ) {
         // In the SAME transaction (and under the invoice row lock): a cron
         // worker's claim can't interleave between the committed due date and
         // the moved sequence, and a reschedule failure aborts the edit
         // rather than leaving the old dunning timeline against the new date.
+        // Delta from the LOCKED row's due date, so a concurrent edit that
+        // already moved it (and its anchor) is shifted back correctly.
         await require("./invoice-followups").rescheduleForInvoiceEdit(
           id,
-          { previousDueDate: existing.due_date, newDueDate: data.due_date },
+          { previousDueDate: lockedRow.due_date, newDueDate: data.due_date },
           client,
         );
       }

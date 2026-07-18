@@ -715,6 +715,53 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     );
   });
 
+  it('reschedules from the LOCKED due date when a concurrent edit moved it first (stale-form save)', async () => {
+    // Admin A moved the due date to 08-15 (and shifted the anchor) while
+    // admin B's form still shows 07-30. B's save writes 07-30 back — the
+    // comparison must run against the LOCKED row (08-15), not B's pre-lock
+    // snapshot (07-30 vs 07-30 → no-op), or the sequence stays on A's
+    // timeline while the invoice shows B's date (codex r7).
+    const preRead = { id: 'inv-1', status: 'sent', customer_id: 'cust-1', invoice_number: 'INV-105', line_items: '[]', due_date: '2026-07-30' };
+    const lockedRow = { ...preRead, due_date: '2026-08-15' };
+    const activityInsert = jest.fn(async () => [1]);
+    const invoicesFirst = jest.fn()
+      .mockResolvedValueOnce(preRead)
+      .mockResolvedValue(lockedRow);
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: invoicesFirst,
+          update: jest.fn(() => ({ returning: jest.fn(async () => [{ ...preRead }]) })),
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'activity_log') {
+        return { insert: activityInsert };
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await InvoiceService.update('inv-1', { due_date: '2026-07-30' });
+    expect(invoicesFirst).toHaveBeenCalledTimes(2); // pre-read + in-txn lock read
+    expect(mockRescheduleForInvoiceEdit).toHaveBeenCalledWith(
+      'inv-1',
+      { previousDueDate: '2026-08-15', newDueDate: '2026-07-30' },
+      expect.anything(),
+    );
+  });
+
   it('does NOT re-anchor the follow-up sequence when the due date is unchanged', async () => {
     const stored = { id: 'inv-1', status: 'sent', customer_id: 'cust-1', invoice_number: 'INV-103', line_items: '[]', due_date: '2026-07-30' };
     const activityInsert = jest.fn(async () => [1]);
