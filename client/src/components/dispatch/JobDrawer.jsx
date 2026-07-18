@@ -193,7 +193,6 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     }
     // jobId deliberately excluded — re-running on jobId change is
     // covered by the effect above and would cause double-fetches.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refetchSignal]);
 
   // Fetch active techs once on first open. The list rarely changes

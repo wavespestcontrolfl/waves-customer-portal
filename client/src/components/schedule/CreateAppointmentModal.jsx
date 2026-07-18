@@ -116,16 +116,6 @@ const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', l
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
 
-function discountAvailableForCustomer(discount, customer) {
-  const requiredTier = discount?.requires_waveguard_tier || '';
-  if (!requiredTier) return !discount?.is_waveguard_tier_discount;
-  const customerTier = customer?.tier || customer?.waveguard_tier || '';
-  if (discount?.is_waveguard_tier_discount) return customerTier === requiredTier;
-  const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(requiredTier);
-  const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customerTier);
-  return requiredIdx < 0 || customerIdx >= requiredIdx;
-}
-
 function normalizeHourTime(value, fallback = '09:00') {
   const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
   if (!match) return fallback;
@@ -451,7 +441,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (!cancelled) setScheduleEstimatesLoading(false);
       });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on the customer and default estimate only.
   }, [selectedCustomer?.id, defaultEstimateId]);
 
   // Find-a-Time state
@@ -647,7 +637,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!auto) return;
     autoAppliedScheduleEstimateRef.current = auto.key;
     applyScheduleEstimate(auto.estimate.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on the schedule-estimate pipeline state only.
   }, [scheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
 
   const defaultEstimateAppliedRef = useRef(false);
@@ -1027,7 +1017,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
       return { group, dates };
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on the scheduling inputs only.
   }, [services, apptDate, recurringCount, skipWeekends, weekendShift]);
 
   // Compute window_end given a start time and a duration in minutes.
