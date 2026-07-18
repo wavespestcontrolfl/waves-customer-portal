@@ -1090,12 +1090,13 @@ function projectArchivedFeeValues(project) {
 }
 
 function projectRecordedFeeValues(project) {
-  const values = [];
   const findings = parseJsonish(project?.findings);
-  if (findings?.inspection_fee != null) values.push(findings.inspection_fee);
+  // The live entry ALWAYS contributes — an absent fee bills at the flat
+  // default just like a blank one, so it must count as digit-free in the
+  // resolve step even when archived filings carry numeric fees
+  // (codex #2817 r31).
+  const values = [findings?.inspection_fee ?? ''];
   values.push(...projectArchivedFeeValues(project));
-  // Digit-free entries ('', 'waived') can't be scrub targets but still BILL
-  // at the flat default — they must not suppress it (codex #2817).
   return resolveFeeValuesForScrub(values);
 }
 

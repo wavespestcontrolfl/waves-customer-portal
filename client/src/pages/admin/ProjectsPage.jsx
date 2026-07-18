@@ -896,7 +896,7 @@ function CustomerProjectReportPreview({
   // exactly what the customer's token serves (codex #2817).
   const previewFeeValues = project.project_type === WDO_TYPE
     ? resolveFeeValuesForScrub([
-      ...(findings?.inspection_fee != null ? [findings.inspection_fee] : []),
+      findings?.inspection_fee ?? "",
       ...(Array.isArray(project.wdo_archived_fee_values) ? project.wdo_archived_fee_values : []),
     ])
     : [];

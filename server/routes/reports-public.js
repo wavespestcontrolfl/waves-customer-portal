@@ -731,6 +731,13 @@ router.post('/project/:token/ask', async (req, res, next) => {
 });
 
 router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
+  // Signed legal filing behind a long-lived token — never cache, index, or
+  // leak the URL. Set before ANY return so the 402/404/NoSuchKey early paths
+  // carry the same protection as the PDF itself, matching /project/:token/data
+  // (codex #2817).
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.setHeader('Referrer-Policy', 'no-referrer');
   if (!extractProjectReportTokenLookup(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
@@ -778,10 +785,6 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     }
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="FDACS-13645.pdf"');
-    // Signed legal filing behind a long-lived token — never cache, index, or leak the URL.
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Robots-Tag', 'noindex');
-    res.setHeader('Referrer-Policy', 'no-referrer');
     object.Body.on('error', (err) => {
       logger.warn(`[reports-public] FDACS filing stream failed for ${project.id}: ${err.message}`);
       if (!res.headersSent) res.status(502).end();

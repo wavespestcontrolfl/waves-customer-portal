@@ -187,6 +187,11 @@ describe('public project reports', () => {
       const body = await res.json();
       expect(res.status).toBe(404);
       expect(body.error).toBe('Report not found');
+      // The gated 404 carries the same privacy headers as the PDF itself —
+      // they are set before any return (codex #2817).
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     });
   });
 

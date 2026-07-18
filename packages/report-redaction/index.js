@@ -294,12 +294,16 @@ function containsInspectionFeeCue(text) {
 const WDO_DEFAULT_INSPECTION_FEE = 250;
 
 // Normalize recorded fee values for the value scrub: digit-free entries
-// ('', 'waived') can't be scrub targets but still BILL at the flat default,
-// so they must not suppress it. An explicit numeric entry (including '0')
-// always wins — redactSpecificAmounts itself skips zero.
+// ('', 'waived', or an absent field passed as '') can't be scrub targets but
+// still BILL at the flat default, so ANY of them keeps the default in the
+// set — a numeric archived fee alongside a digit-free live one must never
+// displace the amount actually billed (codex #2817 r31). A list of explicit
+// numeric entries stays exactly those amounts (precision is the point of a
+// value-specific scrub) — redactSpecificAmounts itself skips zero.
 function resolveFeeValuesForScrub(values) {
-  const usable = (values || []).filter((v) => /\d/.test(String(v == null ? '' : v)));
-  if (!usable.length) usable.push(WDO_DEFAULT_INSPECTION_FEE);
+  const all = values || [];
+  const usable = all.filter((v) => /\d/.test(String(v == null ? '' : v)));
+  if (usable.length < all.length || !usable.length) usable.push(WDO_DEFAULT_INSPECTION_FEE);
   return usable;
 }
 

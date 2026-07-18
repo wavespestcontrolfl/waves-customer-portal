@@ -897,16 +897,15 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
   if (typeof parsedFindingsForFee === 'string') {
     try { parsedFindingsForFee = JSON.parse(parsedFindingsForFee); } catch { parsedFindingsForFee = null; }
   }
-  // Resolved like every other scrub site: a blank/digit-free fee ('',
-  // 'waived') bills at the flat default, so the default must join the scrub
-  // targets here too — "buyer asked about the $250 charge" has no literal
-  // cue and would otherwise reach the model. Archived filing snapshot fees
-  // (passed by the on-project endpoint; the pre-save preview has none) join
-  // for the same reason: a legacy note can quote an older filed fee
-  // (codex #2817).
+  // Resolved like every other scrub site: an absent/blank/digit-free fee
+  // bills at the flat default, so the default must join the scrub targets
+  // here too — "buyer asked about the $250 charge" has no literal cue and
+  // would otherwise reach the model. Archived filing snapshot fees (passed
+  // by the on-project endpoint; the pre-save preview has none) join for the
+  // same reason: a legacy note can quote an older filed fee (codex #2817).
   const recordedFeeValues = typeCarriesFee
     ? resolveFeeValuesForScrub([
-      ...(parsedFindingsForFee?.inspection_fee != null ? [parsedFindingsForFee.inspection_fee] : []),
+      parsedFindingsForFee?.inspection_fee ?? '',
       ...archivedFeeValues,
     ])
     : [];

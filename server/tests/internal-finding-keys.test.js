@@ -113,11 +113,14 @@ describe('free-text gating and default fee', () => {
     // resolveFeeValuesForScrub, so no default is added here
     expect(projectArchivedFeeValues(project)).toEqual(['325']);
     expect(projectArchivedFeeValues({ findings: { inspection_fee: '175' } })).toEqual([]);
-    // full egress set = live + archived; a digit-free live fee never
-    // suppresses a digit-bearing archived one
+    // full egress set = live + archived; a digit-free (or absent) live fee
+    // bills at the flat default, so the default stays a scrub target even
+    // when an archived fee is numeric — it is never displaced
     expect(projectRecordedFeeValues(project)).toEqual(['175', '325']);
     expect(projectRecordedFeeValues({ ...project, findings: { inspection_fee: 'waived' } }))
-      .toEqual(['325']);
+      .toEqual(['325', WDO_DEFAULT_INSPECTION_FEE]);
+    expect(projectRecordedFeeValues({ ...project, findings: {} }))
+      .toEqual(['325', WDO_DEFAULT_INSPECTION_FEE]);
   });
 });
 
