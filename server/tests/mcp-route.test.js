@@ -272,6 +272,17 @@ describe('tools', () => {
     expect(filtered.length).toBeGreaterThan(0);
   });
 
+  test('search_resolutions decays stale artifacts below fresher ones', async () => {
+    mockRows = [
+      { source: 'resolution', source_id: 'old', title: 'Old', content: 'x', metadata: { occurredAt: '2024-07-18T00:00:00Z' } },
+      { source: 'resolution', source_id: 'new', title: 'New', content: 'x', metadata: { occurredAt: '2026-07-10T00:00:00Z' } },
+    ];
+    const { body } = await callTool('search_resolutions', { query: 'refund' });
+    // Pre-decay the older artifact out-fuses the newer (better FTS rank);
+    // the ~2-year 240-day-half-life decay must re-rank the fresh one first.
+    expect(toolResult(body).results.map((d) => d.sourceId)).toEqual(['new', 'old']);
+  });
+
   test('a crashing tool returns a generic failure, not internals', async () => {
     mockRejectWith = new Error('connection refused to 10.0.0.7:5432');
     const { body } = await callTool('list_sources', {});

@@ -25,7 +25,7 @@ const { safeEqual } = require('../middleware/hermes-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { embedQuery } = require('../services/llm/embed');
-const { rrfFuse } = require('../services/knowledge-index/hybrid-search');
+const { rrfFuse, applyRecencyDecay } = require('../services/knowledge-index/hybrid-search');
 const { toVectorLiteral } = require('../services/knowledge-index/ingest');
 
 const router = express.Router();
@@ -63,11 +63,11 @@ async function searchIndex(query, { sources = null, limit = 10 } = {}) {
     db('knowledge_embeddings')
       .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q]),
   )
-    .select('source', 'source_id', 'title', 'content',
+    .select('source', 'source_id', 'title', 'content', 'metadata',
       db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]))
     .orderBy('rank', 'desc')
     .limit(CHUNK_FETCH_LIMIT);
-  const ftsList = ftsRows.map((r) => ({ key: key(r), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content }));
+  const ftsList = ftsRows.map((r) => ({ key: key(r), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata }));
 
   let vectorList = [];
   let usedVector = false;
@@ -80,13 +80,17 @@ async function searchIndex(query, { sources = null, limit = 10 } = {}) {
         .whereNotNull('embedding')
         .whereRaw('1 - (embedding <=> ?::vector) >= ?', [literal, MIN_VECTOR_SIMILARITY]),
     )
-      .select('source', 'source_id', 'title', 'content')
+      .select('source', 'source_id', 'title', 'content', 'metadata')
       .orderByRaw('embedding <=> ?::vector', [literal])
       .limit(CHUNK_FETCH_LIMIT);
-    vectorList = rows.map((r) => ({ key: key(r), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content }));
+    vectorList = rows.map((r) => ({ key: key(r), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata }));
   }
 
-  const fused = rrfFuse([vectorList, ftsList]);
+  // Decay observational hits, then re-rank — mirrors hybridKnowledgeSearch:
+  // a stale resolution must drop below fresher docs it out-fused.
+  const fused = rrfFuse([vectorList, ftsList])
+    .map((d) => ({ ...d, score: applyRecencyDecay(d) }))
+    .sort((a, b) => b.score - a.score);
   return {
     usedVector,
     results: fused.slice(0, cap).map((d) => ({
