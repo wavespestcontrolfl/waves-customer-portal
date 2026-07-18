@@ -1225,15 +1225,15 @@ function EstimateToolView() {
   // A live DB re-arm of lawn_pricing_v2.programMinimumMonthly must reach it
   // too, or fallback estimates preview/save below-minimum rows the public
   // route then refuses to accept. Fetch failure leaves the disarmed default.
-  // Tracked as a settled promise so the FALLBACK generate path can await it
-  // — an operator generating before this resolves would price on the static
-  // disarmed defaults and persist a non-replayable client result below a
-  // re-armed floor (codex P2 round 8 on #2827). 5s abort keeps the await
-  // bounded; any failure leaves the disarmed defaults (fail-open, as
-  // before).
+  // Refreshed on mount AND before every fallback calculation (codex P1: a
+  // re-arm while an estimator tab stays open must reach the next fallback
+  // quote — these saves have no replayable engine input, so a stale
+  // disarmed module state would persist a below-floor client price). The
+  // fallback generate path awaits the tracked promise; 5s abort keeps that
+  // bounded, and any failure keeps the last applied state (fail-open).
   const pricingConfigReadyRef = useRef(Promise.resolve());
-  useEffect(() => {
-    pricingConfigReadyRef.current = (async () => {
+  const refreshPricingConfig = useCallback(() => {
+    const run = (async () => {
       const fetchConfigRow = async (key) => {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 5000);
@@ -1245,7 +1245,7 @@ function EstimateToolView() {
           if (!r.ok) return null;
           return (await r.json())?.data ?? null;
         } catch {
-          return null; /* disarmed defaults stand */
+          return null; /* last applied (or disarmed default) state stands */
         } finally {
           clearTimeout(timer);
         }
@@ -1257,7 +1257,12 @@ function EstimateToolView() {
       if (lawnRow) applyServerLawnPricingConfig(lawnRow);
       if (pestRow) applyServerPestPricingConfig(pestRow);
     })();
+    pricingConfigReadyRef.current = run;
+    return run;
   }, []);
+  useEffect(() => {
+    refreshPricingConfig();
+  }, [refreshPricingConfig]);
 
   /* ── Manual discount presets (pulled from /admin/discounts) ── */
   const [discountPresets, setDiscountPresets] = useState([]);
@@ -2037,10 +2042,11 @@ function EstimateToolView() {
     }
 
     // Fallback: use v1 client-side calculation
-    // Wait for the live pricing-config load (bounded — 5s abort + fail-open
-    // inside the fetch) so a re-armed floor can't be raced by an early
-    // generate pricing on the static disarmed defaults.
-    await pricingConfigReadyRef.current;
+    // Refresh the live pricing config for THIS quote (bounded — 5s abort +
+    // fail-open to the last applied state) so a re-arm after mount, or an
+    // early generate racing the initial load, can't price on stale floor
+    // switches.
+    await refreshPricingConfig();
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =

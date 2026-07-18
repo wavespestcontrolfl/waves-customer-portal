@@ -27,9 +27,18 @@
 // to a monthly dollar amount and/or pest_base.enforce_floor_post_discount
 // back to true (db-bridge live-reads both). The in-code constants now
 // default to the disarmed values, so the DOWN migration restores the
-// pre-ruling values explicitly (50 / true) rather than deleting keys.
+// ORIGINAL pre-migration values from the backup row `up` snapshots
+// (including deleting keys that did not exist), falling back to the
+// documented pre-ruling values (50 / true / true) only when no backup row
+// is present — an environment configured differently before this deploy
+// must round-trip unchanged (codex P1).
 
 const CHANGED_BY = 'claude-2026-07-17';
+const BACKUP_KEY = 'floors_backup_20260717120000';
+const FLOOR_KEYS = {
+  lawn_pricing_v2: ['programMinimumMonthly', 'useLawnCostFloor'],
+  pest_base: ['enforce_floor_post_discount'],
+};
 
 const CHANGELOG_IDENTITY = {
   version_from: 'v4.6',
@@ -103,6 +112,27 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return;
 
   const lawn = await readConfigData(knex, 'lawn_pricing_v2');
+  const pestSnapshot = await readConfigData(knex, 'pest_base');
+  // Snapshot the ORIGINAL row data BEFORE any write so down() can restore
+  // the exact prior floor-key state — value or absence — instead of
+  // hardcoding pre-ruling defaults (codex P1: an environment already
+  // configured differently must not silently re-arm on rollback). Stored as
+  // a dedicated pricing_config row; db-bridge only reads known keys, so the
+  // backup is inert at runtime.
+  await knex('pricing_config').where({ config_key: BACKUP_KEY }).del();
+  await knex('pricing_config').insert({
+    config_key: BACKUP_KEY,
+    name: 'Backup: forget-all-pricing-floors original values (migration 20260717120000)',
+    category: 'system',
+    sort_order: 999,
+    data: JSON.stringify({
+      lawn_pricing_v2: lawn.exists ? lawn.data : null,
+      pest_base: pestSnapshot.exists ? pestSnapshot.data : null,
+    }),
+    created_at: knex.fn.now(),
+    updated_at: knex.fn.now(),
+  });
+
   if (lawn.exists) {
     const oldValue = lawn.data.programMinimumMonthly ?? null;
     const oldUseFloor = typeof lawn.data.useLawnCostFloor === 'boolean'
@@ -155,49 +185,51 @@ exports.down = async function down(knex) {
     await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
   }
 
-  // The in-code constants now default to the disarmed values, so rollback
-  // must RESTORE the pre-ruling values explicitly — deleting the keys would
-  // leave the floors off.
-  const lawn = await readConfigData(knex, 'lawn_pricing_v2');
-  if (lawn.exists) {
-    await writeConfigData(knex, 'lawn_pricing_v2', {
-      ...lawn.data,
-      programMinimumMonthly: 50,
-      // Pre-ruling state: cost-floor machinery armed (it was the in-code
-      // default before the 2026-07-17 disarm) — restore explicitly for the
-      // same reason as programMinimumMonthly above.
-      useLawnCostFloor: true,
-    });
+  // Restore the ORIGINAL pre-migration floor-key state from the backup row
+  // `up` snapshotted — value or absence, per key — so an environment that
+  // was configured differently before the deploy round-trips unchanged
+  // (codex P1). Only the floor keys are touched; unrelated keys edited
+  // since the deploy keep their current values. Without a backup row
+  // (partial environment), fall back to the documented pre-ruling values
+  // (50 / true / true) — deleting the keys would leave the floors off
+  // because the in-code constants now default to the disarmed values.
+  const backupRow = await knex('pricing_config').where({ config_key: BACKUP_KEY }).first('data');
+  const backup = parseConfigData(backupRow?.data);
+  const FALLBACK_ORIGINALS = {
+    lawn_pricing_v2: { programMinimumMonthly: 50, useLawnCostFloor: true },
+    pest_base: { enforce_floor_post_discount: true },
+  };
+
+  for (const configKey of Object.keys(FLOOR_KEYS)) {
+    const row = await readConfigData(knex, configKey);
+    if (!row.exists) continue;
+    const original = backup[configKey] && typeof backup[configKey] === 'object'
+      ? backup[configKey]
+      : FALLBACK_ORIGINALS[configKey];
+    const next = { ...row.data };
+    const oldSlice = {};
+    const newSlice = {};
+    for (const key of FLOOR_KEYS[configKey]) {
+      oldSlice[key] = Object.prototype.hasOwnProperty.call(row.data, key) ? row.data[key] : null;
+      if (Object.prototype.hasOwnProperty.call(original, key)) {
+        next[key] = original[key];
+        newSlice[key] = original[key];
+      } else {
+        delete next[key];
+        newSlice[key] = null; // key did not exist pre-migration — removed
+      }
+    }
+    await writeConfigData(knex, configKey, next);
     await insertAudit(
       knex,
-      'lawn_pricing_v2',
-      {
-        programMinimumMonthly: lawn.data.programMinimumMonthly ?? null,
-        useLawnCostFloor: typeof lawn.data.useLawnCostFloor === 'boolean'
-          ? lawn.data.useLawnCostFloor
-          : null,
-      },
-      { programMinimumMonthly: 50, useLawnCostFloor: true },
-      'Rollback: re-arm the $50/mo lawn program minimum (owner directive 2026-07-09 value) and the lawn cost-floor enforcement.',
+      configKey,
+      oldSlice,
+      newSlice,
+      backupRow
+        ? 'Rollback: restore the pre-2026-07-17 floor values from the migration backup snapshot.'
+        : 'Rollback (no backup snapshot found): re-arm the documented pre-ruling floor values.',
     );
   }
 
-  const pest = await readConfigData(knex, 'pest_base');
-  if (pest.exists) {
-    await writeConfigData(knex, 'pest_base', {
-      ...pest.data,
-      enforce_floor_post_discount: true,
-    });
-    await insertAudit(
-      knex,
-      'pest_base',
-      {
-        enforce_floor_post_discount: typeof pest.data.enforce_floor_post_discount === 'boolean'
-          ? pest.data.enforce_floor_post_discount
-          : null,
-      },
-      { enforce_floor_post_discount: true },
-      'Rollback: re-arm the $79/visit post-discount pest program floor (owner decision 2026-07-09).',
-    );
-  }
+  await knex('pricing_config').where({ config_key: BACKUP_KEY }).del();
 };
