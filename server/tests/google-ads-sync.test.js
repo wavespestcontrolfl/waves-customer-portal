@@ -97,21 +97,6 @@ describe('Google Ads campaign sync', () => {
 
     const results = await GoogleAds.syncCampaigns();
 
-    // TEMPORARY CI DIAGNOSTIC (remove before merge): in the CI no-DB job this
-    // suite fails with results=[] while isConfigured() is TRUE (round 1 proved
-    // the env swap works), which means syncCampaigns threw internally and the
-    // catch swallowed the error into the mocked logger. Surface it, plus which
-    // of this file's mocks actually ran. Messages only — no env values.
-    if (results.length !== 1) {
-      const logger = require('../services/logger');
-      throw new Error('CI-DIAG syncCampaigns empty. '
-        + `loggerErrors=${JSON.stringify(logger.error.mock.calls)} `
-        + `loggerWarns=${JSON.stringify(logger.warn.mock.calls)} `
-        + `apiCtor=${mockGoogleAdsApi.mock.calls.length} `
-        + `customerFactory=${mockCustomerFactory.mock.calls.length} `
-        + `query=${mockCustomerQuery.mock.calls.length}`);
-    }
-
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe('paused');
     expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({
