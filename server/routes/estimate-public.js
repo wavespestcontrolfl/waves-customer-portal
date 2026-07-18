@@ -6939,6 +6939,21 @@ async function handleEstimateView(req, res, next) {
     if (!estimate) {
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
+
+    // UNPUBLISHED rows (draft/scheduled) never render through this
+    // unauthenticated SSR pipeline: the legacy draft-preview convenience
+    // served the full quote + customer contact details to ANYONE holding the
+    // token, while the React /:token/data path correctly demands a verified
+    // staff JWT for the same rows. Staff previews go through the React page
+    // (?adminPreview=1 — what the estimate tool's "Customer View" and the
+    // estimates list's Preview already link); everyone else gets the SPA's
+    // "link isn't valid" screen. On the /api/estimates mount (no SPA to fall
+    // through to) an unpublished token reads as not found.
+    if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) {
+      if (req.path.startsWith('/estimate/')) return next();
+      return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+    }
+
     await reconcileFrozenMembershipSnapshot(estimate);
 
     // Parsed once here (post-reconcile) so the V2 gate's one-time check below
@@ -6996,26 +7011,16 @@ async function handleEstimateView(req, res, next) {
         billByInvoice: effectiveInvoiceMode,
         paymentMethodPreference: null,
       })).required;
-    // Staff can request the REAL React renderer for an unpublished row via
-    // ?adminPreview=1 (the estimate tool's "Customer View" + the estimates
-    // list's Preview). The param is NOT authorization — this route only
-    // serves the SPA shell; GET /:token/data does the staff-JWT check and
-    // still 404s the draft for anyone else, so a non-staff hit on the URL
-    // renders the React "link isn't valid" screen (strictly less exposure
-    // than the SSR draft page below).
+    // adminPreview marks staff previews (the estimate tool's "Customer View"
+    // + the estimates list's Preview). The param is NOT authorization — it
+    // only excludes the view from experiment assignment / side effects here;
+    // GET /:token/data does the staff-JWT check. Unpublished rows never
+    // reach this point (guard at the top of the handler).
     const adminPreviewRequested = req.query.adminPreview === '1';
-    let shouldUseReactEstimateView = (estimate.use_v2_view === true
+    let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
-      || recurringCardForcesReactView)
-      // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
-      // renderer so office staff can still preview a draft via /estimate/<token>
-      // before it's sent — UNLESS the staff preview param asks for the React
-      // page (the renderer the customer actually gets once it's sent; the
-      // /:token/data staff gate makes that path draft-safe). The use_v2_view
-      // default flip otherwise only takes effect once the estimate is
-      // actually published.
-      && (!UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status) || adminPreviewRequested);
+      || recurringCardForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not

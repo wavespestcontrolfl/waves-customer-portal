@@ -377,11 +377,18 @@ router.get('/:token', async (req, res, next) => {
       ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url, SERVICE_PHOTO_TTL_SECONDS)
       : null;
 
-    // A no-show is an operational-status flip (admin-dispatch) that does
-    // not move the track_state ENUM, so derive the customer-facing state
-    // from status when it's 'no_show'. Everything else maps 1:1 from the
-    // canonical track_state machine.
-    const customerState = row.status === 'no_show' ? 'no_show' : row.track_state;
+    // Terminal OPERATIONAL statuses win over track_state: no_show,
+    // cancelled and skipped are admin-dispatch status flips that don't
+    // always move the track_state ENUM (several cancellation paths change
+    // status without cancelling tracking, and completion tracking is
+    // best-effort after commit). Keying the customer-facing state off a
+    // stale track_state='en_route' kept streaming live tech GPS until
+    // token expiry for a visit that was already cancelled. Everything
+    // non-terminal maps 1:1 from the canonical track_state machine.
+    let customerState = row.track_state;
+    if (row.status === 'no_show') customerState = 'no_show';
+    else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
+    else if (row.status === 'completed') customerState = 'complete';
 
     const response = {
       state: customerState,

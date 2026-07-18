@@ -1687,9 +1687,55 @@ const StripeService = {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
-    const card = await db('payment_methods')
-      .where({ customer_id: customerId, processor: 'stripe', is_default: true, autopay_enabled: true })
-      .first();
+    // customers.autopay_payment_method_id is the enrollment pointer — "the
+    // method actually in charge" (autopay-enrollment.js) — so collection
+    // honors it first. The default+enabled lookup is the fallback, with a
+    // deterministic order: legacy data (or a pre-fix race) can hold several
+    // is_default rows, and an unordered .first() charged whichever row the
+    // planner happened to return.
+    // Eligibility beyond "enabled + has a Stripe pm id": the callers'
+    // customerOnAutopay check only proves SOME default+enabled method is
+    // chargeable, so both the pointer AND the fallback must refuse a method
+    // the eligibility predicate rejects — an expired card, an unverified
+    // bank row, or any bank while customers.ach_status is blocked. Without
+    // the fallback check, rejecting the pointer just reselected the same
+    // row (the pointer normally IS the default) and charged it anyway.
+    const { isBankMethodType, isExpiredCardMethod } = require('./autopay-eligibility');
+    // Legacy rows store 2-digit expiry years — normalize before the expiry
+    // check (same recipe as the set-default guard) or a valid '12/32' card
+    // reads as year 32 and collection refuses a method the portal accepts.
+    // Full normalization at write time is a separate cleanup.
+    const normalizeLegacyExpiry = (m) => {
+      const rawYear = parseInt(m.exp_year, 10);
+      return Number.isFinite(rawYear) && rawYear < 100 ? { ...m, exp_year: rawYear + 2000 } : m;
+    };
+    const methodEligibleForCharge = (m) => !!m
+      && !!m.stripe_payment_method_id
+      && !isExpiredCardMethod(normalizeLegacyExpiry(m))
+      && !(isBankMethodType(m.method_type) && (
+        (customer.ach_status && customer.ach_status !== 'active')
+        || ['pending_verification', 'verification_failed'].includes(m.ach_status)
+      ));
+
+    let card = null;
+    if (customer.autopay_payment_method_id) {
+      const pointerRow = await db('payment_methods')
+        .where({ id: customer.autopay_payment_method_id, customer_id: customerId, processor: 'stripe', autopay_enabled: true })
+        .whereNotNull('stripe_payment_method_id')
+        .first();
+      if (pointerRow && !methodEligibleForCharge(pointerRow)) {
+        logger.warn(`[stripe] autopay pointer ${pointerRow.id} ineligible for customer ${customerId} (${isExpiredCardMethod(pointerRow) ? 'expired card' : 'ACH blocked'}) — falling back to default lookup`);
+      } else {
+        card = pointerRow || null;
+      }
+    }
+    if (!card) {
+      const candidates = await db('payment_methods')
+        .where({ customer_id: customerId, processor: 'stripe', is_default: true, autopay_enabled: true })
+        .orderBy('updated_at', 'desc')
+        .orderBy('id', 'asc');
+      card = candidates.find(methodEligibleForCharge) || null;
+    }
 
     if (!card || !card.stripe_payment_method_id) {
       throw new Error('No Stripe autopay payment method on file');
