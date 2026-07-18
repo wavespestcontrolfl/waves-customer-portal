@@ -190,6 +190,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         try {
           existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
         } catch { existingMeta = {}; }
+        let insertFresh = false;
         if (existingMeta.estimator_engine === true) {
           if (callSid) {
             // Same callSid = same request. A prior estimator bell stands
@@ -198,28 +199,32 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             // manually" text must upgrade to the draft link.
             if (!estimateId || existingMeta.estimateId) return true;
           } else {
-            // A thread key spans REQUESTS on one phone, so only a true
-            // retry stands: the same draft again, or both sides still-open
-            // owed-quotes. A different draft (second property) or a fresh
-            // owed-quote after a completed one must re-ring — discarding
-            // those hid real work from the operator.
+            // A thread key spans REQUESTS on one phone. Only a true retry
+            // stands (same draft again, or both sides still-open
+            // owed-quotes). An open placeholder upgrades to its outcome —
+            // but a bell that already tells a COMPLETED draft's story is
+            // history: a new request or a different draft gets a FRESH
+            // bell instead of overwriting it.
             const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
             const bothOpen = !estimateId && !existingMeta.estimateId;
             if (sameDraft || bothOpen) return true;
+            if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
           }
         }
-        await db('notifications')
-          .where({ id: existing.id })
-          .update({
-            title,
-            body,
-            link,
-            metadata: JSON.stringify({ ...existingMeta, ...metadata }),
-            // The content changed materially — an already-read bell must
-            // come back unread or the upgrade is invisible.
-            read_at: null,
-          });
-        return true;
+        if (!insertFresh) {
+          await db('notifications')
+            .where({ id: existing.id })
+            .update({
+              title,
+              body,
+              link,
+              metadata: JSON.stringify({ ...existingMeta, ...metadata }),
+              // The content changed materially — an already-read bell must
+              // come back unread or the upgrade is invisible.
+              read_at: null,
+            });
+          return true;
+        }
       }
     }
     // notifyAdmin catches insert failures and returns null — that is NOT a

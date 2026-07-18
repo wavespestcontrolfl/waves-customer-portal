@@ -10,7 +10,18 @@
  * draft-time guard owns duplicates so different-property quotes survive.
  */
 
-jest.mock('../models/db', () => jest.fn());
+// Chainable stub for the cooldown lookup (notifications table); tests set
+// mockRecentBell to simulate a run inside the cooldown window.
+let mockRecentBell = null;
+jest.mock('../models/db', () => {
+  const chain = {
+    whereRaw: () => chain,
+    where: () => chain,
+    orderBy: () => chain,
+    first: async () => mockRecentBell,
+  };
+  return jest.fn(() => chain);
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -49,6 +60,7 @@ const PHONE = '+19415550123';
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockRecentBell = null;
   process.env.GATE_ESTIMATOR_SMS_DRAFTS = 'true';
   mockEngineEnabled.mockReturnValue(true);
   mockDispatch.mockResolvedValue({ ok: true, json: { quote_request: true, confidence: 0.9 } });
@@ -138,6 +150,18 @@ describe('startSmsThreadDraft', () => {
       lane: 'red',
       body: expect.stringContaining('ambiguous_phone'),
     }));
+    expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+  });
+
+  test('a run inside the cooldown window skips before any paid call', async () => {
+    // The durable bell doubles as the per-phone claim: repeated quote-y
+    // texts must not burn FAST/DEEP runs while a run already started.
+    mockRecentBell = { id: 'bell-1' };
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    expect(result.started).toBe(false);
+    expect(result.skipped).toBe('cooldown');
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 

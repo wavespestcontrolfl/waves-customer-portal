@@ -167,6 +167,25 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       result.skipped = 'no_usable_phone';
       return result;
     }
+    // DB-backed per-phone cooldown BEFORE any paid call: the durable
+    // owed-quote bell doubles as the claim record, so a sender repeating
+    // quote-flavored texts can't burn unlimited FAST/DEEP runs — draft-time
+    // duplicate detection alone happens after the spend. Independent later
+    // requests (different property included) pass once the window clears;
+    // within it, the standing bell already tells the operator a quote is
+    // owed on this phone.
+    if (!dryRun) {
+      const SMS_DRAFT_COOLDOWN_MS = 10 * 60 * 1000;
+      const db = require('../../models/db');
+      const recentRun = await db('notifications')
+        .whereRaw("metadata->>'smsThreadKey' = ?", [`sms:${digits}`])
+        .where('created_at', '>=', new Date(Date.now() - SMS_DRAFT_COOLDOWN_MS))
+        .first();
+      if (recentRun) {
+        result.skipped = 'cooldown';
+        return result;
+      }
+    }
     if (!skipIntentGate) {
       const signal = await threadQuoteSignal(triggerBody);
       if (!signal.quoteRequest) {
