@@ -58,6 +58,35 @@ function composeClarifyBody({ missing, firstName }) {
   return `${greeting}it's Waves Pest Control — glad to get you a quote. Which service are you looking for — pest control, lawn care, mosquito, or something else?`;
 }
 
+// Rewrite an unclaimed pending clarify with the union of missing items and
+// the NEWEST request's linkage. Guarded on status so a claim landing
+// mid-merge wins; the read-modify-write on flags has a tiny lost-update
+// window between two simultaneous mergers, which the approval guard's
+// staleness recheck absorbs (it re-derives what is still missing from the
+// live rows, not from flags alone).
+async function mergePendingClarify(existing, { askable, firstName, linkage }) {
+  let existingFlags = {};
+  try {
+    existingFlags = typeof existing.flags === 'string' ? JSON.parse(existing.flags) : (existing.flags || {});
+  } catch { existingFlags = {}; }
+  const existingMissing = Array.isArray(existingFlags.missing) ? existingFlags.missing : [];
+  const merged = [...new Set([...existingMissing, ...askable])];
+  await db('message_drafts')
+    .where({ id: existing.id, status: 'pending' })
+    .update({
+      customer_id: linkage.customerId || existing.customer_id || null,
+      draft_response: composeClarifyBody({ missing: merged, firstName }),
+      flags: JSON.stringify({
+        ...existingFlags,
+        missing: merged,
+        lead_id: linkage.leadId || existingFlags.lead_id || null,
+        estimate_id: linkage.estimateId || existingFlags.estimate_id || null,
+        source: linkage.source,
+        channel_provenance: linkage.channelProvenance || existingFlags.channel_provenance || null,
+      }),
+    });
+}
+
 /**
  * Park one clarifying-question draft. Fail-soft by contract: callers sit on
  * quote dead-end paths that must never break because calibration/outreach
@@ -120,40 +149,18 @@ async function parkClarifyAsk({
         }).orWhere('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
       })
       .first();
+    const linkage = { customerId, leadId, estimateId, source, channelProvenance };
     if (existing) {
-      // Merge, don't discard: a new dead-end can carry items the open draft
-      // doesn't ask yet (service-only draft, then an address-only request)
-      // — dropping them would leave the second question never asked once
-      // the first resolves. Only an unclaimed 'pending' draft is rewritten;
-      // approved/revised are mid-send and a recently-sent one is a cooldown.
+      // Merge, don't discard: an unclaimed 'pending' draft is ALWAYS
+      // rewritten on a dedupe hit — union of missing items (a new dead-end
+      // can carry a question the draft doesn't ask yet) AND linkage
+      // refreshed to the NEWEST request, so the approval guard judges
+      // staleness against the request that still needs the question rather
+      // than one whose lead closed. approved/revised are mid-send and a
+      // recently-sent one is a cooldown — untouched.
       if (existing.status === 'pending') {
-        let existingFlags = {};
-        try {
-          existingFlags = typeof existing.flags === 'string' ? JSON.parse(existing.flags) : (existing.flags || {});
-        } catch { existingFlags = {}; }
-        const existingMissing = Array.isArray(existingFlags.missing) ? existingFlags.missing : [];
-        const merged = [...new Set([...existingMissing, ...askable])];
-        if (merged.length > existingMissing.length) {
-          await db('message_drafts')
-            .where({ id: existing.id, status: 'pending' })
-            .update({
-              // The NEWEST request owns the linkage: the approval guard
-              // judges staleness against it, and the old request's closed
-              // lead / retired estimate must not kill a question the new
-              // request still needs.
-              customer_id: customerId || existing.customer_id || null,
-              draft_response: composeClarifyBody({ missing: merged, firstName }),
-              flags: JSON.stringify({
-                ...existingFlags,
-                missing: merged,
-                lead_id: leadId || existingFlags.lead_id || null,
-                estimate_id: estimateId || existingFlags.estimate_id || null,
-                source,
-                channel_provenance: channelProvenance || existingFlags.channel_provenance || null,
-              }),
-            });
-          return { parked: false, skipped: 'merged_into_open_clarify', draftId: existing.id };
-        }
+        await mergePendingClarify(existing, { askable, firstName, linkage });
+        return { parked: false, skipped: 'merged_into_open_clarify', draftId: existing.id };
       }
       return { parked: false, skipped: 'open_or_recent_clarify', draftId: existing.id };
     }
@@ -183,9 +190,19 @@ async function parkClarifyAsk({
         .returning(['id']);
     } catch (insertErr) {
       // The partial unique index (message_drafts_clarify_open_uniq) makes
-      // one-open-clarify-per-phone a DB invariant — a concurrent producer
-      // winning the race is the deduped outcome, not an error.
+      // one-open-clarify-per-phone a DB invariant. Losing the race must not
+      // discard THIS request's items/linkage — merge them into the winner.
       if (insertErr.code === '23505') {
+        const winner = await db('message_drafts')
+          .where({ intent: 'estimate_clarify', source_ref: sourceRef, status: 'pending' })
+          .whereNull('sent_at')
+          .first();
+        if (winner) {
+          await mergePendingClarify(winner, { askable, firstName, linkage });
+          return { parked: false, skipped: 'merged_into_open_clarify', draftId: winner.id };
+        }
+        // Winner already claimed or sent between the conflict and this read
+        // — the standing draft/cooldown covers the phone.
         return { parked: false, skipped: 'open_or_recent_clarify' };
       }
       throw insertErr;

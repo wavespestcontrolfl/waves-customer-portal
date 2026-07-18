@@ -15,8 +15,9 @@ jest.mock('../models/db', () => {
     const builder = {
       where() { return builder; },
       whereIn() { return builder; },
+      whereNull() { return builder; },
       orWhere() { return builder; },
-      first: async () => mockState.existingDraft,
+      first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
       update: async (payload) => {
         mockState.updates.push(payload);
         return 1;
@@ -58,7 +59,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { existingDraft: null, inserts: [], updates: [] };
+  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [] };
   mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
   mockNotifyAdmin.mockResolvedValue({ id: 'bell-1' });
 });
@@ -107,23 +108,54 @@ describe('parkClarifyAsk', () => {
     expect(JSON.parse(mockState.inserts[0].flags).toPhone).toBe('+19415550142');
   });
 
-  test('a lost insert race (23505 on the partial unique index) is the deduped outcome', async () => {
+  test('a lost race with no readable winner (claimed/sent mid-conflict) still dedupes', async () => {
     mockState.insertError = Object.assign(new Error('duplicate key'), { code: '23505' });
     const result = await parkClarifyAsk(BASE);
     expect(result).toEqual({ parked: false, skipped: 'open_or_recent_clarify' });
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('an open or recently sent clarify covering the same items dedupes', async () => {
+  test('a recently sent clarify dedupes without touching the row', async () => {
     mockState.existingDraft = {
       id: 'draft-0',
-      status: 'pending',
+      status: 'sent',
       flags: JSON.stringify({ missing: ['street_address'] }),
     };
     const result = await parkClarifyAsk(BASE);
     expect(result).toEqual({ parked: false, skipped: 'open_or_recent_clarify', draftId: 'draft-0' });
     expect(mockState.inserts).toHaveLength(0);
     expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('a same-items pending dedupe still refreshes linkage to the newest request', async () => {
+    // The old request's closed lead must not kill a question the NEW
+    // request still needs — every pending dedupe hit rewrites linkage.
+    mockState.existingDraft = {
+      id: 'draft-0',
+      status: 'pending',
+      flags: JSON.stringify({ missing: ['street_address'], lead_id: 'old-lead' }),
+    };
+    const result = await parkClarifyAsk({ ...BASE, channelProvenance: 'sms' });
+    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0' });
+    const flags = JSON.parse(mockState.updates[0].flags);
+    expect(flags.missing).toEqual(['street_address']);
+    expect(flags.lead_id).toBe('lead-1');
+    expect(flags.channel_provenance).toBe('sms');
+  });
+
+  test('a lost insert race merges this request into the winner', async () => {
+    mockState.insertError = Object.assign(new Error('duplicate key'), { code: '23505' });
+    // Pre-check sees nothing; the post-conflict read finds the winner.
+    mockState.firstQueue = [null, {
+      id: 'winner-1',
+      status: 'pending',
+      flags: JSON.stringify({ missing: ['specific_service'] }),
+    }];
+    const result = await parkClarifyAsk(BASE);
+    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'winner-1' });
+    const flags = JSON.parse(mockState.updates[0].flags);
+    expect(flags.missing.sort()).toEqual(['specific_service', 'street_address']);
+    expect(flags.lead_id).toBe('lead-1');
   });
 
   test('a new missing item MERGES into the open pending draft instead of being discarded', async () => {
