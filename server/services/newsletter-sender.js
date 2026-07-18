@@ -360,23 +360,33 @@ async function sendCampaign(sendId, opts = {}) {
   if (!send) throw new Error('not found');
   if (!send.html_body && !send.text_body) throw new Error('body required');
 
-  const eventSelection = await validateFlagshipEventSelection(send);
-  if (eventSelection.flagship) {
-    if (!eventSelection.valid) {
-      const err = new Error(`flagship event selection is no longer eligible: ${eventSelection.errors.join(' ')}`);
-      err.code = 'EVENT_SELECTION_INVALID';
-      throw err;
-    }
-    const now = new Date();
-    if (send.status === 'scheduled' && !isCurrentFlagshipTarget(send.scheduled_for, now)) {
-      const err = new Error('scheduled flagship target is not the current issue Tuesday at 6:00 AM ET');
-      err.code = 'FLAGSHIP_SCHEDULE_TARGET';
-      throw err;
-    }
-    if (!isFlagshipDeliveryWindow(now)) {
-      const err = new Error('flagship newsletters can only be delivered Tuesday at 6:00 AM ET');
-      err.code = 'FLAGSHIP_CADENCE_WINDOW';
-      throw err;
+  // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
+  // A preclaimed resume re-mails a campaign that already passed these gates:
+  // re-validating the lineup would reject it against itself (a partial
+  // first pass finalizes 'sent' and markEventsFeatured advances
+  // times_featured, so the same locked ids read as "no longer new"), and
+  // the 6:00–6:14 delivery window would block stalled-send recovery at
+  // 6:30. Resume changes nothing editorially — identical body, identical
+  // lineup, only the outstanding delivery rows.
+  if (!opts.preclaimed) {
+    const eventSelection = await validateFlagshipEventSelection(send);
+    if (eventSelection.flagship) {
+      if (!eventSelection.valid) {
+        const err = new Error(`flagship event selection is no longer eligible: ${eventSelection.errors.join(' ')}`);
+        err.code = 'EVENT_SELECTION_INVALID';
+        throw err;
+      }
+      const now = new Date();
+      if (send.status === 'scheduled' && !isCurrentFlagshipTarget(send.scheduled_for, now)) {
+        const err = new Error('scheduled flagship target is not the current issue Tuesday at 6:00 AM ET');
+        err.code = 'FLAGSHIP_SCHEDULE_TARGET';
+        throw err;
+      }
+      if (!isFlagshipDeliveryWindow(now)) {
+        const err = new Error('flagship newsletters can only be delivered Tuesday at 6:00 AM ET');
+        err.code = 'FLAGSHIP_CADENCE_WINDOW';
+        throw err;
+      }
     }
   }
 
@@ -601,6 +611,21 @@ async function sendCampaign(sendId, opts = {}) {
       });
       const subscriberIds = chunkToSend.map((s) => s.id);
 
+      // Ownership check + lease renewal BEFORE the external call: 0 rows
+      // means recovery rotated sending_claim_token while we were stalled —
+      // stop WITHOUT mailing this chunk. A successful renewal also resets
+      // the stale lease, so recovery cannot legally reclaim while the
+      // following SendGrid request is in flight (a reclaim requires a full
+      // lease window of silence).
+      const heartbeat = await db('newsletter_sends')
+        .where({ id: send.id, status: 'sending', sending_claim_token: claimToken })
+        .update({ updated_at: new Date() });
+      if (!heartbeat) {
+        claimLost = true;
+        logger.error(`[newsletter] send ${send.id} claim lost (stale reclaim by another worker) — stopping before mailing this chunk; ${accepted} accepted so far; new owner resumes the rest`);
+        break;
+      }
+
       try {
         // sendBroadcast = sendBatch with the SENDGRID_ASM_GROUP_NEWSLETTER
         // group attached by default. Newsletter unsubs land in the
@@ -682,20 +707,6 @@ async function sendCampaign(sendId, opts = {}) {
         failed += updated;
       }
 
-      // Heartbeat + ownership check: History's stale-claim recovery frees a
-      // 'sending' row once updated_at exceeds the lease; touching it after
-      // every chunk keeps a progressing send alive. The token guard makes
-      // this a lease renewal — 0 rows means recovery reclaimed the campaign
-      // under a NEW token while we were stuck, so we stop before mailing
-      // another chunk and leave the rest to the new owner.
-      const heartbeat = await db('newsletter_sends')
-        .where({ id: send.id, status: 'sending', sending_claim_token: claimToken })
-        .update({ updated_at: new Date() });
-      if (!heartbeat) {
-        claimLost = true;
-        logger.error(`[newsletter] send ${send.id} claim lost mid-send (stale reclaim by another worker) — stopping after ${accepted} accepted; new owner resumes the rest`);
-        break;
-      }
     }
     if (claimLost) break;
   }
@@ -1004,6 +1015,10 @@ async function markEventsFeatured(send) {
       await trx('events_raw').where({ id }).update({
         times_featured: nextFeatured,
         last_featured_at: new Date(),
+        // The editorial star is consumed by shipping: drop featured back to
+        // approved so the eligibility override can't re-admit the same
+        // event in the next issue.
+        admin_status: db.raw(`CASE WHEN admin_status = 'featured' THEN 'approved' ELSE admin_status END`),
         freshness_status,
         freshness_score,
         updated_at: new Date(),

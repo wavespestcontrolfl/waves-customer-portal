@@ -1468,11 +1468,11 @@ router.patch('/events/:id', async (req, res, next) => {
     const updates = { updated_at: new Date() };
     if (adminStatus !== undefined) {
       updates.admin_status = adminStatus;
-      // Only increment times_featured on transition TO featured
-      if (adminStatus === 'featured' && event.admin_status !== 'featured') {
-        updates.last_featured_at = new Date();
-        updates.times_featured = db.raw('COALESCE(times_featured, 0) + 1');
-      }
+      // Featuring is an editorial STAR for the upcoming issue — not ship
+      // history. times_featured/last_featured_at advance only in
+      // markEventsFeatured when an issue actually sends; incrementing on
+      // the click made isEligibleForFreshDigest reject the starred event
+      // before it ever shipped (Codex r3 P1).
     }
     if (eventType !== undefined) updates.event_type = eventType;
     if (recurrenceType !== undefined) updates.recurrence_type = recurrenceType;
@@ -1483,12 +1483,12 @@ router.patch('/events/:id', async (req, res, next) => {
     if (regionZone !== undefined) updates.region_zone = regionZone;
     if (priceText !== undefined) updates.price_text = priceText;
 
-    // Recompute freshness when type, recurrence, status, or times_featured
-    // changes — a recurrence-only correction (weekly → none, or the reverse)
-    // must re-derive freshness_status or the digest SQL gate keeps acting on
-    // the stale classification.
-    const featureTransition = adminStatus === 'featured' && event.admin_status !== 'featured';
-    if (eventType !== undefined || recurrenceType !== undefined || freshnessStatus !== undefined || featureTransition) {
+    // Recompute freshness when type, recurrence, or explicit status changes —
+    // a recurrence-only correction (weekly → none, or the reverse) must
+    // re-derive freshness_status or the digest SQL gate keeps acting on the
+    // stale classification. (Featuring no longer touches the counters, so it
+    // no longer triggers a recompute.)
+    if (eventType !== undefined || recurrenceType !== undefined || freshnessStatus !== undefined) {
       const { classifyFreshness } = require('../services/event-freshness');
 
       if (freshnessStatus !== undefined) {
@@ -1513,14 +1513,13 @@ router.patch('/events/:id', async (req, res, next) => {
           }
         }
       } else {
-        // Derive freshness from event type (use incremented count if featuring)
-        const nextFeatured = featureTransition ? (event.times_featured || 0) + 1 : event.times_featured;
+        // Derive freshness from event type (counters untouched by featuring)
         const { freshness_status, freshness_score } = classifyFreshness({
           event_type: eventType || event.event_type,
           recurrence_type: recurrenceType !== undefined ? recurrenceType : event.recurrence_type,
           title: event.title,
           description: event.description,
-          times_featured: nextFeatured,
+          times_featured: event.times_featured,
           start_at: event.start_at,
           end_at: event.end_at,
         });
@@ -1565,24 +1564,13 @@ router.post('/events/bulk-action', async (req, res, next) => {
     if (action === 'approve' || action === 'reset') {
       updates.suppression_reason = null;
     }
-    if (action === 'feature') {
-      updates.last_featured_at = new Date();
-    }
+    // Featuring is an editorial star, not ship history — counters advance
+    // only in markEventsFeatured when an issue actually sends (Codex r3 P1).
+    const count = await db('events_raw').whereIn('id', safeIds).update(updates);
 
-    let query = db('events_raw').whereIn('id', safeIds);
-    if (action === 'feature') {
-      // Only increment times_featured on rows not already featured
-      query = query.whereNot('admin_status', 'featured').update({
-        ...updates,
-        times_featured: db.raw('COALESCE(times_featured, 0) + 1'),
-      });
-    } else {
-      query = query.update(updates);
-    }
-    const count = await query;
-
-    // Recompute freshness for bulk-featured rows so times_featured
-    // changes are reflected in freshness_status/score
+    // Freshness recompute kept for parity with the single-event PATCH: the
+    // counters didn't move, but a bulk feature over rows with stale
+    // classifications refreshes them from current metadata.
     if (action === 'feature' && count > 0) {
       const { classifyFreshness } = require('../services/event-freshness');
       const featured = await db('events_raw')

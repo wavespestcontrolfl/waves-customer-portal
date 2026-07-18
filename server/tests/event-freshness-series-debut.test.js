@@ -127,3 +127,33 @@ describe('isEligibleForFreshDigest series debut', () => {
     }), REFERENCE)).toBe(false);
   });
 });
+
+describe('admin featured star overrides the once-only newness gate', () => {
+  const featuredOneTime = (overrides = {}) => ({
+    admin_status: 'featured',
+    event_url: 'https://events.example/starred',
+    event_type: 'one_time',
+    recurrence_type: 'none',
+    freshness_status: 'fresh_one_time',
+    times_featured: 1, // e.g. counters advanced by the retired click-increment
+    last_featured_at: '2026-07-10T10:00:00Z',
+    merged_into: null,
+    start_at: '2026-07-18T22:00:00Z',
+    title: 'Starred Art Walk',
+    ...overrides,
+  });
+
+  test('a starred event stays eligible despite prior feature counters', () => {
+    expect(isEligibleForFreshDigest(featuredOneTime(), REFERENCE)).toBe(true);
+    // Same counters without the star: rejected (once-only rule intact).
+    expect(isEligibleForFreshDigest(featuredOneTime({ admin_status: 'approved' }), REFERENCE)).toBe(false);
+  });
+
+  test('the star does not bypass the other hard gates', () => {
+    expect(isEligibleForFreshDigest(featuredOneTime({ event_url: null }), REFERENCE)).toBe(false);
+    expect(isEligibleForFreshDigest(featuredOneTime({
+      event_type: 'recurring_series', recurrence_type: 'weekly', title: 'Weekly yoga',
+    }), REFERENCE)).toBe(false);
+    expect(isEligibleForFreshDigest(featuredOneTime({ start_at: '2026-07-01T22:00:00Z' }), REFERENCE)).toBe(false);
+  });
+});

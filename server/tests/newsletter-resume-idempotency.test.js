@@ -267,7 +267,10 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
 
     const result = await sendCampaign('send-1');
     expect(result.lostClaim).toBe(true);
-    expect(result.accepted).toBe(1); // the in-flight chunk completed before the ownership check
+    // The ownership check runs BEFORE the external call — a reclaimed
+    // worker mails nothing (Codex r3: check before each batch, not after).
+    expect(result.accepted).toBe(0);
+    expect(mockSendBroadcast).not.toHaveBeenCalled();
   });
 
   test('does not overwrite deliveries recovered by processed webhooks when SendGrid rejects', async () => {
@@ -727,8 +730,13 @@ describe('markEventsFeatured (PR D)', () => {
       throw new Error(`unexpected ${table}`);
     });
     db.transaction = jest.fn(async (cb) => cb(trx));
+    // Raw SQL fragment for the featured → approved demotion (star consumed
+    // on ship); the mock passes the text through for assertion.
+    db.raw = jest.fn((sql) => sql);
 
     await markEventsFeatured({ event_ids: ['e1'] });
+
+    expect(updates[0].admin_status).toContain("WHEN admin_status = 'featured' THEN 'approved'");
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
     // The read locks the row (forUpdate) before the write — no lost increment.

@@ -318,7 +318,13 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // times_featured, so the allowance is single-shot by construction.
   const isSeriesDebut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
   if (isRoutineRecurringEvent(event) && !isSeriesDebut) return false;
-  if (!isEditoriallyNewEvent(event, reference)) return false;
+  // Admin 'featured' = deliberately starred for the upcoming issue. It
+  // overrides the once-only newness rejection — covering rows whose counters
+  // were advanced by the retired click-increment behavior, and any event the
+  // operator explicitly re-stars. The star is consumed on ship
+  // (markEventsFeatured demotes featured → approved), so it can't re-admit
+  // the same event issue after issue. Every other hard gate still applies.
+  if (!isEditoriallyNewEvent(event, reference) && event.admin_status !== 'featured') return false;
 
   // Hard reject on terminal freshness states regardless of event_type
   if (event.freshness_status === 'expired') return false;
