@@ -5217,11 +5217,15 @@ router.delete('/:id/prepaid', async (req, res, next) => {
         .returning(['id']);
       return res.json({ success: true, clearedCount: cleared.length, seriesParentId: parentId });
     }
-    await db('scheduled_services').where({ id: req.params.id })
+    const cleared = await db('scheduled_services').where({ id: req.params.id })
       .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null,
-      });
+      })
+      .returning(['id']);
+    // 0 rows = the visit was reassigned/settled after the pre-check —
+    // report that instead of claiming the prepayment was cleared.
+    if (!cleared.length) return res.status(404).json({ error: 'Scheduled service not found' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
