@@ -84,6 +84,64 @@ function applyWikiTrustGate(queryBuilder, trustedOnly) {
   return queryBuilder.whereIn('review_status', TRUSTED_STATUSES);
 }
 
+const KB_SEARCH_COLUMNS = ['id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id'];
+const WIKI_SEARCH_COLUMNS = ['id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status'];
+
+function kbFtsQuery(q, trustedOnly, limit) {
+  return applyKbTrustGate(
+    db('knowledge_base')
+      .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q])
+      .where({ status: 'active' }),
+    trustedOnly,
+  )
+    .select(...KB_SEARCH_COLUMNS, db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]))
+    .orderBy('rank', 'desc')
+    .orderBy('updated_at', 'desc')
+    .limit(limit);
+}
+
+function kbIlikeQuery(term, trustedOnly, limit) {
+  return applyKbTrustGate(
+    db('knowledge_base')
+      .where(function () {
+        this.where('title', 'ilike', term)
+          .orWhere('content', 'ilike', term);
+      })
+      .where({ status: 'active' }),
+    trustedOnly,
+  )
+    .orderBy('updated_at', 'desc')
+    .limit(limit)
+    .select(...KB_SEARCH_COLUMNS);
+}
+
+function wikiFtsQuery(q, trustedOnly, limit) {
+  return applyWikiTrustGate(
+    db('knowledge_entries')
+      .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q]),
+    trustedOnly,
+  )
+    .select(...WIKI_SEARCH_COLUMNS, db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]))
+    .orderBy('rank', 'desc')
+    .orderBy('data_point_count', 'desc')
+    .limit(limit);
+}
+
+function wikiIlikeQuery(term, trustedOnly, limit) {
+  return applyWikiTrustGate(
+    db('knowledge_entries')
+      .where(function () {
+        this.where('title', 'ilike', term)
+          .orWhere('content', 'ilike', term)
+          .orWhere('summary', 'ilike', term);
+      }),
+    trustedOnly,
+  )
+    .orderBy('data_point_count', 'desc')
+    .limit(limit)
+    .select(...WIKI_SEARCH_COLUMNS);
+}
+
 // ══════════════════════════════════════════════════════════════
 // KNOWLEDGE BRIDGE SERVICE
 // ══════════════════════════════════════════════════════════════
@@ -229,83 +287,46 @@ const KnowledgeBridge = {
   // ────────────────────────────────────────────────────────────
   // unifiedSearch — search both knowledge systems at once
   // Ranked full-text first (websearch_to_tsquery + ts_rank over the
-  // generated search_vector columns); falls back to the historical ILIKE
-  // substring path when FTS matches nothing — stopword-only queries and
-  // partial tokens ("K-Fl") still answer, and a missing search_vector
-  // column degrades instead of erroring.
+  // generated search_vector columns); each corpus INDEPENDENTLY falls
+  // back to the historical ILIKE substring path when its FTS matches
+  // nothing — stopword-only queries and partial tokens ("K-Fl") still
+  // answer, one corpus's FTS hits never suppress the other's substring
+  // matches, and a missing search_vector column degrades instead of
+  // erroring.
   // ────────────────────────────────────────────────────────────
   async unifiedSearch(query, options = {}) {
     if (!query?.trim()) return { claudeopedia: [], wiki: [], bridged: [] };
 
     const q = query.trim();
+    const term = `%${q.toLowerCase()}%`;
     const limit = Math.min(options.limit || 20, 50);
 
     let claudeopedia = [];
     let wiki = [];
-    let searchMethod = 'fts';
+    let kbMethod = 'fts';
+    let wikiMethod = 'fts';
 
     try {
-      [claudeopedia, wiki] = await Promise.all([
-        applyKbTrustGate(
-          db('knowledge_base')
-            .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q])
-            .where({ status: 'active' }),
-          options.trustedOnly,
-        )
-          .select(
-            'id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id',
-            db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]),
-          )
-          .orderBy('rank', 'desc')
-          .orderBy('updated_at', 'desc')
-          .limit(limit),
-        applyWikiTrustGate(
-          db('knowledge_entries')
-            .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q]),
-          options.trustedOnly,
-        )
-          .select(
-            'id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status',
-            db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]),
-          )
-          .orderBy('rank', 'desc')
-          .orderBy('data_point_count', 'desc')
-          .limit(limit),
-      ]);
+      claudeopedia = await kbFtsQuery(q, options.trustedOnly, limit);
     } catch (err) {
-      logger.warn(`[knowledge-bridge] FTS search failed, falling back to ILIKE: ${err.message}`);
+      logger.warn(`[knowledge-bridge] KB FTS search failed, falling back to ILIKE: ${err.message}`);
+    }
+    if (!claudeopedia.length) {
+      kbMethod = 'ilike';
+      claudeopedia = await kbIlikeQuery(term, options.trustedOnly, limit);
     }
 
-    if (!claudeopedia.length && !wiki.length) {
-      searchMethod = 'ilike';
-      const term = `%${q.toLowerCase()}%`;
-
-      claudeopedia = await applyKbTrustGate(
-        db('knowledge_base')
-          .where(function () {
-            this.where('title', 'ilike', term)
-              .orWhere('content', 'ilike', term);
-          })
-          .where({ status: 'active' }),
-        options.trustedOnly,
-      )
-        .orderBy('updated_at', 'desc')
-        .limit(limit)
-        .select('id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id');
-
-      wiki = await applyWikiTrustGate(
-        db('knowledge_entries')
-          .where(function () {
-            this.where('title', 'ilike', term)
-              .orWhere('content', 'ilike', term)
-              .orWhere('summary', 'ilike', term);
-          }),
-        options.trustedOnly,
-      )
-        .orderBy('data_point_count', 'desc')
-        .limit(limit)
-        .select('id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status');
+    try {
+      wiki = await wikiFtsQuery(q, options.trustedOnly, limit);
+    } catch (err) {
+      logger.warn(`[knowledge-bridge] wiki FTS search failed, falling back to ILIKE: ${err.message}`);
     }
+    if (!wiki.length) {
+      wikiMethod = 'ilike';
+      wiki = await wikiIlikeQuery(term, options.trustedOnly, limit);
+    }
+
+    const searchMethod = kbMethod === wikiMethod ? kbMethod : 'mixed';
 
     // Find bridged pairs. Guarded: the live knowledge_bridge table has the
     // migration-000015 source/target shape, not the 000018 kb_entry_id/

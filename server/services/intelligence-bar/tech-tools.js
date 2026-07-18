@@ -429,10 +429,16 @@ async function searchKnowledgeBase(query) {
       : [];
     const wikiById = Object.fromEntries(wikiRows.map((r) => [r.id, r]));
 
-    const results = [
-      ...(claudeopedia || []).map((r) => ({ title: r.title, category: r.category, snippet: kbSnippetById[r.id] || null })),
-      ...(wiki || []).map((r) => ({ title: r.title, category: r.category, snippet: wikiById[r.id]?.summary || wikiById[r.id]?.snippet || null })),
-    ].slice(0, 5);
+    // Interleave the two corpora (wiki first — field outcomes lead, matching
+    // the admin tool's presentation) so a populated KB can never push every
+    // wiki hit past the cap, and vice versa.
+    const wikiResults = (wiki || []).map((r) => ({ title: r.title, category: r.category, snippet: wikiById[r.id]?.summary || wikiById[r.id]?.snippet || null }));
+    const kbResults = (claudeopedia || []).map((r) => ({ title: r.title, category: r.category, snippet: kbSnippetById[r.id] || null }));
+    const results = [];
+    for (let i = 0; results.length < 5 && (i < wikiResults.length || i < kbResults.length); i++) {
+      if (i < wikiResults.length) results.push(wikiResults[i]);
+      if (results.length < 5 && i < kbResults.length) results.push(kbResults[i]);
+    }
 
     return { results };
   } catch {
