@@ -36,7 +36,13 @@ jest.mock('../models/db', () => {
     };
     return builder;
   };
-  return jest.fn((table) => makeBuilder(table));
+  const dbMock = jest.fn((table) => makeBuilder(table));
+  // withClarifyLock: transaction executor doubles as the query builder; the
+  // advisory-lock raw() is a no-op here.
+  const trx = Object.assign((table) => makeBuilder(table), { raw: async () => ({}) });
+  dbMock.transaction = async (callback) => callback(trx);
+  dbMock.raw = async () => ({});
+  return dbMock;
 });
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -129,10 +135,15 @@ describe('parkClarifyAsk', () => {
     expect(JSON.parse(mockState.inserts[0].flags).toPhone).toBe('+19415550142');
   });
 
-  test('a lost race with no readable winner (claimed/sent mid-conflict) still dedupes', async () => {
+  test('a unique-index conflict is a fail-soft anomaly, never a bell', async () => {
+    // The clarify lock serializes every producer, so the partial unique
+    // index can only fire for an out-of-band writer — the transaction
+    // rolls back into the fail-soft catch and the standing draft covers
+    // the phone.
     mockState.insertError = Object.assign(new Error('duplicate key'), { code: '23505' });
     const result = await parkClarifyAsk(BASE);
-    expect(result).toEqual({ parked: false, skipped: 'open_or_recent_clarify' });
+    expect(result.parked).toBe(false);
+    expect(result.skipped).toMatch(/^error:/);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -177,20 +188,6 @@ describe('parkClarifyAsk', () => {
     expect(flags.channel_provenance).toBe('sms');
   });
 
-  test('a lost insert race merges this request into the winner', async () => {
-    mockState.insertError = Object.assign(new Error('duplicate key'), { code: '23505' });
-    // Pre-check sees nothing; the post-conflict read finds the winner.
-    mockState.firstQueue = [null, {
-      id: 'winner-1',
-      status: 'pending',
-      flags: JSON.stringify({ missing: ['specific_service'] }),
-    }];
-    const result = await parkClarifyAsk(BASE);
-    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'winner-1', covers: ['specific_service', 'street_address'] });
-    const flags = JSON.parse(mockState.updates[0].payload.flags);
-    expect(flags.missing.sort()).toEqual(['specific_service', 'street_address']);
-    expect(flags.lead_id).toBe('lead-1');
-  });
 
   test('a new missing item MERGES into the open pending draft instead of being discarded', async () => {
     // Service-only draft open, address-only request arrives: dropping it

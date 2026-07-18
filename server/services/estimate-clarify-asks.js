@@ -58,35 +58,51 @@ function composeClarifyBody({ missing, firstName }) {
   return `${greeting}it's Waves Pest Control — glad to get you a quote. Which service are you looking for — pest control, lawn care, mosquito, or something else?`;
 }
 
+// Every flags mutation for one phone's clarify lifecycle serializes under
+// an advisory transaction lock — merges, reply bookkeeping, and
+// answer stamps all read-modify-write the same jsonb, and interleaving
+// writers could drop each other's items. Same pattern as the estimator
+// engine's per-call advisory lock.
+function withClarifyLock(digits, callback) {
+  return db.transaction(async (trx) => {
+    await trx.raw(
+      'select pg_advisory_xact_lock(hashtext(?), hashtext(?))',
+      ['estimate_clarify', String(digits)],
+    );
+    return callback(trx);
+  });
+}
+
 // Rewrite an unclaimed pending clarify with the union of missing items and
-// the NEWEST request's linkage. Guarded on status so a claim landing
-// mid-merge wins; the read-modify-write on flags has a tiny lost-update
-// window between two simultaneous mergers, which the approval guard's
-// staleness recheck absorbs (it re-derives what is still missing from the
-// live rows, not from flags alone).
-async function mergePendingClarify(existing, { askable, firstName, linkage }) {
+// the NEWEST request's linkage. Runs under the clarify lock (trx), so the
+// flags read is serialized. Linkage is REPLACED, not backfilled: the
+// newest request is authoritative, and a deliberately-null customerId
+// (ambiguous shared phone) must not inherit the old draft's customer — a
+// later reply would overwrite the wrong CRM record. Guarded on status so
+// a claim landing before the lock wins.
+async function mergePendingClarify(trx, existing, { askable, firstName, linkage }) {
   let existingFlags = {};
   try {
     existingFlags = typeof existing.flags === 'string' ? JSON.parse(existing.flags) : (existing.flags || {});
   } catch { existingFlags = {}; }
   const existingMissing = Array.isArray(existingFlags.missing) ? existingFlags.missing : [];
   const merged = [...new Set([...existingMissing, ...askable])];
-  const changed = await db('message_drafts')
+  const changed = await trx('message_drafts')
     .where({ id: existing.id, status: 'pending' })
     .update({
-      customer_id: linkage.customerId || existing.customer_id || null,
+      customer_id: linkage.customerId || null,
       draft_response: composeClarifyBody({ missing: merged, firstName }),
       flags: JSON.stringify({
         ...existingFlags,
         missing: merged,
-        lead_id: linkage.leadId || existingFlags.lead_id || null,
-        estimate_id: linkage.estimateId || existingFlags.estimate_id || null,
+        lead_id: linkage.leadId || null,
+        estimate_id: linkage.estimateId || null,
         source: linkage.source,
-        channel_provenance: linkage.channelProvenance || existingFlags.channel_provenance || null,
+        channel_provenance: linkage.channelProvenance || null,
       }),
     });
-  // 0 rows = the claim landed mid-merge; the caller must NOT report a
-  // merge (the new item would silently vanish from flags.missing).
+  // 0 rows = the claim landed first; the caller must NOT report a merge
+  // (the new item would silently vanish from flags.missing).
   return { changed: changed > 0, merged };
 }
 
@@ -139,12 +155,19 @@ async function parkClarifyAsk({
     if (!digits) return { parked: false, skipped: 'no_usable_phone' };
 
     const sourceRef = `clarify:${digits}`;
+    const linkage = { customerId, leadId, estimateId, source, channelProvenance };
+    // The whole dedupe→merge→insert sequence holds the clarify lock, so
+    // producers for one phone serialize completely — no lost merges, no
+    // 23505 recovery dance (the unique index remains as the DB backstop;
+    // hitting it under the lock is a genuine anomaly and rolls back into
+    // the outer fail-soft catch).
+    const outcome = await withClarifyLock(digits, async (trx) => {
     // One OPEN clarify per phone; no re-ask soon after a sent one. "Open"
     // means sent_at IS NULL — the admin send path stamps sent_at but leaves
     // status 'approved'/'revised', so status alone would read a delivered
     // clarify as open forever. "Recently sent" keys on sent_at directly for
     // the same reason.
-    const existing = await db('message_drafts')
+    const existing = await trx('message_drafts')
       .where({ intent: 'estimate_clarify', source_ref: sourceRef })
       .where(function openOrRecentlySent() {
         this.where(function stillOpen() {
@@ -155,7 +178,6 @@ async function parkClarifyAsk({
       // merge path.
       .orderByRaw('sent_at asc nulls first')
       .first();
-    const linkage = { customerId, leadId, estimateId, source, channelProvenance };
     if (existing) {
       // Merge, don't discard: an unclaimed 'pending' draft is ALWAYS
       // rewritten on a dedupe hit — union of missing items (a new dead-end
@@ -165,7 +187,7 @@ async function parkClarifyAsk({
       // than one whose lead closed. approved/revised are mid-send and a
       // recently-sent one is a cooldown — untouched.
       if (existing.status === 'pending') {
-        const mergeResult = await mergePendingClarify(existing, { askable, firstName, linkage });
+        const mergeResult = await mergePendingClarify(trx, existing, { askable, firstName, linkage });
         if (mergeResult.changed) {
           return {
             parked: false,
@@ -216,72 +238,48 @@ async function parkClarifyAsk({
       // covers OPEN drafts, so the sent row won't conflict).
     }
 
-    const body = composeClarifyBody({ missing: askable, firstName });
-    let draft;
-    try {
-      [draft] = await db('message_drafts')
-        .insert({
-          customer_id: customerId || null,
-          draft_response: body,
-          intent: 'estimate_clarify',
-          status: 'pending',
-          source_ref: sourceRef,
-          context_summary: contextSummary
-            || `Quote request is missing ${askable.join(' + ')} (${source}). Clarifying question drafted — review and approve to send.`,
-          flags: JSON.stringify({
-            estimate_clarify: true,
-            missing: askable,
-            toPhone: `+1${digits}`,
-            lead_id: leadId || null,
-            estimate_id: estimateId || null,
-            source,
-            channel_provenance: channelProvenance || null,
-          }),
-        })
-        .returning(['id']);
-    } catch (insertErr) {
-      // The partial unique index (message_drafts_clarify_open_uniq) makes
-      // one-open-clarify-per-phone a DB invariant. Losing the race must not
-      // discard THIS request's items/linkage — merge them into the winner.
-      if (insertErr.code === '23505') {
-        const winner = await db('message_drafts')
-          .where({ intent: 'estimate_clarify', source_ref: sourceRef, status: 'pending' })
-          .whereNull('sent_at')
-          .first();
-        if (winner) {
-          const mergeResult = await mergePendingClarify(winner, { askable, firstName, linkage });
-          if (mergeResult.changed) {
-            return {
-              parked: false,
-              skipped: 'merged_into_open_clarify',
-              draftId: winner.id,
-              covers: mergeResult.merged,
-            };
-          }
-        }
-        // Winner already claimed or sent between the conflict and this read
-        // — the standing draft/cooldown covers the phone.
-        return { parked: false, skipped: 'open_or_recent_clarify' };
-      }
-      throw insertErr;
-    }
-
-    try {
-      await require('./notification-service').notifyAdmin(
-        'lead',
-        'Clarifying question drafted — approve to send',
-        `A quote request is missing ${askable.join(' and ').replace(/_/g, ' ')}. A clarifying text is waiting for your approval in the drafts queue.`,
-        {
-          link: '/admin/communications',
-          metadata: { estimate_clarify: true, draftId: draft.id, source, leadId, estimateId },
-        },
-      );
-    } catch (bellErr) {
-      logger.warn(`[estimate-clarify] bell failed (draft stands): ${bellErr.message}`);
-    }
-
-    logger.info('[estimate-clarify] clarify draft parked', { draftId: draft.id, source, missing: askable });
+    const [draft] = await trx('message_drafts')
+      .insert({
+        customer_id: customerId || null,
+        draft_response: composeClarifyBody({ missing: askable, firstName }),
+        intent: 'estimate_clarify',
+        status: 'pending',
+        source_ref: sourceRef,
+        context_summary: contextSummary
+          || `Quote request is missing ${askable.join(' + ')} (${source}). Clarifying question drafted — review and approve to send.`,
+        flags: JSON.stringify({
+          estimate_clarify: true,
+          missing: askable,
+          toPhone: `+1${digits}`,
+          lead_id: leadId || null,
+          estimate_id: estimateId || null,
+          source,
+          channel_provenance: channelProvenance || null,
+        }),
+      })
+      .returning(['id']);
     return { parked: true, draftId: draft.id, covers: askable };
+    });
+
+    // Bell OUTSIDE the lock/transaction — a slow or failing notification
+    // must not hold the phone's lifecycle lock or roll back the draft.
+    if (outcome.parked) {
+      try {
+        await require('./notification-service').notifyAdmin(
+          'lead',
+          'Clarifying question drafted — approve to send',
+          `A quote request is missing ${askable.join(' and ').replace(/_/g, ' ')}. A clarifying text is waiting for your approval in the drafts queue.`,
+          {
+            link: '/admin/communications',
+            metadata: { estimate_clarify: true, draftId: outcome.draftId, source, leadId, estimateId },
+          },
+        );
+      } catch (bellErr) {
+        logger.warn(`[estimate-clarify] bell failed (draft stands): ${bellErr.message}`);
+      }
+      logger.info('[estimate-clarify] clarify draft parked', { draftId: outcome.draftId, source, missing: askable });
+    }
+    return outcome;
   } catch (err) {
     logger.warn(`[estimate-clarify] park failed: ${err.message}`);
     return { parked: false, skipped: `error: ${err.message}` };
@@ -354,29 +352,24 @@ async function handleClarifyReply({ phone, body }) {
     const missing = Array.isArray(flags.missing) ? flags.missing : [];
     if (!missing.length) return { handled: false };
 
+    // PREP (unlocked): the snapshot decides what to ATTEMPT, and the slow
+    // classifier runs outside the lock. The locked phase below re-reads
+    // fresh state and only records what is STILL missing then — rapid
+    // concurrent replies can't restore answered items or drop entries.
     const text = String(body).trim();
-    const recorded = [];
+    const candidates = [];
     let capturedAddress = null;
     if (missing.includes('street_address')) {
       capturedAddress = extractAddressReply(text);
-      if (capturedAddress) {
-        if (flags.lead_id) {
-          await db('leads').where({ id: flags.lead_id }).whereNull('deleted_at')
-            .update({ address: capturedAddress });
-        }
-        if (awaiting.customer_id) {
-          await db('customers').where({ id: awaiting.customer_id })
-            .update({ address_line1: capturedAddress });
-        }
-        recorded.push('street_address');
-      }
+      if (capturedAddress) candidates.push('street_address');
     }
+    let serviceText = null;
     if (missing.includes('specific_service')) {
       // The classifier is the acceptance bar — length alone would record
       // "thanks, sounds good" as the requested service. The RAW text is
       // stored (label semantics preserved); the classifier only vouches
       // that it actually names a service.
-      let serviceText = capturedAddress ? text.replace(capturedAddress, ' ') : text;
+      serviceText = capturedAddress ? text.replace(capturedAddress, ' ') : text;
       serviceText = serviceText.replace(/\s+/g, ' ').replace(/^[\s,\-–—:]+|[\s,\-–—:]+$/g, '').trim();
       if (serviceText.length >= 3 && serviceText.length <= 80) {
         const { classifyServiceIntent } = require('./sms-service-intent');
@@ -390,30 +383,58 @@ async function handleClarifyReply({ phone, body }) {
             if (typeof timer.unref === 'function') timer.unref();
           }),
         ]);
-        if (cls?.interest) {
-          if (flags.lead_id) {
-            await db('leads').where({ id: flags.lead_id }).whereNull('deleted_at')
-              .update({ service_interest: serviceText });
-          }
-          recorded.push('specific_service');
-        }
+        if (cls?.interest) candidates.push('specific_service');
       }
     }
-    if (!recorded.length) return { handled: false };
+    if (!candidates.length) return { handled: false };
 
-    // Lifecycle bookkeeping: recorded items leave the missing set; the ask
-    // is consumed (answered_at) only when nothing remains. A partial
-    // answer keeps the draft routable for its remaining item, and the
-    // park-time cooldown exception lets the remainder be re-asked.
-    const remaining = missing.filter((item) => !recorded.includes(item));
-    await db('message_drafts').where({ id: awaiting.id }).update({
-      flags: JSON.stringify({
-        ...flags,
-        missing: remaining,
-        answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
-        ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
-      }),
+    // LOCKED phase: fresh re-read; CRM field writes and lifecycle
+    // bookkeeping commit in one transaction. Recorded items leave the
+    // missing set; the ask is consumed (answered_at) only when nothing
+    // remains — a partial answer keeps the draft routable for its
+    // remainder, and the park-time cooldown exception lets it be re-asked.
+    const locked = await withClarifyLock(digits, async (trx) => {
+      const fresh = await trx('message_drafts')
+        .where({ id: awaiting.id })
+        .whereRaw("(flags->>'answered_at') is null")
+        .first();
+      if (!fresh) return { recorded: [] };
+      let freshFlags = {};
+      try {
+        freshFlags = typeof fresh.flags === 'string' ? JSON.parse(fresh.flags) : (fresh.flags || {});
+      } catch { freshFlags = {}; }
+      const freshMissing = Array.isArray(freshFlags.missing) ? freshFlags.missing : [];
+      const recorded = candidates.filter((item) => freshMissing.includes(item));
+      if (!recorded.length) return { recorded: [] };
+
+      if (recorded.includes('street_address')) {
+        if (freshFlags.lead_id) {
+          await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at')
+            .update({ address: capturedAddress });
+        }
+        if (fresh.customer_id) {
+          await trx('customers').where({ id: fresh.customer_id })
+            .update({ address_line1: capturedAddress });
+        }
+      }
+      if (recorded.includes('specific_service') && freshFlags.lead_id) {
+        await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at')
+          .update({ service_interest: serviceText });
+      }
+
+      const remaining = freshMissing.filter((item) => !recorded.includes(item));
+      await trx('message_drafts').where({ id: fresh.id }).update({
+        flags: JSON.stringify({
+          ...freshFlags,
+          missing: remaining,
+          answer_recorded: [...(Array.isArray(freshFlags.answer_recorded) ? freshFlags.answer_recorded : []), ...recorded],
+          ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
+        }),
+      });
+      return { recorded };
     });
+    if (!locked.recorded.length) return { handled: false };
+    const recorded = locked.recorded;
 
     // Resume drafting when the SMS engine lane is armed — the thread now
     // carries the answer, so the composer gets everything in one pass. The
@@ -456,31 +477,35 @@ async function recordClarifyAnswer({ phone, items = [] }) {
       ? allDigits
       : (allDigits.length === 11 && allDigits.startsWith('1') ? allDigits.slice(1) : null);
     if (!digits) return { recorded: false };
-    const awaiting = await db('message_drafts')
-      .where({ intent: 'estimate_clarify', source_ref: `clarify:${digits}` })
-      .whereNotNull('sent_at')
-      .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS))
-      .whereRaw("(flags->>'answered_at') is null")
-      .orderBy('sent_at', 'desc')
-      .first();
-    if (!awaiting) return { recorded: false };
-    let flags = {};
-    try {
-      flags = typeof awaiting.flags === 'string' ? JSON.parse(awaiting.flags) : (awaiting.flags || {});
-    } catch { flags = {}; }
-    const missing = Array.isArray(flags.missing) ? flags.missing : [];
-    const recorded = missing.filter((item) => items.includes(item));
-    if (!recorded.length) return { recorded: false };
-    const remaining = missing.filter((item) => !recorded.includes(item));
-    await db('message_drafts').where({ id: awaiting.id }).update({
-      flags: JSON.stringify({
-        ...flags,
-        missing: remaining,
-        answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
-        ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
-      }),
+    // Read + stamp under the clarify lock — same lost-update protection as
+    // every other flags writer.
+    return await withClarifyLock(digits, async (trx) => {
+      const awaiting = await trx('message_drafts')
+        .where({ intent: 'estimate_clarify', source_ref: `clarify:${digits}` })
+        .whereNotNull('sent_at')
+        .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS))
+        .whereRaw("(flags->>'answered_at') is null")
+        .orderBy('sent_at', 'desc')
+        .first();
+      if (!awaiting) return { recorded: false };
+      let flags = {};
+      try {
+        flags = typeof awaiting.flags === 'string' ? JSON.parse(awaiting.flags) : (awaiting.flags || {});
+      } catch { flags = {}; }
+      const missing = Array.isArray(flags.missing) ? flags.missing : [];
+      const recorded = missing.filter((item) => items.includes(item));
+      if (!recorded.length) return { recorded: false };
+      const remaining = missing.filter((item) => !recorded.includes(item));
+      await trx('message_drafts').where({ id: awaiting.id }).update({
+        flags: JSON.stringify({
+          ...flags,
+          missing: remaining,
+          answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
+          ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
+        }),
+      });
+      return { recorded: true, items: recorded };
     });
-    return { recorded: true, items: recorded };
   } catch (err) {
     logger.warn(`[estimate-clarify] answer bookkeeping failed: ${err.message}`);
     return { recorded: false };
