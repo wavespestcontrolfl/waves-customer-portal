@@ -23,22 +23,27 @@ const DISPOSITION_TEXT = {
   complaint_escalated: 'Escalated the complaint',
   vendor_logged: 'Logged as a vendor/partner contact',
   voicemail_processed: 'Processed the voicemail',
-  no_action_needed: 'No action needed',
 };
 
-// Dispositions that carry no reusable knowledge.
-const SKIP_DISPOSITIONS = new Set(['spam_discarded', 'wrong_number_closed']);
+// Dispositions that carry no reusable knowledge. no_action_needed is the
+// disposition layer's dead-air/silence/sub-threshold-noise bucket.
+const SKIP_DISPOSITIONS = new Set(['spam_discarded', 'wrong_number_closed', 'no_action_needed']);
 const SKIP_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'silent_or_noise']);
 
 const clean = (v) => String(v || '').trim();
 
-function redact(text, context = {}) {
+function redact(text, contexts = []) {
   const value = clean(text);
   if (!value) return '';
   // redactText exact-matches names from context.customer.* (nested) — a flat
   // context is a silent no-op for the name pass; the pii-redactor heuristic
-  // alone misses single-name references ("Spoke with Jane").
-  return redactPii(redactText(value, { customer: context })).text;
+  // alone misses single-name references ("Spoke with Jane"). Multiple name
+  // contexts run sequentially (linked customer + extracted caller can be
+  // different people).
+  const list = Array.isArray(contexts) ? contexts : [contexts];
+  let out = value;
+  for (const c of list) out = redactText(out, { customer: c });
+  return redactPii(out).text;
 }
 
 // V2 extractions store pests_observed as objects ({ pest_type, ... });
@@ -80,15 +85,29 @@ function renderQuestion(extraction) {
 function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalAction = null, context = {} }) {
   const extraction = parseEnriched(rawExtraction);
   if (!extraction) return null;
-  if (extraction.meta?.is_spam) return null;
-  if (SKIP_NATURES.has(clean(extraction.call_nature))) return null;
 
   // call_log.disposition is the TERMINAL outcome production stamped (layered
-  // spam verdict, whether a booking actually happened); the model's
-  // recommended_disposition is only the fallback for rows never stamped.
+  // spam verdict, whether a booking actually happened). When a terminal
+  // disposition exists it OVERRIDES the model's spam-ish labels — the
+  // disposition layer deliberately routes model-flagged spam to lead-response
+  // unless independent signals agree, so a stamped real outcome must map even
+  // if V2 said is_spam/robocall. Model labels only gate never-stamped rows.
+  const terminal = clean(call.disposition);
   const recommended = clean(extraction.recommended_disposition);
-  const disposition = clean(call.disposition) || recommended;
-  if (SKIP_DISPOSITIONS.has(disposition)) return null;
+  if (terminal) {
+    if (SKIP_DISPOSITIONS.has(terminal)) return null;
+  } else {
+    if (extraction.meta?.is_spam) return null;
+    if (SKIP_NATURES.has(clean(extraction.call_nature))) return null;
+    if (SKIP_DISPOSITIONS.has(recommended)) return null;
+  }
+  const disposition = terminal || recommended;
+
+  // Prospect calls often have no linked customers row — the extraction's own
+  // caller name is then the only redaction context available.
+  const caller = extraction.caller || {};
+  const nameContexts = [context, { first_name: caller.first_name, last_name: caller.last_name }]
+    .filter((c) => c && (clean(c.first_name) || clean(c.last_name)));
 
   const summary = clean(extraction.meta?.call_summary || call.call_summary);
   if (!summary) return null;
@@ -98,7 +117,7 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
   else if (disposition) resolutionParts.push(`Outcome: ${disposition.replace(/_/g, ' ')}`);
   if (finalAction && finalAction !== disposition) resolutionParts.push(`Action taken: ${clean(finalAction).replace(/_/g, ' ')}`);
   for (const note of triageNotes) {
-    if (clean(note.resolution_note)) resolutionParts.push(`Triage (${note.reason_code}): ${redact(note.resolution_note, context)}`);
+    if (clean(note.resolution_note)) resolutionParts.push(`Triage (${note.reason_code}): ${redact(note.resolution_note, nameContexts)}`);
   }
   if (!resolutionParts.length) return null; // nothing resolved — no knowledge to keep
 
@@ -114,8 +133,8 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
     source: 'call',
     sourceId: call.id,
     customerId: call.customer_id || null,
-    question: redact(renderQuestion(extraction), context),
-    situation: redact(summary, context),
+    question: redact(renderQuestion(extraction), nameContexts),
+    situation: redact(summary, nameContexts),
     resolution: resolutionParts.join('. '),
     outcome: {
       disposition: disposition || null,

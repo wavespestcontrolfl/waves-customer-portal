@@ -21,6 +21,10 @@ const args = process.argv.slice(2);
 const EXECUTE = args.includes('--execute');
 const limitFlag = args.indexOf('--limit');
 const BATCH = limitFlag >= 0 ? parseInt(args[limitFlag + 1], 10) : 500;
+if (limitFlag >= 0 && (!Number.isInteger(BATCH) || BATCH <= 0)) {
+  console.error(`--limit must be a positive integer, got: ${args[limitFlag + 1]}`);
+  process.exit(1);
+}
 
 (async () => {
   const db = require('../models/db');

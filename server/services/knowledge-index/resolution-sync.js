@@ -145,6 +145,15 @@ async function refreshCallArtifacts() {
         this.select(db.raw('1')).from('route_decisions as rd')
           .whereRaw('rd.call_log_id = ra.source_id')
           .whereRaw('rd.created_at > ra.updated_at');
+      }).orWhereExists(function () {
+        // The call row itself was re-stamped or invalidated (force-reprocess
+        // clears ai_extraction_enriched on implausible transcripts) — the
+        // null re-map then retires the artifact.
+        this.select(db.raw('1')).from('call_log as c')
+          .whereRaw('c.id = ra.source_id')
+          .where(function () {
+            this.whereNull('c.ai_extraction_enriched').orWhereRaw('c.updated_at > ra.updated_at');
+          });
       });
     })
     .limit(REFRESH_BATCH)
@@ -190,8 +199,13 @@ function visitRecommendationPredicate() {
     this.select(db.raw('1')).from('service_findings as sf')
       .whereRaw('sf.service_record_id = sr.id').whereNotNull('sf.recommendation');
   })
-    .orWhereRaw("jsonb_array_length(coalesce(sr.structured_notes->'recommendations', '[]'::jsonb)) > 0")
-    .orWhereRaw("jsonb_array_length(coalesce(sr.service_data->'protocol'->'recommendations', '[]'::jsonb)) > 0");
+    // Type-guarded: legacy rows can store recommendations as a scalar string,
+    // and jsonb_array_length on a scalar THROWS. Scalars are admitted (the
+    // extractor wraps them); only the array-length test needs the guard.
+    .orWhereRaw("(jsonb_typeof(sr.structured_notes->'recommendations') = 'array' AND jsonb_array_length(sr.structured_notes->'recommendations') > 0)")
+    .orWhereRaw("jsonb_typeof(sr.structured_notes->'recommendations') = 'string'")
+    .orWhereRaw("(jsonb_typeof(sr.service_data->'protocol'->'recommendations') = 'array' AND jsonb_array_length(sr.service_data->'protocol'->'recommendations') > 0)")
+    .orWhereRaw("jsonb_typeof(sr.service_data->'protocol'->'recommendations') = 'string'");
 }
 
 const parseJsonbMaybe = (v) => {
@@ -203,8 +217,9 @@ const parseJsonbMaybe = (v) => {
 function structuredRecommendationsFor(record) {
   const notes = parseJsonbMaybe(record.structured_notes);
   const serviceData = parseJsonbMaybe(record.service_data);
-  const fromNotes = Array.isArray(notes?.recommendations) ? notes.recommendations : [];
-  const fromServiceData = Array.isArray(serviceData?.protocol?.recommendations) ? serviceData.protocol.recommendations : [];
+  const asArray = (v) => (Array.isArray(v) ? v : (typeof v === 'string' && v.trim() ? [v] : []));
+  const fromNotes = asArray(notes?.recommendations);
+  const fromServiceData = asArray(serviceData?.protocol?.recommendations);
   return [...new Set([...fromNotes, ...fromServiceData].map((r) => String(r || '').trim()).filter(Boolean))];
 }
 
@@ -253,6 +268,9 @@ async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
   while (stats.mapped < limit) {
     let query = db('service_records as sr')
       .leftJoin('customers as cu', 'cu.id', 'sr.customer_id')
+      // Same scope every service-history reader uses — an incomplete or
+      // office-handoff visit is not a resolved past visit.
+      .where('sr.status', 'completed')
       .where(visitRecommendationPredicate)
       .whereNotExists(function () {
         this.select(db.raw('1')).from('resolution_artifacts as ra')
@@ -308,7 +326,15 @@ async function refreshVisitArtifacts() {
   const records = await db('service_records as sr')
     .leftJoin('customers as cu', 'cu.id', 'sr.customer_id')
     .whereIn('sr.id', stale.map((r) => r.source_id))
+    .where('sr.status', 'completed')
     .select(...VISIT_SELECT);
+  // Stale artifacts whose record fell out of 'completed' scope retire too.
+  const fetchedIds = new Set(records.map((r) => r.id));
+  for (const row of stale) {
+    if (fetchedIds.has(row.source_id)) continue;
+    await db('resolution_artifacts').where({ source: 'visit', source_id: row.source_id }).del();
+    stats.retired += 1;
+  }
   const side = await loadVisitSideData(records.map((r) => r.id));
   for (const record of records) {
     const artifact = mapVisitRecord(record, side);
@@ -333,4 +359,4 @@ async function syncResolutionArtifacts(options = {}) {
   return summary;
 }
 
-module.exports = { syncResolutionArtifacts, syncCallArtifacts, syncVisitArtifacts, refreshCallArtifacts, refreshVisitArtifacts };
+module.exports = { syncResolutionArtifacts, syncCallArtifacts, syncVisitArtifacts, refreshCallArtifacts, refreshVisitArtifacts, structuredRecommendationsFor };

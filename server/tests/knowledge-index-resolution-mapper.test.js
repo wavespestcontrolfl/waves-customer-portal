@@ -1,4 +1,5 @@
 const { mapCall, mapVisit } = require('../services/knowledge-index/resolution-mapper');
+const { structuredRecommendationsFor } = require('../services/knowledge-index/resolution-sync');
 const { applyRecencyDecay, RESOLUTION_HALF_LIFE_DAYS } = require('../services/knowledge-index/hybrid-search');
 
 const CALL = { id: 'c1', customer_id: 'cu1', created_at: new Date('2026-07-01T12:00:00Z'), call_summary: null };
@@ -51,6 +52,40 @@ describe('resolution mapper — calls', () => {
     expect(a.resolution).toContain('Booked the service');
     expect(a.outcome.disposition).toBe('booked');
     expect(a.outcome.recommendedDisposition).toBe('callback_task_created');
+  });
+
+  test('terminal disposition overrides model spam labels (codex r3)', () => {
+    // Model flagged spam, but production stamped a real outcome — must map.
+    const a = mapCall({
+      call: { ...CALL, disposition: 'booked' },
+      extraction: extraction({ meta: { call_summary: 'Booked despite model spam flag.', is_spam: true }, call_nature: 'robocall' }),
+      context: CONTEXT,
+    });
+    expect(a).not.toBeNull();
+    expect(a.outcome.disposition).toBe('booked');
+    // no_action_needed is dead air — skipped whether stamped or recommended.
+    expect(mapCall({ call: { ...CALL, disposition: 'no_action_needed' }, extraction: extraction() })).toBeNull();
+    expect(mapCall({ call: CALL, extraction: extraction({ recommended_disposition: 'no_action_needed' }) })).toBeNull();
+  });
+
+  test('extracted caller names redact prospect calls with no customer row (codex r3 P1)', () => {
+    const a = mapCall({
+      call: { ...CALL, customer_id: null },
+      extraction: extraction({
+        caller: { first_name: 'Rosalind', last_name: 'Quimby' },
+        meta: { call_summary: 'Rosalind asked about quarterly pest control; Quimby residence on the island.', is_spam: false },
+      }),
+      context: {}, // no linked customer
+    });
+    expect(a.situation).not.toMatch(/Rosalind|Quimby/);
+    expect(a.situation).toContain('[name]');
+  });
+
+  test('scalar legacy recommendations are wrapped, not thrown (codex r3)', () => {
+    expect(structuredRecommendationsFor({ structured_notes: { recommendations: 'Water twice weekly' }, service_data: null }))
+      .toEqual(['Water twice weekly']);
+    expect(structuredRecommendationsFor({ structured_notes: null, service_data: { protocol: { recommendations: ['A', 'A', ' '] } } }))
+      .toEqual(['A']);
   });
 
   test('single-name references are redacted via the context pass (codex P1)', () => {
