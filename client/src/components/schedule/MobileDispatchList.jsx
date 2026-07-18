@@ -174,9 +174,9 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
     canAssignTechnician || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
 
   const actionBtnClass =
-    'inline-flex items-center justify-center h-9 flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
+    'inline-flex items-center justify-center h-11 flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
   const primaryBtnClass =
-    'inline-flex items-center justify-center h-9 flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
+    'inline-flex items-center justify-center h-11 flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
 
   return (
     <div

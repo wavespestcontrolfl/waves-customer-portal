@@ -16,154 +16,23 @@ import { useState, useEffect, useRef } from "react";
 import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { cn } from "./ui/cn";
-import { Building2 } from "lucide-react";
 import {
-  LayoutDashboard,
-  Camera,
-  Users,
-  ClipboardList,
-  Calendar,
-  Clock,
-  BookOpen,
-  MessageSquare,
-  Star,
-  Gift,
-  Mail,
-  Megaphone,
   Search,
-  Share2,
-  Wrench,
-  Package,
-  Tags,
-  ShieldCheck,
-  BookMarked,
-  Brain,
-  FileText,
-  Landmark,
-  Receipt,
-  Banknote,
-  Calculator,
-  Activity,
-  Settings,
   LogOut,
   Menu,
-  Home,
   X,
   Sparkles,
-  Send,
-  Newspaper,
-  Bot,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { adminFetch } from "../utils/admin-fetch";
+import {
+  ADMIN_DESKTOP_NAV_SECTIONS,
+  ADMIN_MOBILE_TABS,
+  isAdminNavItemActive,
+} from "../config/adminNavigation";
 import NotificationBell from "./NotificationBell";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
-
-const MOBILE_TABS = [
-  { path: "/admin/dashboard", icon: Home, label: "Dashboard" },
-  { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
-  { path: "/admin/customers", icon: Users, label: "Customers" },
-  { path: "/admin/communications", icon: MessageSquare, label: "Messages" },
-  { path: "/admin/more", icon: Menu, label: "More" },
-];
-
-function isTabActive(pathname, tabPath, search = "") {
-  if (pathname === tabPath) return true;
-  if (tabPath === "/admin/dashboard" && pathname === "/admin") return true;
-  if (tabPath === "/admin/schedule" && pathname === "/admin/dispatch") {
-    return new URLSearchParams(search).get("tab") === "schedule";
-  }
-  if (pathname.startsWith(tabPath + "/")) return true;
-  return false;
-}
-
-const NAV_SECTIONS = [
-  {
-    section: "Operations",
-    items: [
-      { path: "/admin/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-      { path: "/admin/customers", icon: Users, label: "Customers" },
-      { path: "/admin/pipeline", icon: ClipboardList, label: "Pipeline" },
-      { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
-      { path: "/admin/timetracking", icon: Clock, label: "Staff" },
-      { path: "/admin/service-library", icon: BookOpen, label: "Services", adminOnly: true },
-      // Ratified Q7 (universal one-time services): label-only rename —
-      // route and files stay /admin/projects.
-      { path: "/admin/projects", icon: FileText, label: "Jobs" },
-      { path: "/admin/contracts", icon: FileText, label: "Contracts" },
-    ],
-  },
-  {
-    section: "Communications",
-    items: [
-      {
-        path: "/admin/communications",
-        icon: MessageSquare,
-        label: "SMS/Call",
-      },
-      { path: "/admin/reviews", icon: Star, label: "Reviews" },
-      { path: "/admin/referrals", icon: Gift, label: "Referrals" },
-      { path: "/admin/email", icon: Mail, label: "Email" },
-    ],
-  },
-  {
-    section: "Marketing",
-    items: [
-      { path: "/admin/ppc", icon: Megaphone, label: "PPC" },
-      { path: "/admin/seo", icon: Search, label: "SEO" },
-      { path: "/admin/social-media", icon: Share2, label: "Social Media" },
-      { path: "/admin/blog", icon: Newspaper, label: "Blog" },
-      { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
-      { path: "/admin/lawn-assessments", icon: Camera, label: "Assessments" },
-    ],
-  },
-  {
-    section: "Agents",
-    items: [
-      { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
-      { path: "/admin/agent-estimate", icon: Sparkles, label: "Agent Estimate", flag: "agent_estimate" },
-    ],
-  },
-  {
-    section: "Field & Equipment",
-    items: [
-      // The field photo-scoring flow now lives on the Assessments hub
-      // (/admin/lawn-assessments?tab=field) under Marketing — one
-      // consolidated section instead of two assessment areas.
-      { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
-      { path: "/admin/inventory", icon: Package, label: "Inventory" },
-      { path: "/admin/price-match", icon: Tags, label: "Price Match" },
-      { path: "/admin/compliance", icon: ShieldCheck, label: "Compliance" },
-    ],
-  },
-  {
-    section: "Intelligence",
-    items: [
-      { path: "/admin/knowledge", icon: BookMarked, label: "Wiki" },
-      { path: "/admin/kb", icon: Brain, label: "Knowledge Base" },
-    ],
-  },
-  {
-    section: "Finance",
-    items: [
-      { path: "/admin/invoices", icon: FileText, label: "Invoices" },
-      { path: "/admin/billing-recovery", icon: Banknote, label: "Recovery" },
-      { path: "/admin/payers", icon: Building2, label: "Payers" },
-      { path: "/admin/banking", icon: Landmark, label: "Banking" },
-      { path: "/admin/tax", icon: Receipt, label: "Taxes" },
-      { path: "/admin/pricing-logic", icon: Calculator, label: "Pricing" },
-      { path: "/admin/price-change", icon: Megaphone, label: "Price Notices" },
-    ],
-  },
-  {
-    section: "System",
-    items: [
-      { path: "/admin/tool-health", icon: Activity, label: "Tool Health" },
-      { path: "/admin/settings", icon: Settings, label: "Settings" },
-    ],
-  },
-];
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -187,6 +56,47 @@ export default function AdminLayoutV2() {
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
+
+  // Give Safari home-screen bookmarks the admin app identity and launch URL.
+  // index.html defaults to the customer portal, so without this swap an admin
+  // bookmark can be installed as "Waves" with start_url "/". The html hook
+  // also lets portaled admin dialogs inherit the mobile form safeguards even
+  // though they render outside .admin-shell-v2.
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const root = document.documentElement;
+    const manifest = document.querySelector('link[rel="manifest"]');
+    const appTitle = document.querySelector(
+      'meta[name="apple-mobile-web-app-title"]',
+    );
+    const description = document.querySelector('meta[name="description"]');
+    const previous = {
+      manifest: manifest?.getAttribute("href"),
+      appTitle: appTitle?.getAttribute("content"),
+      description: description?.getAttribute("content"),
+      documentTitle: document.title,
+    };
+
+    root.classList.add("admin-app");
+    manifest?.setAttribute("href", "/admin-manifest.json");
+    appTitle?.setAttribute("content", "Waves Admin");
+    description?.setAttribute(
+      "content",
+      "Waves Pest Control admin portal — dispatch, customers, billing, and reports.",
+    );
+    document.title = "Waves Admin";
+
+    return () => {
+      root.classList.remove("admin-app");
+      if (manifest && previous.manifest != null)
+        manifest.setAttribute("href", previous.manifest);
+      if (appTitle && previous.appTitle != null)
+        appTitle.setAttribute("content", previous.appTitle);
+      if (description && previous.description != null)
+        description.setAttribute("content", previous.description);
+      document.title = previous.documentTitle;
+    };
+  }, []);
 
   // Restore route if we just returned from WavesPay (iOS often evicts the
   // tab during the hand-off, reloading the app to its default route).
@@ -300,6 +210,8 @@ export default function AdminLayoutV2() {
             type="button"
             onClick={() => setSidebarOpen(true)}
             aria-label="Open menu"
+            aria-expanded={sidebarOpen}
+            aria-controls="admin-sidebar"
             style={{
               background: "none",
               border: "none",
@@ -355,6 +267,7 @@ export default function AdminLayoutV2() {
 
       {/* Sidebar */}
       <aside
+        id="admin-sidebar"
         style={{
           width: 220,
           background: "var(--surface-primary)",
@@ -442,9 +355,10 @@ export default function AdminLayoutV2() {
             alignItems: "center",
             gap: 8,
             margin: "10px 12px",
-            padding: isMobile ? "12px 12px" : "8px 10px",
-            minHeight: isMobile ? 44 : undefined,
-            borderRadius: 8,
+            padding: isMobile ? "0 12px" : "0 10px",
+            minHeight: isMobile ? 44 : 36,
+            boxSizing: "border-box",
+            borderRadius: 4,
             border: "1px solid var(--border-default)",
             background: "var(--surface-hover)",
             color: "var(--text-tertiary)",
@@ -454,11 +368,11 @@ export default function AdminLayoutV2() {
           }}
           aria-label="Open search"
         >
-          <Search size={isMobile ? 16 : 14} strokeWidth={2} />
+          <Search size={isMobile ? 16 : 14} strokeWidth={2} aria-hidden />
           <span style={{ flex: 1 }}>Search…</span>
           <kbd
             style={{
-              fontFamily: "'Roboto', Arial, sans-serif",
+              fontFamily: "inherit",
               fontSize: 11,
               padding: "2px 6px",
               borderRadius: 4,
@@ -472,42 +386,52 @@ export default function AdminLayoutV2() {
         </button>
 
         {/* Nav sections */}
-        <nav style={{ flex: 1, padding: "4px 8px 12px" }}>
-          {NAV_SECTIONS.map(({ section, items }) => (
-            <div key={section} style={{ marginBottom: 10 }}>
-              <div
+        <nav
+          aria-label="Admin sections"
+          style={{ flex: 1, padding: "4px 8px 12px" }}
+        >
+          {ADMIN_DESKTOP_NAV_SECTIONS.map(({ section, items }) => {
+            const headingId = `admin-nav-${section
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")}`;
+            return (
+            <div
+              key={section}
+              role="group"
+              aria-labelledby={headingId}
+              style={{ marginBottom: 10 }}
+            >
+              <h2
+                id={headingId}
                 style={{
-                  // Title-case section headers, weight 600 — heavier and
-                  // closer to body copy than the prior all-caps tracked
-                  // label, so the groupings read as section names rather
-                  // than utility labels.
-                  fontSize: 15,
-                  fontWeight: 600,
-                  color: "var(--text-primary)",
-                  textTransform: "none",
-                  letterSpacing: 0,
-                  padding: "14px 12px 6px",
+                  fontSize: 12,
+                  lineHeight: 1.4,
+                  fontWeight: 500,
+                  color: "var(--text-secondary)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  padding: "12px 12px 4px",
+                  margin: 0,
                   userSelect: "none",
                 }}
               >
                 {section}
-              </div>
+              </h2>
               {items
                 .filter((item) => !item.adminOnly || user?.role === "admin")
                 .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
-                .map(({ path, icon: Icon, label }) => {
-                const isActive =
-                  location.pathname === path ||
-                  (path === "/admin/schedule" &&
-                    location.pathname === "/admin/dispatch" &&
-                    new URLSearchParams(location.search).get("tab") ===
-                      "schedule") ||
-                  (path === "/admin/dashboard" &&
-                    location.pathname === "/admin");
+                .map((item) => {
+                const { path, icon: Icon, label } = item;
+                const isActive = isAdminNavItemActive(
+                  item,
+                  location.pathname,
+                  location.search,
+                );
                 return (
                   <Link
                     key={path}
                     to={path}
+                    aria-current={isActive ? "page" : undefined}
                     onClick={(e) => {
                       if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                       if (location.pathname === path || location.pathname.startsWith(path + "/")) {
@@ -519,8 +443,9 @@ export default function AdminLayoutV2() {
                       display: "flex",
                       alignItems: "center",
                       gap: 12,
-                      padding: isMobile ? "10px 12px" : "8px 12px",
-                      minHeight: isMobile ? 44 : undefined,
+                      padding: "0 12px",
+                      minHeight: isMobile ? 44 : 36,
+                      boxSizing: "border-box",
                       borderRadius: 6,
                       marginBottom: 1,
                       background: isActive
@@ -544,13 +469,14 @@ export default function AdminLayoutV2() {
                         e.currentTarget.style.background = "transparent";
                     }}
                   >
-                    <Icon size={18} strokeWidth={1.75} />
+                    <Icon size={18} strokeWidth={1.75} aria-hidden />
                     <span>{label}</span>
                   </Link>
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </nav>
 
         {/* User chip footer */}
@@ -625,7 +551,7 @@ export default function AdminLayoutV2() {
               e.currentTarget.style.color = "var(--text-tertiary)";
             }}
           >
-            <LogOut size={15} strokeWidth={1.75} />
+            <LogOut size={15} strokeWidth={1.75} aria-hidden />
           </button>
         </div>
       </aside>
@@ -682,10 +608,11 @@ export default function AdminLayoutV2() {
           }}
         >
           <div style={{ display: "flex", alignItems: "stretch", height: 56 }}>
-            {MOBILE_TABS.map(({ path, icon: Icon, label }) => {
-              const active = isTabActive(
+            {ADMIN_MOBILE_TABS.map((item) => {
+              const { path, icon: Icon, label } = item;
+              const active = isAdminNavItemActive(
+                item,
                 location.pathname,
-                path,
                 location.search,
               );
               return (
@@ -710,7 +637,11 @@ export default function AdminLayoutV2() {
                     minHeight: 44,
                   }}
                 >
-                  <Icon size={22} strokeWidth={active ? 2.25 : 1.75} />
+                  <Icon
+                    size={22}
+                    strokeWidth={active ? 2.25 : 1.75}
+                    aria-hidden
+                  />
                   <span
                     style={{
                       fontSize: 10,

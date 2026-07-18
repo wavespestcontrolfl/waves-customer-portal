@@ -1,6 +1,6 @@
 /**
  * <AdminDispatchPage>— top-level dispatcher surface at /admin/dispatch.
- * Seven tabs, all rendered as one centered pill:
+ * Eight tabs, all rendered as one centered pill:
  *   - "Board"        — phase 2 dispatch board (map + roster)
  *   - "Schedule"     — DispatchPageV2's schedule grid (default)
  *   - "Protocols"    — DispatchPageV2's Protocols panel
@@ -8,6 +8,7 @@
  *   - "CSR Booking"  — DispatchPageV2's CSRPanel
  *   - "Job Scores"   — DispatchPageV2's RevenuePanel
  *   - "Insights"     — DispatchPageV2's InsightsPanel
+ *   - "Automation"   — Auto-Dispatch runs and decision audit
  *
  * Per-tab URL state via ?tab=<key>. Default = board. Tabs that route into
  * DispatchPageV2 pass `activeTab` so its internal tab strip can stay
@@ -33,6 +34,7 @@ import { useSearchParams } from "react-router-dom";
 import {
   CalendarDays,
   CalendarPlus,
+  Bot,
   ClipboardList,
   Headphones,
   Lightbulb,
@@ -40,6 +42,8 @@ import {
   TrendingUp,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { getAdminUser } from "../../lib/adminAuth";
+import AutoDispatchPage from "./AutoDispatchPage";
 import DispatchBoardPage from "./DispatchBoardPage";
 
 const DispatchPageV2 = React.lazy(() => import("./DispatchPageV2"));
@@ -53,17 +57,40 @@ const TABS = {
   CSR: "csr",
   REVENUE: "revenue",
   INSIGHTS: "insights",
+  AUTOMATION: "automation",
 };
 const TAB_LIST = [
   { key: TABS.BOARD, label: "Board", Icon: Map },
   { key: TABS.SCHEDULE, label: "Schedule", Icon: CalendarDays },
   { key: TABS.PROTOCOLS, label: "Protocols", Icon: ClipboardList },
-  { key: TABS.MATCH, label: "Tech Match", Icon: ClipboardList },
-  { key: TABS.CSR, label: "CSR Booking", Icon: Headphones },
-  { key: TABS.REVENUE, label: "Job Scores", Icon: TrendingUp },
-  { key: TABS.INSIGHTS, label: "Insights", Icon: Lightbulb },
+  {
+    key: TABS.MATCH,
+    label: "Tech Match",
+    Icon: ClipboardList,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: TABS.CSR,
+    label: "CSR Booking",
+    Icon: Headphones,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: TABS.REVENUE,
+    label: "Job Scores",
+    Icon: TrendingUp,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: TABS.INSIGHTS,
+    label: "Insights",
+    Icon: Lightbulb,
+    className: "hidden md:inline-flex",
+  },
+  // Auto-Dispatch is an owner/admin tool — every /api/admin/auto-dispatch
+  // endpoint is requireAdmin, so the tab is filtered by role below.
+  { key: TABS.AUTOMATION, label: "Automation", Icon: Bot, adminOnly: true },
 ];
-const VALID_TABS = TAB_LIST.map((t) => t.key);
 
 // Top-level tab → DispatchPageV2 internal activeTab. The schedule grid
 // inside DispatchPageV2 is keyed as 'board' (legacy), while every other
@@ -73,7 +100,10 @@ const innerActiveTabFor = (topTab) =>
 
 export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initial = VALID_TABS.includes(searchParams.get(TAB_KEY))
+  const isAdmin = getAdminUser()?.role === "admin";
+  const visibleTabs = TAB_LIST.filter(({ adminOnly }) => !adminOnly || isAdmin);
+  const validTabKeys = visibleTabs.map((t) => t.key);
+  const initial = validTabKeys.includes(searchParams.get(TAB_KEY))
     ? searchParams.get(TAB_KEY)
     : TABS.BOARD;
   const [tab, setTab] = useState(initial);
@@ -106,7 +136,6 @@ export default function AdminDispatchPage() {
       next.set(TAB_KEY, tab);
       setSearchParams(next, { replace: true });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
   return (
@@ -117,11 +146,15 @@ export default function AdminDispatchPage() {
         <AdminCommandHeader
           title="Schedule"
           icon={CalendarDays}
-          sections={TAB_LIST}
+          sections={visibleTabs}
           activeKey={tab}
           onSectionChange={setTab}
           ariaLabel="Schedule section"
-          navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+          navGridClassName={
+            isAdmin
+              ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"
+              : "grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+          }
           action={
             tab === TABS.SCHEDULE
               ? {
@@ -140,6 +173,8 @@ export default function AdminDispatchPage() {
       >
         {tab === TABS.BOARD ? (
           <DispatchBoardPage />
+        ) : tab === TABS.AUTOMATION && isAdmin ? (
+          <AutoDispatchPage embedded />
         ) : (
           <Suspense
             fallback={

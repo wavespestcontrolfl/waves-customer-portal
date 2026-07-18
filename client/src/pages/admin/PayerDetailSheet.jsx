@@ -118,7 +118,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   }, [loadStatements, loadAr, onChanged]);
 
   return (
-    <Sheet open onClose={onClose} width="lg">
+    <Sheet open onClose={onClose} width="lg" ariaLabel={`${payer.display_name} payer details`}>
       <SheetHeader>
         <div className="flex items-start justify-between gap-3">
           <div>

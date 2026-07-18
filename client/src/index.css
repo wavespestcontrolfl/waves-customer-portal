@@ -45,6 +45,20 @@ html {
   select {
     font-size: 16px !important;
   }
+
+  /* Safari home-screen admin: 16px prevents focus zoom, while a 44px control
+     box keeps fields and portaled-dialog actions usable above the home
+     indicator. html.admin-app is mounted by AdminLayoutV2 so this also covers
+     React portals rendered as direct body children. */
+  html.admin-app input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]):not([type="range"]):not([type="color"]),
+  html.admin-app textarea,
+  html.admin-app select {
+    min-height: 44px !important;
+    font-size: 16px !important;
+  }
+  html.admin-app [role="dialog"] button {
+    min-height: 44px;
+  }
 }
 
 /* preflight is disabled, so border-width utilities have no effect without
@@ -137,6 +151,15 @@ html {
 .admin-shell-v2 pre,
 .admin-shell-v2 pre * {
   font-family: "Roboto", system-ui, sans-serif !important;
+}
+
+/* Tailwind preflight is intentionally disabled, so native form controls keep
+   the browser's content-box default. Inside the admin that can make a
+   width:100% field overflow once its padding and border are added. Keep the
+   existing page-local dimensions and styling, but make those dimensions
+   include the field chrome. */
+.admin-shell-v2 :where(input, select, textarea) {
+  box-sizing: border-box;
 }
 
 /* /admin/* scroll feel — scoped to .admin-shell-v2. The admin window never

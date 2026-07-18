@@ -335,7 +335,7 @@ function CredentialForm({ initial, onSave, onCancel, saving }) {
   );
 }
 
-export default function CredentialsPage() {
+export default function CredentialsPage({ embedded = false }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -406,9 +406,13 @@ export default function CredentialsPage() {
       {" "}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         {" "}
-        <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
-          Credentials
-        </h1>{" "}
+        {embedded ? (
+          <h2 className="text-20 font-medium text-ink-primary">Credentials</h2>
+        ) : (
+          <h1 className="text-28 font-normal tracking-h1 text-ink-primary">
+            Credentials
+          </h1>
+        )}{" "}
         <Button
           variant="primary"
           onClick={() => {

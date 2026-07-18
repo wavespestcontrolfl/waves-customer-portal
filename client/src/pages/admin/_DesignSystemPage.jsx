@@ -364,7 +364,7 @@ export default function DesignSystemPage() {
           <Button onClick={() => setDialogOpen(false)}>Archive</Button>{" "}
         </DialogFooter>{" "}
       </Dialog>{" "}
-      <Sheet open={sheetOpen} onClose={() => setSheetOpen(false)}>
+      <Sheet open={sheetOpen} onClose={() => setSheetOpen(false)} ariaLabel="Customer details">
         {" "}
         <SheetHeader>
           {" "}

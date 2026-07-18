@@ -31,6 +31,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
+import useModalFocus from '../../hooks/useModalFocus';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -114,16 +115,6 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
-
-function discountAvailableForCustomer(discount, customer) {
-  const requiredTier = discount?.requires_waveguard_tier || '';
-  if (!requiredTier) return !discount?.is_waveguard_tier_discount;
-  const customerTier = customer?.tier || customer?.waveguard_tier || '';
-  if (discount?.is_waveguard_tier_discount) return customerTier === requiredTier;
-  const requiredIdx = WAVEGUARD_TIER_ORDER.indexOf(requiredTier);
-  const customerIdx = WAVEGUARD_TIER_ORDER.indexOf(customerTier);
-  return requiredIdx < 0 || customerIdx >= requiredIdx;
-}
 
 function normalizeHourTime(value, fallback = '09:00') {
   const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
@@ -297,6 +288,7 @@ export function pickAutoScheduleEstimate({
 }
 
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
+  const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
 
@@ -449,7 +441,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (!cancelled) setScheduleEstimatesLoading(false);
       });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on the customer and default estimate only.
   }, [selectedCustomer?.id, defaultEstimateId]);
 
   // Find-a-Time state
@@ -645,7 +637,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!auto) return;
     autoAppliedScheduleEstimateRef.current = auto.key;
     applyScheduleEstimate(auto.estimate.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on the schedule-estimate pipeline state only.
   }, [scheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
 
   const defaultEstimateAppliedRef = useRef(false);
@@ -1025,7 +1017,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
       return { group, dates };
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on the scheduling inputs only.
   }, [services, apptDate, recurringCount, skipWeekends, weekendShift]);
 
   // Compute window_end given a start time and a duration in minutes.
@@ -1313,7 +1305,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   return createPortal(
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={modalStyle}>
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        style={modalStyle}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-appointment-title"
+      >
         <style>{`
           .waves-sq-date::-webkit-calendar-picker-indicator { opacity: 0.5; cursor: pointer; filter: grayscale(1); transition: opacity 0.15s; }
           .waves-sq-date::-webkit-calendar-picker-indicator:hover { opacity: 1; }
@@ -1337,7 +1336,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             borderBottom: `1px solid ${D.border}`,
           }}>
             <div style={{ position: 'relative', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <h1 style={{ fontFamily: ROBOTO_STACK, fontSize: 17, fontWeight: 500, color: '#18181B', margin: 0, maxWidth: 'calc(100% - 148px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <h1 id="new-appointment-title" style={{ fontFamily: ROBOTO_STACK, fontSize: 17, fontWeight: 500, color: '#18181B', margin: 0, maxWidth: 'calc(100% - 148px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 New Appointment
               </h1>
               <button
@@ -1346,7 +1345,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 aria-label="Close"
                 style={{
                   position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
-                  width: 36, height: 36, borderRadius: 18, border: 'none',
+                  width: 44, height: 44, borderRadius: 22, border: 'none',
                   background: '#FFFFFF', color: '#18181B', fontSize: 18, lineHeight: 1,
                   cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}
@@ -1357,7 +1356,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 disabled={!canSubmit}
                 style={{
                   position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
-                  padding: '9px 20px', borderRadius: 999, border: 'none',
+                  height: 44, padding: '0 20px', borderRadius: 999, border: 'none',
                   background: canSubmit ? '#18181B' : '#E4E4E7',
                   color: canSubmit ? '#fff' : '#A1A1AA',
                   fontSize: 14, fontWeight: 500,
@@ -1370,7 +1369,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           </div>
         ) : (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h1 style={{ fontFamily: ROBOTO_STACK, fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
+            <h1 id="new-appointment-title" style={{ fontFamily: ROBOTO_STACK, fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
             <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
           </div>
         )}

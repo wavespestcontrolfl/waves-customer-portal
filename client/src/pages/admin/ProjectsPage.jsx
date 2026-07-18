@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
@@ -70,7 +71,7 @@ function useConfirmDialog() {
     return () => clearTimeout(t);
   }, [pending]);
   const element = pending ? (
-    <Dialog open size="sm" onClose={handleCancel}>
+    <Dialog open size="sm" onClose={handleCancel} aria-label="Confirmation">
       <DialogBody>
         <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
           {pending.message}
@@ -1183,10 +1184,8 @@ function CustomerProjectReportPreview({
 }
 
 export default function ProjectsPage() {
-  const initialProjectId =
-    typeof window !== "undefined"
-      ? new URLSearchParams(window.location.search).get("projectId")
-      : null;
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialProjectId = searchParams.get("projectId");
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState("");
@@ -1234,11 +1233,33 @@ export default function ProjectsPage() {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (!initialProjectId || selectedId) return;
-    if (projects.some((p) => p.id === initialProjectId)) {
-      setSelectedId(initialProjectId);
+    if (!initialProjectId) {
+      setSelectedId(null);
+      return;
     }
-  }, [initialProjectId, projects, selectedId]);
+    const match = projects.find(
+      (project) => String(project.id) === String(initialProjectId),
+    );
+    setSelectedId(match?.id || null);
+  }, [initialProjectId, projects]);
+
+  const selectProject = useCallback(
+    (projectId) => {
+      if (!projectId) return;
+      const next = new URLSearchParams(searchParams);
+      next.set("projectId", String(projectId));
+      setSearchParams(next);
+      setSelectedId(projectId);
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const closeProject = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("projectId");
+    setSearchParams(next, { replace: true });
+    setSelectedId(null);
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     adminFetch("/admin/projects/types")
@@ -1261,10 +1282,10 @@ export default function ProjectsPage() {
     <div className="max-w-[1300px] mx-auto text-ink-primary">
       {" "}
       <AdminCommandHeader
-        title="Jobs"
+        title="Reports"
         icon={ClipboardList}
         action={{
-          label: "New Job",
+          label: "New Reports",
           icon: Plus,
           onClick: () => setCreateMode("general"),
         }}
@@ -1319,7 +1340,7 @@ export default function ProjectsPage() {
               <div className="p-6 text-13 text-zinc-500">Loading…</div>
             ) : regularProjects.length === 0 ? (
               <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-13 text-zinc-500 text-center">
-                No jobs match these filters.
+                No reports match these filters.
               </div>
             ) : (
               regularProjects.map((p) => (
@@ -1327,7 +1348,7 @@ export default function ProjectsPage() {
                   key={p.id}
                   project={p}
                   active={selectedId === p.id}
-                  onSelect={() => setSelectedId(p.id)}
+                  onSelect={() => selectProject(p.id)}
                 />
               ))
             ))}
@@ -1336,7 +1357,7 @@ export default function ProjectsPage() {
             <WdoReportsSection
               projects={wdoProjects}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={selectProject}
             />
           )}
         </div>
@@ -1348,7 +1369,7 @@ export default function ProjectsPage() {
             key={selected.id}
             projectId={selected.id}
             typesRegistry={typesRegistry}
-            onClose={() => setSelectedId(null)}
+            onClose={closeProject}
             onChanged={loadProjects}
             canAdminActions={isAdmin}
           />
@@ -1377,7 +1398,7 @@ export default function ProjectsPage() {
           onCreated={(p) => {
             setCreateMode(null);
             loadProjects();
-            if (p?.id) setSelectedId(p.id);
+            if (p?.id) selectProject(p.id);
           }}
         />
       )}
@@ -2386,7 +2407,13 @@ export function ProjectDetail({
             color: "#71717A",
             fontSize: 22,
             cursor: "pointer",
-            padding: "0 8px",
+            width: 44,
+            height: 44,
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
           }}
           aria-label="Close"
         >
@@ -2690,6 +2717,7 @@ export function ProjectDetail({
                 title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from selected context."
                 style={{
                   padding: "4px 10px",
+                  minHeight: 44,
                   borderRadius: 6,
                   fontSize: 11,
                   fontWeight: 500,
@@ -2721,7 +2749,7 @@ export function ProjectDetail({
             >
               {" "}
               <label
-                style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 44 }}
               >
                 {" "}
                 <input
@@ -2734,7 +2762,7 @@ export function ProjectDetail({
                 Include recent calls/texts/emails
               </label>{" "}
               <label
-                style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 44 }}
               >
                 {" "}
                 <input
@@ -2775,6 +2803,7 @@ export function ProjectDetail({
                 onClick={() => appendTechnicalSnippet(snippet.text)}
                 style={{
                   padding: "5px 8px",
+                  minHeight: 44,
                   borderRadius: 6,
                   border: `1px solid #D4D4D8`,
                   background: "#FFFFFF",

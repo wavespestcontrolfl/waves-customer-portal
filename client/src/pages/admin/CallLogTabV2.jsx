@@ -22,6 +22,7 @@
 // - Disposition gap: missed calls that lack an operator-set
 //   disposition should surface in a clear "needs review" state.
 import { useState, useEffect, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import { CheckCircle2, MessageSquare, PhoneCall, Voicemail, XCircle } from "lucide-react";
 import {
   Badge,
@@ -247,6 +248,7 @@ function StatButton({ label, value, filter, active, onClick, alert }) {
 }
 
 export default function CallLogTabV2() {
+  const navigate = useNavigate();
   const [calls, setCalls] = useState([]);
   const [routeCalibration, setRouteCalibration] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -429,7 +431,7 @@ export default function CallLogTabV2() {
     const params = new URLSearchParams({ phone: phone || "" });
     if (city) params.set("city", city);
     if (state) params.set("state", state);
-    window.open(`/admin/customers/new?${params.toString()}`, "_blank");
+    navigate(`/admin/customers/new?${params.toString()}`);
   };
 
   const handleTextBack = (call) => {

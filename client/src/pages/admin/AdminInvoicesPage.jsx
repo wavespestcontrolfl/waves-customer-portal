@@ -62,6 +62,7 @@
 //   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useSearchParams } from "react-router-dom";
 import {
   ExternalLink,
   FileText,
@@ -410,6 +411,32 @@ export function invoiceDepositCreditTotal(lineItems) {
     .reduce((sum, li) => sum + Math.abs(Number(li.amount) || 0), 0);
 }
 
+export function buildInvoiceListParams({
+  limit = 100,
+  pageNo = 1,
+  sort = "newest",
+  filter = "all",
+  query = "",
+  datePeriod = "all",
+  customerFilterId = "",
+} = {}) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    page: String(pageNo),
+    sort,
+  });
+  if (filter === "archived") params.set("archived", "only");
+  else if (filter !== "all") params.set("status", filter);
+
+  const term = query.trim();
+  if (term) params.set("search", term);
+  if (customerFilterId) params.set("customerId", customerFilterId);
+
+  const start = datePeriodStart(datePeriod);
+  if (start) params.set("from", formatDateParam(start));
+  return params;
+}
+
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
@@ -617,6 +644,9 @@ function InvoiceList({
   promptResendId,
   onPromptResendHandled,
 }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const customerFilterId =
+    searchParams.get("customer") || searchParams.get("customerId") || "";
   // POST /admin/invoices/:id/charge-card is requireAdmin on the server
   // (off-session saved-card charges are admin-only); the charge action only
   // renders for admin-role users, failing closed on missing/unknown role.
@@ -645,19 +675,15 @@ function InvoiceList({
 
   const load = useCallback(
     async ({ append = false, pageNo = 1 } = {}) => {
-      const params = new URLSearchParams({
-        limit: String(PAGE_SIZE),
-        page: String(pageNo),
+      const params = buildInvoiceListParams({
+        limit: PAGE_SIZE,
+        pageNo,
         sort,
+        filter,
+        query,
+        datePeriod,
+        customerFilterId,
       });
-      if (filter === "archived") params.set("archived", "only");
-      else if (filter !== "all") params.set("status", filter);
-
-      const term = query.trim();
-      if (term) params.set("search", term);
-
-      const start = datePeriodStart(datePeriod);
-      if (start) params.set("from", formatDateParam(start));
 
       const data = await adminFetch(`/admin/invoices?${params}`).catch(
         () => null,
@@ -678,28 +704,41 @@ function InvoiceList({
         setSelected(new Set());
       }
     },
-    [PAGE_SIZE, datePeriod, filter, query, sort],
+    [PAGE_SIZE, customerFilterId, datePeriod, filter, query, sort],
   );
   useEffect(() => {
     load();
   }, [load]);
 
-  // Deep-link from a notification: /admin/invoices?invoice=<invoiceId> expands
-  // that invoice's detail row (payment_succeeded / payment_failed / refund /
-  // bill_payment_error notifications). The row only renders once the invoice is
-  // in the loaded list, so wait for it to appear. Runs once.
-  const invoiceDeepLinkDone = useRef(false);
+  // Keep expanded invoice detail in the URL so notification links, mobile
+  // back navigation, and refresh all restore the same row.
   useEffect(() => {
-    if (invoiceDeepLinkDone.current) return;
-    const invoiceId = new URLSearchParams(window.location.search).get("invoice");
+    const invoiceId = searchParams.get("invoice");
     if (!invoiceId) {
-      invoiceDeepLinkDone.current = true;
+      setExpanded(null);
       return;
     }
-    if (!invoices.some((inv) => String(inv.id) === String(invoiceId))) return;
-    invoiceDeepLinkDone.current = true;
-    setExpanded(invoiceId);
-  }, [invoices]);
+    const match = invoices.find(
+      (inv) => String(inv.id) === String(invoiceId),
+    );
+    setExpanded(match?.id || null);
+  }, [invoices, searchParams]);
+
+  const toggleExpanded = (invoiceId) => {
+    const isOpen = String(expanded) === String(invoiceId);
+    const next = new URLSearchParams(searchParams);
+    if (isOpen) next.delete("invoice");
+    else next.set("invoice", String(invoiceId));
+    setSearchParams(next, { replace: isOpen });
+    setExpanded(isOpen ? null : invoiceId);
+  };
+
+  const clearCustomerFilter = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("customer");
+    next.delete("customerId");
+    setSearchParams(next, { replace: true });
+  };
 
   const handleSend = (invoice) => {
     setSendModalInvoice(invoice);
@@ -990,6 +1029,41 @@ function InvoiceList({
           />{" "}
         </div>{" "}
       </div>
+      {customerFilterId && (
+        <div
+          style={{
+            margin: isMobile ? "0 16px 12px" : "0 0 12px",
+            padding: "10px 12px",
+            border: `1px solid ${D.border}`,
+            borderRadius: 8,
+            background: D.card,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            fontSize: 13,
+          }}
+        >
+          <span>Customer invoices only</span>
+          <button
+            type="button"
+            onClick={clearCustomerFilter}
+            aria-label="Clear customer invoice filter"
+            style={{
+              minHeight: 44,
+              padding: "0 14px",
+              borderRadius: 999,
+              border: `1px solid ${D.border}`,
+              background: D.bg,
+              color: D.text,
+              cursor: "pointer",
+              fontSize: 13,
+            }}
+          >
+            Show all
+          </button>
+        </div>
+      )}
       {/* Filter pills */}
       <div
         style={{
@@ -1138,7 +1212,7 @@ function InvoiceList({
                   >
                     {" "}
                     <button
-                      onClick={() => setExpanded(isOpen ? null : inv.id)}
+                      onClick={() => toggleExpanded(inv.id)}
                       style={{
                         width: "100%",
                         textAlign: "left",

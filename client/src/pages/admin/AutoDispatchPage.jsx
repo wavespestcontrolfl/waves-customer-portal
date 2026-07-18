@@ -51,6 +51,30 @@ function Chip({ children, tone = "neutral" }) {
   );
 }
 
+// Local header button — this file is Tier-2 (D palette + inline styles), so
+// it must not pull Tier-1 components/ui primitives (AGENTS.md one-style rule).
+function HeaderButton({ onClick, disabled = false, primary = false, icon: Icon, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6, minHeight: 32,
+        padding: "0 12px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+        fontFamily: "inherit", cursor: disabled ? "default" : "pointer",
+        background: primary ? D.heading : "transparent",
+        color: primary ? "#FFFFFF" : D.text,
+        border: `1px solid ${primary ? D.heading : D.border}`,
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      {Icon && <Icon size={14} aria-hidden="true" />}
+      {children}
+    </button>
+  );
+}
+
 function fmt(ts) {
   if (!ts) return "—";
   try {
@@ -58,7 +82,7 @@ function fmt(ts) {
   } catch { return String(ts); }
 }
 
-export default function AutoDispatchPage() {
+export default function AutoDispatchPage({ embedded = false }) {
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
@@ -112,13 +136,27 @@ export default function AutoDispatchPage() {
 
   return (
     <div style={{ background: D.bg, minHeight: "100%", padding: 16 }}>
-      <AdminCommandHeader
-        title="Auto-Dispatch"
-        actions={[
-          { key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: loadRuns },
-          { key: "dryrun", label: running ? "Running…" : "Run dry-run", size: "sm", icon: Play, disabled: running, onClick: triggerDryRun },
-        ]}
-      />
+      {embedded ? (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: D.heading }}>Auto-Dispatch</h2>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+            <HeaderButton onClick={loadRuns} icon={RefreshCw}>
+              Refresh
+            </HeaderButton>
+            <HeaderButton onClick={triggerDryRun} disabled={running} icon={Play} primary>
+              {running ? "Running…" : "Run dry-run"}
+            </HeaderButton>
+          </div>
+        </div>
+      ) : (
+        <AdminCommandHeader
+          title="Auto-Dispatch"
+          actions={[
+            { key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: loadRuns },
+            { key: "dryrun", label: running ? "Running…" : "Run dry-run", size: "sm", icon: Play, disabled: running, onClick: triggerDryRun },
+          ]}
+        />
+      )}
 
       <p style={{ color: D.muted, fontSize: 13, margin: "8px 2px 16px" }}>
         Optimizes future recurring visits more than 14 days out. Runs daily; this view shows each run and
@@ -126,12 +164,12 @@ export default function AutoDispatchPage() {
       </p>
 
       {error && (
-        <div style={{ background: "#FEE2E2", color: D.red, padding: "8px 12px", borderRadius: 8, marginBottom: 12, fontSize: 13 }}>
+        <div role="alert" style={{ background: "#FEE2E2", color: D.red, padding: "8px 12px", borderRadius: 8, marginBottom: 12, fontSize: 13 }}>
           {error}
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 1fr) minmax(360px, 1.4fr)", gap: 16 }}>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(320px,1fr)_minmax(360px,1.4fr)]">
         {/* Runs list */}
         <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflow: "hidden" }}>
           <div style={{ padding: "10px 14px", borderBottom: `1px solid ${D.border}`, fontWeight: 700, color: D.heading, fontSize: 13 }}>
@@ -143,8 +181,10 @@ export default function AutoDispatchPage() {
             <div style={{ padding: 24, color: D.muted, fontSize: 13 }}>No runs yet. Trigger a dry-run to start.</div>
           ) : runs.map((r) => (
             <button
+              type="button"
               key={r.id}
               onClick={() => setSelected(r.id)}
+              aria-pressed={selected === r.id}
               style={{
                 width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10,
                 padding: "10px 14px", borderBottom: `1px solid ${D.border}`, background: selected === r.id ? D.bg : D.card,

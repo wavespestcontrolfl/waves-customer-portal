@@ -3,6 +3,7 @@ import {
   ATTACHMENT_HELP_TEXT,
   ATTACHMENT_VISIBILITY_TEXT,
   attachmentTotalBytes,
+  buildInvoiceListParams,
   canAddInvoiceAttachments,
   invoiceAttachmentLimitLabel,
   invoiceDepositCreditTotal,
@@ -10,6 +11,22 @@ import {
   isAllowedAttachmentFile,
   validateAttachmentFiles,
 } from "./AdminInvoicesPage.jsx";
+
+describe("AdminInvoicesPage customer handoff", () => {
+  it("passes the customer context through to the invoice list endpoint", () => {
+    expect(
+      buildInvoiceListParams({
+        customerFilterId: "cust-123",
+        filter: "unpaid",
+        query: "Quarterly",
+      }).toString(),
+    ).toContain("customerId=cust-123");
+  });
+
+  it("omits customerId for the ordinary all-invoices view", () => {
+    expect(buildInvoiceListParams().has("customerId")).toBe(false);
+  });
+});
 
 describe("AdminInvoicesPage invoice list dates", () => {
   it("groups full ISO service dates by the service calendar day", () => {

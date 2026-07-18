@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import AddressAutocomplete from "../AddressAutocomplete";
+import useModalFocus from "../../hooks/useModalFocus";
 import { PROPERTY_LABEL_OPTIONS } from "../../lib/customerFormOptions";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -25,10 +26,14 @@ function ringClass() {
 }
 
 function formFromInitialValues(initialValues = null) {
+  const initialPhone = String(initialValues?.phone || "");
+  const localPhone = /^\+1\d{10}$/.test(initialPhone)
+    ? initialPhone.slice(2)
+    : initialPhone;
   return {
     firstName: initialValues?.firstName || "",
     lastName: initialValues?.lastName || "",
-    phone: initialValues?.phone || "",
+    phone: localPhone,
     email: initialValues?.email || "",
     addressLine1: initialValues?.address || "",
     addressLine2: initialValues?.addressLine2 || "",
@@ -53,6 +58,7 @@ export default function MobileNewCustomerSheet({
   const [form, setForm] = useState(() => formFromInitialValues(initialValues));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const sheetRef = useModalFocus(open, onClose);
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
@@ -115,6 +121,11 @@ export default function MobileNewCustomerSheet({
 
   return (
     <div
+      ref={sheetRef}
+      tabIndex={-1}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="mobile-new-customer-title"
       className="fixed inset-0 z-[110] bg-white overflow-y-auto md:hidden"
       style={{ fontFamily: "Roboto, Arial, sans-serif" }}
     >
@@ -133,7 +144,7 @@ export default function MobileNewCustomerSheet({
           onClick={onClose}
           aria-label="Close"
           className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring text-zinc-900"
-          style={{ width: 36, height: 36 }}
+          style={{ width: 44, height: 44 }}
         >
           {" "}
           <X size={20} strokeWidth={1.75} />{" "}
@@ -146,6 +157,7 @@ export default function MobileNewCustomerSheet({
           className="rounded-full font-medium u-focus-ring"
           style={{
             padding: "8px 18px",
+            minHeight: 44,
             fontSize: 15,
             background: canSave ? "#18181B" : "#F4F4F5",
             color: canSave ? "#FFFFFF" : "#A1A1AA",
@@ -164,6 +176,7 @@ export default function MobileNewCustomerSheet({
       >
         {/* Heading */}
         <h1
+          id="mobile-new-customer-title"
           className="text-zinc-900"
           style={{
             fontSize: 30,
@@ -218,8 +231,8 @@ export default function MobileNewCustomerSheet({
               type="tel"
               inputMode="tel"
               placeholder="Phone number"
-              className="flex-1 bg-transparent outline-none"
-              style={{ fontSize: 15 }}
+              className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 outline-none shadow-none"
+              style={{ fontSize: 15, border: 0, boxShadow: "none" }}
               value={form.phone}
               onChange={(e) => set("phone", e.target.value)}
               autoComplete="tel"
@@ -332,8 +345,8 @@ export default function MobileNewCustomerSheet({
           >
             {" "}
             <input
-              className="flex-1 bg-transparent outline-none"
-              style={{ fontSize: 15 }}
+              className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 outline-none shadow-none"
+              style={{ fontSize: 15, border: 0, boxShadow: "none" }}
               placeholder="State"
               value={form.state}
               onChange={(e) =>

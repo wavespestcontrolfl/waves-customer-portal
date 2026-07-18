@@ -1,18 +1,9 @@
 import { useEffect, useRef } from 'react';
 
-// Shared focus management for the hand-rolled customer-surface modals
-// (legacy inline-style pages — no Radix). On open: remembers the trigger,
-// moves focus into the dialog, and keeps Tab / Shift+Tab cycling inside it.
-// On close/unmount: restores focus to the remembered trigger.
-//
-// Usage:
-//   const dialogRef = useModalFocus(open);        // `open` optional, defaults true
-//   ...
-//   <div ref={dialogRef} role="dialog" aria-modal="true" ...>
-//
-// For modals that only mount while open, call it with no argument.
-// Pass an onEscape callback to give every modal the same keyboard-close
-// contract without duplicating document listeners at each call site.
+// Shared focus management for the hand-rolled modals. On open: remembers the
+// trigger, moves focus into the dialog, and keeps Tab / Shift+Tab cycling
+// inside it. On close/unmount: restores focus to the remembered trigger.
+// Pass an onEscape callback to add the standard keyboard-close behavior.
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -24,9 +15,19 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-// Document-level key listeners are shared by every hand-rolled modal. Track
-// their mount order so only the topmost dialog can trap focus or handle
-// Escape when dialogs are stacked (for example, an error alert over a form).
+function isAvailable(element) {
+  if (element.closest('[hidden], [aria-hidden="true"]')) return false;
+  let current = element;
+  while (current instanceof HTMLElement) {
+    const style = window.getComputedStyle(current);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    current = current.parentElement;
+  }
+  return true;
+}
+
+// Only the topmost modal owns the document-level keyboard contract when
+// dialogs are stacked (for example, an error alert over a form).
 const modalStack = [];
 
 export default function useModalFocus(active = true, onEscape = null) {
@@ -35,19 +36,14 @@ export default function useModalFocus(active = true, onEscape = null) {
   const onEscapeRef = useRef(onEscape);
   onEscapeRef.current = onEscape;
 
-  // Capture the opener during render on the closed→open transition. With an
-  // autoFocus child (e.g. the chat input in PortalPage), React moves focus
-  // INTO the dialog at commit — before the passive effect below runs — so
-  // reading document.activeElement there records the modal's own child and
-  // close never restores focus to the trigger. At render time focus is still
-  // on the opener. `openedRef` flips inside the effect (not during render) so
-  // a render that never commits can't strand it.
+  // Capture the opener during render because an autoFocus child can move
+  // focus before the passive effect runs.
   const openerRef = useRef(null);
   const openedRef = useRef(false);
   if (active && !openedRef.current) {
-    const el = document.activeElement;
-    if (!(dialogRef.current && dialogRef.current.contains(el))) {
-      openerRef.current = el;
+    const element = document.activeElement;
+    if (!(dialogRef.current && dialogRef.current.contains(element))) {
+      openerRef.current = element;
     }
   }
 
@@ -62,43 +58,40 @@ export default function useModalFocus(active = true, onEscape = null) {
     modalStack.push(modalEntry);
 
     const getFocusable = () =>
-      Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
-        (el) => !el.hasAttribute('hidden') && el.getAttribute('aria-hidden') !== 'true'
-      );
+      Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter(isAvailable);
 
-    // Make the container itself focusable so dialogs with zero focusable
-    // children (or async-mounted content, e.g. Stripe elements) still work.
     if (!dialog.hasAttribute('tabindex')) dialog.setAttribute('tabindex', '-1');
-    // Respect an autoFocus element inside the dialog (e.g. the chat input);
-    // otherwise move focus to the dialog container itself.
-    if (!dialog.contains(document.activeElement)) dialog.focus();
+    if (!dialog.contains(document.activeElement)) {
+      dialog.focus({ preventScroll: true });
+    }
 
-    const onKeyDown = (e) => {
+    const onKeyDown = (event) => {
       if (modalStack[modalStack.length - 1] !== modalEntry) return;
-      if (e.key === 'Escape' && onEscapeRef.current) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
+      if (event.key === 'Escape' && onEscapeRef.current) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
         onEscapeRef.current();
         return;
       }
-      if (e.key !== 'Tab') return;
+      if (event.key !== 'Tab') return;
+
       const focusable = getFocusable();
       if (focusable.length === 0) {
-        e.preventDefault();
-        dialog.focus();
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
         return;
       }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       const current = document.activeElement;
-      if (e.shiftKey) {
+      if (event.shiftKey) {
         if (current === first || current === dialog || !dialog.contains(current)) {
-          e.preventDefault();
-          last.focus();
+          event.preventDefault();
+          last.focus({ preventScroll: true });
         }
       } else if (current === last || !dialog.contains(current)) {
-        e.preventDefault();
-        first.focus();
+        event.preventDefault();
+        first.focus({ preventScroll: true });
       }
     };
 

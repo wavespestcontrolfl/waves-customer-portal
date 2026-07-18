@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { BookOpen, Brain, Gauge, Plus, ShieldCheck, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
@@ -118,8 +119,19 @@ const STATUS_COLORS = {
   draft: D.blue,
 };
 
-export default function KnowledgeBasePage() {
-  const [tab, setTab] = useState("browse");
+const KB_TAB_KEYS = new Set(["browse", "create", "field", "audit", "tokens"]);
+
+export default function KnowledgeBasePage({ embedded = false }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const queryKey = embedded ? "kbTab" : "tab";
+  const requestedTab = searchParams.get(queryKey);
+  const tab = KB_TAB_KEYS.has(requestedTab) ? requestedTab : "browse";
+  const setTab = (nextTab) => {
+    const next = new URLSearchParams(searchParams);
+    if (nextTab === "browse") next.delete(queryKey);
+    else next.set(queryKey, nextTab);
+    setSearchParams(next, { replace: true });
+  };
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
   const isMobile = useIsMobile();
@@ -161,6 +173,8 @@ export default function KnowledgeBasePage() {
         sections={tabs}
         activeKey={tab}
         onSectionChange={setTab}
+        headingLevel={embedded ? 2 : 1}
+        sticky={!embedded}
         navGridClassName="grid-cols-2 md:grid-cols-5"
       />
       {/* Stats Row */}
