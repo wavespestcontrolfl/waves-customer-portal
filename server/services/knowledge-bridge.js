@@ -328,12 +328,12 @@ const KnowledgeBridge = {
 
     const searchMethod = kbMethod === wikiMethod ? kbMethod : 'mixed';
 
-    // Find bridged pairs. Guarded: the live knowledge_bridge table has the
-    // migration-000015 source/target shape, not the 000018 kb_entry_id/
-    // wiki_entry_id shape this query (and the rest of this service) was
-    // written for — 000018's hasTable guard skipped its create everywhere.
-    // Without the guard, any search WITH hits threw and took the whole
-    // knowledge tool down. Bridge reconciliation is a follow-up lane.
+    // Find bridged pairs. Migration 20260718000004 reshaped knowledge_bridge
+    // to the kb_entry_id/wiki_entry_id schema this service targets (000015's
+    // source/target shape had shipped instead, breaking every bridge
+    // read/write). The try/catch stays as defense in depth: a schema mismatch
+    // must degrade to bridged:[] — never take the whole knowledge tool down,
+    // which is what happened from April until lane A1's guard.
     let bridges = [];
     try {
       const allKbIds = claudeopedia.map(e => e.id).filter(Boolean);
