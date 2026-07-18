@@ -326,6 +326,18 @@ const VALUE_SCRUB_AFTER_SUBJECTS =
 // Deliberately NOT the bare word "fee" — "$250 permit fee" is the permit's
 // fee, not the inspection fee.
 const VALUE_SCRUB_FEE_CONTEXT = /\b(?:inspection|wdo)\b/i;
+// A number directly after an identifier noun is a unit/room/document NUMBER,
+// never the fee — absolute skip, like the street guard ("Condo Unit 250"
+// survives even inside a WDO clause) (codex #2817 r32).
+const VALUE_SCRUB_ID_BEFORE =
+  /(?:\b(?:unit|apt|apartment|suite|ste|building|bldg|room|lot|parcel|permit|case|invoice|account|acct|job|order|no|num|number)\.?|#)\s*$/i;
+// A BARE (marker-less) number needs positive money evidence to be read as
+// the fee: a value introducer or money verb directly before, or a money
+// word directly after. Quantities and identifiers ("Applied 250 gallons")
+// never qualify (codex #2817 r32).
+const VALUE_SCRUB_BARE_BEFORE =
+  /(?:\b(?:is|was|of|totals?|totaling|billed|charged|quoted|paid|collected|costs?|runs?)|[:=])\s*$/i;
+const VALUE_SCRUB_BARE_AFTER = /^\s*(?:due|owed|payable|billed|charged?)\b/i;
 function redactSpecificAmounts(text, values) {
   let str = String(text || '');
   if (!str) return str;
@@ -347,26 +359,39 @@ function redactSpecificAmounts(text, values) {
     seen.add(intPart);
     const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     const num = `(?:${intPart}|${grouped})`;
+    // The bare-number branch consumes its preceding character as a CAPTURED
+    // prefix instead of a lookbehind — this module runs in the browser (admin
+    // preview) and lookbehind throws at construction on Safari < 16.4
+    // (codex #2817 r32). The prefix char class matches the old lookbehind
+    // exactly and is re-emitted in the replacement.
     const re = new RegExp(
       `(?:\\$\\s?${num}(?:\\.\\d{1,2})?(?!\\d)`
       + `|(?:USD|US\\$)\\s?${num}(?:\\.\\d{1,2})?(?!\\d)`
       + `|\\b${num}(?:\\.\\d{1,2})?\\s?dollars?\\b`
-      + `|(?<![\\d.$/:,\\-])${num}(?:\\.00?)?\\b(?![.,]?\\d)(?!\\s?(?:days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies))\\b))`,
+      + `|(^|[^\\d.$/:,\\-])${num}(?:\\.00?)?\\b(?![.,]?\\d)(?!\\s?(?:dollars?|days?|weeks?|months?|years?|hours?|minutes?|business|am|pm|%|square|sq|sqft|feet|foot|ft|acres?|stor(?:y|ies)|gallons?|gal|oz|ounces?|lbs?|pounds?|units?|degrees?|psi|linear)\\b))`,
       'g',
     );
-    str = str.replace(re, (match, offset, whole) => {
-      // replace() passes (match, ...groups, offset, string); this regex has
-      // no capture groups, so the arguments line up as declared. Only the
-      // text BEFORE the amount is checked: "Repair cost $250" skips, while
-      // the fee paraphrase "the quoted $250 charge" (subject AFTER) redacts.
-      const clauseStart = Math.max(0, offset - 50);
-      const before = whole.slice(clauseStart, offset).split(/[.;!?\n]/).pop() || '';
+    str = str.replace(re, (match, barePrefix, offset, whole) => {
+      // replace() passes (match, ...groups, offset, string); the single
+      // capture group is the bare branch's consumed prefix — undefined when
+      // a marker branch ($/USD/dollars) matched. Only the text BEFORE the
+      // amount is checked for subjects: "Repair cost $250" skips, while the
+      // fee paraphrase "the quoted $250 charge" (subject AFTER) redacts.
+      const isBare = barePrefix !== undefined;
+      const lead = isBare ? barePrefix : '';
+      const amountStart = offset + lead.length;
+      const clauseStart = Math.max(0, amountStart - 50);
+      const before = whole.slice(clauseStart, amountStart).split(/[.;!?\n]/).pop() || '';
       const after = (whole.slice(offset + match.length, offset + match.length + 40).split(/[.;!?\n]/)[0] || '');
       if (VALUE_SCRUB_STREET_AFTER.test(after)) return match;
+      if (isBare) {
+        if (VALUE_SCRUB_ID_BEFORE.test(before)) return match;
+        if (!VALUE_SCRUB_BARE_BEFORE.test(before) && !VALUE_SCRUB_BARE_AFTER.test(after)) return match;
+      }
       const feeContext = VALUE_SCRUB_FEE_CONTEXT.test(before + after);
       if (VALUE_SCRUB_SUBJECTS.test(before) && !feeContext) return match;
       if (VALUE_SCRUB_AFTER_SUBJECTS.test(after) && !feeContext) return match;
-      return '[fee removed]';
+      return `${lead}[fee removed]`;
     });
   }
   return str;

@@ -162,6 +162,30 @@ describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
     expect(redactSpecificAmounts('0 live termites observed in 0 areas.', ['0']))
       .toBe('0 live termites observed in 0 areas.');
   });
+  test('a BARE number needs positive money evidence — identifiers and quantities survive', () => {
+    // identifier noun directly before = a unit/document number, never the fee
+    expect(redactSpecificAmounts('Condo Unit 250 inspected for WDO activity.', ['250']))
+      .toBe('Condo Unit 250 inspected for WDO activity.');
+    // quantity units are fenced in the regex itself
+    expect(redactSpecificAmounts('Applied 250 gallons during the WDO treatment.', ['250']))
+      .toBe('Applied 250 gallons during the WDO treatment.');
+    // a value introducer directly before is evidence — the paraphrase redacts
+    expect(redactSpecificAmounts('The fee was 250 for this visit.', ['250']))
+      .toBe('The fee was [fee removed] for this visit.');
+    // a money word directly after is evidence too
+    expect(redactSpecificAmounts('250 due at closing.', ['250']))
+      .toBe('[fee removed] due at closing.');
+    // no adjacency evidence at all = not the fee
+    expect(redactSpecificAmounts('Serviced 250 this quarter.', ['250']))
+      .toBe('Serviced 250 this quarter.');
+  });
+  test('the shared package contains no lookbehind — it must construct on every supported browser', () => {
+    // the admin preview constructs these regexes in the browser; lookbehind
+    // throws a SyntaxError at construction on Safari < 16.4 (codex #2817)
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('@waves/report-redaction'), 'utf8');
+    expect(src).not.toMatch(/\(\?<[!=]/);
+  });
 });
 
 describe('redactProjectTitleForWrite', () => {
