@@ -1653,4 +1653,41 @@ router.post('/voice-profiles/:id/review', requireAdmin, async (req, res, next) =
   }
 });
 
+// GET /pathology — the failure ledger: (surface × failure mode) cell counts
+// (all-time + current drafter version), recent classified entries, and
+// pending/accepted patch proposals. Read-only.
+router.get('/pathology', async (req, res, next) => {
+  try {
+    const ledger = require('../services/sms-pathology-ledger');
+    const summary = await ledger.getPathologySummary();
+    res.json({
+      generatedAt: new Date().toISOString(),
+      gateEnabled: require('../config/feature-gates').isEnabled('smsPathologyLedger'),
+      ...summary,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /pathology/proposals/:id/review — accept/dismiss a PENDING patch
+// proposal. Accepting records the owner's go-ahead only — the actual
+// prompt/facts change still ships as a human-authored PROMPT_VERSION bump.
+// requireAdmin: this is the review surface for changes to generation.
+router.post('/pathology/proposals/:id/review', requireAdmin, async (req, res, next) => {
+  try {
+    const ledger = require('../services/sms-pathology-ledger');
+    const result = await ledger.reviewPatchProposal({
+      id: req.params.id,
+      action: String(req.body?.action || '').trim(),
+      reviewedBy: actorName(req),
+      adminUserId: req.technicianId || null,
+    });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ status: result.status });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
