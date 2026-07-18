@@ -285,7 +285,7 @@ router.get('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
             ? `You picked <strong>${escapeHtml(pick)}</strong>. Tap confirm and it's counted.`
             : 'Tap confirm and your feedback is counted.'}</p>
           <form method="POST" action="${formAction}">
-            <button type="submit" class="btn">Confirm${pick ? ` — ${escapeHtml(pick)}` : ''}</button>
+            <button type="submit" class="btn">Confirm${reaction ? ` — ${escapeHtml(reaction.label)}` : ''}</button>
           </form>
           <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>`;
     }

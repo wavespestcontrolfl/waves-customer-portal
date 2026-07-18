@@ -320,8 +320,13 @@ function socialRowHtml() {
 function glassFinePrint(T, extra = '') {
   // Balanced, centered stack: business+address / site·email·phone /
   // license — then socials and the logo (owner footer spec 07-06).
+  // Every fine-print item stacks on its own line (owner calls 2026-07-17:
+  // on mobile the address sits BELOW the LLC line and website/email/phone
+  // read vertically; email clients can't be trusted with media queries,
+  // so the stack applies everywhere — centered, it reads intentional on
+  // desktop too).
   return `${extra}<div style="font-family:${T.font};font-size:14px;letter-spacing:0.01em;color:${T.muted};line-height:1.65;text-align:center;">
-            ${WAVES_BUSINESS_NAME} · ${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a> · <a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:none;">contact@wavespestcontrol.com</a> · <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a><br/>${WAVES_FL_LICENSE_LINE}
+            ${WAVES_BUSINESS_NAME}<br/>${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a><br/><a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:none;">contact@wavespestcontrol.com</a><br/><a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a><br/>${WAVES_FL_LICENSE_LINE}
           </div>
           ${socialRowHtml()}
           <div style="margin:12px 0 0 0;text-align:center;"><img src="${GLASS_LOGO_IMG}" alt="${WAVES_BUSINESS_NAME}" width="44" height="44" style="width:44px;height:44px;border:0;" /></div>`;

@@ -112,7 +112,7 @@ function renderFeedbackHtml({ token } = {}) {
   // bars the report action bar and glass landing pages use. Label stays on
   // the legacy navy like [data-glass-accent] pins.
   const buttons = REACTIONS.map((r) => `<td style="padding:5px;">
-<a href="${esc(feedbackReactionUrl(token, r.key))}" style="display:block;background:#F5B520;background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%);border:1px solid #FFEEB4;color:#1B2C5B;text-decoration:none;border-radius:10px;padding:12px 8px;font-weight:800;font-size:15px;text-align:center;font-family:Inter,Arial,sans-serif;white-space:nowrap;">${esc(`${r.emoji} ${r.label}`)}</a>
+<a href="${esc(feedbackReactionUrl(token, r.key))}" style="display:block;background:#F5B520;background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%);border:1px solid #FFEEB4;color:#1B2C5B;text-decoration:none;border-radius:10px;padding:12px 8px;font-weight:800;font-size:15px;text-align:center;font-family:Inter,Arial,sans-serif;white-space:nowrap;">${esc(r.label)}</a>
 </td>`).join('');
 
   return `<div style="margin:24px 0 0 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;">
@@ -134,8 +134,10 @@ function renderFeedbackText({ token } = {}) {
 // No-recipient renders (public archive, RSS, preview/test send). No per-
 // recipient token exists, so the reactions are inert text — never dead links.
 function renderFeedbackNeutralHtml() {
+  // Chips mirror the live buttons — label only (owner call 2026-07-17:
+  // no emojis ON the buttons; the question line and text part keep them).
   const chips = REACTIONS.map((r) =>
-    `<span style="display:inline-block;margin:4px;padding:9px 14px;background:#ffffff;border:1px solid ${C.rule};border-radius:8px;font-size:14px;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(`${r.emoji} ${r.label}`)}</span>`,
+    `<span style="display:inline-block;margin:4px;padding:9px 14px;background:#ffffff;border:1px solid ${C.rule};border-radius:8px;font-size:14px;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(r.label)}</span>`,
   ).join('');
   return `<div style="margin:24px 0 0 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;text-align:center;">
 <p style="margin:0 0 12px 0;font-size:17px;font-weight:800;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(FEEDBACK_QUESTION)}</p>

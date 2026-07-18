@@ -50,10 +50,14 @@ describe('feedback rendering', () => {
     expect(html).toContain(QUESTION_ESCAPED);
     for (const r of REACTIONS) {
       expect(html).toContain(`/api/public/newsletter/feedback/${TOKEN}/${r.key}`);
-      expect(html).toContain(`${r.emoji} ${r.label}`);
+      // Buttons are label-only (owner call 2026-07-17: no emojis on the
+      // buttons); emojis stay in the plain-text part.
+      expect(html).toContain(`>${r.label}</a>`);
+      expect(html).not.toContain(r.emoji);
     }
     const text = renderFeedbackText({ token: TOKEN });
     expect(text).toContain(`/api/public/newsletter/feedback/${TOKEN}/needs-work`);
+    expect(text).toContain('👎 Needs work');
   });
 
   test('missing or malformed token degrades to inert chips — never dead links', () => {
