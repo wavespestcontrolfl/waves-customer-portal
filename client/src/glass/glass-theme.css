@@ -426,7 +426,10 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
      EVERY glass-theme element uniformly (owner 2026-07-18: same treatment
      on all customer-facing templates): cards, chips, gold accents, and
      themed buttons. Press feedback survives through the non-spatial
-     hover/active styles (shadow, background). */
+     hover/active styles (shadow, background). !important so page-local
+     softenings (e.g. the report stylesheet's own
+     .service-report-v1 [data-glass="card"]:hover 1px lift, which
+     out-specifies this block) can't reintroduce a lift on touch. */
   html[data-glass-theme] [data-glass="card"]:hover,
   html[data-glass-theme] [data-glass="card"]:active,
   html[data-glass-theme] [data-glass="chip"]:hover,
@@ -434,7 +437,7 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
   html[data-glass-theme] [data-glass-accent]:hover,
   html[data-glass-theme] [data-glass-accent]:active,
   html[data-glass-theme] button:not([data-glass]):not([data-glass-accent]):hover {
-    transform: none;
+    transform: none !important;
   }
 }
 
