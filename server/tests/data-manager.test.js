@@ -438,6 +438,56 @@ describe('conversion-lane marketing-consent suppression', () => {
     expect(event.userData).toBeUndefined();
   });
 
+  test('opt-out on a LINKED identifier suppresses the person even when a stale lead email won the pick', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['current@example.com'] }));
+    // mapCompletedJobCandidate collapses to leadEmail || customerEmail — the
+    // stale lead email wins the pick, but the customer's CURRENT email is the
+    // one that opted out. The person is opted out; nothing of theirs uploads.
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:S9',
+      email: 'stale-lead@example.com', phone: '+19415550100',
+      consentIdentifiers: [
+        { email: 'stale-lead@example.com', phone: '+19415550100' },
+        { email: 'current@example.com', phone: null },
+      ],
+    }]);
+    expect(cleaned).toMatchObject({ email: null, phone: null, consentSuppressed: true });
+  });
+
+  test('no linked identifier opted out → candidate untouched', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['someoneelse@example.com'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:S10',
+      email: 'lead@example.com', phone: '+19415550100',
+      consentIdentifiers: [
+        { email: 'lead@example.com', phone: '+19415550100' },
+        { email: 'customer@example.com', phone: null },
+      ],
+    }]);
+    expect(cleaned).toMatchObject({ email: 'lead@example.com', phone: '+19415550100' });
+    expect(cleaned.consentSuppressed).toBeUndefined();
+  });
+
+  test('a Meta-click-only sibling outranks a consent-stripped duplicate in the dedupe', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    const base = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S2',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
+    };
+    // Stripped row keeps value+timestamp+leadId points; the sibling has ONLY a
+    // Meta click key (never scored before this fix) — it must still win, for
+    // both the fbc and the weaker fbp variants.
+    for (const metaKeys of [{ fbc: 'fb.1.1.click-1' }, { fbp: 'fb.1.1.99' }]) {
+      const cleaned = await applyMarketingConsent('completed_job_revenue', [
+        { ...base, leadId: 'lead-1', email: 'optout@example.com', phone: '+19415550100' },
+        { ...base, email: null, phone: null, ...metaKeys },
+      ]);
+      const [winner] = dedupeCandidatesByTransaction(cleaned);
+      expect(winner.consentSuppressed).toBeUndefined();
+      expect(winner.fbc || winner.fbp).toBeTruthy();
+    }
+  });
+
   test('fails CLOSED — a suppression-load error propagates and aborts the run', async () => {
     mockLoadSuppression.mockRejectedValue(new Error('db unavailable'));
     await expect(applyMarketingConsent('completed_job_revenue', [{ transactionId: 't-5', email: 'a@b.com' }]))

@@ -313,6 +313,12 @@ function candidateMatchScore(candidate) {
   let score = 0;
   if (candidate.gclid) score += 8;
   if (candidate.wbraid || candidate.gbraid) score += 6;
+  // Meta click keys count too: candidates feed BOTH lanes, and a sibling
+  // carrying only fbc/fbclid (or the weaker fbp cookie) must outrank a
+  // consent-stripped row whose leftover value/leadId points would otherwise
+  // win the dedupe and cost CAPI its click-ID-only measurement path.
+  if (candidate.fbc || candidate.fbclid) score += 6;
+  if (candidate.fbp) score += 3;
   if (normalizeEmail(candidate.email)) score += 4;
   if (normalizePhone(candidate.phone)) score += 4;
   if (number(candidate.conversionValue) > 0) score += 2;
@@ -419,6 +425,15 @@ function mapCompletedJobCandidate(row) {
     fbp: row.fbp || null,
     email: leadEmail || customerEmail || null,
     phone: leadPhone || customerPhone || null,
+    // EVERY linked contact identifier, for person-level consent checks. The
+    // upload hashes only the collapsed email/phone pick above — but an
+    // opt-out on ANY linked identifier (e.g. the customer's current email
+    // when a stale lead email won the pick) opts the PERSON out, and the
+    // stale identifiers must not upload either. Never uploaded itself.
+    consentIdentifiers: [
+      { email: leadEmail, phone: leadPhone },
+      { email: customerEmail, phone: customerPhone },
+    ],
     metadata: {
       invoiceStatus: row.invoice_status || null,
       serviceLine: row.service_line || null,
@@ -555,8 +570,15 @@ async function applyMarketingConsent(conversionType, candidates) {
   const sup = await loadMarketingSuppression();
   let suppressed = 0;
   let strippedPhones = 0;
+  // Person-level check: the collapsed email/phone pick PLUS every linked
+  // identifier the mapper carried (consentIdentifiers) — an opt-out on the
+  // customer's current email opts the person out even when a stale lead
+  // email won the collapsed pick.
+  const personSuppressed = (candidate) => sup.isSuppressed(candidate)
+    || (Array.isArray(candidate.consentIdentifiers)
+      && candidate.consentIdentifiers.some((id) => sup.isSuppressed(id)));
   const cleaned = candidates.map((candidate) => {
-    if (sup.isSuppressed(candidate)) {
+    if (personSuppressed(candidate)) {
       suppressed += 1;
       return { ...candidate, email: null, phone: null, consentSuppressed: true };
     }
