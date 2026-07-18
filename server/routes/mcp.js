@@ -237,6 +237,9 @@ router.post('/', mcpAuth, async (req, res) => {
   const body = req.body;
   try {
     if (Array.isArray(body)) {
+      if (body.length === 0) {
+        return res.status(200).json(rpcError(null, -32600, 'empty batch'));
+      }
       if (body.length > MAX_BATCH) {
         return res.status(200).json(rpcError(null, -32600, `batch too large (max ${MAX_BATCH})`));
       }

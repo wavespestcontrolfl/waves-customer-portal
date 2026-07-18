@@ -189,6 +189,10 @@ describe('JSON-RPC plumbing', () => {
     const capped = await rpc(big);
     expect(capped.body.error.code).toBe(-32600);
     expect(capped.body.error.message).toMatch(/batch too large/);
+
+    const empty = await rpc([]);
+    expect(empty.status).toBe(200);
+    expect(empty.body.error.code).toBe(-32600); // spec: empty batch is Invalid Request, not a notification
   });
 });
 
