@@ -3,7 +3,13 @@ const logger = require('./logger');
 const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact, getServiceContact } = require('./customer-contact');
-const { getProjectType, redactInspectionFeeCuesForType } = require('./project-types');
+const {
+  getProjectType,
+  redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeHasInternalFindingKeys,
+} = require('./project-types');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { invoiceAmountDue } = require('./invoice-helpers');
@@ -104,11 +110,16 @@ function projectTypeLabel(project = {}) {
 
 function projectTitle(project = {}) {
   const title = clean(project.title);
-  // same type-gated fee scrub as the report headline and document list — a
-  // legacy/deploy-window title must not ride the customer/third-party
-  // emails raw (codex #2817)
-  if (title) return redactInspectionFeeCuesForType(title, project.project_type);
-  return projectTypeLabel(project);
+  if (!title) return projectTypeLabel(project);
+  // same type-gated cue+value scrub as the public /data headline — a
+  // legacy/deploy-window title can carry the fee literally or as a bare
+  // paraphrased amount, and it rides customer/third-party emails
+  // (codex #2817)
+  let safe = redactInspectionFeeCuesForType(title, project.project_type);
+  if (projectTypeHasInternalFindingKeys(project.project_type)) {
+    safe = redactSpecificAmounts(safe, projectRecordedFeeValues(project));
+  }
+  return safe;
 }
 
 function resolveProjectEmailRecipient(customer = {}) {

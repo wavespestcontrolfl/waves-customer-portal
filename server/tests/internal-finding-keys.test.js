@@ -87,6 +87,17 @@ describe('free-text gating and default fee', () => {
   test('a blank fee falls back to the flat WDO default for the value pass', () => {
     expect(projectRecordedFeeValues({ findings: {} })).toEqual([WDO_DEFAULT_INSPECTION_FEE]);
     expect(projectRecordedFeeValues({ findings: { inspection_fee: '175' } })).toEqual(['175']);
+    // digit-free entries ('', 'waived') bill at the default and must not
+    // suppress it; an explicit '0' wins (and the scrubber skips zero)
+    expect(projectRecordedFeeValues({ findings: { inspection_fee: '' } })).toEqual([WDO_DEFAULT_INSPECTION_FEE]);
+    expect(projectRecordedFeeValues({ findings: { inspection_fee: 'waived' } })).toEqual([WDO_DEFAULT_INSPECTION_FEE]);
+    expect(projectRecordedFeeValues({ findings: { inspection_fee: '0' } })).toEqual(['0']);
+  });
+  test('street addresses survive the value pass absolutely', () => {
+    expect(redactSpecificAmounts('250 Main St WDO inspection scheduled.', ['250']))
+      .toBe('250 Main St WDO inspection scheduled.');
+    expect(redactSpecificAmounts('Property at 250 Oakwood Drive inspected.', ['250']))
+      .toBe('Property at 250 Oakwood Drive inspected.');
   });
 });
 

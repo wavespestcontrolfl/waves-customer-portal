@@ -288,6 +288,27 @@ function containsInspectionFeeCue(text) {
 // when it numerically equals the fee, so a coincidental match never
 // corrupts legitimate customer text. Regexes are built at call time — this
 // path runs server-side only, never in the browser bundle.
+// The flat WDO inspection fee that bills when the field is left blank
+// (owner decision 2026-07-12). Lives HERE so billing (WDO_FEE_TIERS),
+// server redaction, and the client preview all share one number.
+const WDO_DEFAULT_INSPECTION_FEE = 250;
+
+// Normalize recorded fee values for the value scrub: digit-free entries
+// ('', 'waived') can't be scrub targets but still BILL at the flat default,
+// so they must not suppress it. An explicit numeric entry (including '0')
+// always wins — redactSpecificAmounts itself skips zero.
+function resolveFeeValuesForScrub(values) {
+  const usable = (values || []).filter((v) => /\d/.test(String(v == null ? '' : v)));
+  if (!usable.length) usable.push(WDO_DEFAULT_INSPECTION_FEE);
+  return usable;
+}
+
+// An amount directly followed by a street suffix is an ADDRESS — "250 Main
+// St WDO inspection" must survive even though "WDO" appears nearby, so this
+// check is absolute (it outranks the fee-context override).
+const VALUE_SCRUB_STREET_AFTER =
+  /^\s*(?:[\w\-]+\s+){0,3}?(?:Street|St|Avenue|Ave|Road|Rd|Lane|Ln|Boulevard|Blvd|Drive|Dr|Court|Ct|Way|Place|Pl|Terrace|Ter|Circle|Cir|Trail|Trl|Parkway|Pkwy)\b/i;
+
 const VALUE_SCRUB_SUBJECTS =
   /\b(?:repairs?|re-?treatments?|treatments?|permits?|damages?|estimates?|deductibles?|discounts?|credits?|balance|totals?|subtotal|prices?|costs?|charges?|values?|purchase|escrow|deposits?)\b/i;
 // Amount-FIRST subjects: "A $250 repair was completed" names its subject
@@ -336,7 +357,8 @@ function redactSpecificAmounts(text, values) {
       // the fee paraphrase "the quoted $250 charge" (subject AFTER) redacts.
       const clauseStart = Math.max(0, offset - 50);
       const before = whole.slice(clauseStart, offset).split(/[.;!?\n]/).pop() || '';
-      const after = (whole.slice(offset + match.length, offset + match.length + 30).split(/[.;!?\n]/)[0] || '');
+      const after = (whole.slice(offset + match.length, offset + match.length + 40).split(/[.;!?\n]/)[0] || '');
+      if (VALUE_SCRUB_STREET_AFTER.test(after)) return match;
       const feeContext = VALUE_SCRUB_FEE_CONTEXT.test(before + after);
       if (VALUE_SCRUB_SUBJECTS.test(before) && !feeContext) return match;
       if (VALUE_SCRUB_AFTER_SUBJECTS.test(after) && !feeContext) return match;
@@ -351,4 +373,6 @@ module.exports = {
   redactInspectionFeeCues,
   containsInspectionFeeCue,
   redactSpecificAmounts,
+  resolveFeeValuesForScrub,
+  WDO_DEFAULT_INSPECTION_FEE,
 };

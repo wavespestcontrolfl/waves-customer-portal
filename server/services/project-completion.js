@@ -239,6 +239,13 @@ function projectCompletionNotes({ project, profile, portalAttached, reportPath }
     projectCompletion: true,
     projectId: project.id,
     projectType: project.project_type,
+    // Stamped so every later egress of the copied notes (service history,
+    // invoice snapshots, service-report PDFs) can run the VALUE-based fee
+    // scrub without refetching the project (codex #2817). Fee-carrying
+    // types only.
+    ...(projectTypeHasInternalFindingKeys(project.project_type)
+      ? { feeValues: projectRecordedFeeValues(project) }
+      : {}),
     projectTitle: project.title || null,
     completionMode: profile.completionMode || null,
     portalVisibility: profile.portalVisibility || null,

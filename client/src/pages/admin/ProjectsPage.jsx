@@ -8,7 +8,12 @@ import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
-import { INTERNAL_FINDING_KEYS, redactInspectionFeeCues } from "../../lib/wdoReportFields";
+import {
+  INTERNAL_FINDING_KEYS,
+  redactInspectionFeeCues,
+  redactSpecificAmounts,
+  resolveFeeValuesForScrub,
+} from "../../lib/wdoReportFields";
 import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
@@ -883,9 +888,34 @@ function CustomerProjectReportPreview({
   // narrative with a baked-in fee must look redacted here too, or staff
   // approve text the customer never sees (codex #2817). Type-gated to WDO,
   // the only type carrying the internal fee field.
+  // Cue + recorded-value passes, matching the server /data serializer — the
+  // fee values come from the live edit state (findings.inspection_fee),
+  // falling back to the shared flat default when blank, so staff approve
+  // exactly what the customer's token serves (codex #2817).
+  const previewFeeValues = project.project_type === WDO_TYPE
+    ? resolveFeeValuesForScrub(findings?.inspection_fee != null ? [findings.inspection_fee] : [])
+    : [];
   const feeRedact = project.project_type === WDO_TYPE
+    ? (text) => (typeof text === "string"
+      ? redactSpecificAmounts(redactInspectionFeeCues(text), previewFeeValues)
+      : text)
+    : (text) => text;
+  // Cue-only variant for STRUCTURED finding fields — the server limits the
+  // value pass to free-prose (textarea) keys so "175 Main Street" with a
+  // $175 fee is never corrupted; the preview must match.
+  const feeRedactCueOnly = project.project_type === WDO_TYPE
     ? (text) => (typeof text === "string" ? redactInspectionFeeCues(text) : text)
     : (text) => text;
+  const previewFreeTextKeys = (() => {
+    const acc = new Set();
+    const walk = (fields) => (fields || []).forEach((f) => {
+      if (f.type === "textarea" && f.key) acc.add(f.key);
+      if (f.fields) walk(f.fields);
+    });
+    walk(typeCfg?.findingsFields);
+    walk(typeCfg?.fields);
+    return acc;
+  })();
   const customerRecommendations = recommendations
     ? feeRedact(String(recommendations))
     : recommendations;
@@ -1032,7 +1062,7 @@ function CustomerProjectReportPreview({
                       {projectFieldLabel(typeCfg, key)}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      {feeRedact(formatProjectPreviewValue(value))}
+                      {(previewFreeTextKeys.has(key) ? feeRedact : feeRedactCueOnly)(formatProjectPreviewValue(value))}
                     </div>
                   </div>
                 ))}
@@ -1069,7 +1099,7 @@ function CustomerProjectReportPreview({
                       {label}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      {feeRedact(formatProjectPreviewValue(value))}
+                      {feeRedactCueOnly(formatProjectPreviewValue(value))}
                     </div>
                   </div>
                 ))}

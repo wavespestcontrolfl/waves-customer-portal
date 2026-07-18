@@ -11,7 +11,9 @@
 import {
   INTERNAL_FINDING_KEYS as INTERNAL_FINDING_KEY_LIST,
   redactInspectionFeeCues,
+  redactSpecificAmounts,
+  resolveFeeValuesForScrub,
 } from "@waves/report-redaction";
 
 export const INTERNAL_FINDING_KEYS = new Set(INTERNAL_FINDING_KEY_LIST);
-export { redactInspectionFeeCues };
+export { redactInspectionFeeCues, redactSpecificAmounts, resolveFeeValuesForScrub };

@@ -1019,6 +1019,8 @@ const {
   redactInspectionFeeCues,
   containsInspectionFeeCue,
   redactSpecificAmounts,
+  resolveFeeValuesForScrub,
+  WDO_DEFAULT_INSPECTION_FEE,
 } = require('@waves/report-redaction');
 
 // Whether a project type's form carries any internal finding key (today:
@@ -1062,12 +1064,6 @@ function redactProjectTitleForWrite(title, projectTypeKey) {
 // may only survive there). Feeds the VALUE-based scrub at egress and in the
 // backfill so paraphrased fees ("the quoted $250 charge") are caught without
 // the literal cue (codex #2817).
-// A blank WDO fee still bills at the flat default (owner decision
-// 2026-07-12) — the value scrub must cover that amount too, or a
-// paraphrased "$250 charge" passes through whenever the field was left
-// empty. admin-projects' WDO_FEE_TIERS imports this same constant.
-const WDO_DEFAULT_INSPECTION_FEE = 250;
-
 function projectRecordedFeeValues(project) {
   const values = [];
   const parse = (v) => {
@@ -1086,9 +1082,9 @@ function projectRecordedFeeValues(project) {
       }
     }
   }
-  // Blank fee = the flat default still bills (and can be paraphrased).
-  if (!values.length) values.push(WDO_DEFAULT_INSPECTION_FEE);
-  return values;
+  // Digit-free entries ('', 'waived') can't be scrub targets but still BILL
+  // at the flat default — they must not suppress it (codex #2817).
+  return resolveFeeValuesForScrub(values);
 }
 
 // Deep cue detection over a findings object (or JSON string of one).
@@ -1133,9 +1129,16 @@ function customerSafeServiceNotes(notes, structuredNotes) {
   let parsed = structuredNotes;
   if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { parsed = null; } }
   const type = parsed?.projectType;
-  return (type && projectTypeHasInternalFindingKeys(type))
-    ? redactInspectionFeeCues(notes)
-    : notes;
+  if (!type || !projectTypeHasInternalFindingKeys(type)) return notes;
+  // Cue + value passes: a CAS-skipped/restored legacy row can paraphrase
+  // the fee without the literal cue. Fee values are stamped into
+  // structured_notes at completion time; older rows fall back to the flat
+  // default (their true values were covered by the backfill migration).
+  let safe = redactInspectionFeeCues(notes);
+  const feeValues = resolveFeeValuesForScrub(
+    Array.isArray(parsed?.feeValues) ? parsed.feeValues : [],
+  );
+  return redactSpecificAmounts(safe, feeValues);
 }
 
 // Finding VALUES need the fee scrub too, not just the dedicated internal key
@@ -1234,6 +1237,7 @@ module.exports = {
   redactInspectionFeeCues,
   containsInspectionFeeCue,
   redactSpecificAmounts,
+  resolveFeeValuesForScrub,
   projectRecordedFeeValues,
   findingsContainFeeCue,
   filingBinaryMayDiscloseFee,
