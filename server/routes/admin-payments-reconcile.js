@@ -132,6 +132,19 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       if (chargeDetails.status !== 'succeeded') {
         return res.status(400).json({ error: `Charge is ${chargeDetails.status}, not succeeded` });
       }
+      // Refunded/disputed money isn't collectible — and Stripe keeps
+      // status 'succeeded' on refunded charges, so the check above doesn't
+      // catch them. Partial refunds are equally unreconcilable: this route
+      // books a FLAT collected amount, which would overstate what was kept.
+      if (chargeDetails.refunded || Number(chargeDetails.amount_refunded) > 0 || chargeDetails.disputed) {
+        return res.status(400).json({ error: 'Charge has been refunded or disputed — it cannot be reconciled against an invoice' });
+      }
+      // The amount agreement below compares bare numbers (charge minor units
+      // vs invoice USD); a same-value foreign-currency charge would pass it
+      // while settling for very different money.
+      if (String(chargeDetails.currency || '').toLowerCase() !== 'usd') {
+        return res.status(400).json({ error: `Charge currency is ${String(chargeDetails.currency || 'unknown').toUpperCase()} — only USD charges can be reconciled` });
+      }
 
       // Amount agreement, keyed on the amount DUE (total − applied account credit),
       // not the gross total. This route records a FLAT collected amount; it does NOT
@@ -279,6 +292,24 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
           source: 'admin_payment_reconcile',
         }),
       });
+
+      // CRITICAL audit row — money flows through this endpoint and a missing
+      // row makes a "charged but unpaid" reconciliation drift impossible to
+      // trace later. Written INSIDE the transaction: an audit failure rolls
+      // the whole reconcile back, instead of 500ing a request whose invoice
+      // was already flipped paid (state change hidden behind an error).
+      await auditPaymentReconcile({
+        tech_user_id: req.technicianId || null,
+        invoice_id: invoiceId,
+        invoice_number: invoice.invoice_number,
+        collected_via: collectedVia,
+        stripe_charge_id: stripeChargeId || null,
+        amount: collectedAmount,
+        ip_address: ipFromReq(req),
+        user_agent: uaFromReq(req),
+        trx,
+      });
+
       return { updated: rows };
     });
     if (txResult.conflict) {
@@ -299,22 +330,6 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     }
 
     logger.info(`[reconcile] invoice ${invoice.invoice_number} marked paid via ${collectedVia}${stripeChargeId ? ` (${stripeChargeId})` : ''}`);
-
-    // CRITICAL audit row — money flows through this endpoint and a missing
-    // row makes a "charged but unpaid" reconciliation drift impossible to
-    // trace later. await + let errors bubble (the route's existing try/catch
-    // surfaces them); we'd rather 500 the request than silently lose the
-    // audit trail.
-    await auditPaymentReconcile({
-      tech_user_id: req.technicianId || null,
-      invoice_id: invoiceId,
-      invoice_number: invoice.invoice_number,
-      collected_via: collectedVia,
-      stripe_charge_id: stripeChargeId || null,
-      amount: collectedAmount,
-      ip_address: ipFromReq(req),
-      user_agent: uaFromReq(req),
-    });
 
     const refreshed = await db('invoices').where({ id: invoiceId }).first();
     res.json({ success: true, invoice: refreshed, stripe_charge: chargeDetails ? {

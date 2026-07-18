@@ -30,6 +30,38 @@ const {
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// ─── Technician scoping ─────────────────────────────────────────────────────
+// requireTechOrAdmin admits technician tokens, but a tech must not be able to
+// browse arbitrary customers' profiles, payment methods, or CRM state — a
+// field token grants access only to the customers whose visits are assigned
+// to that tech. Admin requests are unscoped. Endpoints with no tech surface
+// at all (comms, timeline, credits, pipeline, CRM writes) are requireAdmin
+// outright.
+async function technicianServicesCustomer(req, customerId) {
+  if (req.techRole !== 'technician') return true;
+  const assigned = await db('scheduled_services')
+    .where({ customer_id: customerId, technician_id: req.technicianId })
+    .first('id');
+  return !!assigned;
+}
+
+// Fields stripped from list rows for technician tokens. The field flows
+// that search customers (estimate builder, project-report picker) render
+// identity, contact, address, and service context — not account financials
+// or CRM/marketing state.
+const TECH_LIST_STRIPPED_FIELDS = [
+  'lifetimeRevenue', 'balanceOwed', 'cardsOnFile', 'healthScore',
+  'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
+  'landingPageUrl', 'lastContactDate', 'lastContactType', 'nextFollowUp',
+  'lastRating', 'tags',
+];
+
+function techSafeListRow(mapped) {
+  const out = { ...mapped };
+  for (const field of TECH_LIST_STRIPPED_FIELDS) delete out[field];
+  return out;
+}
+
 function dateOnlyForApi(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -1296,7 +1328,22 @@ router.get('/', async (req, res, next) => {
 
     const filters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited };
     const healthScoreSelect = latestHealthScoreRaw(await getHealthScoreColumns());
-    let query = applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters).select(
+
+    // Technician tokens must not be able to enumerate the customer base:
+    // the directory (list + count) is limited to customers with a visit
+    // assigned to the requesting tech, and rows are trimmed below
+    // (techSafeListRow). Admin requests are unscoped.
+    const isTechRequest = req.techRole === 'technician';
+    const scopeTechAssigned = (q) => {
+      if (isTechRequest) {
+        q.whereIn('customers.id', db('scheduled_services')
+          .select('customer_id')
+          .where('technician_id', req.technicianId));
+      }
+      return q;
+    };
+
+    let query = scopeTechAssigned(applyCustomerListFilters(db('customers').whereNull('customers.deleted_at'), filters)).select(
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
@@ -1331,10 +1378,10 @@ router.get('/', async (req, res, next) => {
       query = query.orderBy(sortCol, dir);
     }
 
-    const total = await applyCustomerListFilters(
+    const total = await scopeTechAssigned(applyCustomerListFilters(
       db('customers').whereNull('customers.deleted_at'),
       filters
-    ).count('* as count').first();
+    )).count('* as count').first();
     const totalCount = parseInt(total?.count || 0);
     const offset = (page - 1) * limit;
     const customers = await query.limit(limit).offset(offset);
@@ -1349,14 +1396,18 @@ router.get('/', async (req, res, next) => {
     const allSources = await db('customers').whereNull('deleted_at').select('lead_source').whereNotNull('lead_source').groupBy('lead_source');
     const allAreas = await db('customers').whereNull('deleted_at').select('city').whereNotNull('city').where('city', '!=', '').groupBy('city').orderBy('city');
 
+    // Technician tokens get trimmed rows (no financial/CRM fields) and no
+    // pipeline/marketing aggregates — same response shape so the shared
+    // search UIs keep working.
+    const mappedRows = customers.map(mapCustomerListRow);
     res.json({
-      customers: customers.map(mapCustomerListRow),
+      customers: isTechRequest ? mappedRows.map(techSafeListRow) : mappedRows,
       total: totalCount, page, limit,
       totalPages: Math.max(1, Math.ceil(totalCount / limit)),
-      pipelineCounts: pipelineMap,
+      pipelineCounts: isTechRequest ? {} : pipelineMap,
       filters: {
-        tags: allTags.map(t => t.tag),
-        sources: allSources.map(s => s.lead_source).filter(Boolean),
+        tags: isTechRequest ? [] : allTags.map(t => t.tag),
+        sources: isTechRequest ? [] : allSources.map(s => s.lead_source).filter(Boolean),
         areas: allAreas.map(a => a.city).filter(Boolean),
       },
     });
@@ -1364,7 +1415,7 @@ router.get('/', async (req, res, next) => {
 });
 
 // GET /api/admin/customers/pipeline — kanban view
-router.get('/pipeline/view', async (req, res, next) => {
+router.get('/pipeline/view', requireAdmin, async (req, res, next) => {
   try {
     const limitPerStage = Math.min(500, Math.max(1, parseInt(req.query.limitPerStage) || 100));
     const result = {};
@@ -1405,6 +1456,11 @@ router.get('/pipeline/view', async (req, res, next) => {
 // services, etc.) every time the tech opens the payment sheet.
 router.get('/:id/cards', async (req, res, next) => {
   try {
+    // Payment methods stay visible to the tech checkout/project flows, but
+    // only for customers with a visit assigned to this tech.
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const cards = await db('payment_methods')
       .where({ customer_id: req.params.id })
       .orderBy('is_default', 'desc')
@@ -1428,6 +1484,9 @@ router.get('/:id/cards', async (req, res, next) => {
 // Lazily backfills a primary property for customers created after the migration.
 router.get('/:id/properties', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
@@ -1500,7 +1559,7 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
 });
 
 // GET /api/admin/customers/:id/timeline — unified customer timeline
-router.get('/:id/timeline', async (req, res, next) => {
+router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
   try {
     const customerId = req.params.id;
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
@@ -1620,7 +1679,7 @@ router.get('/:id/timeline', async (req, res, next) => {
 // GET /api/admin/customers/:id/comms — unified per-customer SMS + voice
 // thread (PR 3 of comms unification). Replaces the SMS-only feed that
 // fed the Comms tab from `data.smsLog`. Email lands in PR 5.
-router.get('/:id/comms', async (req, res, next) => {
+router.get('/:id/comms', requireAdmin, async (req, res, next) => {
   try {
     const customerId = req.params.id;
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
@@ -1686,6 +1745,9 @@ router.get('/:id/comms', async (req, res, next) => {
 // we can match the quoted line to a schedulable service.
 router.get('/:id/schedule-estimates', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const customer = await db('customers')
       .where({ id: req.params.id })
       .whereNull('deleted_at')
@@ -1829,6 +1891,9 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
 // which pulls 16 parallel tables; this endpoint is the 4 we actually need.
 router.get('/:id/estimates-summary', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const customer = await db('customers')
       .where({ id: req.params.id })
       .whereNull('deleted_at')
@@ -1894,6 +1959,9 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
 
 router.get('/:id/latest-scheduled-service', async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const service = await db('scheduled_services')
       .where({ customer_id: req.params.id })
       .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'])
@@ -1915,6 +1983,12 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
 // GET /api/admin/customers/:id — full detail
 router.get('/:id', async (req, res, next) => {
   try {
+    // The 360 payload below includes billing history, stored payment
+    // methods, consents, and contracts — a technician token gets it only
+    // for customers whose visits are assigned to them.
+    if (!(await technicianServicesCustomer(req, req.params.id))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
     const c = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!c) return res.status(404).json({ error: 'Customer not found' });
 
@@ -2718,7 +2792,7 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
 });
 
 // PUT /api/admin/customers/:id/stage
-router.put('/:id/stage', async (req, res, next) => {
+router.put('/:id/stage', requireAdmin, async (req, res, next) => {
   try {
     const { stage, notes } = req.body;
     if (!isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
@@ -2768,7 +2842,7 @@ router.put('/:id/stage', async (req, res, next) => {
 });
 
 // POST /api/admin/customers/:id/tags
-router.post('/:id/tags', async (req, res, next) => {
+router.post('/:id/tags', requireAdmin, async (req, res, next) => {
   try {
     await db('customer_tags').insert({ customer_id: req.params.id, tag: req.body.tag }).onConflict(['customer_id', 'tag']).ignore();
     res.json({ success: true });
@@ -2776,7 +2850,7 @@ router.post('/:id/tags', async (req, res, next) => {
 });
 
 // DELETE /api/admin/customers/:id/tags/:tag
-router.delete('/:id/tags/:tag', async (req, res, next) => {
+router.delete('/:id/tags/:tag', requireAdmin, async (req, res, next) => {
   try {
     await db('customer_tags').where({ customer_id: req.params.id, tag: req.params.tag }).del();
     res.json({ success: true });
@@ -2784,7 +2858,7 @@ router.delete('/:id/tags/:tag', async (req, res, next) => {
 });
 
 // POST /api/admin/customers/:id/interactions
-router.post('/:id/interactions', async (req, res, next) => {
+router.post('/:id/interactions', requireAdmin, async (req, res, next) => {
   try {
     const { type, subject, body } = req.body;
     await db('customer_interactions').insert({
@@ -2797,7 +2871,7 @@ router.post('/:id/interactions', async (req, res, next) => {
 });
 
 // POST /api/admin/customers/:id/follow-up
-router.post('/:id/follow-up', async (req, res, next) => {
+router.post('/:id/follow-up', requireAdmin, async (req, res, next) => {
   try {
     await db('customers').where({ id: req.params.id }).update({
       next_follow_up_date: req.body.date, follow_up_notes: req.body.notes,
@@ -3488,7 +3562,7 @@ router.post('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
 });
 
 // GET /:id/credits — account credit balance + ledger history for Customer 360.
-router.get('/:id/credits', async (req, res, next) => {
+router.get('/:id/credits', requireAdmin, async (req, res, next) => {
   try {
     const customer = await db('customers').where({ id: req.params.id }).first('id');
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -3607,6 +3681,9 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  technicianServicesCustomer,
+  techSafeListRow,
+  TECH_LIST_STRIPPED_FIELDS,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,

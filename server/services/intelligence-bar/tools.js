@@ -121,13 +121,13 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'query_revenue',
-    description: 'Query revenue and billing data. Can filter by date range, customer, status.',
+    description: 'Query revenue and billing data. Can filter by date range, customer, status. customer_id must be a customer UUID (use query_customers to find it first), never a name.',
     input_schema: {
       type: 'object',
       properties: {
         date_from: { type: 'string' },
         date_to: { type: 'string' },
-        customer_id: { type: 'string' },
+        customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
         status: { type: 'string', enum: ['paid', 'sent', 'viewed', 'overdue', 'all'] },
         group_by: { type: 'string', enum: ['customer', 'month', 'service_type', 'none'] },
       },
@@ -678,8 +678,18 @@ async function getScheduleView(input) {
 }
 
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function queryRevenue(input) {
   const { date_from, date_to, customer_id, status, group_by } = input;
+
+  // customer_id lands in a uuid-column comparison: name-like input from the
+  // model throws a Postgres cast error and flags the tool DEGRADED in Tool
+  // Health. Return a typed error instead so the model recovers by resolving
+  // the customer first.
+  if (customer_id && !UUID_RE.test(String(customer_id))) {
+    return { error: `customer_id must be a customer UUID, got "${customer_id}". Use query_customers to look the customer up, then retry with their id.` };
+  }
 
   let query = db('invoices')
     .leftJoin('customers', 'invoices.customer_id', 'customers.id');
@@ -720,6 +730,10 @@ async function queryRevenue(input) {
     .modify(q => {
       if (date_from) q.where('created_at', '>=', date_from);
       if (date_to) q.where('created_at', '<=', date_to);
+      // Same customer scope as the invoice list above — without it a
+      // customer-specific answer pairs one customer's invoices with
+      // COMPANY-WIDE totals in the same response.
+      if (customer_id) q.where('customer_id', customer_id);
       if (status && status !== 'all') q.where('status', status);
     })
     .select(

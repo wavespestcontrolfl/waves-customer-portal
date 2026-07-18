@@ -299,6 +299,30 @@ router.post('/fix-service-types', devOnly, adminAuthenticate, requireAdmin, asyn
 // Everything below requires admin OR tech.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// ─── Technician job scoping ─────────────────────────────────────────────────
+// requireTechOrAdmin admits both staff roles, but the board payloads below
+// join each visit's customer contact info, address, and billing context, and
+// the per-visit money endpoints (prepaid, invoice mint) change billing state.
+// A technician token lives on a phone in the field — scope it to the tech's
+// OWN assigned jobs server-side instead of trusting the client filter
+// (TechHomePage) to hide the rest of the organization. Admin requests stay
+// unscoped.
+const isTechnicianRequest = (req) => req.techRole === 'technician';
+
+function scopeToAssignedTech(req, q) {
+  if (isTechnicianRequest(req)) {
+    q.where('scheduled_services.technician_id', req.technicianId);
+  }
+}
+
+// Ownership gate for per-visit endpoints. Callers 404 (not 403) on failure
+// so an unowned id doesn't confirm the row exists.
+async function technicianOwnsScheduledService(req, serviceId) {
+  if (!isTechnicianRequest(req)) return true;
+  const svc = await db('scheduled_services').where({ id: serviceId }).first('technician_id');
+  return !!svc && String(svc.technician_id) === String(req.technicianId);
+}
+
 // Legacy wrapper — kept for backwards compat in other code paths
 function sanitizeServiceType(serviceType) {
   return normalizeServiceType(serviceType);
@@ -1405,6 +1429,7 @@ router.get('/', async (req, res, next) => {
 
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })
+      .modify((q) => scopeToAssignedTech(req, q))
       // Exclude 'rescheduled' alongside 'cancelled': the customer-portal
       // reschedule request flow flips status to 'rescheduled' but leaves
       // the original scheduled_date / window in place until the office
@@ -1761,6 +1786,7 @@ router.get('/week', async (req, res, next) => {
 
       const services = await db('scheduled_services')
         .where({ scheduled_date: dateStr })
+        .modify((q) => scopeToAssignedTech(req, q))
         // See day endpoint for why 'rescheduled' is excluded.
         .whereNotIn('status', ['cancelled', 'rescheduled'])
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -2029,6 +2055,7 @@ router.get('/month', async (req, res, next) => {
         gridStart.toISOString().split('T')[0],
         gridEnd.toISOString().split('T')[0],
       ])
+      .modify((q) => scopeToAssignedTech(req, q))
       // See day endpoint for why 'rescheduled' is excluded.
       .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -3173,6 +3200,10 @@ router.get('/list', async (req, res, next) => {
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id');
 
+    // Technician tokens only ever see their own assigned jobs — this ANDs
+    // with (and therefore overrides) any techId query param.
+    scopeToAssignedTech(req, q);
+
     // Date range — default: today forward
     const dateFrom = from || etDateString();
     q = q.where('scheduled_services.scheduled_date', '>=', dateFrom);
@@ -3566,7 +3597,11 @@ async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) 
 }
 
 // PUT /api/admin/schedule/:id/update-details — edit service fields
-router.put('/:id/update-details', async (req, res, next) => {
+// requireAdmin: only dispatch/admin surfaces call this, and its inputs
+// (assignmentScope, recurrence config, spawnRecurringChildren, payer/pricing
+// fields) can propagate to recurring siblings and children — rows a per-visit
+// ownership check on :id alone cannot vouch for.
+router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
     const {
       serviceType, estimatedDuration, scheduledDate,
@@ -5039,10 +5074,21 @@ async function generatePrepaidReceiptForService(serviceId) {
 // working unchanged.
 router.post('/:id/prepaid', async (req, res, next) => {
   try {
+    // Ownership before money: a technician must not be able to stamp
+    // prepayments (or mint receipts) onto another tech's visits.
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     const { amount, method, note, applyToSeries, emailReceipt } = req.body;
     const amt = Number(amount);
     if (!Number.isFinite(amt) || amt < 0) {
       return res.status(400).json({ error: 'amount must be a non-negative number' });
+    }
+    // Series mode stamps EVERY non-completed sibling in the recurring
+    // family — rows that can be assigned to other technicians, which the
+    // anchor-only ownership check above cannot vouch for. Admin only.
+    if (applyToSeries && isTechnicianRequest(req)) {
+      return res.status(403).json({ error: 'Admin access required to apply a prepayment across a series' });
     }
     if (applyToSeries) {
       const result = await stampSeriesPrepaid(db, {
@@ -5101,7 +5147,15 @@ router.post('/:id/prepaid', async (req, res, next) => {
 // hunt down each prepaid visit individually if the customer asks for a refund.
 router.delete('/:id/prepaid', async (req, res, next) => {
   try {
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     if (req.query.series === '1' || req.query.series === 'true') {
+      // Same boundary as the series stamp: clearing crosses sibling visits
+      // that may belong to other technicians. Admin only.
+      if (isTechnicianRequest(req)) {
+        return res.status(403).json({ error: 'Admin access required to clear a series prepayment' });
+      }
       const anchor = await db('scheduled_services').where({ id: req.params.id }).first();
       if (!anchor) return res.status(404).json({ error: 'Scheduled service not found' });
       const parentId = resolveSeriesParentId(anchor);
@@ -5134,6 +5188,11 @@ router.delete('/:id/prepaid', async (req, res, next) => {
 // scheduled_service.
 router.post('/:id/invoice', async (req, res, next) => {
   try {
+    // Ownership before money: minting the visit's collectible invoice is a
+    // billing action — a technician can only do it for their own visits.
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select('scheduled_services.*',
@@ -5500,6 +5559,9 @@ router.post('/:id/invoice', async (req, res, next) => {
 // families so downstream reporting can read either shape.
 router.put('/:id/status', async (req, res, next) => {
   try {
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
     const { status: toStatus, notes, requestReview } = req.body;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -6096,7 +6158,9 @@ router.put('/:id/status', async (req, res, next) => {
 
 // POST /api/admin/schedule/optimize — route optimization v3 (Google Routes API)
 // Uses Google Routes API with traffic-aware optimization, falls back to nearest-neighbor.
-router.post('/optimize', async (req, res, next) => {
+// requireAdmin: reads the whole board and rewrites route_order across every
+// returned service — a dispatch function, not a field one.
+router.post('/optimize', requireAdmin, async (req, res, next) => {
   try {
     const RouteOptimizer = require('../services/route-optimizer');
     const { date, technicianId } = req.body;
@@ -6191,7 +6255,7 @@ router.post('/optimize', async (req, res, next) => {
 
 // POST /api/admin/schedule/optimize-route — single-tech route optimization
 // Optimizes only the specified technician's stops for a given date.
-router.post('/optimize-route', async (req, res, next) => {
+router.post('/optimize-route', requireAdmin, async (req, res, next) => {
   try {
     const RouteOptimizer = require('../services/route-optimizer');
     const { technicianId, date } = req.body;
@@ -6311,6 +6375,9 @@ function haversine(lat1, lng1, lat2, lng2) {
 // GET /api/admin/schedule/:id/wdo-brief
 router.get('/:id/wdo-brief', async (req, res, next) => {
   try {
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!svc.pre_service_brief) return res.json({ brief: null });
@@ -6321,6 +6388,9 @@ router.get('/:id/wdo-brief', async (req, res, next) => {
 // GET /api/admin/schedule/:id/estimate-source
 router.get('/:id/estimate-source', async (req, res, next) => {
   try {
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     const svc = await db('scheduled_services')
       .where({ 'scheduled_services.id': req.params.id })
       .first('source_estimate_id');
@@ -6398,6 +6468,9 @@ router.get('/:id/estimate-source', async (req, res, next) => {
 // POST /api/admin/schedule/:id/regenerate-brief
 router.post('/:id/regenerate-brief', async (req, res, next) => {
   try {
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     const AppointmentTagger = require('../services/appointment-tagger');
     await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
@@ -6480,6 +6553,16 @@ async function scheduleReviewRequest(svc) {
 router.get('/vehicle-location', async (req, res, next) => {
   try {
     const { serviceId, techId } = req.query || {};
+    // Live vehicle position is per-tech data: a technician can resolve it
+    // only through their own visits or their own techId.
+    if (isTechnicianRequest(req)) {
+      if (serviceId && !(await technicianOwnsScheduledService(req, serviceId))) {
+        return res.status(404).json({ error: 'Service not found' });
+      }
+      if (techId && String(techId) !== String(req.technicianId)) {
+        return res.status(403).json({ error: 'Technicians can only query their own vehicle location' });
+      }
+    }
     if (serviceId) {
       const row = await buildAssignedScheduleEtaQuery(db, serviceId);
       const location = formatAssignedVehicleLocation(row);
@@ -6510,6 +6593,9 @@ router.get('/vehicle-location', async (req, res, next) => {
 // GET /api/admin/schedule/eta/:serviceId — calculate assigned tech ETA to a service
 router.get('/eta/:serviceId', async (req, res, next) => {
   try {
+    if (!(await technicianOwnsScheduledService(req, req.params.serviceId))) {
+      return res.status(404).json({ error: 'Service not found' });
+    }
     const BouncieService = require('../services/bouncie');
     const eta = await calculateAssignedScheduleEta(req.params.serviceId, BouncieService);
     if (!eta.found && eta.reason === 'not_found') return res.status(404).json({ error: 'Service not found' });
@@ -6690,6 +6776,10 @@ router.post('/generate-report', async (req, res) => {
       customerInteraction, customerConcern, pestActivityRating, photoCount,
       includeCustomerComms,
     } = req.body;
+
+    if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
 
     const asArray = (v) => (Array.isArray(v) ? v.filter(Boolean).map((x) => String(x).trim()).filter(Boolean) : []);
     const areas = asArray(areasServiced);
@@ -7231,7 +7321,10 @@ router.get('/recurring-anomalies', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/recurring-alerts', async (req, res, next) => {
+// requireAdmin: office triage queue — joins customer identity across the
+// whole recurring book, and its actions (renew/cancel/switch) are office
+// decisions.
+router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
   try {
     const alerts = [];
 
@@ -7352,7 +7445,7 @@ router.get('/recurring-alerts', async (req, res, next) => {
 
 // POST /api/admin/schedule/recurring-alerts/:id/action
 // body: { action: 'extend' | 'convert_ongoing' | 'let_lapse', count?: number }
-router.post('/recurring-alerts/:id/action', async (req, res, next) => {
+router.post('/recurring-alerts/:id/action', requireAdmin, async (req, res, next) => {
   try {
     const { action, count, notes } = req.body;
     const idParam = String(req.params.id);
@@ -7631,6 +7724,14 @@ router.get('/next-visit', async (req, res, next) => {
   try {
     const customerId = req.query.customerId;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    // Technicians can only look up customers whose visits are assigned to
+    // them — same boundary as the admin-customers proxy.
+    if (isTechnicianRequest(req)) {
+      const assigned = await db('scheduled_services')
+        .where({ customer_id: customerId, technician_id: req.technicianId })
+        .first('id');
+      if (!assigned) return res.status(404).json({ error: 'Customer not found' });
+    }
     const today = etDateString();
     const row = await db('scheduled_services')
       .where({ customer_id: customerId })
@@ -7714,6 +7815,9 @@ function flushEstimateSlotCaches() {
 }
 
 router._test = {
+  isTechnicianRequest,
+  scopeToAssignedTech,
+  technicianOwnsScheduledService,
   buildAssignedScheduleEtaQuery,
   buildTechStatusQuery,
   compactCheckoutInvoiceLines,

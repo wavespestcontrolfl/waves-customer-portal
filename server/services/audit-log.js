@@ -158,6 +158,7 @@ async function auditTerminalHandoffValidate({ tech_user_id, invoice_id, jti, out
 async function auditPaymentReconcile({
   tech_user_id, invoice_id, invoice_number, collected_via,
   stripe_charge_id, amount, ip_address, user_agent,
+  trx = null,
 }) {
   return recordAuditEvent({
     actor_type: 'technician',
@@ -169,6 +170,7 @@ async function auditPaymentReconcile({
     ip_address,
     user_agent,
     critical: true,
+    trx,
   });
 }
 

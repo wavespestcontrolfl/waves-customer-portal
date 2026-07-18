@@ -2113,19 +2113,12 @@ router.delete('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/estimates/cleanup-demo — remove seed/demo estimates
-router.post('/cleanup-demo', async (req, res, next) => {
-  try {
-    const demoNames = ['James Kowalski', 'Karen White', 'Robert Niles', 'Linda Chen', 'Tom Perez', 'Susan Park', 'Dave Richardson', 'Maria Santos'];
-    let deleted = 0;
-    for (const name of demoNames) {
-      const count = await db('estimates').where('customer_name', name).del();
-      deleted += count;
-    }
-    logger.info(`[estimates] Cleaned up ${deleted} demo estimates`);
-    res.json({ success: true, deleted });
-  } catch (err) { next(err); }
-});
+// The old POST /cleanup-demo endpoint (bulk-delete estimates matching a
+// hardcoded list of seed customer names) is intentionally GONE: it was live
+// in production, reachable by any staff token, and deleted by name match
+// alone — a real customer sharing a seed name would lose sent/accepted
+// estimates permanently. One-off seed cleanup belongs in ops/agents/ scripts,
+// not a standing route.
 
 router._internals = {
   clearQuoteRequirementFlags,
