@@ -404,37 +404,49 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
     opacity 0.6s ease, border-color 0.3s ease !important;
 }
 
-/* ---------- mobile: glass material off (owner ask 2026-07-10) ----------
-   backdrop-filter surfaces re-composite whatever sits behind them on every
-   scroll frame, so on phones the card interiors smear/shimmer against the
-   fixed scene while the page moves. Cards go near-solid — the same surface
-   the no-backdrop-filter fallback below uses — and the sheen overlays go
-   with them. The scene (mesh, orbs, grain) stays; only the card material
-   changes. Modals + scrim keep the glass: the page can't scroll under an
-   open dialog, so they never show the artifact. */
+/* ---------- mobile: full glass material, pop-out off (owner ruling
+   2026-07-18; supersedes the 2026-07-10 solid-card entry) ----------
+   The owner's 07-10 complaint was the POP-OUT — touch fires the desktop
+   :hover/:active lift mid-scroll, so cards jump under the finger — but the
+   fix of the day also stripped the frosted material. Ruling now: the
+   July-8-era material comes back exactly (blur tuned down from desktop's
+   32px for mobile GPUs, as it was then); only the lift transforms stay
+   suppressed. */
 @media (max-width: 640px) {
-  html[data-glass-theme] [data-glass]:not([data-glass="modal"]) {
-    background: rgba(255, 255, 255, 0.93) !important;
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
+  html[data-glass-theme] {
+    --glass-blur: 20px;
   }
-  /* the specular shine + sheen exist to catch light in the glass; on a
-     solid card they only add a compositing layer apiece */
-  html[data-glass-theme] [data-glass]:not([data-glass="modal"])::before,
-  html[data-glass-theme] [data-glass]:not([data-glass="modal"])::after {
-    display: none;
+  html[data-glass-theme] [data-glass="soft"],
+  html[data-glass-theme] [data-glass="chip"] {
+    backdrop-filter: blur(14px) saturate(165%) !important;
+    -webkit-backdrop-filter: blur(14px) saturate(165%) !important;
   }
-  html[data-glass-theme] [data-glass-accent] {
-    background: linear-gradient(135deg, rgba(255, 222, 120, 0.6), rgba(244, 176, 20, 0.45)),
-      rgb(240, 165, 0) !important;
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
-  }
-  /* touch fires :hover/:active mid-scroll — the lift/scale reads as cards
-     jumping under the finger */
+  /* touch fires :hover/:active mid-scroll — lifts and scales read as
+     elements jumping under the finger (the "pop-out"). Suppressed for
+     EVERY glass-theme element uniformly (owner 2026-07-18: same treatment
+     on all customer-facing templates): cards, chips, gold accents, and
+     themed buttons. Press feedback survives through the non-spatial
+     hover/active styles (shadow, background). !important on the glass
+     surfaces so page-local softenings (e.g. the report stylesheet's own
+     .service-report-v1 [data-glass="card"]:hover 1px lift, which
+     out-specifies this block) can't reintroduce a lift on touch — glass
+     cards/chips/accents are flow content and never use transforms for
+     layout. */
   html[data-glass-theme] [data-glass="card"]:hover,
   html[data-glass-theme] [data-glass="card"]:active,
-  html[data-glass-theme] [data-glass="chip"]:hover {
+  html[data-glass-theme] [data-glass="chip"]:hover,
+  html[data-glass-theme] [data-glass="chip"]:active,
+  html[data-glass-theme] [data-glass-accent]:hover,
+  html[data-glass-theme] [data-glass-accent]:active {
+    transform: none !important;
+  }
+  /* Untagged buttons must NOT get !important: some are POSITIONED with an
+     inline transform (PortalPage password-visibility eye translateY(-50%),
+     the lawn-report photo arrows) and !important would yank them out of
+     place on touch. A plain later-in-file rule beats the theme's own
+     button hover lift above (same selector, same specificity) while still
+     losing to inline layout transforms — exactly the precedence we want. */
+  html[data-glass-theme] button:not([data-glass]):not([data-glass-accent]):hover {
     transform: none;
   }
 }
