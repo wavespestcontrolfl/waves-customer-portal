@@ -24,7 +24,6 @@ module.exports = {
     optionalTables: [
       'revenue_daily',        // tax-tools: try/catch YTD revenue aggregation
       'ad_spend_log',         // revenue-tools: try/catch ad spend lookup
-      'wiki_articles',        // tech-tools: try/catch knowledge base search
       'csr_call_records',     // comms-tools: try/catch CSR call log join
       'csr_follow_up_tasks',  // comms-tools: try/catch follow-up aggregation
     ],
