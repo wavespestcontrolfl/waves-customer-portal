@@ -438,34 +438,15 @@
   margin: 14px 0 16px;
 }
 
-/* ---------- mobile: glass material off (owner ask 2026-07-10) ----------
-   Same de-glass as glass-theme.css — backdrop-filter chrome smears during
-   touch scrolling. White glass goes near-solid; gold pills keep their
-   gradient over an opaque brand-gold base. */
+/* ---------- mobile: full glass material, pop-out off (owner ruling
+   2026-07-18; supersedes the 2026-07-10 solid-card entry) ----------
+   Material overrides removed — the estimate chrome keeps its full frosted
+   glass on phones again. Only the hover lifts stay suppressed: touch fires
+   :hover mid-scroll, so the pills jump under the finger. */
 @media (max-width: 640px) {
-  [data-glass-theme] .gc-freq-btn,
-  [data-glass-theme] .gc-scarcity,
-  [data-glass-theme] .gc-tech-chip,
-  [data-glass-theme] .gc-proof,
-  [data-glass-theme] .gc-mbb,
-  [data-glass-theme] .gc-section-cta {
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
-  [data-glass-theme] .gc-freq-btn,
-  [data-glass-theme] .gc-tech-chip,
-  [data-glass-theme] .gc-proof,
-  [data-glass-theme] .gc-mbb {
-    background: rgba(255, 255, 255, 0.93);
-  }
-  [data-glass-theme] .gc-freq-btn[data-active],
-  [data-glass-theme] .gc-section-cta {
-    background: linear-gradient(135deg, rgba(255, 222, 120, 0.6), rgba(244, 176, 20, 0.45)),
-      rgb(240, 165, 0);
-  }
-  [data-glass-theme] .gc-scarcity {
-    background: linear-gradient(135deg, rgba(255, 230, 150, 0.6), rgba(244, 176, 20, 0.35)),
-      #fffdf5;
+  [data-glass-theme] .gc-freq-btn:hover,
+  [data-glass-theme] .gc-section-cta:hover {
+    transform: none;
   }
 }
 

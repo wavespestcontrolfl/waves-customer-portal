@@ -227,6 +227,7 @@ const READ_ONLY = [
   'get_truck_status', 'get_truck_trips',
   'get_apify_status', 'get_social_channel_status', 'get_managed_agent_runs',
   'get_scheduled_job_health',
+  'search_call_research',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {

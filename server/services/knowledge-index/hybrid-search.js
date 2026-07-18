@@ -13,9 +13,11 @@
  * fusion, results are capped per source type so one corpus cannot flood the
  * top, and each returned doc carries its best-matching chunk as the snippet.
  *
- * No recency decay here BY DESIGN: every v1 corpus is curated/canonical
- * (protocols, labels, KB). Decay arrives with lane B's observational
- * resolution artifacts, where staleness is real.
+ * Recency decay applies ONLY to the observational 'resolution' corpus
+ * (lane B): a resolution from last month outranks the same answer from a
+ * year ago, because operational practice drifts. Curated corpora
+ * (protocols, labels, KB, wiki) never decay — they are maintained, not
+ * observed.
  *
  * Trust gates: the wiki corpus is trusted-only at INGEST (connectors) and the
  * A1 lists enforce trustedOnly at query time, so unreviewed pages can't
@@ -40,8 +42,21 @@ const CHUNK_FETCH_LIMIT = 100;
 // text-embedding-3-small — on-topic pairs typically score well above it.
 const MIN_VECTOR_SIMILARITY = 0.30;
 const MAX_PER_SOURCE = 6;
+// Observational sources halve in fused score every ~8 months. Only
+// 'resolution' and 'call_research' decay (see module doc) — curated
+// corpora don't expire.
+const RESOLUTION_HALF_LIFE_DAYS = 240;
+const DECAYED_SOURCES = new Set(['resolution', 'call_research']);
 
 const docKey = (source, sourceId) => `${source}:${sourceId}`;
+
+function applyRecencyDecay(doc, now = Date.now()) {
+  if (!DECAYED_SOURCES.has(doc.source)) return doc.score;
+  const occurredAt = doc.metadata && doc.metadata.occurredAt ? Date.parse(doc.metadata.occurredAt) : NaN;
+  if (!Number.isFinite(occurredAt)) return doc.score;
+  const ageDays = Math.max(0, (now - occurredAt) / 86400000);
+  return doc.score * (2 ** (-ageDays / RESOLUTION_HALF_LIFE_DAYS));
+}
 
 /**
  * rrfFuse(lists) — lists: Array<Array<{ key, ...payload }>> (each ranked,
@@ -118,9 +133,15 @@ async function hybridKnowledgeSearch(query, { limit = 15 } = {}) {
     const fused = rrfFuse([vector.list, chunkFts, kbList, wikiList]);
     if (!fused.length) return { results: [], usedVector: vector.usedVector };
 
+    // Decay observational hits, then re-rank — a decayed resolution can drop
+    // below a curated doc it out-fused.
+    const decayed = fused
+      .map((doc) => ({ ...doc, score: applyRecencyDecay(doc) }))
+      .sort((a, b) => b.score - a.score);
+
     const perSource = new Map();
     const results = [];
-    for (const doc of fused) {
+    for (const doc of decayed) {
       const used = perSource.get(doc.source) || 0;
       if (used >= MAX_PER_SOURCE) continue;
       perSource.set(doc.source, used + 1);
@@ -141,4 +162,4 @@ async function hybridKnowledgeSearch(query, { limit = 15 } = {}) {
   }
 }
 
-module.exports = { hybridKnowledgeSearch, rrfFuse, RRF_K };
+module.exports = { hybridKnowledgeSearch, rrfFuse, applyRecencyDecay, RRF_K, RESOLUTION_HALF_LIFE_DAYS };

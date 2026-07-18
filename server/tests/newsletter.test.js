@@ -33,7 +33,27 @@ const { computeSendRates, aggregateSendMetrics, ratesFromTotals } = require('../
 const { gbpFallbackByLocation, normalizeGbpByLocation } = require('../services/content-scheduler');
 const { normalizeEventTitle, findDuplicateClusters, rewriteCalendarEventIds } = require('../services/event-duplicates');
 const { pickSurvivor, isCleanCrossSourceCluster, isAutoMergeableCluster, computeSurvivorBackfill } = require('../services/event-dedup');
-const { isEligibleForFreshDigest, cityToZone, weekLockKey } = require('../services/event-freshness');
+const {
+  classifyFreshness,
+  isEligibleForFreshDigest,
+  isRoutineRecurringEvent,
+  isEditoriallyNewEvent,
+  editorialNoveltyScore,
+  dedupeDigestEvents,
+  excludeRepeatedDateIdentities,
+  getCurrentNewsletterTuesday,
+  getNextNewsletterTuesday,
+  getActiveNewsletterTuesday,
+  getNewsletterWeekOf,
+  defaultTargetSendAt,
+  isFlagshipTargetForWeek,
+  getNewsletterDraftWindowStart,
+  isFlagshipScheduledTime,
+  isFlagshipDeliveryWindow,
+  isCurrentFlagshipTarget,
+  cityToZone,
+  weekLockKey,
+} = require('../services/event-freshness');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { getFlagshipType } = require('../config/newsletter-types');
 const { EMAIL_RE, escapeHtml } = publicRouter;
@@ -272,6 +292,157 @@ describe('event cityToZone — kebab/space normalization', () => {
   });
 });
 
+describe('event freshness — routine recurrence and editorial newness', () => {
+  const futureEvent = (overrides = {}) => ({
+    title: 'One-Time Art Walk',
+    description: 'A date-specific downtown event.',
+    admin_status: 'approved',
+    event_url: 'https://events.example/art-walk',
+    event_type: 'one_time',
+    recurrence_type: 'none',
+    freshness_status: 'fresh_one_time',
+    times_featured: 0,
+    last_featured_at: null,
+    start_at: new Date(Date.now() + 5 * 86400_000).toISOString(),
+    ...overrides,
+  });
+
+  test('rejects recurring metadata and common mislabeled weekly-class copy', () => {
+    expect(isRoutineRecurringEvent(futureEvent({ event_type: 'recurring_series' }))).toBe(true);
+    expect(isRoutineRecurringEvent(futureEvent({ recurrence_type: 'weekly' }))).toBe(true);
+    expect(isRoutineRecurringEvent(futureEvent({ title: 'Weekly Yoga Class' }))).toBe(true);
+    expect(isRoutineRecurringEvent(futureEvent({ title: 'Yoga every Tuesday' }))).toBe(true);
+    expect(isRoutineRecurringEvent(futureEvent({ title: 'Sunset Yoga Workshop' }))).toBe(false);
+  });
+
+  test('recurrence wins over conflicting one-time freshness metadata', () => {
+    expect(classifyFreshness(futureEvent({ recurrence_type: 'weekly' }))).toEqual({
+      freshness_status: 'stale_recurring',
+      freshness_score: 10,
+    });
+    expect(isEligibleForFreshDigest(futureEvent({ recurrence_type: 'weekly' }))).toBe(false);
+    expect(isEligibleForFreshDigest(futureEvent({ event_type: 'ongoing' }))).toBe(false);
+  });
+
+  test('hard-rejects previously featured non-annual events', () => {
+    expect(isEligibleForFreshDigest(futureEvent({ times_featured: 1 }))).toBe(false);
+    expect(isEligibleForFreshDigest(futureEvent({
+      last_featured_at: new Date(Date.now() - 365 * 86400_000).toISOString(),
+    }))).toBe(false);
+  });
+
+  test('annual occurrences revive only after a trustworthy 300-day cooldown', () => {
+    const reference = new Date('2026-07-14T12:00:00Z');
+    const annual = { event_type: 'annual', recurrence_type: 'annual', times_featured: 1 };
+    expect(isEditoriallyNewEvent({ ...annual, last_featured_at: '2025-09-18T12:00:00Z' }, reference)).toBe(false); // 299d
+    expect(isEditoriallyNewEvent({ ...annual, last_featured_at: '2025-09-17T12:00:00Z' }, reference)).toBe(true);  // 300d
+    expect(isEditoriallyNewEvent(annual, reference)).toBe(false); // history with no timestamp fails closed
+  });
+
+  test('limited-run opening/closing eligibility uses the supplied reference time', () => {
+    const reference = new Date('2030-03-05T12:00:00Z');
+    expect(isEligibleForFreshDigest(futureEvent({
+      event_type: 'limited_run',
+      freshness_status: 'fresh_limited_run_opening',
+      start_at: '2030-03-08T14:00:00Z',
+      end_at: '2030-03-20T22:00:00Z',
+    }), reference)).toBe(true);
+  });
+
+  test('recently pulled unseen events outrank old or previously featured rows', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-14T12:00:00Z'));
+    try {
+      expect(editorialNoveltyScore(futureEvent({ pulled_at: '2026-07-12T12:00:00Z' }))).toBe(100);
+      expect(editorialNoveltyScore(futureEvent({ pulled_at: '2026-05-01T12:00:00Z' }))).toBe(50);
+      expect(editorialNoveltyScore(futureEvent({ last_featured_at: '2026-07-01T12:00:00Z' }))).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('newsletter digest identity dedupe', () => {
+  test('rejects every occurrence of an identical title spanning multiple ET dates', () => {
+    const rows = [
+      { id: 'yoga-1', title: 'Sunset Yoga', start_at: '2026-07-18T22:00:00Z' },
+      { id: 'yoga-2', title: 'Sunset Yoga', start_at: '2026-07-25T22:00:00Z' },
+      { id: 'art-1', title: 'Friday Art Walk', start_at: '2026-07-18T18:00:00Z' },
+      { id: 'art-2', title: 'Friday Art Walk!', start_at: '2026-07-18T20:00:00Z' },
+    ];
+    const filtered = excludeRepeatedDateIdentities(rows);
+    expect(filtered.map((row) => row.id)).toEqual(['art-1', 'art-2']);
+    expect(dedupeDigestEvents(filtered).map((row) => row.id)).toEqual(['art-1']);
+  });
+
+  test('drops normalized-title duplicates but preserves distinct events sharing a roundup URL', () => {
+    const rows = [
+      { id: 'best', title: 'Bubbles Under the Banyans', start_at: '2026-07-18T18:00:00Z', event_url: 'https://events.example/bubbles?utm_source=x' },
+      { id: 'same-title', title: 'Bubbles under Banyans!', event_url: 'https://other.example/2' },
+      { id: 'roundup-peer', title: 'Downtown Chalk Festival', start_at: '2026-07-18T18:00:00Z', event_url: 'https://www.events.example/bubbles#tickets' },
+      { id: 'same-event-alias', title: 'Bubbles Beneath the Banyans', start_at: '2026-07-18T20:00:00Z', event_url: 'https://www.events.example/bubbles#tickets' },
+      { id: 'unique', title: 'Friday Art Walk', event_url: 'https://events.example/art-walk' },
+    ];
+    expect(dedupeDigestEvents(rows).map((row) => row.id)).toEqual(['best', 'roundup-peer', 'same-event-alias', 'unique']);
+  });
+
+  test('does not merge fuzzy multi-city events from the same-day roundup article', () => {
+    const sharedUrl = 'https://localnews.example/fourth-of-july-roundup';
+    const rows = [
+      {
+        id: 'sarasota',
+        title: 'Fourth of July Fireworks Sarasota',
+        city: 'sarasota',
+        venue_name: 'Bayfront Park',
+        start_at: '2026-07-04T22:00:00Z',
+        event_url: sharedUrl,
+      },
+      {
+        id: 'bradenton',
+        title: 'Fourth of July Fireworks Bradenton',
+        city: 'bradenton',
+        venue_name: 'Riverwalk',
+        start_at: '2026-07-04T22:00:00Z',
+        event_url: sharedUrl,
+      },
+    ];
+    expect(dedupeDigestEvents(rows).map((row) => row.id)).toEqual(['sarasota', 'bradenton']);
+  });
+});
+
+describe('newsletter Tuesday cadence helpers', () => {
+  test('anchors the issue week to the most recent Tuesday in ET', () => {
+    expect(getCurrentNewsletterTuesday(new Date('2026-07-14T11:00:00Z'))).toBe('2026-07-14'); // Tue 7am ET
+    expect(getCurrentNewsletterTuesday(new Date('2026-07-20T16:00:00Z'))).toBe('2026-07-14'); // Monday
+    expect(getNewsletterWeekOf('2026-07-19')).toBe('2026-07-14');
+  });
+
+  test('Monday drafting anchors to the upcoming Tuesday, not the expired prior window', () => {
+    expect(getActiveNewsletterTuesday(new Date('2026-07-20T11:00:00Z'))).toBe('2026-07-21'); // Mon 7am ET
+    expect(getActiveNewsletterTuesday(new Date('2026-07-21T09:30:00Z'))).toBe('2026-07-21'); // Tue 5:30am ET
+    expect(getNewsletterDraftWindowStart('2026-07-21').toISOString()).toBe('2026-07-20T04:00:00.000Z');
+  });
+
+  test('planner points at Tuesday and default send is exactly 6am ET across DST', () => {
+    expect(getNextNewsletterTuesday(new Date('2026-07-16T16:00:00Z'))).toBe('2026-07-21');
+    expect(defaultTargetSendAt('2026-07-14').toISOString()).toBe('2026-07-14T10:00:00.000Z'); // EDT
+    expect(defaultTargetSendAt('2026-12-01').toISOString()).toBe('2026-12-01T11:00:00.000Z'); // EST
+    expect(isFlagshipScheduledTime('2026-07-14T10:00:00.000Z')).toBe(true);
+    expect(isFlagshipScheduledTime('2026-12-01T11:00:00.000Z')).toBe(true);
+    expect(isFlagshipScheduledTime('2026-07-14T10:01:00.000Z')).toBe(false);
+    expect(isFlagshipTargetForWeek('2026-07-21T10:00:00.000Z', '2026-07-21')).toBe(true);
+    expect(isFlagshipTargetForWeek('2026-07-28T10:00:00.000Z', '2026-07-21')).toBe(false);
+    expect(isCurrentFlagshipTarget('2026-07-21T10:00:00.000Z', new Date('2026-07-21T10:05:00Z'))).toBe(true);
+    expect(isCurrentFlagshipTarget('2026-07-14T10:00:00.000Z', new Date('2026-07-21T10:05:00Z'))).toBe(false);
+  });
+
+  test('delivery executor has only a tight 15-minute Tuesday 6am tolerance', () => {
+    expect(isFlagshipDeliveryWindow('2026-07-14T10:00:00.000Z')).toBe(true);
+    expect(isFlagshipDeliveryWindow('2026-07-14T10:14:59.000Z')).toBe(true);
+    expect(isFlagshipDeliveryWindow('2026-07-14T10:15:00.000Z')).toBe(false);
+    expect(isFlagshipDeliveryWindow('2026-07-13T10:00:00.000Z')).toBe(false);
+  });
+});
+
 describe('event weekLockKey — per-week advisory-lock key', () => {
   test('distinct weeks produce distinct keys (the old per-year-collision bug)', () => {
     const k1 = weekLockKey('2026-05-28');
@@ -478,7 +649,7 @@ describe('event ingestion buildExtractionSystemPrompt — shared extraction prom
 });
 
 describe('event ingestion normalizeExtractedEvent — validation + auto-approve gate', () => {
-  const { normalizeExtractedEvent } = require('../services/event-ingestion');
+  const { normalizeExtractedEvent, recurrenceMetadataFromIcalEvent } = require('../services/event-ingestion');
   const NOW = Date.parse('2026-06-11T12:00:00Z');
   const tier1 = { id: 'src-1', priority_tier: 1, coverage_geo: ['tampa'] };
   const tier2 = { id: 'src-2', priority_tier: 2, coverage_geo: ['sarasota'] };
@@ -525,6 +696,19 @@ describe('event ingestion normalizeExtractedEvent — validation + auto-approve 
     expect(noCity.row.city).toBe('sarasota');
     const longCity = normalizeExtractedEvent(tier2, { title: 'A', startAt: '2026-06-14T10:00:00-04:00', city: 'x'.repeat(300) }, NOW);
     expect(longCity.row.city).toHaveLength(128);
+  });
+
+  test('maps authoritative iCal RRULE frequency before prose classification', () => {
+    expect(recurrenceMetadataFromIcalEvent({ rrule: { origOptions: { freq: 2 } } })).toMatchObject({
+      event_type: 'recurring_series',
+      recurrence_type: 'weekly',
+      freshness_status: 'stale_recurring',
+      routine: true,
+    });
+    expect(recurrenceMetadataFromIcalEvent({
+      rrule: { toString: () => 'RRULE:FREQ=YEARLY;BYMONTH=7' },
+    })).toMatchObject({ event_type: 'annual', recurrence_type: 'annual', routine: false });
+    expect(recurrenceMetadataFromIcalEvent({})).toBeNull();
   });
 });
 
@@ -1409,7 +1593,7 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     });
     expect(html).toContain('✔️ Pack a chair');
     expect(html).toContain('✔️ Hydrate like it&#39;s your job');
-    expect(html).toContain('— The Waves Pest Control Team');
+    expect(html).toContain('— The Waves Team');
   });
 
   test('P.S. label never doubles when the model writes the prefix itself; label-only ps renders nothing', async () => {
@@ -1741,6 +1925,9 @@ describe('newsletter findHallucinatedClaims', () => {
     expect(findHallucinatedClaims('<p>Our pet-safe formula</p>').length).toBeGreaterThan(0);
     expect(findHallucinatedClaims('<p>child-safe spray</p>').length).toBeGreaterThan(0);
     expect(findHallucinatedClaims('<p>EPA-approved blend</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>Safe for pets once dry.</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>Our chemical-free, non-toxic treatment is harmless.</p>').length).toBeGreaterThan(0);
+    expect(findHallucinatedClaims('<p>You can return inside safely after 30 minutes.</p>').length).toBeGreaterThan(0);
   });
 
   test('dedupes repeated patterns — one error per label', () => {
@@ -1952,7 +2139,7 @@ describe('newsletter validateNewsletterDraft — hallucinated claims hard-block'
 // ── Autopilot preflight gate ─────────────────────────────────────────
 //
 // preflightDigest enforces the flagship type's declared quality contract
-// before the Thursday auto-draft. Hard-fail (skip) on too few events or
+// before the Tuesday auto-draft. Hard-fail (skip) on too few events or
 // too few sources; city diversity + image coverage are soft warnings.
 // A regression here either ships thin newsletters (gate too loose) or
 // silences the autopilot every week (gate too strict).
@@ -2040,6 +2227,18 @@ describe('newsletter preflightDigest', () => {
     expect(r.stats.eligibleCount).toBe(2); // not 5
     expect(r.pass).toBe(false); // 2 distinct < 5 required
     expect(r.hardFailures.some((f) => /Eligible fresh approved events: 2 \/ required 5/.test(f))).toBe(true);
+  });
+
+  test('dedupes distinct rows that represent the same normalized event identity', () => {
+    const duplicateA = { ...ev(0, { source: 's0' }), title: 'Grasons Shopping Event', event_url: 'https://events.example/grasons?utm_source=a' };
+    const duplicateB = { ...ev(1, { source: 's1' }), title: 'Grasons Shopping Event!', event_url: 'https://www.events.example/grasons#details' };
+    const unique = [2, 3, 4, 5].map((i) => ({
+      ...ev(i, { source: `s${i % 2}` }),
+      title: `Unique Event ${i}`,
+      event_url: `https://events.example/${i}`,
+    }));
+    const r = preflightDigest([duplicateA, duplicateB, ...unique]);
+    expect(r.stats.eligibleCount).toBe(5);
   });
 });
 

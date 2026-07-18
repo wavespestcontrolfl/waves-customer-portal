@@ -180,6 +180,10 @@ function makeDatabase({
         if (table === 'estimates') return thenable([{ id: estimate?.id || 'estimate-1', token: estimate?.token || 'token-1' }]);
         return thenable(1);
       },
+      del: () => {
+        writes.push({ table, op: 'del' });
+        return thenable(1);
+      },
       then: (resolve) => resolve(
         table === 'customers as c' ? turfRows
           : table === 'estimates' ? (estimateRows ?? (estimate ? [estimate] : []))
@@ -452,6 +456,9 @@ describe('Agent Estimate draft tool', () => {
       reasoning: 'old basis',
     }));
     expect(update.notes).toBeNull();
+    // The re-composition resets the learning-loop draft baseline inside the
+    // same transaction — the old baseline describes the replaced composition.
+    expect(writes).toContainEqual({ table: 'estimate_draft_baselines', op: 'del' });
   });
 
   test('David-style existing-customer expansion preserves current pest and prices only lawn plus tree-shrub', async () => {

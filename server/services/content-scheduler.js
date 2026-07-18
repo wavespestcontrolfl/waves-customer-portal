@@ -128,11 +128,11 @@ async function sharePublishedBlog(blog) {
 
 const NEWSLETTER_SOCIAL_FALLBACK = {
   facebook: (subject) =>
-    `Fresh This Week is here: ${subject} — See what's happening from North Port to Tampa.`,
+    `The latest Waves Newsletter is here: ${subject} — See what's happening from North Port to Tampa.`,
   instagram: () =>
-    'Fresh This Week just dropped — local events across SW Florida. Link in bio. #FreshThisWeek #SWFL #SWFLevents',
+    'The latest Waves Newsletter just dropped — local events across SW Florida. Link in bio. #WavesNewsletter #SWFL #SWFLevents',
   linkedin: () =>
-    'Our latest Fresh This Week local guide is live, featuring events and community highlights across Southwest Florida.',
+    'The latest Waves Newsletter is live, featuring events and community highlights across Southwest Florida.',
 };
 
 // GBP posts go to each of the 4 Waves locations. Build per-location copy so
@@ -141,7 +141,7 @@ function gbpFallbackByLocation() {
   const { WAVES_LOCATIONS } = require('../config/locations');
   const out = {};
   for (const loc of WAVES_LOCATIONS) {
-    out[loc.id] = `Fresh This Week is live — local events and weekend plans near ${loc.name}, all across SW Florida.`;
+    out[loc.id] = `The Waves Newsletter is live — local events and weekend plans near ${loc.name}, all across SW Florida.`;
   }
   return out;
 }
@@ -187,7 +187,7 @@ ${locationList}
 
 Return ONLY valid JSON with these keys:
 - facebook: 150-250 chars, conversational, 1-2 emojis, do NOT include any URL
-- instagram: 150-300 chars before hashtags, end with 3-5 hashtags (#FreshThisWeek #SWFL #SWFLevents etc), do NOT include any URL
+- instagram: 150-300 chars before hashtags, end with 3-5 hashtags (#WavesNewsletter #SWFL #SWFLevents etc), do NOT include any URL
 - linkedin: 100-200 chars, professional but fun community tone, do NOT include any URL
 - gbp: an OBJECT keyed by the location ids above. Each value is 80-150 chars, community-oriented, names/nods to THAT specific area, no hashtags, no URL. Example: {"bradenton": "...", "parrish": "...", "sarasota": "...", "venice": "..."}`,
   });
@@ -264,7 +264,7 @@ async function sharePublishedNewsletter(send) {
 
     if (!customContent) {
       customContent = {
-        facebook: NEWSLETTER_SOCIAL_FALLBACK.facebook(send.subject || 'Fresh This Week'),
+        facebook: NEWSLETTER_SOCIAL_FALLBACK.facebook(send.subject || 'Waves Newsletter'),
         instagram: NEWSLETTER_SOCIAL_FALLBACK.instagram(),
         linkedin: NEWSLETTER_SOCIAL_FALLBACK.linkedin(),
         gbp: gbpFallbackByLocation(),

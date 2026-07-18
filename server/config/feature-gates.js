@@ -14,6 +14,7 @@
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
+ *   GATE_CALL_RESEARCH_MINER=true (nightly voice-of-customer call-research mining)
  *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
@@ -81,6 +82,13 @@ const gates = {
   // search instantly reverts to the lane-A1 FTS path, the nightly sync
   // no-ops, and existing embeddings stay in place for a later re-enable.
   hybridKnowledge: process.env.GATE_HYBRID_KNOWLEDGE === 'true',
+
+  // MCP read-only knowledge tools (lane C): the /api/mcp machine endpoint
+  // exposing hybrid knowledge search + catalog/protocol lookups to MCP
+  // clients (Claude Code sessions, agents) under MCP_SERVICE_TOKEN.
+  // Read-only by construction; opt-in in EVERY environment. Kill switch:
+  // unset — the endpoint 403s.
+  mcpReadTools: process.env.GATE_MCP_READ_TOOLS === 'true',
 
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
@@ -153,6 +161,13 @@ const gates = {
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
 
+  // Call-Research Miner (voice-of-customer corpus) — nightly extraction of
+  // verbatim double-redacted quote chunks from call transcripts into
+  // call_research_chunks (research taxonomy, reader-not-ingestor). Paid
+  // Gemini extraction per new call (pennies nightly). No sends, no
+  // customer-visible effect; prod opt-in per house pattern.
+  callResearchMiner: isProd ? process.env.GATE_CALL_RESEARCH_MINER === 'true' : true,
+
   // Call re-transcription backfill (voice-corpus training) — hourly, batched
   // upgrade of consented legacy call recordings to diarized transcripts via
   // the same pipeline new calls use; feeds the corpus miner. DEFAULT ON per
@@ -197,6 +212,16 @@ const gates = {
   // has to earn each intent.
   smsAutoSend: process.env.GATE_SMS_AUTO_SEND === 'true',
 
+  // SMS Sealed Eval (brand-voice loop measurement) — a locked exam for the
+  // house-voice drafter: frozen (inbound, day-of facts, human reply) items
+  // replayed through the current drafter per provider leg and graded by the
+  // live judge, with McNemar significance vs a baseline run. The weekly cron
+  // only tops up the item pool (pure selection, no LLM); exam RUNS are
+  // manual-trigger only (admin endpoint) because each burns items × several
+  // LLM calls. No sends, no customer-visible effect; prod opt-in per house
+  // pattern.
+  smsSealedEval: isProd ? process.env.GATE_SMS_SEALED_EVAL === 'true' : true,
+
   // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
   // replies for HISTORICAL inbound SMS that already have a human reply and
   // feeds them to the existing judge, compressing months of per-intent
@@ -204,6 +229,15 @@ const gates = {
   // history is exhausted. Burns ~2 Anthropic calls per sample, so prod
   // requires explicit opt-in; flip off (or leave — it no-ops) when done.
   shadowBackfill: isProd ? process.env.GATE_SHADOW_BACKFILL === 'true' : true,
+
+  // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
+  // each draft_unsafe judgment into a fixed (harness surface × failure mode)
+  // cell, and weekly parks a harness-patch PROPOSAL card when a cell
+  // accumulates enough fresh evidence. Proposals never auto-apply — a prompt
+  // change is a human-shipped version bump. No sends, no customer-visible
+  // effect; burns one FAST call per unsafe judgment + ≤2 weekly DEEP calls,
+  // so prod requires explicit opt-in per house pattern.
+  smsPathologyLedger: isProd ? process.env.GATE_SMS_PATHOLOGY_LEDGER === 'true' : true,
 
   // AI Blog Writer — generates content via Anthropic API
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,

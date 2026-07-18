@@ -28,10 +28,11 @@ const db = require('../models/db');
 const adminNewsletterRouter = require('../routes/admin-newsletter');
 
 const EVENT_UUID = '2b0fcf1c-2a8e-4d3e-9b5a-1f2e3d4c5b6a';
+const SEND_UUID = '11111111-2222-4333-8444-555555555555';
 
 function draftRow(eventIds) {
   return {
-    id: 'send-1',
+    id: SEND_UUID,
     status: 'draft',
     subject: 'Existing subject',
     subject_b: null,
@@ -54,7 +55,7 @@ function mockSendsTable(row) {
   db.mockImplementation((table) => {
     if (table !== 'newsletter_sends') throw new Error(`Unexpected table ${table}`);
     const q = {};
-    ['where', 'orderBy', 'limit', 'offset', 'select'].forEach((method) => {
+    ['where', 'whereIn', 'orderBy', 'limit', 'offset', 'select'].forEach((method) => {
       q[method] = jest.fn(() => q);
     });
     q.first = jest.fn(async () => row);
@@ -86,7 +87,7 @@ async function withServer(fn) {
 }
 
 async function patchSend(baseUrl, body) {
-  const res = await fetch(`${baseUrl}/admin/newsletter/sends/send-1`, {
+  const res = await fetch(`${baseUrl}/admin/newsletter/sends/${SEND_UUID}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),

@@ -49,9 +49,19 @@ function makeDatabase({ lead, estimate, emptyEstimateUpdate = false }) {
         storedEstimate = { id: 'estimate-new', status: 'draft', ...row };
         return { returning: async () => [storedEstimate] };
       }
-      return Promise.resolve([row]);
+      // Upsert chain used by the learning-loop baseline capture; `then`
+      // keeps plain awaited inserts working for other tables.
+      const chain = {
+        onConflict: () => chain,
+        ignore: () => chain,
+        returning: async () => [{ id: 'row-1' }],
+        then: (resolve) => resolve([row]),
+      };
+      return chain;
     },
   });
+  trx.fn = { now: () => 'NOW' };
+  trx.raw = (sql) => sql;
 
   return {
     database: {
@@ -734,6 +744,43 @@ describe('admin estimate persistence', () => {
     expect(updates[0].patch.expires_at.toISOString()).toBe('2026-05-22T12:00:00.000Z');
     expect(estimateViewUrl(result.estimate.token)).toBe('https://portal.wavespestcontrol.com/estimate/existing-token');
     expect(getEstimatePricingCache('estimate-draft')).toBeNull();
+  });
+
+  test('reusing a lead-linked AI draft captures its baseline in the same transaction', async () => {
+    // The builder wholesale-replaces the AI composition while `source`
+    // survives (not part of the write payload) — without the capture the
+    // later send would read this maximal rewrite as sent-unedited.
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: {
+        id: 'lead-1',
+        status: 'new',
+        phone: '9415550101',
+        estimate_id: 'estimate-draft',
+      },
+      estimate: {
+        id: 'estimate-draft',
+        status: 'draft',
+        source: 'estimator_engine',
+        token: 'existing-token',
+        monthly_total: 99,
+        estimate_data: JSON.stringify({ engineInputs: { services: { pest: {} } } }),
+      },
+    });
+
+    const result = await createOrReuseAdminEstimate({
+      database,
+      body: { ...baseBody },
+      technicianId: 'tech-1',
+      now,
+    });
+
+    expect(result.reused).toBe(true);
+    const capture = inserts.find((entry) => entry.table === 'estimate_draft_baselines');
+    expect(capture).toBeTruthy();
+    expect(capture.row.estimate_id).toBe('estimate-draft');
+    expect(capture.row.source).toBe('estimator_engine');
+    expect(JSON.parse(capture.row.baseline_fields).monthly_total).toBe(99);
   });
 
   test('creates a new estimate when the lead-linked prior estimate is archived', async () => {

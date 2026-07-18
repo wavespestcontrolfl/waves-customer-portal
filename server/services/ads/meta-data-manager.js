@@ -105,7 +105,11 @@ function buildEvent(candidate) {
 
 function skipReason(candidate) {
   if (!candidate.eventTimestamp) return 'missing_event_timestamp';
-  if (!buildEvent(candidate)) return 'missing_match_keys';
+  // consentSuppressed candidates arrive from collectCandidates with email/phone
+  // already nulled (marketing opt-out); one that still carries fbc/fbp/fbclid
+  // keeps measuring through the click id. Only a candidate with NO remaining
+  // match key is dropped — labeled distinctly from never-had-keys rows.
+  if (!buildEvent(candidate)) return candidate.consentSuppressed ? 'consent_suppressed' : 'missing_match_keys';
   // Meta rejects the whole batch on a single >7-day-old event — drop it here.
   const ts = toUnixSeconds(candidate.eventTimestamp);
   if (ts && (Date.now() / 1000 - ts) > maxEventAgeDays() * 86400) return 'event_too_old';
@@ -262,12 +266,13 @@ async function buildReadiness({ periodDays = 7, limit = 50 } = {}) {
   for (const conversionType of Object.keys(EVENT_NAMES)) {
     try {
       const candidates = await collectCandidates(conversionType, { ...range, limit });
-      const counts = { total: candidates.length, eligible: 0, missingMatchKeys: 0, missingConversionValue: 0 };
+      const counts = { total: candidates.length, eligible: 0, missingMatchKeys: 0, missingConversionValue: 0, consentSuppressed: 0 };
       for (const c of candidates) {
         const r = skipReason(c);
         if (!r) counts.eligible += 1;
         else if (r === 'missing_match_keys') counts.missingMatchKeys += 1;
         else if (r === 'missing_conversion_value') counts.missingConversionValue += 1;
+        else if (r === 'consent_suppressed') counts.consentSuppressed += 1;
       }
       conversions[conversionType] = { eventName: EVENT_NAMES[conversionType], candidates: counts };
     } catch (err) {

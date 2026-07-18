@@ -445,7 +445,17 @@ function initScheduledJobs() {
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {
-      await runExclusive('knowledge-index-sync', () => require('./knowledge-index/ingest').syncKnowledgeIndex());
+      await runExclusive('knowledge-index-sync', async () => {
+        // Map fresh call/visit resolutions first so the same night's corpus
+        // sync chunks + embeds them. Isolated: a resolution-sweep failure
+        // must not cost the curated corpora their nightly sync/embeds.
+        try {
+          await require('./knowledge-index/resolution-sync').syncResolutionArtifacts();
+        } catch (err) {
+          logger.error(`[knowledge-index] resolution sweep failed (corpus sync continues): ${err.message}`);
+        }
+        await require('./knowledge-index/ingest').syncKnowledgeIndex();
+      });
     } catch (err) {
       logger.error(`[knowledge-index] nightly sync failed: ${err.message}`);
     }
@@ -1016,8 +1026,8 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 4AM — Newsletter event ingestion (P3a). Pulls every enabled
   // RSS source from event_sources, upserts into events_raw. Daily cadence
-  // (vs weekly with the newsletter draft) so events added 6 days before
-  // a Friday send still make it into the dashboard tiles.
+  // (vs weekly with the newsletter draft) so events added shortly before
+  // a Tuesday issue still make it into the dashboard tiles.
   // =========================================================================
   cron.schedule('0 4 * * *', async () => {
     logger.info('Running: Newsletter event ingestion');
@@ -1081,6 +1091,27 @@ function initScheduledJobs() {
       await runExclusive('voice-corpus-miner', () => mineVoiceCorpus({ sinceDays: 3 }));
     } catch (err) {
       logger.error(`Voice-corpus miner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3:05AM ET — Call-research miner (voice-of-customer corpus).
+  // Extracts verbatim (double-redacted) quote chunks from call transcripts
+  // into call_research_chunks, tagged with the fixed research taxonomy.
+  // Runs after the 2:40 knowledge sync + 2:45 voice-corpus miner; chunks
+  // embed via the NEXT night's knowledge-index sync. Claims via
+  // call_log.research_mined_at — a prompt-version bump re-mines the whole
+  // corpus over successive nights; failed extractions retry nightly.
+  // =========================================================================
+  cron.schedule('5 3 * * *', async () => {
+    if (!isEnabled('callResearchMiner')) return;
+    logger.info('Running: Call-research miner');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { mineCallResearch } = require('./call-research-miner');
+      await runExclusive('call-research-miner', () => mineCallResearch({ limit: 150 }));
+    } catch (err) {
+      logger.error(`Call-research miner failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1171,6 +1202,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+
+  // =========================================================================
+  // WEEKLY SUN 3:05AM ET — Sealed-eval freezer top-up (brand-voice loop
+  // measurement). Pure selection, no LLM spend: freezes judged live drafts
+  // (inbound + day-of facts_block + human reply) into sms_sealed_eval_items
+  // until the pool reaches SEALED_EVAL_TARGET, so the locked exam keeps
+  // coverage as intents shift. Idempotent (anti-join + unique source draft);
+  // no-ops once full. Exam RUNS are never scheduled — manual endpoint only.
+  // =========================================================================
+  cron.schedule('5 3 * * 0', async () => {
+    if (!isEnabled('smsSealedEval')) return;
+    logger.info('Running: Sealed-eval freezer top-up');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sealEvalItems } = require('./sms-sealed-eval');
+      await runExclusive('sms-sealed-eval-seal', () => sealEvalItems());
+    } catch (err) {
+      logger.error(`Sealed-eval freezer failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // HOURLY :15 — Shadow backfill (brand-voice loop accelerator). Drafts
   // house-voice replies for HISTORICAL inbounds that already have a human
@@ -1188,6 +1240,44 @@ function initScheduledJobs() {
       await runExclusive('shadow-backfill', () => runShadowBackfill());
     } catch (err) {
       logger.error(`Shadow backfill failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:20AM ET — Pathology classifier (brand-voice loop diagnostics).
+  // Runs after the 3:55am judge: every new draft_unsafe judgment is
+  // classified into a fixed (harness surface × failure mode) cell so the
+  // top failure cause is standing data, not a hand-run readout. Batch-capped
+  // FAST calls; idempotent anti-join.
+  // =========================================================================
+  cron.schedule('20 4 * * *', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS pathology classifier');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { classifyPathologies } = require('./sms-pathology-ledger');
+      await runExclusive('sms-pathology-classify', () => classifyPathologies());
+    } catch (err) {
+      logger.error(`SMS pathology classifier failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:40AM ET — Pathology patch proposer. Cells with enough fresh
+  // evidence get ONE parked harness-patch proposal card + bell (Agents →
+  // Shadow Drafts). Recommendation only — a human ships any actual prompt
+  // change as a PROMPT_VERSION bump. ≤PATHOLOGY_PROPOSAL_MAX_CELLS DEEP
+  // calls per week.
+  // =========================================================================
+  cron.schedule('40 4 * * 0', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS pathology patch proposer');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposePatches } = require('./sms-pathology-ledger');
+      await runExclusive('sms-pathology-propose', () => proposePatches());
+    } catch (err) {
+      logger.error(`SMS pathology proposer failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1266,12 +1356,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY THURSDAY 7AM ET — Newsletter autopilot
+  // EVERY MONDAY 7AM ET — Newsletter autopilot
   // Auto-drafts the weekly flagship digest from approved events. Never
   // auto-sends — creates a draft for admin review. Skips if fewer than 3
   // eligible events and notifies admin to approve more.
   // =========================================================================
-  cron.schedule('0 7 * * 4', async () => {
+  cron.schedule('0 7 * * 1', async () => {
     try {
       const { autoDraftFlagship } = require('./newsletter-autopilot');
       const result = await autoDraftFlagship();
@@ -1282,21 +1372,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // THU–SUN 2PM ET — Missed-tick catch-up for the Thursday-7AM autopilot. If
-  // the process was down at 7AM Thursday, the weekly draft never got created.
+  // MONDAY 2PM + TUESDAY 4:30AM ET — Missed-tick catch-up for the Monday-7AM
+  // autopilot. The early-Tuesday recovery still leaves 90 minutes for proof
+  // approval before the exact 6:00AM delivery target; it never auto-approves.
   // Re-run autoDraftFlagship ONLY for a week that was NEVER ATTEMPTED (no
   // calendar row, or status 'planned'). A deliberately-deleted draft (status
   // 'drafted' with a null send_id) is left alone so it can't silently reappear,
   // and drafted/scheduled/sent/skipped weeks are already handled. The autopilot's
   // own advisory lock + dedupe make a catch-up invocation safe if it races the
-  // 7AM run. Runs daily Thu–Sun so a mid-week recovery still lands the draft.
+  // 7AM run.
   // A catch-up that hard-fails preflight persists a 'skipped' row, so the
   // following day's tick retires the week instead of re-running + re-notifying.
   // =========================================================================
-  cron.schedule('0 14 * * 4,5,6,0', async () => {
+  const runNewsletterAutopilotCatchup = async () => {
     try {
-      const { getCurrentNewsletterThursday } = require('./event-freshness');
-      const weekOf = getCurrentNewsletterThursday();
+      const { getActiveNewsletterTuesday } = require('./event-freshness');
+      const weekOf = getActiveNewsletterTuesday();
       const cal = await db('newsletter_calendar').where('week_of', weekOf).first();
       // Only catch up weeks that were never attempted — but a drafted week
       // may still be missing its owner proof (a transient SendGrid failure
@@ -1319,7 +1410,9 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[newsletter-autopilot-catchup] failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('0 14 * * 1', runNewsletterAutopilotCatchup, { timezone: 'America/New_York' });
+  cron.schedule('30 4 * * 2', runNewsletterAutopilotCatchup, { timezone: 'America/New_York' });
 
   // =========================================================================
   // DAILY 6AM ET — Newsletter indexability decay: noindex stale event digests
@@ -1346,7 +1439,7 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 6:15AM ET — Event auto-curation. Classifies never-examined pending
   // events with Claude and approves real consumer events for the digest, so
-  // the Thursday 7AM autopilot has an approved pool without a human working
+  // Monday's 7AM autopilot has an approved pool without a human working
   // the Event Inbox every week (the lane starved at 0 eligible for two weeks
   // when approval was manual-only). Runs after the 4AM ingest → 5AM
   // normalize → 5:30 expiry → 5:45 dedup chain so it judges clean, classified
@@ -1453,7 +1546,7 @@ function initScheduledJobs() {
   // (normalized title + ET day + city — conservative, near-zero false positives)
   // and collapse each cluster into one survivor (highest-priority source, then
   // most complete). Runs after the 5AM normalize + 5:30AM expire, before the
-  // Thursday-7AM autopilot, so the lineup it sees is already de-duplicated.
+  // Monday-7AM autopilot, so the lineup it sees is already de-duplicated.
   // =========================================================================
   cron.schedule('45 5 * * *', async () => {
     try {
