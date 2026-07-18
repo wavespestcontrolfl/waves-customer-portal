@@ -334,10 +334,18 @@ describe('service-interest mapper hardening', () => {
     expect(mapped.services.lawn).toMatchObject({ track: 'st_augustine', tier: 'enhanced' });
   });
 
-  test('a scope-resetting conjunction ends the negation: "no lawn but pest control"', () => {
+  test('a CONTRASTIVE conjunction ends the negation: "no lawn but pest control"', () => {
     const mapped = mapServiceInterestToEstimateServices('no lawn but pest control');
     expect(mapped.services.lawn).toBeUndefined();
     expect(mapped.services.pest).toMatchObject({ frequency: 'quarterly' });
+  });
+
+  test('plain "and" does NOT reset — "no lawn and mosquito" is a coordinated negated list', () => {
+    const mapped = mapServiceInterestToEstimateServices('quarterly pest, no lawn and mosquito');
+    expect(mapped.services.pest).toMatchObject({ frequency: 'quarterly' });
+    expect(mapped.services.lawn).toBeUndefined();
+    expect(mapped.services.mosquito).toBeUndefined();
+    expect(mapped.services.oneTimeMosquito).toBeUndefined();
   });
 
   test("don't-need phrasing negates through intervening words", () => {

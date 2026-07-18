@@ -58,9 +58,13 @@ function normalizedServiceClauses(serviceInterest) {
 // Negation tokens. The positive idioms "not only …"/"not just …" are NOT
 // negations — "not only pest but lawn care" asks for both services.
 const NEGATION_WORD = /\b(?:no|not|without|never|skip|except|cancel|dont|don t|do not|doesnt|doesn t|does not)\b(?!\s+(?:only|just|to mention)\b)/g;
-// Conjunctions that end a negation's reach: "no lawn but pest" and
-// "no lawn and pest" still select pest.
-const NEGATION_RESET = /\b(?:but|however|plus|and)\b/;
+// CONTRASTIVE conjunctions end a negation's reach: "no lawn but pest"
+// still selects pest. Plain "and" does NOT reset — "no lawn and mosquito"
+// is a coordinated negated list, and treating "and" as a reset would quote
+// the second service the customer explicitly declined. The cost is that
+// "no lawn and pest please" parks for manual review instead of quoting
+// pest — the safe failure direction.
+const NEGATION_RESET = /\b(?:but|however|plus)\b/;
 
 // True when the pattern matches somewhere in the text WITHOUT a negation
 // governing it. A negation governs from its token to the END of its clause
