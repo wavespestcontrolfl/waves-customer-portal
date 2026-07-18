@@ -139,7 +139,10 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
       <div data-gt="eyebrow" style={eyebrow}>Today’s protection status</div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ width: 12, height: 12, borderRadius: '50%', background: t.color, flexShrink: 0, boxShadow: `0 0 0 4px ${t.color}22` }} />
-        <h2 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 25, color: TEXT, margin: 0 }}>{status.label}</h2>
+        {/* sr-v2-hero-title marks this as the V2 hero so glass hides the
+            eyebrow above it (the ReportViewPage :has() rule) — lawn/tree get
+            this via a direct-sibling h2; here the h2 sits in a flex wrapper. */}
+        <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 25, color: TEXT, margin: 0 }}>{status.label}</h2>
       </div>
       {statusSummary ? (
         <p style={{ fontSize: 15, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
@@ -358,7 +361,9 @@ export function PestProtectionMap({ defense, print = false }) {
       `}</style>
       <div data-gt="eyebrow" style={eyebrow}>Where we protected</div>
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 2px' }}>
-        {perimeterActive ? 'A protective barrier is active around your home' : 'We’re building protection around your home'}
+        {/* Observational, not an efficacy promise — say what we DID, not that
+            a barrier "is active" (same standard the AI copy guard enforces). */}
+        {perimeterActive ? 'We treated the perimeter of your home today' : 'We’re building protection around your home'}
       </h3>
       <p style={{ fontSize: 14, color: MUTED, margin: '0 0 6px' }}>Where we treated and what we’re keeping an eye on this visit.</p>
 

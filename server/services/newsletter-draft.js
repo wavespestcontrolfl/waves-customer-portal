@@ -29,9 +29,7 @@ const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
 } = require('./newsletter-event-selection');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('./llm/call');
 
 function generateSlug(subject) {
   const base = (subject || 'newsletter')
@@ -1290,13 +1288,10 @@ async function createNewsletterDraft({
   trx,
   persist = true,
 }) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-    throw new Error('Anthropic API not configured');
-  }
-
   const knex = trx || db;
+  // The issue's Tuesday (not "now") anchors both the seasonal-month framing
+  // and every event-policy window — cross-provider dispatch happens below.
   const editorialReference = resolveIssueReference(issueReference);
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const month = editorialReference.toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' });
   const typeConfig = getNewsletterType(newsletterType);
   const voice = getVoiceProfile(typeConfig.voiceProfile);
@@ -1371,49 +1366,19 @@ async function createNewsletterDraft({
 ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
 
-  // 3. Call Claude API. 8192 tokens — the Beehiiv-parity schema is richer
+  // 3. Call the Sonnet → OpenAI Terra content policy. 8192 tokens — the Beehiiv-parity schema is richer
   // (captions, scoop labels, checklists) and a 10-event lineup at 4096
   // risked mid-JSON truncation.
-  const response = await anthropic.messages.create({
-    model: MODELS.WORKHORSE,
-    max_tokens: 8192,
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    maxTokens: 8192,
+    jsonMode: true,
     system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }],
+    text: userPrompt,
   });
+  if (!response.ok || !response.json) throw new Error('Newsletter AI providers did not return valid JSON');
 
-  // 4. Parse JSON response
-  const text = response.content?.[0]?.text || '';
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Claude did not return JSON');
-
-  let rawJson = jsonMatch[0];
-  // Repair common Claude JSON issues
-  rawJson = rawJson.replace(/,\s*([\]}])/g, '$1');  // trailing commas
-  rawJson = rawJson.replace(/[\x00-\x1F\x7F]/g, (ch) => {  // unescaped control chars
-    if (ch === '\n' || ch === '\r' || ch === '\t') return ch;
-    return '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0');
-  });
-
-  let draft;
-  try {
-    draft = JSON.parse(rawJson);
-  } catch (firstErr) {
-    const logger = require('./logger');
-    logger.warn(`[newsletter-draft] JSON repair: first parse failed (${firstErr.message}), retrying with Claude`);
-    // Ask Claude to fix its own JSON
-    const repairResponse = await anthropic.messages.create({
-      model: MODELS.WORKHORSE,
-      max_tokens: 4000,
-      messages: [
-        { role: 'user', content: `The following JSON has syntax errors. Fix ONLY the JSON syntax (trailing commas, unescaped quotes, etc) and return ONLY the valid JSON. Do not change any content.\n\n${rawJson}` },
-      ],
-    });
-    const repairText = repairResponse.content?.[0]?.text || '';
-    const repairMatch = repairText.match(/\{[\s\S]*\}/);
-    if (!repairMatch) throw firstErr;
-    let repairedJson = repairMatch[0].replace(/,\s*([\]}])/g, '$1');
-    draft = JSON.parse(repairedJson);
-  }
+  // 4. The shared dispatcher parses JSON and crosses providers on malformed output.
+  const draft = response.json;
 
   // 4a. Factual lock — overwrite AI-supplied date/venue/address/URL/image
   //     with the values from events_raw, keyed by the eventId the model

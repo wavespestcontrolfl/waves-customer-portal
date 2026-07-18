@@ -183,8 +183,8 @@ describe('syncAudience', () => {
     const saved = inserts.filter((x) => x.table === 'ad_audience_syncs').pop();
     const persisted = JSON.parse(saved.row.member_keys);
     expect(persisted).toEqual(expect.arrayContaining([
-      { k: 'customer:c1', d: ['h:a@x.com', 'h:19412975749'] },
-      { k: 'customer:c1', d: ['h:a@x.com', 'h:OLD'] },
+      expect.objectContaining({ k: 'customer:c1', d: ['h:a@x.com', 'h:19412975749'] }),
+      expect.objectContaining({ k: 'customer:c1', d: ['h:a@x.com', 'h:OLD'] }),
     ]));
   });
 
@@ -245,5 +245,120 @@ describe('buildReadiness', () => {
     expect(r.audiences.customers.withMatchKeys).toBe(1);
     expect(r.audiences.customers.missingMatchKeys).toBe(1);
     expect(r.audiences.unbooked_leads.eligible).toBe(1);
+  });
+});
+
+// ── r2 (Codex): consent semantics in the delta ───────────────────────
+describe('consent (r2)', () => {
+  test('customers audience KEEPS an opted-out customer — it is the prospecting EXCLUSION list', async () => {
+    configure();
+    tableData.customers = [{ id: 'c1', email: 'opted@x.com', phone: '9415551234' }];
+    tableData.email_suppressions = [{ email: 'opted@x.com' }];
+    const r = await MetaAudiences.syncAudience('customers', {});
+    expect(r.eligible).toBe(1);   // NOT dropped — removing them would re-expose them to ads
+    expect(r.toAdd).toBe(1);
+  });
+
+  test('unbooked_leads (retargeting) drops the opted-out lead at collection', async () => {
+    configure();
+    tableData.leads = [{ id: 'l1', email: 'opted@x.com', phone: null }];
+    tableData.email_suppressions = [{ email: 'opted@x.com' }];
+    const r = await MetaAudiences.syncAudience('unbooked_leads', {});
+    expect(r.eligible).toBe(0);
+    expect(r.toAdd).toBe(0);
+  });
+
+  test('consent removal overrides shared-identifier retention; housemate re-adds next run', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    // Opted-out lead l1 (unique email) shares a household phone with current lead l2:
+    // the old rule would RETAIN l1's row forever, keeping the opted-out email matchable.
+    tableData.leads = [{ id: 'l2', email: 'fine@x.com', phone: '9415551111' }];
+    tableData.email_suppressions = [{ email: 'opted@x.com' }];
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [
+      { k: 'lead:l1', d: ['h:opted@x.com', 'h:19415551111'] },
+      { k: 'lead:l2', d: ['h:fine@x.com', 'h:19415551111'] },
+    ] };
+    const r = await MetaAudiences.syncAudience('unbooked_leads', {});
+    expect(r.consentRemovals).toBe(1);
+    expect(r.toRemove).toBe(1);
+    expect(r.retained).toBe(0);
+    expect(r.deferredReAdds).toBe(1);
+    const del = global.fetch.mock.calls.find((c) => c[1] && c[1].method === 'DELETE');
+    expect(JSON.parse(del[1].body).payload.data).toEqual([['h:opted@x.com', 'h:19415551111']]);
+    // l2 is deliberately absent from persisted state — the DELETE (which runs after
+    // adds and matches by ANY identifier) may knock them out; next sync re-adds.
+    const saved = inserts.filter((x) => x.table === 'ad_audience_syncs').pop();
+    expect(JSON.parse(saved.row.member_keys)).toEqual([]);
+  });
+});
+
+// ── r3 (Codex): variant-uploaded rows removed via dropped-member hashing ──
+describe('consent (r3)', () => {
+  test('a canonical-variant suppression removes the row uploaded under the raw source variant', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    // l1's SOURCE email is a dotted gmail variant; the suppression stores the
+    // canonical form. The uploaded row hashed the raw variant, so the raw
+    // suppression hash alone can never match it — the dropped member's own
+    // source string must drive the removal. l1 also shares a household phone
+    // with current lead l2 (the retention case).
+    tableData.leads = [
+      { id: 'l1', email: 'o.p.t.e.d@gmail.com', phone: '9415551111' },
+      { id: 'l2', email: 'fine@x.com', phone: '9415551111' },
+    ];
+    tableData.email_suppressions = [{ email: 'opted@gmail.com' }];
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [
+      { k: 'lead:l1', d: ['h:o.p.t.e.d@gmail.com', 'h:19415551111'] },
+      { k: 'lead:l2', d: ['h:fine@x.com', 'h:19415551111'] },
+    ] };
+    const r = await MetaAudiences.syncAudience('unbooked_leads', {});
+    expect(r.eligible).toBe(1); // l1 dropped at collection (canonical match)
+    expect(r.consentRemovals).toBe(1);
+    expect(r.toRemove).toBe(1);
+    expect(r.retained).toBe(0);
+    const del = global.fetch.mock.calls.find((c) => c[1] && c[1].method === 'DELETE');
+    expect(JSON.parse(del[1].body).payload.data).toEqual([['h:o.p.t.e.d@gmail.com', 'h:19415551111']]);
+  });
+});
+
+// ── r4 (Codex): canonical consent hash in state + one-snapshot suppression ──
+describe('consent (r4)', () => {
+  test('persisted rows carry the canonical consent hash (c)', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    tableData.customers = [{ id: 'c1', email: 'First.Last+promo@Gmail.com', phone: null }];
+    await MetaAudiences.syncAudience('customers', {});
+    const saved = inserts.filter((x) => x.table === 'ad_audience_syncs').pop();
+    const persisted = JSON.parse(saved.row.member_keys);
+    expect(persisted[0].c).toBe('h:firstlast@gmail.com'); // canonical, not raw
+  });
+
+  test('a variant-uploaded row whose SOURCE was hard-deleted is still consent-removed via its stored canonical hash', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    // l1's source lead is GONE; its state row was uploaded from a dotted
+    // variant (raw hash unmatchable from the canonical suppression) but a
+    // post-fix sync stamped the canonical hash c. It shares a household phone
+    // with current lead l2 — the previously-retained untraceable case.
+    tableData.leads = [{ id: 'l2', email: 'fine@x.com', phone: '9415551111' }];
+    tableData.email_suppressions = [{ email: 'opted@gmail.com' }];
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [
+      { k: 'lead:l1', d: ['h:o.p.t.e.d@gmail.com', 'h:19415551111'], c: 'h:opted@gmail.com' },
+      { k: 'lead:l2', d: ['h:fine@x.com', 'h:19415551111'], c: 'h:fine@x.com' },
+    ] };
+    const r = await MetaAudiences.syncAudience('unbooked_leads', {});
+    expect(r.consentRemovals).toBe(1);
+    expect(r.toRemove).toBe(1);
+    expect(r.retained).toBe(0);
+  });
+
+  test('ONE suppression snapshot serves both collection and removal (no double load)', async () => {
+    configure();
+    tableData.leads = [{ id: 'l1', email: 'a@x.com', phone: null }];
+    mockDb.mockClear(); // count only THIS sync's loads
+    await MetaAudiences.syncAudience('unbooked_leads', {});
+    const loads = mockDb.mock.calls.filter((c) => c[0] === 'messaging_suppression').length;
+    expect(loads).toBe(1);
   });
 });

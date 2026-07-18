@@ -578,6 +578,285 @@ function keywordStuffingFinding(body, primaryKeyword) {
   return null;
 }
 
+// ── Product / inventory claims (P1 PRODUCT_CLAIM) ─────────────────────────
+// Autonomous drafts have repeatedly asserted professional product names,
+// active-ingredient mechanisms, and "what our techs carry" inventory claims
+// that nothing in content-ops/facts-bank/ supports (Codex flagged Advion/
+// indoxacarb + "which is what our techs carry" on astro PR #383). Product
+// facts are never in the brief facts_pack, so in this lane they are
+// UNVERIFIABLE by construction: block them all. Consumer-brand "don't spray
+// Raid/Ortho" warnings stay legal — the lists below cover professional
+// products and active ingredients only.
+const PRO_PRODUCT_TERMS = [
+  'advion', 'termidor', 'taurus sc', 'alpine wsg', 'temprid',
+  'demand cs', 'suspend sc', 'suspend polyzone', 'talstar', 'maxforce',
+  'optigard', 'arilon', 'intice',
+  'essentria', 'sentricon', 'trelona', 'altriset', 'terro pro',
+];
+// Brand names that are ALSO ordinary English words ("use these steps in
+// tandem", "phantom ants", "on the premises", "a vendetta against roaches").
+// Bare word matching P1'd valid prose, so these only count as products when
+// adjacent to a product noun/formulation.
+const AMBIGUOUS_PRODUCT_TERMS = ['phantom', 'premise', 'tandem', 'vendetta'];
+const PRODUCT_NOUN_TERMS = ['insecticide', 'termiticide', 'pesticide', 'aerosol', 'foam', 'gel', 'bait', 'granules?', 'spray', 'dust', 'label', 'sc', 'wsg', 'wg', 'xt'];
+const PRODUCT_NOUN_SRC = `(?:${PRODUCT_NOUN_TERMS.join('|')})`;
+// Round-9 (Codex P2): reading/following the LABEL is the compliance
+// language the writer prompt REQUIRES ("our technicians use the product
+// label to choose safe placement") — never an inventory claim. 'label'
+// stays in PRODUCT_NOUN_SRC for brand adjacency ("the Premise label"),
+// but the inventory branch excludes it, and an inventory noun that is
+// itself modifying "label(s)" ("the product label", "the bait label") is
+// a label reference, not carried inventory.
+const INVENTORY_PRODUCT_NOUN_SRC = `(?:${PRODUCT_NOUN_TERMS.filter((t) => t !== 'label').join('|')})`;
+const ACTIVE_INGREDIENT_TERMS = [
+  'indoxacarb', 'fipronil', 'dinotefuran', 'imidacloprid', 'bifenthrin',
+  'hydramethylnon', 'abamectin', 'avermectin', 'thiamethoxam', 'clothianidin',
+  'cyfluthrin', 'deltamethrin', 'lambda-cyhalothrin', 'cyhalothrin',
+  'permethrin', 'cypermethrin', 'esfenvalerate', 'chlorfenapyr', 'novaluron',
+  'pyriproxyfen', 'methoprene', 'hexaflumuron', 'noviflumuron', 'sulfluramid',
+  'chlorantraniliprole',
+];
+const INVENTORY_CLAIM_RES = [
+  // "our techs carry/use/rely on … <some product/formulation>" — the verb
+  // alone is NOT a violation ("our technicians use moisture meters", "our
+  // team uses inspection notes"); it must be about a pesticide product.
+  // Named brands/ingredients after these verbs are caught by the brand and
+  // ingredient branches regardless.
+  // The product noun must be the OBJECT of the verb (a few determiner/
+  // adjective words at most) — "carry more than one bait" blocks, while
+  // "use inspection notes to decide where bait should go" stays legal.
+  new RegExp(`\\b(?:our|waves(?:'s?)?)\\s+(?:techs?|technicians?|team|pros?|crews?)\\s+(?:carry|carries|use|uses|apply|applies|stock|stocks|lean\\s+on|rely|relies|prefer|prefers|spray|sprays|trust|trusts)\\b(?:\\s+on)?(?:\\s+[\\w'’-]+){0,3}?\\s+(?:${INVENTORY_PRODUCT_NOUN_SRC}|baits?|gels?|products?|formulations?|chemicals?)\\b(?!\\s+labels?\\b)`, 'i'),
+  // Anaphoric inventory claims — "what our techs carry", "which is what our
+  // techs use" — always refer back to a just-named product; keep unconditional.
+  /\bwhat\s+(?:our|the)\s+(?:techs?|technicians?|team|pros?)\s+(?:carry|carries|use|uses)\b/i,
+  /\bwhich\s+is\s+what\s+(?:our\s+(?:techs?|technicians?|team)|we)\s+(?:carry|carries|use|uses)\b/i,
+];
+
+// A professional product named as a TOPIC ("Sentricon in Southwest Florida")
+// is legitimate informational content; the violation is naming it in a
+// recommendation / usage / inventory context ("the gel pros reach for is
+// Advion", "grab some Advion", "which is what our techs carry"). Active
+// ingredients get no such carve-out — mechanism-level specifics are never in
+// the facts bank and homeowners don't search them.
+// choose/select forms (round 9): "Choose Advion for ants" / "select
+// Termidor along the slab" are recommendations by different wording.
+const PRODUCT_CONTEXT_VERBS_SRC = "(?:use[sd]?|using|appl(?:y|ies|ied|ying)|plac(?:e[sd]?|ing)|put(?:s|ting)?\\s+(?:out|down)|grabs?|bu(?:y|ys|ying)|pick(?:s|ing)?\\s+up|recommend\\w*|carr(?:y|ies|ying)|reach(?:es)?\\s+for|lean[s]?\\s+on|trusts?|sprays?|spraying|treats?\\s+with|choos(?:e|es|ing)|chose(?:n)?|select(?:s|ed|ing)?)";
+
+function productClaimFinding(text) {
+  const s = String(text || '');
+  for (const term of ACTIVE_INGREDIENT_TERMS) {
+    const re = new RegExp(`\\b${escapeRegExp(term)}\\b`, 'i');
+    if (re.test(s)) {
+      return finding('P1', 'PRODUCT_CLAIM', `Names the active ingredient "${term}" — mechanism-level product facts are not in the facts bank and cannot ship in autonomous content. Describe the product class generically (e.g. "a slow-acting sugar-based bait gel labeled for indoor use") and defer specifics to the label.`);
+    }
+  }
+  const brandAlt = PRO_PRODUCT_TERMS.map(escapeRegExp).join('|');
+  // Context that turns a brand TOPIC into a recommendation/endorsement/usage
+  // claim: usage verbs before the brand; endorsement, EFFICACY ("works best",
+  // "kills ants quickly"), or PASSIVE-USAGE ("is applied in pea-sized dabs")
+  // phrasing after it. A bare brand mention with none of these stays legal
+  // (informational topic).
+  const POST_BRAND_CLAIM_SRC = [
+    'is\\s+what', 'which\\s+is\\s+what', 'pro\\s+choice', 'go-?to', 'top\\s+pick', 'favorite',
+    'best\\s+(?:bait|gel|product|option|choice)',
+    // efficacy claims. 'works' is EFFICACY-QUALIFIED (round-10, Codex P2):
+    // bare "How Sentricon works in Southwest Florida" / "Sentricon works by
+    // intercepting foragers" is the product-as-TOPIC informational copy the
+    // carve-out above explicitly allows (and evaluate() scans title/meta, so
+    // an unqualified 'works' blocked legitimate topic pages before a PR ever
+    // opened). It only counts as a claim with efficacy/comparative/guarantee
+    // wording ("works better/best/guaranteed/wonders/every time") or an
+    // endorsing intensifier before it ("really/actually works").
+    'works?\\s+(?:best|better|faster|great|wonders|guaranteed|perfectly|flawlessly|reliably|so\\s+well|every\\s+time|like\\s+a\\s+charm|instantly|overnight|on\\s+contact)',
+    '(?:really|actually|truly|always|just|simply)\\s+works?\\b',
+    'kills?\\b', 'knocks?\\s+(?:out|down)', 'wipes?\\s+out', 'eliminates?', 'eradicates?', 'outperforms?',
+    'is\\s+(?:the\\s+)?(?:best|most\\s+effective|effective|strongest|stronger)',
+    // passive usage — present AND past tense
+    '(?:is|are|was|were|gets?|got)\\s+(?:applied|used|placed|sprayed|injected|installed|put\\s+(?:down|out))',
+  ].join('|');
+  const brandInRecommendation = new RegExp(`\\b(?:${PRODUCT_CONTEXT_VERBS_SRC}|rel(?:y|ies|ying)\\s+on)\\b[^.!?\\n]{0,120}\\b(?:${brandAlt})\\b|\\b(?:${brandAlt})\\b[^.!?\\n]{0,120}\\b(?:${POST_BRAND_CLAIM_SRC})`, 'i');
+  const brandMatch = s.match(brandInRecommendation);
+  if (brandMatch) {
+    return finding('P1', 'PRODUCT_CLAIM', `Recommends the professional product in "${brandMatch[0].trim().slice(0, 120)}" — unsupported by the facts bank. Name the product class generically and defer specifics to the label; product names are only legal as an informational topic, never as a usage/efficacy claim.`);
+  }
+  // Ambiguous brand words only count when adjacent to a product noun
+  // ("Phantom aerosol", "Premise granules") — bare "in tandem"/"phantom ants"
+  // is ordinary prose.
+  const ambiguousAlt = AMBIGUOUS_PRODUCT_TERMS.map(escapeRegExp).join('|');
+  const ambiguousProduct = new RegExp(`\\b(?:${ambiguousAlt})\\s+${PRODUCT_NOUN_SRC}\\b`, 'i');
+  const ambiguousMatch = s.match(ambiguousProduct);
+  if (ambiguousMatch) {
+    return finding('P1', 'PRODUCT_CLAIM', `Names the professional product "${ambiguousMatch[0].trim()}" — unsupported by the facts bank. Name the product class generically instead.`);
+  }
+  for (const re of INVENTORY_CLAIM_RES) {
+    const m = s.match(re);
+    if (m) {
+      return finding('P1', 'PRODUCT_CLAIM', `Inventory claim "${m[0]}" asserts what Waves technicians carry/use — unverifiable from the facts bank and goes stale. Remove the claim; describe what a licensed professional would do instead.`);
+    }
+  }
+  return null;
+}
+
+// ── Prevention / elimination promises (P1 PREVENTION_PROMISE) ─────────────
+// The facts bank prohibits guaranteed-extermination / 100%-elimination
+// claims, and drafts keep emitting softer variants ("prevents next month's
+// trail", "keeps them from coming back") that Codex then flags round after
+// round. The documented offer is reduced recurrence + free re-treatment —
+// never prevention. Patterns are pest-anchored to avoid the bare-'never'
+// false-positive class that got the old signal removed (PR #2776).
+const PEST_OBJ_SRC = "(?:ants?|pests?|bugs?|roaches|cockroaches|termites?|rodents?|mice|rats?|mosquito(?:es)?|spiders?|fleas?|ticks?|infestations?|colon(?:y|ies)|trails?|them|they)";
+// Round-8 (Codex P1): the filler words between a service subject and the
+// promise verb must never absorb a negation that governs the verb —
+// "This treatment does not eliminate ants" / "won't eliminate ants" are
+// exactly the honest disclaimers this gate exists to ENCOURAGE. Every
+// filler word is lookahead-guarded against these forms; two-word
+// negations resolve too ("does not" = allowed "does" + blocked "not", so
+// the verb position lands on "not" and the match dies). "not" heading a
+// "not only/just/merely" construction stays allowed because "This
+// treatment not only prevents ants…" is an AFFIRMATIVE claim.
+const NEGATION_WORD_SRC = "(?:not(?!\\s+(?:only|just|merely)\\b)|no|never|won['’]?t|cannot|can['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|couldn['’]?t|shouldn['’]?t|wouldn['’]?t|mustn['’]?t)";
+const NON_NEGATED_FILLER_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’]+\\s+){0,2}?`;
+// Every pattern is pest-anchored — the OBJECT (or the promised state) must be
+// a pest term, so "prevents next month's water bill" / "prevents moisture
+// buildup" stay legal. Source strings (not RegExp literals) so the finding
+// scanner can run each with the global flag and inspect EVERY match — a
+// single negated-disclaimer match must not exempt later matches of the same
+// pattern.
+const PREVENTION_PROMISE_SRCS = [
+  // "prevents/keeps/stops <pest> from coming back / returning / getting in"
+  `\\b(?:prevents?|keeps?|stops?)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+from\\s+(?:coming\\s+back|returning|re-?infest\\w*|ever\\s+\\w+|getting\\s+(?:back\\s+)?in(?:side)?\\b)`,
+  // "<pest> won't / will not / will never come back or return"
+  `\\b${PEST_OBJ_SRC}\\s+(?:won['’]?t|will\\s+not|will\\s+never|never)\\s+(?:come\\s+back|return|be\\s+back)`,
+  // "never see/deal with another <pest>"
+  `\\bnever\\s+(?:see|have|deal\\s+with|worry\\s+about)\\s+(?:another\\s+)?${PEST_OBJ_SRC}`,
+  // guaranteed / promised elimination or 100% anything
+  "\\b(?:guarantees?d?|promises?d?)\\s+(?:[\\w'’]+\\s+){0,3}?(?:eliminat\\w+|exterminat\\w+|eradicat\\w+|pest[-\\s]?free|100\\s?%)",
+  "\\b100\\s?%\\s+(?:effective|eliminat\\w+|eradicat\\w+|pest[-\\s]?free|guaranteed?|success)",
+  // "eliminates/gets rid of <pest> for good / permanently / forever"
+  `\\b(?:eliminates?|gets?\\s+rid\\s+of|removes?|clears?\\s+out)\\s+(?:[\\w'’]+\\s+){0,3}?${PEST_OBJ_SRC}\\s+(?:for\\s+good|permanently|forever|once\\s+and\\s+for\\s+all)`,
+  // "prevents next month's/season's <pest>" (the PR #383 shape). Pest object
+  // REQUIRED — optional matching blocked "prevents next month's water bill".
+  `\\bprevents?\\s+(?:the\\s+)?(?:next|future)\\s+(?:month|year|season|week)[\\w'’]*\\s+(?:[\\w'’]+\\s+){0,2}?${PEST_OBJ_SRC}`,
+  // BARE unconditional promises with a service/treatment subject:
+  // "This quarterly treatment prevents infestations", "Our treatment
+  // eliminates ants in your home", "A professional application eradicates
+  // cockroaches". The subject anchor keeps question headings and homeowner
+  // how-to framing ("How do I get rid of ants?") legal, and the
+  // negation-guarded filler (round 8) keeps directly negated disclaimers
+  // ("This treatment does not eliminate ants") legal.
+  `\\b(?:treatments?|applications?|services?|programs?|plans?|visits?|products?|this|it)\\s+${NON_NEGATED_FILLER_SRC}(?:prevents?|eliminates?|eradicates?|exterminates?|wipes?\\s+out)\\s+(?:all\\s+|any\\s+|future\\s+|the\\s+|your\\s+)?${PEST_OBJ_SRC}`,
+  // Qualifier promises with no subject needed: "prevents future infestations",
+  // "prevents all ants" — incl. comparison-table row labels.
+  `\\bprevents?\\s+(?:all|any|every|future)\\s+${PEST_OBJ_SRC}`,
+  // "keeps your home/kitchen/yard pest-free" as an unconditional state
+  "\\bkeeps?\\s+(?:your\\s+)?(?:home|house|kitchen|yard|lawn|property)\\s+(?:pest|ant|roach|termite|rodent|bug)[-\\s]?free\\b",
+];
+const PREVENTION_PROMISE_RES = PREVENTION_PROMISE_SRCS.map((src) => new RegExp(src, 'i'));
+
+// Honest-disclaimer context: "no honest company will promise you'll never
+// see another ant" is the phrasing we WANT — a match preceded by a negated
+// promise is a disclaimer, not a claim.
+// Apostrophes match BOTH straight and typographic forms — generated copy
+// routinely ships curly quotes (the pest-practices matcher was burned by
+// exactly this).
+const NEGATED_PROMISE_CONTEXT_RE = /(?:no\s+(?:honest\s+)?(?:company|one|body|pro)|won['’]?t|will\s+not|cannot|can['’]?t|nobody\s+can|don['’]?t|do\s+not|doesn['’]?t|does\s+not|never)\s+(?:[\w'’]+\s+){0,3}?(?:promise|guarantee|tell\s+you)/i;
+
+// Round-8 (Codex P1): a negation IMMEDIATELY before the matched claim
+// directly negates its promise verb — "…doesn't stop ants from coming
+// back", "cannot prevent every ant", "no guaranteed elimination" are
+// disclaimers, not promises. The verb-anchored patterns start AT the verb,
+// so a governing negation sits just before the match start; the
+// subject-anchored pattern is covered by NON_NEGATED_FILLER_SRC instead
+// (there the negation sits INSIDE the match). Anchored to the match start
+// so "not only prevents ants…" (affirmative) and "Nothing stops ants like
+// us" (hype, "Nothing" deliberately absent) still flag.
+const DIRECT_NEGATION_BEFORE_RE = /(?:\bnot|\bnever|\bno|\bcannot|\bwon['’]?t|\bcan['’]?t|\bdon['’]?t|\bdoesn['’]?t|\bdidn['’]?t|\bisn['’]?t|\baren['’]?t|\bwasn['’]?t|\bweren['’]?t|\bcouldn['’]?t|\bwouldn['’]?t|\bshouldn['’]?t|\bmustn['’]?t)\s+$/i;
+
+// Round-9 (Codex P2): subject-level negation — "No service prevents all
+// ants", "No treatment eliminates ants forever" — is the same honest-
+// disclaimer class: a negated SUBJECT ("no" + up to three subject words)
+// governing a verb-anchored match that starts right at the promise verb.
+// The word chain must be CONTIGUOUS, so punctuation breaks government
+// ("With no contract, our treatment eliminates ants for good" still
+// flags), "no matter …" is excluded ("No matter what our treatment
+// prevents…" is a promise), and "Nothing stops ants like us" promotional
+// inversions stay flaggable ("Nothing" is deliberately not "no <subject>").
+const NEGATED_SUBJECT_BEFORE_RE = /\bno\s+(?!matter\b)(?:[\w'’]+\s+){1,3}$/i;
+
+// Round-10 (Codex P2): educational question/how-to framing makes prevention
+// the TOPIC, not a promise — "How to prevent ants from coming back",
+// "Can pest control prevent ants from coming back?" are exactly the
+// search-intent titles the writer is supposed to produce. Two narrow
+// shapes, and BOTH additionally require the matched verb to be BARE
+// (uninflected): infinitives and fronted auxiliaries govern a bare verb,
+// while embedded declarative promises stay inflected ("Did you know our
+// treatment prevents ants…" keeps flagging) or carry a long subject.
+//  - how-to / advice-noun infinitives: "how to (…) prevent", "steps to
+//    keep", "ways to stop", plus a sentence-INITIAL bare "To prevent …".
+//    Mid-sentence infinitives get NO exemption — "designed/guaranteed to
+//    prevent ants from coming back" are capability promises and still flag.
+//  - fronted-question inversion: optional wh-word + auxiliary + a SHORT
+//    subject (1-3 words) directly before the verb — "Can pest control
+//    prevent…", "Will a quarterly treatment stop…". Affirmative subjects
+//    never match (no fronted auxiliary), so "Our service prevents…" /
+//    "We prevent…" keep flagging, and "Nothing stops ants…" hype is
+//    untouched (no auxiliary at all).
+const HOWTO_INFINITIVE_BEFORE_RE = /(?:\bhow\s+to|\b(?:ways?|steps?|tips?|tricks?|methods?|habits?|strategies)\s+to)\s+(?:[\w'’]+\s+){0,2}$|^[^\w]*to\s+$/i;
+const QUESTION_INVERSION_BEFORE_RE = /^[^\w]*(?:(?:how|what|why|where|when|who)\s+)?(?:can|could|will|would|do|does|did|should|shall|may|might)\s+(?:[\w'’]+\s+){1,3}$/i;
+// The bare (uninflected) leading verbs of the verb-anchored promise
+// patterns — the only forms an infinitive or fronted auxiliary can govern.
+// Inflected matches ("prevents", "keeps", "gets rid of") never qualify:
+// \b fails inside the trailing "s".
+const BARE_LEADING_VERB_RE = /^(?:prevent|keep|stop|eliminate|eradicate|exterminate|remove|clear|get|wipe)\b/i;
+
+function preventionPromiseFinding(text) {
+  const s = String(text || '');
+  for (const src of PREVENTION_PROMISE_SRCS) {
+    // Global scan: every match is judged individually. A negated-disclaimer
+    // FIRST match must not exempt a genuine promise later in the same text
+    // ("No honest company will promise you'll never see another ant. Our
+    // service means you will never see another ant." — the second flags).
+    const re = new RegExp(src, 'gi');
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      // The negation must GOVERN the matched claim: same sentence AND no
+      // clause boundary between the negated "promise/guarantee" verb and the
+      // match. A disclaimer must shield neither the next sentence ("… can
+      // promise permanent prevention. Our treatment eliminates ants.") nor a
+      // coordinated clause in the same sentence ("… you'll never see another
+      // ant, but our service eliminates ants.").
+      const before = s.slice(Math.max(0, m.index - 80), m.index);
+      const sentenceBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n'));
+      const sameSentence = sentenceBreak >= 0 ? before.slice(sentenceBreak + 1) : before;
+      // Directly negated claim ("will not prevent ants from returning",
+      // "cannot prevent every ant" — round 8) or negated-subject disclaimer
+      // ("No service prevents all ants" — round 9): exempt.
+      if (DIRECT_NEGATION_BEFORE_RE.test(sameSentence) || NEGATED_SUBJECT_BEFORE_RE.test(sameSentence)) {
+        if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
+        continue;
+      }
+      // Question / how-to framing (round 10): only when the governing
+      // context sits in the same sentence AND the matched verb is bare —
+      // see the RE definitions above for the shapes and their limits.
+      if ((HOWTO_INFINITIVE_BEFORE_RE.test(sameSentence) || QUESTION_INVERSION_BEFORE_RE.test(sameSentence)) && BARE_LEADING_VERB_RE.test(m[0])) {
+        if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
+        continue;
+      }
+      const negation = NEGATED_PROMISE_CONTEXT_RE.exec(sameSentence);
+      if (negation) {
+        const between = sameSentence.slice(negation.index + negation[0].length);
+        const clauseBreak = /[;:—–]|,\s*(?:but|and|yet|so|however|while)\b|\b(?:but|however)\b/i.test(between);
+        if (!clauseBreak) {
+          if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
+          continue;
+        }
+      }
+      return finding('P1', 'PREVENTION_PROMISE', `Prevention/elimination promise "${m[0].trim()}" — the facts bank prohibits guaranteed-outcome claims. Describe reduced recurrence and the free re-treatment (callback) guarantee instead.`);
+    }
+  }
+  return null;
+}
+
 /**
  * evaluate(draft, { service, primaryKeyword, domains }) → { pass, findings }
  *
@@ -634,6 +913,10 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // (publishAstro, mined opportunities) keeps full enforcement.
     operatorFaqException ? null : faqBlockedFinding(body, service),
     keywordStuffingFinding(body, kw),
+    // Product/mechanism/inventory claims and prevention promises ship in meta
+    // just like in body — scan the full publishable text for both.
+    productClaimFinding(publishableText),
+    preventionPromiseFinding(publishableText),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -651,5 +934,10 @@ module.exports = {
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS },
+  // single source of truth for the product-claim + prevention-promise
+  // policies — consumed by the writer prompts so instruction and enforcement
+  // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).
+  PRO_PRODUCT_TERMS,
+  ACTIVE_INGREDIENT_TERMS,
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding },
 };

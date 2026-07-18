@@ -4,8 +4,8 @@ jest.mock('express', () => ({
     get: jest.fn(),
     put: jest.fn(),
   }),
-}), { virtual: true });
-jest.mock('joi', () => ({}), { virtual: true });
+}));
+jest.mock('joi', () => ({}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/auth', () => ({ authenticate: jest.fn() }));
 jest.mock('../services/logger', () => ({

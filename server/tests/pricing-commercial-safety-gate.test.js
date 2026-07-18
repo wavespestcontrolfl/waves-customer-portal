@@ -265,22 +265,29 @@ describe('commercial helper PR1 safety behavior', () => {
 });
 
 describe('commercial safety gate in generateEstimate', () => {
-  test('residential golden master remains unchanged for pest and lawn', () => {
+  test('residential pest and lawn stay pinned to the collected-margin floor', () => {
     const estimate = generateEstimate(baseInput());
     const pest = estimate.lineItems.find((line) => line.service === 'pest_control');
     const lawn = estimate.lineItems.find((line) => line.service === 'lawn_care');
 
     expect(pest).toMatchObject({ monthly: 39, annual: 468, perApp: 117 });
-    expect(lawn).toMatchObject({ monthly: 51.75, annual: 621, perApp: 69 });
+    // Lawn 621 → 648: spot reserves folded into the 35% cost floor
+    // (owner 2026-07-16, LAWN_PRICING_V2_SPOT_RESERVE).
+    expect(lawn).toMatchObject({ monthly: 54, annual: 648, perApp: 72 });
     expect(estimate.summary).toMatchObject({
-      recurringAnnualBeforeDiscount: 1089,
-      // Silver 10% on lawn (621 → 558.90) caps at the $600 lawn program
-      // minimum (owner 2026-07-09): pest 421.20 + lawn 600 = 1021.20.
-      recurringAnnualAfterDiscount: 1021.2,
-      recurringMonthlyAfterDiscount: 85.1,
-      year1Total: 1021,
-      year2Annual: 1021,
-      year2Monthly: 85.1,
+      recurringAnnualBeforeDiscount: 1116,
+      // Silver 10% on lawn (648 → 583.20) is capped at the GREATER of the
+      // $600 program minimum (owner 2026-07-09) and the 35% collected-margin
+      // floor (owner 2026-07-16). With spot reserves folded into the cost
+      // basis the collected floor is 642.76 > 600, so the margin guard
+      // binds: pest 421.20 + lawn 642.76 = 1063.96. Floor-bound monthly
+      // CEILs (1063.96/12 → 88.67); year2Monthly stays plain-rounded
+      // (display-only, documented in the lawn-margin baseline note).
+      recurringAnnualAfterDiscount: 1063.96,
+      recurringMonthlyAfterDiscount: 88.67,
+      year1Total: 1064,
+      year2Annual: 1064,
+      year2Monthly: 88.66,
     });
     expect(estimate.waveGuard).toMatchObject({
       tier: 'silver',

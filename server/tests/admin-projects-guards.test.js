@@ -21,6 +21,7 @@ const {
   evaluateProjectSendReadiness,
   dropStaleCertTreatmentDate,
   resolveWdoInspectionFee,
+  wdoAddendumPhotoCaption,
   wdoFeeIsExplicitZero,
 } = projectsRouter._private;
 
@@ -416,7 +417,7 @@ describe('WDO inspection fee resolution (no-charge rule)', () => {
     expect(resolveWdoInspectionFee({ inspection_fee: '0' })).toBe(0);
     expect(resolveWdoInspectionFee({ inspection_fee: '$0.00' })).toBe(0);
     expect(resolveWdoInspectionFee({ inspection_fee: '0 — comped' })).toBe(0);
-    // Explicit zero beats the sqft tier — the entry always wins.
+    // Explicit zero beats the flat default — the entry always wins.
     expect(resolveWdoInspectionFee({ inspection_fee: '0', structure_sqft: '2200' })).toBe(0);
   });
 
@@ -426,6 +427,7 @@ describe('WDO inspection fee resolution (no-charge rule)', () => {
     expect(resolveWdoInspectionFee(null)).toBe(250);
     // "waived" carries no number — that is NOT an explicit zero.
     expect(resolveWdoInspectionFee({ inspection_fee: 'waived' })).toBe(250);
+    // Historical footprint data no longer affects the flat fee.
     expect(resolveWdoInspectionFee({ inspection_fee: '', structure_sqft: '2200' })).toBe(250);
   });
 
@@ -436,5 +438,33 @@ describe('WDO inspection fee resolution (no-charge rule)', () => {
     expect(wdoFeeIsExplicitZero('waived')).toBe(false);
     expect(wdoFeeIsExplicitZero('175')).toBe(false);
     expect(wdoFeeIsExplicitZero(null)).toBe(false);
+  });
+});
+
+describe('WDO photo addendum captions', () => {
+  test('preserves a technician description', () => {
+    expect(wdoAddendumPhotoCaption({
+      caption: 'Shelter tube at the east garage stem wall.',
+      category: 'wdo_evidence',
+    })).toBe('Shelter tube at the east garage stem wall.');
+  });
+
+  test('uses a useful category fallback instead of a blank Photo N line', () => {
+    expect(wdoAddendumPhotoCaption({ category: 'wdo_damage' }))
+      .toBe('Visible WDO damage documented at the inspected property.');
+    expect(wdoAddendumPhotoCaption({ category: 'previous_treatment' }))
+      .toBe('Evidence of previous treatment documented at the inspected property.');
+    expect(wdoAddendumPhotoCaption({})).toBe('Site condition documented during the WDO inspection.');
+  });
+
+  test('uses the recorded inspection detail when the technician left the caption blank', () => {
+    expect(wdoAddendumPhotoCaption(
+      { category: 'wdo_evidence' },
+      { findings: { wdo_evidence: 'Shelter tubes along the east garage stem wall.' } },
+    )).toBe('Visible WDO evidence: Shelter tubes along the east garage stem wall.');
+    expect(wdoAddendumPhotoCaption(
+      { category: 'inaccessible_area' },
+      { findings: { inaccessible_areas: 'North attic corner blocked by stored materials.' } },
+    )).toBe('Obstruction or inaccessible area: North attic corner blocked by stored materials.');
   });
 });

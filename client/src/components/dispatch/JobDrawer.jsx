@@ -193,7 +193,6 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
     }
     // jobId deliberately excluded — re-running on jobId change is
     // covered by the effect above and would cause double-fetches.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refetchSignal]);
 
   // Fetch active techs once on first open. The list rarely changes
@@ -306,7 +305,7 @@ export default function JobDrawer({ jobId, onClose, refetchSignal = 0 }) {
   const canMarkOnSite  = job && job.status === 'en_route';
 
   return (
-    <Sheet open={open} onClose={onClose} width="md">
+    <Sheet open={open} onClose={onClose} width="md" ariaLabel={job ? `${job.customer_first_name} ${job.customer_last_name} job details` : 'Job details'}>
       <SheetHeader>
         <div className="flex items-center gap-3 min-w-0">
           <h2 className="text-18 font-medium text-ink-primary truncate">

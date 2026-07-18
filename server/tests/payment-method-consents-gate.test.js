@@ -125,7 +125,7 @@ describe('findConsentedChargeableCard — Auto Pay opt-out is sacred', () => {
   test('latest toggle = autopay_disabled -> returns null before touching cards', async () => {
     tableDb({
       autopay_log: [{ event_type: 'autopay_disabled' }],
-      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x' }],
+      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x', method_type: 'card', exp_month: 12, exp_year: 2031 }],
       payment_method_consents: [{ consent_text_version: 'v9_2026-07-12', source: 'pay_page' }],
     });
     expect(await findConsentedChargeableCard('cust-1')).toBe(null);
@@ -134,7 +134,7 @@ describe('findConsentedChargeableCard — Auto Pay opt-out is sacred', () => {
   test('latest toggle = autopay_enabled -> auto-satisfy proceeds to the card checks', async () => {
     tableDb({
       autopay_log: [{ event_type: 'autopay_enabled' }],
-      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x' }],
+      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x', method_type: 'card', exp_month: 12, exp_year: 2031 }],
       payment_method_consents: [{ consent_text_version: 'v9_2026-07-12', source: 'pay_page' }],
     });
     const pm = await findConsentedChargeableCard('cust-1');
@@ -144,7 +144,7 @@ describe('findConsentedChargeableCard — Auto Pay opt-out is sacred', () => {
   test('no toggle history (never enrolled) -> gate does not block', async () => {
     tableDb({
       autopay_log: [],
-      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x' }],
+      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x', method_type: 'card', exp_month: 12, exp_year: 2031 }],
       payment_method_consents: [{ consent_text_version: 'v9_2026-07-12', source: 'portal_add_card' }],
     });
     const pm = await findConsentedChargeableCard('cust-1');

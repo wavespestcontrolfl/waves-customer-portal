@@ -436,6 +436,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
+  // re-reads every corpus connector, upserts changed chunks, embeds pending
+  // ones (paid OpenAI embedding calls — pennies; gate-controlled). Gate off
+  // → no-op. Missing OPENAI_API_KEY → chunks sync for full-text and stay
+  // pending for embedding. runExclusive records job_health.
+  // =========================================================================
+  cron.schedule('40 2 * * *', async () => {
+    if (!isEnabled('hybridKnowledge')) return;
+    try {
+      await runExclusive('knowledge-index-sync', () => require('./knowledge-index/ingest').syncKnowledgeIndex());
+    } catch (err) {
+      logger.error(`[knowledge-index] nightly sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:15AM — Data Hygiene deterministic normalization scan
   // =========================================================================
   cron.schedule('15 3 * * *', async () => {
@@ -621,6 +637,28 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Weekly irrigation email sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY NEWSLETTER INACTIVITY SUNSET (gated: GATE_NEWSLETTER_SUNSET)
+  // Monday 7:30am ET — flags subscribers with 90+ days of zero opens/clicks
+  // across 6+ delivered campaigns, parks ONE win-back draft for the owner to
+  // send, and suppresses (status='inactive') non-responders 30 days after the
+  // win-back delivers. Never sends email itself. The gate check lives INSIDE
+  // runNewsletterSunset, so the off state is a cheap no-op.
+  // =========================================================================
+  cron.schedule('30 7 * * 1', async () => {
+    try {
+      // runExclusive: read-then-act (flag writes + a single draft insert) —
+      // a deploy overlap must not double-flag or park two drafts.
+      await runExclusive('newsletter-sunset', async () => {
+        const { runNewsletterSunset } = require('./newsletter-sunset');
+        const result = await runNewsletterSunset();
+        if (!result?.skipped) logger.info(`[newsletter-sunset] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly newsletter sunset failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1657,6 +1695,32 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Invoice follow-ups failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 10:05AM — Pre-visit late-balance reminders (owner directive
+  // 2026-07-17). One text+email per RECURRING visit landing in 3 days when
+  // the customer has a late RECURRING balance (unpaid dues / overdue
+  // recurring invoices) — never ahead of one-time visits, never for
+  // one-time invoice debt. Runs every day (visits land on weekends too).
+  // DARK unless PREVISIT_BALANCE_REMINDER=true AND the seeded-inactive
+  // previsit_balance_reminder SMS template is activated by the owner.
+  // =========================================================================
+  cron.schedule('5 10 * * *', async () => {
+    logger.info('Running: pre-visit balance reminders');
+    try {
+      await runExclusive('previsit-balance-reminder', async () => {
+        const PrevisitBalanceReminder = require('./previsit-balance-reminder');
+        const result = await PrevisitBalanceReminder.runSweep();
+        if (result.skipped === true) {
+          logger.info(`Pre-visit balance reminders inert: ${result.reason}`);
+        } else {
+          logger.info(`Pre-visit balance reminders done: ${result.sent} sent, ${result.skipped} skipped of ${result.considered}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Pre-visit balance reminders failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

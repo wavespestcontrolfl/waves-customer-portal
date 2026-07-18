@@ -150,11 +150,9 @@ async function generateCaptions({ vision, techNote, location, photoType } = {}) 
   const text = `${CAPTION_TASK.replace(/\{LOCATION\}/g, loc.name)}\n\n--- INPUTS ---\n${facts}`;
   const payload = { system: BRAND_PREAMBLE, text, jsonMode: true, maxTokens: 1200 };
 
-  let res = await llm.callAnthropic({ model: MODELS.VOICE, ...payload });
-  if (!res || !res.ok || !res.json) {
-    // Fall back to the flagship reasoner if the voice tier misses.
-    res = await llm.callAnthropic({ model: MODELS.FLAGSHIP, ...payload });
-  }
+  // Public captions are VOICE-owned customer copy (registry: social posts),
+  // same policy as the admin social-media paths — not the content lane.
+  const res = await llm.dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, payload);
   if (!res || !res.ok || !res.json) {
     const err = new Error('Caption generation failed');
     err.statusCode = 502;

@@ -1823,7 +1823,7 @@ export default function DispatchPageV2({
         : formatETDate(dateAtNoonUTC(date), { month: "long", year: "numeric" });
 
   return (
-    <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900">
+    <div className="min-h-full bg-surface-page font-sans text-zinc-900">
       {/* "↻ Sync AI Data" — right-aligned, only visible on non-board sub-tabs.
           The Schedule h1 + "+ Add Appointment" pill that used to share this
           row are now lifted into AdminDispatchPage so they sit above the
@@ -1992,15 +1992,12 @@ export default function DispatchPageV2({
 
       {/* Mobile day strip — 7 rolling days centered on the selected date.
           Styled to mirror ViewModeSelectorV2 (Day / 5-Day / Week / Month):
-          h-8 hairline pills, dark fill when active, single inline label
+          touch-safe hairline pills, dark fill when active, single inline label
           "<num> <weekday-letter>" so all 7 fit comfortably in the row. */}
       {viewMode === "day" && (
-        <div
-          className="md:hidden mb-4 flex justify-center -mx-4 px-4 overflow-x-auto"
-          style={{ WebkitOverflowScrolling: "touch" }}
-        >
+        <div className="md:hidden mb-4 flex justify-center overflow-x-auto">
           {" "}
-          <div className="inline-flex gap-1.5 min-w-max">
+          <div className="inline-flex gap-1 min-w-max">
             {Array.from({ length: 7 }).map((_, i) => {
               const iso = addDaysISO(date, i - 3);
               const d = dateAtNoonUTC(iso);
@@ -2015,7 +2012,7 @@ export default function DispatchPageV2({
                   key={iso}
                   onClick={() => setDate(iso)}
                   className={cn(
-                    "inline-flex items-center justify-center gap-1 h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors flex-shrink-0",
+                    "inline-flex items-center justify-center gap-1 h-11 min-w-11 px-2 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors flex-shrink-0",
                     selected
                       ? "bg-zinc-900 text-white border-zinc-900"
                       : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",
@@ -2532,6 +2529,7 @@ export default function DispatchPageV2({
               ? [projectService.completionProfile.projectType]
               : null
           }
+          allowInvoiceCompletion={getAdminUser()?.role === "admin"}
           onViewDetails={
             isMobile
               ? () => {
@@ -2545,7 +2543,7 @@ export default function DispatchPageV2({
               : undefined
           }
           onClose={() => setProjectService(null)}
-          onCreated={(p) => {
+          onCreated={(p, outcome = {}) => {
             const svc = projectService;
             setProjectService(null);
             // Silent: this chains straight into the continue editor below,
@@ -2562,9 +2560,10 @@ export default function DispatchPageV2({
             // create sheet (and a second POST) for the same visit
             // (Codex r3 P2).
             setScheduleRefreshKey((k) => k + 1);
-            // Chain straight into the report editor so fill → review → send
-            // all happens without leaving the schedule.
-            if (p?.id) {
+            // A completed WDO already sent its invoice, armed the customer-side
+            // report hold, and closed the linked visit inside the same sheet.
+            // Do not detour into the legacy Project editor afterward.
+            if (p?.id && !outcome.completed) {
               setContinueProjectId(p.id);
               // Seed the snapshot with the created project (Codex r5 P2):
               // week rows (and day rows before the refetch lands) carry no

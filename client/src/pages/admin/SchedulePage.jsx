@@ -4989,7 +4989,7 @@ function CPChip({ selected, onClick, children, dot }) {
       type="button"
       onClick={onClick}
       style={{
-        height: 36,
+        height: 44,
         padding: "0 14px",
         borderRadius: 999,
         background: selected ? CP_M.ink : CP_M.card,
@@ -6202,6 +6202,7 @@ function normalizeApplicationMethod(value = "") {
       "broadcast_spray",
       "spot_treatment",
       "granular_broadcast",
+      "soil_drench",
       "bait_placement",
       "station_check",
       "fog_ulv",
@@ -11071,9 +11072,9 @@ export function CompletionPanel({
               onClick={() => onClose(false)}
               aria-label="Back"
               style={{
-                width: 36,
-                height: 36,
-                minWidth: 36,
+                width: 44,
+                height: 44,
+                minWidth: 44,
                 borderRadius: "50%",
                 background: M.muted,
                 border: "none",
@@ -11120,7 +11121,7 @@ export function CompletionPanel({
                 type="button"
                 onClick={() => onViewDetails(service)}
                 style={{
-                  height: 36,
+                  height: 44,
                   minWidth: 72,
                   borderRadius: 999,
                   background: M.card,
@@ -11674,8 +11675,8 @@ export function CompletionPanel({
                       position: "absolute",
                       bottom: 10,
                       right: 10,
-                      width: 38,
-                      height: 38,
+                      width: 44,
+                      height: 44,
                       borderRadius: "50%",
                       border: `1px solid ${dictation.listening ? M.err : M.hairline}`,
                       background: dictation.listening ? M.err : M.card,
@@ -12349,6 +12350,7 @@ export function CompletionPanel({
                         <option value="broadcast_spray">Broadcast spray</option>
                         <option value="spot_treatment">Spot treatment</option>
                         <option value="granular_broadcast">Granular</option>
+                        <option value="soil_drench">Soil drench</option>
                         <option value="bait_placement">Bait</option>
                         <option value="station_check">Station check</option>
                         <option value="fog_ulv">Fog/ULV</option>
@@ -13670,8 +13672,8 @@ export function CompletionPanel({
                   position: "absolute",
                   bottom: 12,
                   right: 10,
-                  width: 36,
-                  height: 36,
+                  width: 44,
+                  height: 44,
                   borderRadius: "50%",
                   border: `1px solid ${dictation.listening ? D.red : D.border}`,
                   background: dictation.listening ? D.red : D.card,
@@ -14347,6 +14349,7 @@ export function CompletionPanel({
                     <option value="broadcast_spray">Broadcast spray</option>
                     <option value="spot_treatment">Spot treatment</option>
                     <option value="granular_broadcast">Granular</option>
+                    <option value="soil_drench">Soil drench</option>
                     <option value="bait_placement">Bait</option>
                     <option value="station_check">Station check</option>
                     <option value="fog_ulv">Fog/ULV</option>
@@ -15211,6 +15214,7 @@ const PRODUCT_DESCRIPTIONS = {
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
+  tritek: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
   zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
   kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",

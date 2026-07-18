@@ -168,6 +168,34 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
+  test('rechecks the echoed invoice version against the LOCKED row before minting', async () => {
+    // The route's unlocked pre-check can pass and an edit still commit before
+    // the mint transaction takes its FOR UPDATE lock — the locked row is what
+    // the PI is priced and stamped from, so IT must match the echoed version.
+    invoiceRow.updated_at = '2026-07-17T12:00:05.000Z';
+    const StripeService = require('../services/stripe');
+
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id, {
+      expectedVersion: new Date('2026-07-17T12:00:00.000Z').getTime(),
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      inProgress: false,
+      staleInvoice: true,
+    });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    expect(updateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a matching echoed version mints normally (fence trips only on drift)', async () => {
+    invoiceRow.updated_at = '2026-07-17T12:00:05.000Z';
+    const StripeService = require('../services/stripe');
+
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, {
+      expectedVersion: new Date(invoiceRow.updated_at).getTime(),
+    });
+    expect(result.paymentIntentId).toBe('pi_fresh');
+  });
+
   test('does not return a canceled idempotency replay when replacing an invoice PaymentIntent', async () => {
     const StripeService = require('../services/stripe');
     const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);

@@ -110,6 +110,19 @@ describe('wdo-report-pdf', () => {
     expect(_private.sanitizeText('line1\r\nline2\rline3')).toBe('line1\nline2\nline3');
   });
 
+  test('the PDF input path scrubs internal keys and fee cues from findings', () => {
+    // The filled FDACS PDF is emailed and archived — a fee typed into the
+    // free-text comments must not print into Section 5 (codex #2817).
+    const safe = _private.customerSafeFindings({
+      wdo_finding: 'No visible signs of WDO observed',
+      comments: 'Inspection fee $250 collected at closing.',
+      inspection_fee: '250',
+    });
+    expect(safe.inspection_fee).toBeUndefined();
+    expect(safe.comments).toBe('Inspection fee [fee removed] collected at closing.');
+    expect(safe.wdo_finding).toBe('No visible signs of WDO observed');
+  });
+
   test('emoji and unicode in findings do not make the report unsendable', async () => {
     const project = {
       ...baseProject,

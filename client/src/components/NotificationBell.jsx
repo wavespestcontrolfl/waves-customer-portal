@@ -1,29 +1,10 @@
-import { useState, useEffect, useRef, useId } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
-import useLockBodyScroll from '../hooks/useLockBodyScroll.js';
-import useModalFocus from '../hooks/useModalFocus.js';
-import api from '../utils/api.js';
-import {
-  isNativeApp,
-  nativePushPermissionState,
-  requestNativePushPermission,
-} from '../native/nativePush.js';
+import { isNativeApp, nativePushPermissionState, requestNativePushPermission } from '../native/nativePush.js';
+import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
-
-function tokenCustomerId(token) {
-  if (!token) return null;
-  try {
-    const segment = token.split('.')[1];
-    if (!segment) return null;
-    const b64 = segment.replace(/-/g, '+').replace(/_/g, '/');
-    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
-    return payload.customerId == null ? null : String(payload.customerId);
-  } catch {
-    return null;
-  }
-}
 
 export default function NotificationBell({ type = 'admin', customerId }) {
   // type: 'admin' or 'customer'
@@ -34,8 +15,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [notifications, setNotifications] = useState([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(null);
-  const [actionError, setActionError] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [tab, setTab] = useState('account'); // 'account' | 'whats_new'
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
   // hides itself once the user grants permission.
@@ -43,86 +24,46 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [pushEnabling, setPushEnabling] = useState(false);
   const [pushError, setPushError] = useState(null);
   const bellRef = useRef(null);
-  const requestGenerationRef = useRef(0);
-  const [isMobile, setIsMobile] = useState(() => (
-    typeof window !== 'undefined'
-    && (typeof window.matchMedia === 'function'
-      ? window.matchMedia('(max-width: 767px)').matches
-      : window.innerWidth < 768)
-  ));
-  const titleId = useId();
-  const panelId = useId();
+  const panelRef = useRef(null);
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
 
+  const tokenKey = type === 'admin' ? 'waves_admin_token' : 'waves_token';
   const basePath = type === 'admin' ? '/admin/notifications' : '/customer-notifications';
 
-  const activeToken = typeof localStorage === 'undefined'
-    ? ''
-    : (localStorage.getItem(type === 'admin' ? 'waves_admin_token' : 'waves_token') || '');
-  const activeCustomerId = type === 'customer' ? (customerId || tokenCustomerId(activeToken)) : null;
-  const identityKey = type === 'customer' ? (activeCustomerId || 'signed-out') : 'admin';
-
-  const closePanel = () => setOpen(false);
-  const panelRef = useModalFocus(open, closePanel);
-  useLockBodyScroll(open);
-
-  const getAdminHeaders = () => ({
-    Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+  const getHeaders = () => ({
+    Authorization: `Bearer ${localStorage.getItem(tokenKey)}`,
     'Content-Type': 'application/json',
   });
 
-  // Customer requests use the shared refresh-aware client. Admin auth has a
-  // separate token/session model, so keep that surface on its existing fetch.
-  const requestNotificationData = async (path, options = {}) => {
-    if (type === 'customer') return api.request(path, options);
-    const response = await fetch(`${API_BASE}${path}`, {
-      ...options,
-      headers: { ...getAdminHeaders(), ...options.headers },
-    });
-    if (!response.ok) throw new Error(`Notifications failed (${response.status})`);
-    return response.json();
+  // Customer requests go through the shared api client: customer access
+  // tokens expire after 15 minutes and only the client can rotate the
+  // refresh session on a 401 (and it rejects on error responses, so a 401
+  // body is never mistaken for an empty notification list). The admin bell
+  // keeps its separate raw-fetch flow — admin auth is a different token.
+  const requestJson = (path, options = {}) => {
+    if (type !== 'admin') return api.request(path, options);
+    return fetch(`${API_BASE}${path}`, { ...options, headers: getHeaders() })
+      .then((r) => {
+        if (!r.ok) {
+          const err = new Error(`Request failed (${r.status})`);
+          err.status = r.status;
+          throw err;
+        }
+        return r.json();
+      });
   };
-
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') {
-      const sync = () => setIsMobile(window.innerWidth < 768);
-      sync();
-      window.addEventListener('resize', sync);
-      return () => window.removeEventListener('resize', sync);
-    }
-    const media = window.matchMedia('(max-width: 767px)');
-    const sync = (event) => setIsMobile(typeof event?.matches === 'boolean' ? event.matches : media.matches);
-    sync();
-    media.addEventListener?.('change', sync);
-    return () => media.removeEventListener?.('change', sync);
-  }, []);
-
-  // A mounted bell survives a multi-property switch. Blank all customer data
-  // immediately and invalidate in-flight requests before fetching under the
-  // new identity, so property A can never render while property B is active.
-  useEffect(() => {
-    requestGenerationRef.current += 1;
-    setOpen(false);
-    setUnreadCount(0);
-    setNotifications([]);
-    setLoadError(null);
-    setActionError(null);
-  }, [identityKey, type]);
 
   // Poll unread count every 30 seconds
   useEffect(() => {
-    let cancelled = false;
     const fetchCount = () => {
-      if (type === 'customer' && !activeCustomerId) return;
-      try {
-        requestNotificationData(`${basePath}/unread-count`)
-          .then((d) => { if (!cancelled) setUnreadCount(Number(d.count) || 0); })
-          .catch(() => { /* keep the last confirmed count during transient polling failures */ });
-      } catch { /* fetch can throw before returning a promise in test shims */ }
+      requestJson(`${basePath}/unread-count`)
+        .then(d => setUnreadCount(d.count || 0))
+        .catch(() => {});
     };
     fetchCount();
     const iv = setInterval(fetchCount, 30000);
-    return () => { cancelled = true; clearInterval(iv); };
-  }, [basePath, identityKey, type, activeCustomerId]);
+    return () => clearInterval(iv);
+  }, []);
 
   // Close on click outside. The panel is portaled to document.body, so it
   // is NOT a DOM descendant of the bell wrapper — check both refs.
@@ -136,6 +77,15 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
+  // Lock the page scroll while the customer panel is open — on iOS a touch
+  // scroll on the panel otherwise chains to the page behind it.
+  useEffect(() => {
+    if (!open || type === 'admin') return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open, type]);
+
   // Self-heal the push link on load and on PWA resume (admin only). iOS
   // Safari rotates/drops push endpoints, and the server deactivates a
   // subscription after a 404/410 send — previously nothing re-registered
@@ -148,7 +98,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     const sync = () => {
       if (Date.now() - lastSyncAt < 60 * 60 * 1000) return;
       lastSyncAt = Date.now();
-      syncPushSubscription({ apiBase: API_BASE, token: localStorage.getItem('waves_admin_token') })
+      syncPushSubscription({ apiBase: API_BASE, token: localStorage.getItem(tokenKey) })
         .then((r) => { if (r?.ok) setPushOn(true); })
         .catch(() => {});
     };
@@ -158,14 +108,20 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [type]);
 
-  // Probe push state whenever the panel opens. Admin uses Web Push; the
-  // customer native shell checks its OS permission without prompting.
+  // Probe Web Push state when the panel opens (admin only). Re-runs on
+  // each open so a user who enabled push elsewhere doesn't see a stale
+  // "Enable push" strip. Admins get operational Web Push. In the native
+  // customer app this strip is the ONLY push opt-in surface — startup never
+  // prompts for permission (nativePush.js delegates that explicit gesture
+  // here), so without it a fresh install could never grant APNs permission.
+  // Customer web stays strip-free.
+  const showPushStrip = (type === 'admin' || isNativeApp()) && !pushOn;
   useEffect(() => {
     if (!open) return;
     if (type === 'admin') {
       isPushEnabled({
         apiBase: API_BASE,
-        token: localStorage.getItem('waves_admin_token'),
+        token: localStorage.getItem(tokenKey),
         verifyServer: true,
       }).then(setPushOn).catch(() => setPushOn(false));
       return;
@@ -195,7 +151,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       // frontend is configured to talk to a different API origin.
       await ensurePushSubscription({
         apiBase: API_BASE,
-        token: localStorage.getItem('waves_admin_token'),
+        token: localStorage.getItem(tokenKey),
       });
       setPushOn(true);
     } catch (err) {
@@ -205,26 +161,26 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     }
   };
 
-  // Load notifications when opened
+  // Load notifications when opened. A failed load is recorded — rendering
+  // "No notifications yet" (or stale rows) for an outage would present a
+  // broken inbox as a confirmed-empty one. Monotonic sequence: reopening
+  // while a request is in flight starts a new one, and only the latest
+  // issued request may write — a slow older failure must not hide a newer
+  // successful list behind the retry screen.
+  const loadSeqRef = useRef(0);
   const loadNotifications = async () => {
-    if (type === 'customer' && !activeCustomerId) return;
-    const generation = ++requestGenerationRef.current;
+    const seq = ++loadSeqRef.current;
     setLoading(true);
-    setLoadError(null);
-    setActionError(null);
-    setNotifications([]);
+    setLoadFailed(false);
     try {
-      const d = await requestNotificationData(`${basePath}?limit=30`);
-      if (generation === requestGenerationRef.current) {
-        setNotifications(Array.isArray(d.notifications) ? d.notifications : []);
-      }
+      const d = await requestJson(`${basePath}?limit=30`);
+      if (seq !== loadSeqRef.current) return;
+      setNotifications(d.notifications || []);
     } catch {
-      if (generation === requestGenerationRef.current) {
-        setLoadError('Notifications could not be loaded. Check your connection and try again.');
-      }
-    } finally {
-      if (generation === requestGenerationRef.current) setLoading(false);
+      if (seq !== loadSeqRef.current) return;
+      setLoadFailed(true);
     }
+    setLoading(false);
   };
 
   const handleOpen = () => {
@@ -233,49 +189,21 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   };
 
   const markRead = async (id) => {
-    const generation = requestGenerationRef.current;
-    setActionError(null);
+    // Only reflect the read state the server actually accepted — a rejected
+    // write (expired token the refresh couldn't save) must not clear badges.
     try {
-      await requestNotificationData(`${basePath}/${id}/read`, { method: 'PUT' });
-      if (generation !== requestGenerationRef.current) return false;
-      setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
-      setUnreadCount(prev => Math.max(0, prev - 1));
-      return true;
-    } catch {
-      if (generation === requestGenerationRef.current) {
-        setActionError('That notification could not be marked as read. Please try again.');
-      }
-      return false;
-    }
+      await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
+    } catch { return; }
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
+    setUnreadCount(prev => Math.max(0, prev - 1));
   };
 
   const markAllRead = async () => {
-    const generation = requestGenerationRef.current;
-    setActionError(null);
     try {
-      await requestNotificationData(`${basePath}/read-all`, { method: 'PUT' });
-      if (generation !== requestGenerationRef.current) return;
-      setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
-      setUnreadCount(0);
-    } catch {
-      if (generation === requestGenerationRef.current) {
-        setActionError('Notifications could not be marked as read. Please try again.');
-      }
-    }
-  };
-
-  const activateNotification = async (notification) => {
-    if (!notification.read_at) await markRead(notification.id);
-    if (notification.link) {
-      setOpen(false);
-      window.location.assign(notification.link);
-    }
-  };
-
-  const notificationKeyDown = (event, notification) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    activateNotification(notification);
+      await requestJson(`${basePath}/read-all`, { method: 'PUT' });
+    } catch { return; }
+    setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
+    setUnreadCount(0);
   };
 
   // Group by time: Today, Yesterday, This Week, Older
@@ -318,7 +246,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   return (
     <div ref={bellRef} style={{ position: 'relative' }}>
       {/* Bell Button */}
-      <button onClick={handleOpen} aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'} aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? panelId : undefined} style={{
+      <button onClick={handleOpen} aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'} aria-haspopup="dialog" aria-expanded={open} style={{
         background: 'none', border: 'none', cursor: 'pointer', position: 'relative',
         padding: 8, fontSize: 20, color: isDark ? '#64748B' : colors.text, minWidth: 44, minHeight: 44,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -351,16 +279,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // account menu). Inset so the rounded sheet floats over the scene
           // and clears the notch + bottom tab bar. Admin: unchanged white
           // full-screen panel (no glass theme mounted on /admin).
-          <div
-            ref={panelRef}
-            id={panelId}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={titleId}
-            data-glass={isDark ? undefined : 'modal'}
-            style={{
-              '--glass-modal-radius': '24px',
-              position: 'fixed',
+          <div ref={panelRef} data-glass={isDark ? undefined : 'modal'} style={{
+            position: 'fixed',
             top: isDark ? 56 : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 10,
             right: isDark ? 0 : 10,
@@ -373,16 +293,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           }}>
             {/* Header: close + "Notifications" title + mark-all */}
             <div style={{ padding: '16px 20px 8px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              <div id={titleId} style={{ fontSize: 24, fontWeight: 700, color: '#18181B', letterSpacing: '-0.01em' }}>Notifications</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: '#18181B', letterSpacing: '-0.01em' }}>Notifications</div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {unreadCount > 0 && (
                   <button onClick={markAllRead} style={{
                     background: 'none', border: 'none', color: '#52525B',
-                    fontSize: 14, fontWeight: 500, cursor: 'pointer', padding: '4px 8px', minHeight: 44,
+                    fontSize: 13, fontWeight: 500, cursor: 'pointer', padding: '4px 8px',
                   }}>Mark all read</button>
                 )}
                 <button onClick={() => setOpen(false)} aria-label="Close" style={{
-                  width: 44, height: 44, borderRadius: 22, border: 'none',
+                  width: 36, height: 36, borderRadius: 18, border: 'none',
                   background: isDark ? '#F4F4F5' : 'rgba(255,255,255,0.6)',
                   color: '#18181B', fontSize: 18, lineHeight: 1,
                   cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -390,59 +310,78 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               </div>
             </div>
 
+            {/* Pill tabs: Account / What's new */}
+            <div style={{ padding: '8px 20px 16px', flexShrink: 0 }}>
+              <div style={{
+                display: 'flex', gap: 4,
+                background: isDark ? '#F4F4F5' : 'rgba(27,44,91,0.07)',
+                borderRadius: 999, padding: 4, width: 'fit-content',
+              }}>
+                {[
+                  { key: 'account', label: 'Account' },
+                  { key: 'whats_new', label: "What's new" },
+                ].map(({ key, label }) => {
+                  const active = tab === key;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setTab(key)}
+                      style={{
+                        padding: '8px 20px', borderRadius: 999, border: 'none',
+                        background: active ? '#FFFFFF' : 'transparent',
+                        color: active ? '#18181B' : '#71717A',
+                        fontSize: 14, fontWeight: 600, cursor: 'pointer',
+                        boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
+                      }}
+                    >{label}</button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Enable Push strip — admin only, shown when not yet
                 subscribed on this device. iOS reminder is folded into
                 the error message that ensurePushSubscription throws. */}
-            {type === 'admin' && !pushOn && (
+            {showPushStrip && (
               <PushEnableStrip
                 enabling={pushEnabling}
                 error={pushError}
                 onClick={handleEnablePush}
               />
-            )}
-            {type === 'customer' && isNativeApp() && !pushOn && (
-              <PushEnableStrip
-                enabling={pushEnabling}
-                error={pushError}
-                onClick={handleEnablePush}
-                customer
-              />
-            )}
-
-            {(loadError || actionError) && (
-              <div role="alert" style={{
-                margin: '0 16px 8px', padding: '10px 12px', borderRadius: 10,
-                background: '#FEF2F2', color: '#991B1B', fontSize: 14, lineHeight: 1.4,
-              }}>
-                {loadError || actionError}
-                {loadError && (
-                  <button type="button" onClick={loadNotifications} style={{
-                    display: 'block', minHeight: 44, marginTop: 4, padding: '0 4px',
-                    border: 0, background: 'transparent', color: '#075985',
-                    fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                  }}>Try again</button>
-                )}
-              </div>
             )}
 
             {/* Notification list — overscroll containment keeps the sheet's
                 scroll from chaining to the page behind it on iOS. */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: '#71717A', fontSize: 14 }}>Loading…</div>}
-              {!loading && !loadError && notifications.length === 0 && (
+              {!loading && loadFailed && tab === 'account' && (
+                <div style={{ padding: 60, textAlign: 'center' }}>
+                  <div style={{ fontSize: 14, color: '#71717A' }}>Notifications couldn&apos;t be loaded.</div>
+                  <button type="button" onClick={loadNotifications} style={{
+                    marginTop: 12, padding: '8px 14px', borderRadius: 8, border: '1px solid #D8D0C0',
+                    background: '#fff', color: '#04395E', fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                  }}>Try again</button>
+                </div>
+              )}
+              {!loading && !loadFailed && tab === 'account' && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <div style={{ fontSize: 14, color: '#71717A' }}>No notifications yet</div>
                 </div>
               )}
-              {!loading && !loadError && notifications.map(n => (
+              {!loading && tab === 'whats_new' && (
+                <div style={{ padding: 60, textAlign: 'center' }}>
+                  <div style={{ fontSize: 14, color: '#71717A' }}>Nothing new right now</div>
+                </div>
+              )}
+              {!loading && !loadFailed && tab === 'account' && notifications.map(n => (
                 <div key={n.id}
-                  role={(n.link || !n.read_at) ? 'button' : undefined}
-                  tabIndex={(n.link || !n.read_at) ? 0 : undefined}
-                  aria-label={(n.link || !n.read_at) ? `${n.title}${n.read_at ? '' : ', unread'}` : undefined}
-                  onClick={() => activateNotification(n)}
-                  onKeyDown={(event) => notificationKeyDown(event, n)}
+                  onClick={async () => {
+                    if (!n.read_at) await markRead(n.id);
+                    if (n.link) { setOpen(false); window.location.href = n.link; }
+                  }}
                   style={{
-                    padding: '14px 20px', cursor: (n.link || !n.read_at) ? 'pointer' : 'default',
+                    padding: '14px 20px', cursor: n.link ? 'pointer' : 'default',
                     borderBottom: `1px solid ${isDark ? '#F4F4F5' : 'rgba(27,44,91,0.08)'}`,
                     display: 'flex', gap: 12, alignItems: 'flex-start',
                   }}
@@ -464,7 +403,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                         fontSize: 14, color: '#52525B', marginTop: 4, lineHeight: 1.4,
                       }}>{n.body}</div>
                     )}
-                    <div style={{ fontSize: 14, color: '#52525B', marginTop: 6 }}>
+                    <div style={{ fontSize: 12, color: '#A1A1AA', marginTop: 6 }}>
                       {timeAgo(n.created_at)}
                     </div>
                   </div>
@@ -481,16 +420,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // Desktop: admin keeps the flush right-edge drawer; customer gets a
           // floating glass panel (data-glass="modal" material, inset so the
           // rounded corners read intentionally).
-          <div
-            ref={panelRef}
-            id={panelId}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={titleId}
-            data-glass={isDark ? undefined : 'modal'}
-            style={{
-              '--glass-modal-radius': '24px',
-              position: 'fixed', top: isDark ? 56 : 12, right: isDark ? 0 : 12, bottom: isDark ? 0 : 12,
+          <div ref={panelRef} data-glass={isDark ? undefined : 'modal'} style={{
+            position: 'fixed', top: isDark ? 56 : 12, right: isDark ? 0 : 12, bottom: isDark ? 0 : 12,
             width: '100%', maxWidth: 400,
             background: colors.bg, border: `1px solid ${colors.border}`,
             borderRadius: isDark ? 0 : 24,
@@ -504,12 +435,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               flexShrink: 0,
             }}>
-              <div id={titleId} style={{ fontSize: 18, fontWeight: 700, color: colors.text }}>Notifications</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: colors.text }}>Notifications</div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {unreadCount > 0 && (
                   <button onClick={markAllRead} style={{
                     background: 'none', border: 'none', color: colors.teal,
-                    fontSize: 14, fontWeight: 600, cursor: 'pointer', padding: '4px 8px', minHeight: 44,
+                    fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '4px 8px',
                   }}>Mark all read</button>
                 )}
                 <button onClick={() => setOpen(false)} aria-label="Close notifications" style={{
@@ -522,42 +453,27 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
             {/* Enable Push strip — admin only, shown when not yet
                 subscribed on this device. */}
-            {type === 'admin' && !pushOn && (
+            {showPushStrip && (
               <PushEnableStrip
                 enabling={pushEnabling}
                 error={pushError}
                 onClick={handleEnablePush}
               />
-            )}
-            {type === 'customer' && isNativeApp() && !pushOn && (
-              <PushEnableStrip
-                enabling={pushEnabling}
-                error={pushError}
-                onClick={handleEnablePush}
-                customer
-              />
-            )}
-
-            {(loadError || actionError) && (
-              <div role="alert" style={{
-                margin: '12px 16px 0', padding: '10px 12px', borderRadius: 10,
-                background: '#FEF2F2', color: '#991B1B', fontSize: 14, lineHeight: 1.4,
-              }}>
-                {loadError || actionError}
-                {loadError && (
-                  <button type="button" onClick={loadNotifications} style={{
-                    display: 'block', minHeight: 44, marginTop: 4, padding: '0 4px',
-                    border: 0, background: 'transparent', color: '#075985',
-                    fontSize: 14, fontWeight: 700, cursor: 'pointer',
-                  }}>Try again</button>
-                )}
-              </div>
             )}
 
             {/* Notification List */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: colors.muted }}>Loading...</div>}
-              {!loading && !loadError && notifications.length === 0 && (
+              {!loading && loadFailed && (
+                <div style={{ padding: 60, textAlign: 'center' }}>
+                  <div style={{ fontSize: 14, color: colors.muted }}>Notifications couldn&apos;t be loaded.</div>
+                  <button type="button" onClick={loadNotifications} style={{
+                    marginTop: 12, padding: '8px 14px', borderRadius: 8, border: `1px solid ${colors.border || '#D8D0C0'}`,
+                    background: 'transparent', color: colors.text || colors.muted, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                  }}>Try again</button>
+                </div>
+              )}
+              {!loading && !loadFailed && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke={colors.muted} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 12 }}>
                     <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
@@ -566,23 +482,22 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{ fontSize: 14, color: colors.muted }}>No notifications yet</div>
                 </div>
               )}
-              {!loading && groupByTime(notifications).map(([group, items]) => (
+              {!loading && !loadFailed && groupByTime(notifications).map(([group, items]) => (
                 <div key={group}>
                   <div style={{
-                    padding: '8px 20px', fontSize: 12, fontWeight: 700, color: colors.muted,
+                    padding: '8px 20px', fontSize: 11, fontWeight: 700, color: colors.muted,
                     textTransform: 'uppercase', letterSpacing: 0.5,
                     background: isDark ? '#0f172a' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,
                     backdropFilter: isDark ? 'none' : 'blur(8px)', WebkitBackdropFilter: isDark ? 'none' : 'blur(8px)',
                   }}>{group}</div>
                   {items.map(n => (
                     <div key={n.id}
-                      role={(n.link || !n.read_at) ? 'button' : undefined}
-                      tabIndex={(n.link || !n.read_at) ? 0 : undefined}
-                      aria-label={(n.link || !n.read_at) ? `${n.title}${n.read_at ? '' : ', unread'}` : undefined}
-                      onClick={() => activateNotification(n)}
-                      onKeyDown={(event) => notificationKeyDown(event, n)}
+                      onClick={async () => {
+                        if (!n.read_at) await markRead(n.id);
+                        if (n.link) { setOpen(false); window.location.href = n.link; }
+                      }}
                       style={{
-                        padding: '12px 20px', cursor: (n.link || !n.read_at) ? 'pointer' : 'default',
+                        padding: '12px 20px', cursor: n.link ? 'pointer' : 'default',
                         borderBottom: `1px solid ${colors.border}`,
                         background: n.read_at ? 'transparent' : colors.unreadBg,
                         display: 'flex', gap: 12, alignItems: 'flex-start',
@@ -592,17 +507,17 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                       <span style={{ fontSize: 20, flexShrink: 0, marginTop: 2 }}>{n.icon || '\u{1F514}'}</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{
-                          fontSize: 14, fontWeight: n.read_at ? 400 : 700, color: colors.text,
+                          fontSize: 13, fontWeight: n.read_at ? 400 : 700, color: colors.text,
                           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                         }}>{n.title}</div>
                         {n.body && (
                           <div style={{
-                            fontSize: 14, color: colors.muted, marginTop: 2, lineHeight: 1.4,
+                            fontSize: 12, color: colors.muted, marginTop: 2, lineHeight: 1.4,
                             overflow: 'hidden', textOverflow: 'ellipsis',
                             display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
                           }}>{n.body}</div>
                         )}
-                        <div style={{ fontSize: 14, color: colors.muted, marginTop: 4 }}>
+                        <div style={{ fontSize: 11, color: colors.muted, marginTop: 4 }}>
                           {timeAgo(n.created_at)}
                         </div>
                       </div>
@@ -630,34 +545,31 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 // requirement is surfaced via the error-message path inside
 // ensurePushSubscription, not pre-emptively here, so Android/desktop
 // users don't see an irrelevant warning.
-function PushEnableStrip({ enabling, error, onClick, customer = false }) {
+function PushEnableStrip({ enabling, error, onClick }) {
   return (
     <div style={{
       padding: '12px 16px',
       background: '#F4F4F5',
       borderBottom: '1px solid #E4E4E7',
-      fontSize: 14,
+      fontSize: 13,
       color: '#18181B',
     }}>
       <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{ fontWeight: 600 }}>Get push notifications on this device</span>
       </div>
-      <div style={{ marginBottom: 8, color: '#52525B', fontSize: 14 }}>
-        {customer
-          ? 'Get service, appointment, and account updates even when the app is closed.'
-          : 'Banner alerts for failed payments, overdue invoices, unmapped calls, and more.'}
+      <div style={{ marginBottom: 8, color: '#52525B', fontSize: 12 }}>
+        Banner alerts for failed payments, overdue invoices, unmapped calls, and more.
       </div>
       <button
         onClick={onClick}
         disabled={enabling}
         style={{
-          minHeight: 44,
           padding: '8px 14px',
           background: '#18181B',
           color: '#FFFFFF',
           border: 'none',
           borderRadius: 6,
-          fontSize: 14,
+          fontSize: 13,
           fontWeight: 500,
           cursor: enabling ? 'wait' : 'pointer',
         }}
@@ -665,7 +577,7 @@ function PushEnableStrip({ enabling, error, onClick, customer = false }) {
         {enabling ? 'Enabling…' : 'Enable push'}
       </button>
       {error && (
-        <div style={{ marginTop: 8, color: '#991B1B', fontSize: 14, lineHeight: 1.4 }}>
+        <div style={{ marginTop: 8, color: '#C8312F', fontSize: 12, lineHeight: 1.4 }}>
           {error}
         </div>
       )}

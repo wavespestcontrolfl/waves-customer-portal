@@ -340,8 +340,84 @@ async function runPending() {
 
 /**
  * Send a single step for one sequence row.
+ *
+ * Serialized against delivered-invoice edits (2026-07-17 lane): a short
+ * claim is stamped on the sequence row before rendering/sending, and
+ * InvoiceService.update refuses (pre-check + atomic predicate) while a
+ * fresh claim exists — so a reminder can't quote amounts an admin is
+ * rewriting mid-send. The claim clears in `finally`; a crashed sender
+ * self-heals via the TTL window.
  */
+const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
 async function fireStep(row) {
+  // The cleanup is predicated on OUR stamp: if this send outlives the TTL
+  // and another worker replaces the stale claim, an unconditional clear
+  // here would release the successor's live claim and let an edit race its
+  // in-flight reminder.
+  const claimStamp = new Date();
+  let claimedSeq = null;
+  try {
+    // Claim inside a transaction that locks the INVOICE row first.
+    // InvoiceService.update locks the same row before re-checking the claim,
+    // so Postgres strictly orders an edit against this claim — without a
+    // common row lock, both single-statement writes could pass on
+    // pre-commit snapshots of each other. The transaction holds no external
+    // work: it commits before any rendering or sending.
+    await db.transaction(async (trx) => {
+      const lockedInvoice = await trx('invoices')
+        .where({ id: row.invoice_id })
+        .forUpdate()
+        .first();
+      if (!lockedInvoice) return;
+      // Post-claim... now post-LOCK revalidation: the caller's row is a
+      // batch snapshot — a due-date edit (rescheduleForInvoiceEdit, which
+      // commits atomically with its invoice edit) can postpone
+      // next_touch_at, or an admin can pause/stop/advance the sequence.
+      // Fire only if it is still active, on the same step, and actually
+      // due; progress from the LIVE anchor so a postponed timeline is
+      // never overwritten from the stale snapshot.
+      const liveSeq = await trx('invoice_followup_sequences').where({ id: row.id }).first();
+      if (
+        !liveSeq ||
+        liveSeq.status !== 'active' ||
+        liveSeq.step_index !== row.step_index ||
+        !liveSeq.next_touch_at ||
+        new Date(liveSeq.next_touch_at).getTime() > Date.now()
+      ) {
+        return;
+      }
+      const claimed = await trx('invoice_followup_sequences')
+        .where({ id: row.id })
+        .where(function () {
+          this.whereNull('touch_claimed_at').orWhere(
+            'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
+          );
+        })
+        .update({ touch_claimed_at: claimStamp });
+      if (claimed) claimedSeq = liveSeq;
+    });
+  } catch (err) {
+    logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
+    return;
+  }
+  if (!claimedSeq) {
+    logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; skipping touch`);
+    return;
+  }
+  row.anchor_at = claimedSeq.anchor_at;
+  try {
+    await fireTouch(row);
+  } finally {
+    await db('invoice_followup_sequences')
+      .where({ id: row.id, touch_claimed_at: claimStamp })
+      .update({ touch_claimed_at: null })
+      .catch((err) => logger.warn(
+        `[invoice-followups] could not clear touch claim for ${row.invoice_id}: ${err.message}`,
+      ));
+  }
+}
+
+async function fireTouch(row) {
   const step = config.steps[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -398,17 +474,30 @@ async function fireStep(row) {
     const { autoApplyAccountCreditIfEnabled } = require('./customer-credit');
     const dunCreditResult = await autoApplyAccountCreditIfEnabled(row.invoice_id);
     dunAppliedCredit = dunCreditResult?.applied || 0;
-    const fresh = await db('invoices').where({ id: row.invoice_id }).first('total', 'credit_applied', 'status');
+  } catch (creditErr) {
+    logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
+  }
+  // The refresh runs in its OWN try: it is what keeps the reminder's
+  // amounts/copy on the just-edited live row instead of the batch snapshot
+  // (edits are fenced out from the claim onward, so this read is the settled
+  // state) — a credit-helper failure above must not bypass it.
+  try {
+    const fresh = await db('invoices').where({ id: row.invoice_id })
+      .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number');
     if (fresh) {
       row.total = fresh.total;
       row.credit_applied = fresh.credit_applied;
+      row.title = fresh.title;
+      row.token = fresh.token;
+      row.due_date = fresh.due_date;
+      row.invoice_number = fresh.invoice_number;
       if (['prepaid', 'paid'].includes(String(fresh.status || '').toLowerCase())) {
         await stopOnPayment(row.invoice_id).catch(() => {});
         return;
       }
     }
-  } catch (creditErr) {
-    logger.warn(`[invoice-followups] account-credit apply before dun skipped for ${row.invoice_id}: ${creditErr.message}`);
+  } catch (refreshErr) {
+    logger.warn(`[invoice-followups] invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
   }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
@@ -506,7 +595,9 @@ async function fireStep(row) {
   }
 
   const nextIndex = row.step_index + 1;
-  const anchorAt = row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
+  // anchor_at (set when an admin edit shifted the due date) overrides the
+  // send-time anchor so the whole remaining cadence stays on one timeline.
+  const anchorAt = row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
   const nextAt = computeNextTouchAt(anchorAt, nextIndex);
 
   await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -609,7 +700,9 @@ async function releaseFromAutopayHold(invoiceId) {
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
     status: 'active',
     is_autopay_held: false,
-    next_touch_at: computeNextTouchAt(invoice.due_date || invoice.created_at, seq.step_index),
+    // A shifted anchor (delivered-invoice due-date edit while held) wins so
+    // the re-armed step lands on the same timeline fireStep progression uses.
+    next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index),
   });
 }
 
@@ -658,8 +751,70 @@ async function resumeSequence(invoiceId) {
     paused_reason: null,
     paused_until: null,
     paused_by_admin_id: null,
-    next_touch_at: computeNextTouchAt(invoice.due_date || invoice.created_at, seq.step_index),
+    // A shifted anchor (delivered-invoice due-date edit while paused) wins so
+    // the re-armed step lands on the same timeline fireStep progression uses.
+    next_touch_at: computeNextTouchAt(seq.anchor_at || invoice.due_date || invoice.created_at, seq.step_index),
   });
+}
+
+/**
+ * Shift an ACTIVE sequence's whole timeline after an admin edits a
+ * delivered invoice's due date (the 2026-07-17 ruling made
+ * sent/viewed/overdue invoices editable). Moving the due date +N days
+ * moves the cadence anchor +N days and stamps it on the row
+ * (`anchor_at`), so BOTH the current touch and every later step (fireStep
+ * progression reads anchor_at first) stay on one shifted timeline —
+ * re-anchoring only the current step would leave progression computing
+ * later steps from sent_at in the past and burst the remaining reminders
+ * on consecutive cron runs. Paused / autopay-held rows shift the anchor
+ * but keep next_touch_at null until their release paths re-arm them;
+ * stopped / completed rows are terminal and untouched.
+ */
+async function rescheduleForInvoiceEdit(invoiceId, { previousDueDate, newDueDate } = {}, dbc = db) {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const prev = previousDueDate ? new Date(previousDueDate) : null;
+  const next = newDueDate ? new Date(newDueDate) : null;
+  if (!prev || !next || Number.isNaN(prev.getTime()) || Number.isNaN(next.getTime())) return;
+  const deltaDays = Math.round((next.getTime() - prev.getTime()) / dayMs);
+  if (!deltaDays) return;
+
+  // Paused / autopay-held sequences shift their anchor too — their release
+  // paths re-arm the CURRENT step themselves, but fireStep progression
+  // computes later steps from anchor_at, and a stale anchor would land those
+  // in the past and burst them on consecutive cron runs. Only an active
+  // sequence carries a scheduled next touch; held/paused rows keep
+  // next_touch_at null until released. Stopped/completed are terminal.
+  const RESCHEDULABLE_STATUSES = ['active', 'paused', 'autopay_hold'];
+  const seq = await dbc('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+  if (!seq || !RESCHEDULABLE_STATUSES.includes(seq.status)) return;
+  const invoice = await dbc('invoices').where({ id: invoiceId }).first();
+  if (!invoice || isTerminalInvoice(invoice)) return;
+
+  const baseAnchor = seq.anchor_at || invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
+  const shiftedAnchor = shiftAnchorNYCalendarDays(new Date(baseAnchor), deltaDays);
+  const patch = { anchor_at: shiftedAnchor };
+  if (seq.status === 'active') {
+    patch.next_touch_at = computeNextTouchAt(shiftedAnchor, seq.step_index);
+  }
+  await dbc('invoice_followup_sequences').where({ id: seq.id }).update(patch);
+}
+
+/**
+ * Advance an anchor by N America/New_York CALENDAR days. The cadence only
+ * consumes an anchor's NY calendar date (anchorTo10amNY), so the shifted
+ * anchor is pinned to noon UTC of the target day — fixed 24-hour arithmetic
+ * would move a near-midnight anchor across the spring DST boundary onto the
+ * wrong Eastern date and delay every remaining reminder by a day.
+ */
+function shiftAnchorNYCalendarDays(anchorDate, days) {
+  const nyParts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(anchorDate).map((p) => [p.type, p.value])
+  );
+  const base = new Date(Date.UTC(+nyParts.year, +nyParts.month - 1, +nyParts.day, 12));
+  base.setUTCDate(base.getUTCDate() + days);
+  return base;
 }
 
 async function stopSequence(invoiceId, { reason, adminId } = {}) {
@@ -738,6 +893,7 @@ module.exports = {
   handleAutopayFailure,
   pauseSequence,
   resumeSequence,
+  rescheduleForInvoiceEdit,
   stopSequence,
   sendNextTouchNow,
   hasActiveSequence,

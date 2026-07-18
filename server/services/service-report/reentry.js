@@ -46,10 +46,13 @@ function buildReentrySummary(targets, now, timeZone = DEFAULT_TIME_ZONE) {
 
 function buildReentryContextFromRecord(record, now = new Date()) {
   const applications = Array.isArray(record?.applications) ? record.applications : [];
+  // The anchor must be a real clock time: date-only service_date parses to
+  // UTC midnight, which would fabricate ready-at times (and often an instant
+  // 'ready') for records with no true timestamp. No clock anchor → no
+  // re-entry context, and the page honestly shows no ready times.
   const anchorDate = latestDate(applications.map((app) => app.appliedAt || app.applied_at || app.created_at))
     || normalizeDate(record?.ended_at)
-    || normalizeDate(record?.started_at)
-    || normalizeDate(record?.service_date);
+    || normalizeDate(record?.started_at);
 
   if (!anchorDate) return undefined;
 

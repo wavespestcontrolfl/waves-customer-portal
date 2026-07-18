@@ -36,7 +36,10 @@ jobs:
     timeout-minutes: 40
     services:
       postgres:
-        image: postgres:16
+        # pgvector/pgvector = official postgres:16 + the vector extension,
+        # required by the knowledge_embeddings migration (Railway prod
+        # Postgres already ships pgvector).
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: waves
           POSTGRES_PASSWORD: waves

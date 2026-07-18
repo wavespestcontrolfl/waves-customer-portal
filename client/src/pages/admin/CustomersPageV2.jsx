@@ -35,7 +35,7 @@
 //   inside V2. Watch for V1 styling leaking through — should be
 //   reskinned eventually but for now stylistic drift is the risk.
 import { useState, useEffect, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
 import {
   Filter,
   HeartPulse,
@@ -48,6 +48,7 @@ import {
   Users,
 } from "lucide-react";
 import Customer360Profile from "../../components/admin/Customer360ProfileV2";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
 import useIsMobile from "../../hooks/useIsMobile";
@@ -439,6 +440,24 @@ function normalizeQuickAddInitialValues(initialValues = {}) {
   };
 }
 
+function quickAddPresetFromSearchParams(searchParams) {
+  const preset = {};
+  for (const key of [
+    "firstName",
+    "lastName",
+    "phone",
+    "email",
+    "address",
+    "city",
+    "state",
+    "zip",
+  ]) {
+    const value = searchParams.get(key);
+    if (value) preset[key] = value;
+  }
+  return preset;
+}
+
 function QuickAddModalV2({
   open,
   onClose,
@@ -811,11 +830,7 @@ function SortHeaderV2({
   );
 }
 
-const ROBOTO = "'Roboto', Arial, sans-serif";
-
 // --- Command header ---
-// Mirrors the Pipeline page header chrome while keeping Customers'
-// section set: Directory / Map / Health / AI Advisor.
 const VIEWS = [
   { key: "directory", label: "Directory", Icon: Users },
   { key: "map", label: "Map", Icon: MapPinned },
@@ -825,73 +840,25 @@ const VIEWS = [
 
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
   const activeConfig = VIEWS.find((v) => v.key === view) || VIEWS[0];
-  const ActiveIcon = activeConfig.Icon;
 
   return (
-    <div
-      className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
-      style={{ fontFamily: ROBOTO }}
-    >
-      {" "}
-      <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-        {" "}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
-          {" "}
-          <div className="flex items-center gap-3 min-w-0">
-            {" "}
-            <div className="h-9 w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
-              {" "}
-              <ActiveIcon size={17} strokeWidth={1.9} aria-hidden />{" "}
-            </div>{" "}
-            <h1
-              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
-              style={{ fontFamily: ROBOTO }}
-            >
-              Customers
-            </h1>{" "}
-          </div>
-          {canAdd && (
-            <Button
-              size="md"
-              variant="primary"
-              className="gap-2 text-12 font-medium uppercase tracking-label"
-              onClick={onAddCustomer}
-            >
-              {" "}
-              <UserPlus size={15} strokeWidth={1.9} aria-hidden />
-              Add Customer
-            </Button>
-          )}
-        </div>{" "}
-        <nav
-          aria-label="Customers section"
-          className="grid grid-cols-2 lg:grid-cols-4 gap-1 p-2"
-        >
-          {VIEWS.map(({ key, label, Icon }) => {
-            const active = key === view;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => onViewChange(key)}
-                aria-current={active ? "page" : undefined}
-                className={cn(
-                  "h-11 px-3 rounded-sm border-hairline text-12 font-medium uppercase tracking-label",
-                  "inline-flex items-center justify-center gap-2 u-focus-ring transition-colors",
-                  active
-                    ? "bg-zinc-900 text-white border-zinc-900"
-                    : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
-                )}
-              >
-                {" "}
-                <Icon size={15} strokeWidth={1.8} aria-hidden />
-                {label}
-              </button>
-            );
-          })}
-        </nav>{" "}
-      </div>{" "}
-    </div>
+    <AdminCommandHeader
+      title="Customers"
+      icon={activeConfig.Icon}
+      sections={VIEWS}
+      activeKey={view}
+      onSectionChange={onViewChange}
+      ariaLabel="Customers section"
+      action={
+        canAdd
+          ? {
+              label: "Add Customer",
+              icon: UserPlus,
+              onClick: onAddCustomer,
+            }
+          : null
+      }
+    />
   );
 }
 
@@ -964,6 +931,8 @@ function pipelineCustomersFrom(data) {
 
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
+  const navigate = useNavigate();
+  const location = useLocation();
   const isAdmin = getAdminRole() === "admin";
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
@@ -984,8 +953,11 @@ export default function CustomersPageV2() {
   const [filterTier, setFilterTier] = useState("all");
   const [sortBy, setSortBy] = useState("lastName");
   const [sortDir, setSortDir] = useState("asc");
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [quickAddPreset, setQuickAddPreset] = useState(null);
+  const isNewCustomerRoute = location.pathname === "/admin/customers/new";
+  const [showAddModal, setShowAddModal] = useState(isNewCustomerRoute);
+  const [quickAddPreset, setQuickAddPreset] = useState(() =>
+    isNewCustomerRoute ? quickAddPresetFromSearchParams(searchParams) : null,
+  );
   const [filterHasBalance, setFilterHasBalance] = useState(false);
   const [filterLastVisited, setFilterLastVisited] = useState("all"); // all | 30 | 90 | 180 | never
   const [filterCards, setFilterCards] = useState("all"); // all | has | none
@@ -1048,9 +1020,46 @@ export default function CustomersPageV2() {
     setShowAddModal(true);
   };
 
+  // Quick-add success handler (desktop modal + mobile sheet). Both call
+  // onCreated then onClose; on the /admin/customers/new deep-link route the
+  // close handler must not clobber the just-created profile's URL, so the
+  // created ID rides a ref for closeAddCustomer to preserve.
+  const createdCustomerIdRef = useRef(null);
+  const handleQuickAddCreated = (customer) => {
+    loadCustomers();
+    if (view === "pipeline") loadPipeline();
+    if (customer?.id) {
+      createdCustomerIdRef.current = String(customer.id);
+      // Deep-link into the newly created profile.
+      openCustomerProfile(customer.id);
+    }
+  };
+
   const closeAddCustomer = () => {
+    const createdId = createdCustomerIdRef.current;
+    createdCustomerIdRef.current = null;
     setShowAddModal(false);
     setQuickAddPreset(null);
+    if (isNewCustomerRoute) {
+      // Leave the /new route, but keep the just-created customer's profile
+      // open (mobile call-log quick-add lands on Customer 360, not the
+      // bare directory). Cancelling without creating still goes to the
+      // directory.
+      navigate(
+        createdId
+          ? `/admin/customers?customerId=${encodeURIComponent(createdId)}`
+          : "/admin/customers",
+        { replace: true },
+      );
+    }
+  };
+
+  const openCustomerProfile = (customerId) => {
+    selectCustomer(customerId);
+  };
+
+  const closeCustomerProfile = () => {
+    selectCustomer(null, { replace: true });
   };
 
   const startEdit = (c) => {
@@ -1362,13 +1371,14 @@ export default function CustomersPageV2() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search customer by name, phone number"
-              className="block w-full bg-white text-14 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
+              className="block w-full bg-white text-16 text-ink-primary border-hairline border-zinc-300 rounded-sm h-12 px-4 focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900"
             />{" "}
             <div className="mt-3 flex items-center gap-2">
               {" "}
               <button
                 type="button"
                 onClick={() => setShowFilters(true)}
+                aria-label="Filter customers"
                 className="inline-flex items-center justify-center gap-1.5 u-label px-3 h-11 bg-white text-ink-secondary border-hairline border-zinc-300 rounded-sm transition-colors u-focus-ring"
               >
                 {" "}
@@ -1431,7 +1441,11 @@ export default function CustomersPageV2() {
             {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
           </div>
           {/* Filters dialog */}
-          <Dialog open={showFilters} onClose={() => setShowFilters(false)}>
+          <Dialog
+            open={showFilters}
+            onClose={() => setShowFilters(false)}
+            style={{ zIndex: 100 }}
+          >
             {" "}
             <DialogHeader onClose={() => setShowFilters(false)}>
               {" "}
@@ -1621,17 +1635,22 @@ export default function CustomersPageV2() {
                       const addr = formatCustomerAddress(c.address);
                       return (
                         <div
-                          onClick={() => selectCustomer(c.id)}
-                          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3 cursor-pointer hover:bg-zinc-50"
+                          data-customer-id={c.id}
+                          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3"
                           style={{ height: 64 }}
                         >
                           {" "}
                           <HealthDot score={c.healthScore} />{" "}
                           <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                             {" "}
-                            <div className="text-14 font-medium text-ink-primary truncate">
+                            <button
+                              type="button"
+                              onClick={() => openCustomerProfile(c.id)}
+                              aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
+                              className="text-14 font-medium text-blue-700 underline decoration-dotted underline-offset-2 truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
+                            >
                               {c.firstName} {c.lastName}
-                            </div>
+                            </button>
                             {addr ? (
                               <a
                                 href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
@@ -1701,7 +1720,17 @@ export default function CustomersPageV2() {
                     })()
                   ) : (
                     <div
-                      onClick={() => selectCustomer(c.id)}
+                      onClick={() => openCustomerProfile(c.id)}
+                      onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openCustomerProfile(c.id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
                       className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
                       style={{ gridTemplateColumns: TABLE_COLS }}
                     >
@@ -2053,7 +2082,7 @@ export default function CustomersPageV2() {
           ) : (
             <LegacyCustomersPanel
               exportName="CustomerMap"
-              props={{ customers, onSelect: (c) => selectCustomer(c.id) }}
+              props={{ customers, onSelect: (c) => openCustomerProfile(c.id) }}
             />
           )}
         </div>
@@ -2145,11 +2174,7 @@ export default function CustomersPageV2() {
           onClose={closeAddCustomer}
           initialValues={quickAddPreset}
           title={quickAddPreset ? "Add Property" : "Add Customer"}
-          onCreated={(customer) => {
-            loadCustomers();
-            if (view === "pipeline") loadPipeline();
-            if (customer?.id) selectCustomer(customer.id);
-          }}
+          onCreated={handleQuickAddCreated}
         />
       )}
       {isMobile && (
@@ -2157,12 +2182,7 @@ export default function CustomersPageV2() {
           open={showAddModal}
           onClose={closeAddCustomer}
           initialValues={quickAddPreset}
-          onCreated={(customer) => {
-            loadCustomers();
-            if (view === "pipeline") loadPipeline();
-            // Deep-link into the newly created profile (parity with desktop QuickAdd).
-            if (customer?.id) selectCustomer(customer.id);
-          }}
+          onCreated={handleQuickAddCreated}
         />
       )}
 
@@ -2171,9 +2191,9 @@ export default function CustomersPageV2() {
         <Customer360Profile
           key={selected360Id}
           customerId={selected360Id}
-          onSelectCustomer={(id) => selectCustomer(id)}
+          onSelectCustomer={openCustomerProfile}
           onAddProperty={(customer) => {
-            selectCustomer(null, { replace: true });
+            closeCustomerProfile();
             openAddCustomer({
               firstName: customer.firstName || "",
               lastName: customer.lastName || "",
@@ -2195,7 +2215,7 @@ export default function CustomersPageV2() {
                 : "",
             });
           }}
-          onClose={() => selectCustomer(null, { replace: true })}
+          onClose={closeCustomerProfile}
         />
       )}
     </div>

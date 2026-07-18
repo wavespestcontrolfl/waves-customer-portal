@@ -2,8 +2,14 @@ const mockQueryFirst = jest.fn();
 const mockInsertReturning = jest.fn();
 const mockInsert = jest.fn(() => ({ returning: mockInsertReturning }));
 const mockUpdate = jest.fn();
-const mockWhere = jest.fn(() => ({ first: mockQueryFirst, update: mockUpdate }));
+const mockWhere = jest.fn(() => {
+  const chain = { first: mockQueryFirst, update: mockUpdate, forUpdate: jest.fn(() => chain) };
+  return chain;
+});
 const mockDb = jest.fn(() => ({ where: mockWhere, insert: mockInsert }));
+// syncCampaigns upserts inside a row-locked transaction now.
+mockDb.transaction = (cb) => cb(mockDb);
+mockDb.fn = { now: () => 'NOW()' };
 
 jest.mock('../models/db', () => mockDb);
 
@@ -33,11 +39,18 @@ jest.mock('google-ads-api', () => ({
       REMOVED: 4,
     },
   },
-}), { virtual: true });
+}));
+// google-ads-api and uuid are REAL installed packages — these mocks must NOT
+// be `virtual: true`. A virtual mock is registered under a synthesized name
+// key instead of the resolved module path, and in a shared jest worker whose
+// caches were warmed by an earlier suite the service's require can resolve
+// straight to the real library, bypassing the mock — which is how this suite
+// went red only in CI (syncCampaigns made a live OAuth call and swallowed
+// "invalid_client", so every configured-path test saw [] / null).
 
 jest.mock('uuid', () => ({
   v4: jest.fn(() => 'uuid-1'),
-}), { virtual: true });
+}));
 
 const GoogleAds = require('../services/ads/google-ads');
 
@@ -214,6 +227,7 @@ describe('Google Ads campaign sync', () => {
         id: '22594274874',
         campaign_budget: 'customers/3393936713/campaignBudgets/987654321',
       },
+      campaign_budget: { amount_micros: '4000000' },
     }]);
     mockMutateResources.mockResolvedValue({});
 
@@ -223,6 +237,9 @@ describe('Google Ads campaign sync', () => {
       success: true,
       platformCampaignId: '22594274874',
       dailyBudget: 5,
+      // The pre-mutation live amount, observed by the same query that
+      // resolves the budget resource — rollback restore target.
+      previousDailyBudget: 4,
     });
     expect(mockMutateResources).toHaveBeenCalledWith([{
       entity: 'campaign_budget',
@@ -276,5 +293,56 @@ describe('Google Ads campaign sync', () => {
     const gaql = mockCustomerQuery.mock.calls[0][0];
     expect(gaql).toMatch(/segments\.date BETWEEN '\d{4}-\d{2}-\d{2}' AND '\d{4}-\d{2}-\d{2}'/);
     expect(gaql).not.toMatch(/segments\.date >=/);
+  });
+});
+
+describe('sync freshness fence (r12)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env = {
+      ...process.env,
+      GOOGLE_ADS_DEVELOPER_TOKEN: 'developer-token',
+      GOOGLE_ADS_CLIENT_ID: 'client-id',
+      GOOGLE_ADS_CLIENT_SECRET: 'client-secret',
+      GOOGLE_ADS_REFRESH_TOKEN: 'refresh-token',
+      GOOGLE_ADS_CUSTOMER_ID: '3393936713',
+      GOOGLE_ADS_LOGIN_CUSTOMER_ID: '8507694331',
+    };
+  });
+
+  it('skips a row a local writer touched after the sync fetch began', async () => {
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: 111, name: 'Pest Bradenton', status: 2, advertising_channel_type: 'SEARCH' },
+      campaign_budget: { amount_micros: 30_000_000 },
+      metrics: {},
+    }]);
+    // The locked re-read shows the row was updated AFTER fetchStartedAt —
+    // e.g. a compensating rollback restored a failed push mid-sync. Writing
+    // our pre-rollback observation would resurrect the failed amount.
+    mockQueryFirst.mockResolvedValue({
+      id: 'row-1', daily_budget_base: '40', daily_budget_current: '40',
+      updated_at: new Date(Date.now() + 60_000),
+    });
+
+    const results = await GoogleAds.syncCampaigns();
+
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1); // still reported, from local state
+  });
+
+  it('still mirrors a row untouched since before the fetch', async () => {
+    mockCustomerQuery.mockResolvedValue([{
+      campaign: { id: 111, name: 'Pest Bradenton', status: 2, advertising_channel_type: 'SEARCH' },
+      campaign_budget: { amount_micros: 30_000_000 },
+      metrics: {},
+    }]);
+    mockQueryFirst.mockResolvedValue({
+      id: 'row-1', daily_budget_base: '40', daily_budget_current: '40',
+      updated_at: new Date(Date.now() - 3600_000),
+    });
+
+    await GoogleAds.syncCampaigns();
+
+    expect(mockUpdate).toHaveBeenCalled();
   });
 });

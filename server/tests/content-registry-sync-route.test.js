@@ -7,7 +7,7 @@ jest.mock('express', () => ({
     get: jest.fn((path, ...handlers) => { routeHandlers[`GET ${path}`] = handlers; }),
     post: jest.fn((path, ...handlers) => { routeHandlers[`POST ${path}`] = handlers; }),
   }),
-}), { virtual: true });
+}));
 
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {

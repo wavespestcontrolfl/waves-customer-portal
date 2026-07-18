@@ -536,7 +536,10 @@ function mapCustomerListRow(c) {
     propertyType: c.property_type,
     lastContactDate: c.last_contact_date, lastContactType: c.last_contact_type,
     nextFollowUp: c.next_follow_up_date,
-    lifetimeRevenue: parseFloat(c.lifetime_revenue || 0),
+    // lifetime_revenue_net is the payments-derived net computed by the list
+    // query; the bare column is a writer-less legacy fallback for callers
+    // that don't select it.
+    lifetimeRevenue: parseFloat(c.lifetime_revenue_net ?? c.lifetime_revenue ?? 0),
     totalServices: parseInt(c.total_services || c.services_count || 0),
     lastServiceDate: c.last_service_date, nextServiceDate: c.next_service_date,
     serviceTypes: c.service_types || '',
@@ -1306,6 +1309,11 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
       healthScoreSelect,
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
+      // Net of all paid payments minus refunds — the same definition the
+      // customer-detail endpoint computes. customers.lifetime_revenue has NO
+      // production writer (only demo seeds ever set it), so reading the
+      // column shows $0 for every real customer.
+      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
     );
 
     // Alphabetical by first name only — operator preference. No tie-break
@@ -1314,8 +1322,12 @@ router.get('/', async (req, res, next) => {
     const dir = order === 'desc' ? 'desc' : 'asc';
     if (sort === 'name') {
       query = query.orderByRaw(`LOWER(first_name) ${dir} NULLS LAST`);
+    } else if (sort === 'revenue') {
+      // Sort by the computed net, not the writer-less lifetime_revenue column.
+      // `dir` is sanitized to asc/desc above.
+      query = query.orderByRaw(`lifetime_revenue_net ${dir}`);
     } else {
-      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date', revenue: 'lifetime_revenue' }[sort] || 'first_name';
+      const sortCol = { lead_score: 'lead_score', rate: 'monthly_rate', last_contact: 'last_contact_date' }[sort] || 'first_name';
       query = query.orderBy(sortCol, dir);
     }
 
@@ -2093,6 +2105,7 @@ router.get('/:id', async (req, res, next) => {
         address: { line1: c.address_line1, line2: c.address_line2, city: c.city, state: c.state, zip: c.zip },
         property: { type: c.property_type, lawnType: c.lawn_type, sqft: c.property_sqft, lotSqft: c.lot_sqft, palmCount: c.palm_count },
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
+        billingMode: c.billing_mode || null,
         memberSince: c.member_since, active: c.active,
         pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
         leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
@@ -2327,11 +2340,120 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
       return res.status(400).json({ error: 'Invalid pipeline stage' });
+    }
+    // Shared by the explicit per-visit prerequisite AND the clear-to-NULL
+    // path below: future pending/confirmed visits with no positive price,
+    // which complete unbilled in a per-visit lane (completionInvoiceAmount
+    // refuses the monthly-rate fallback there). Callbacks, always-free
+    // service types, and prepaid-stamped visits are exempt — they complete
+    // without an invoice by design in every lane. Errors return [] — fail
+    // OPEN (completion logging backstops) rather than hard-locking saves.
+    const unpricedFutureBillableVisits = async () => {
+      try {
+        const { etDateString } = require('../utils/datetime-et');
+        const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+        const rows = await db('scheduled_services')
+          .where({ customer_id: req.params.id })
+          .whereIn('status', ['pending', 'confirmed'])
+          .where('scheduled_date', '>=', etDateString())
+          .where(function unpriced() {
+            this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
+          })
+          .where(function notPrepaid() {
+            this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
+          })
+          .select('id', 'service_type', 'is_callback', 'scheduled_date')
+          .orderBy('scheduled_date', 'asc')
+          .limit(100);
+        return rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
+      } catch { return []; }
+    };
+    if (req.body.billingMode !== undefined && req.body.billingMode !== null && req.body.billingMode !== '') {
+      const { BILLING_MODES } = require('../services/billing-lane');
+      const mode = req.body.billingMode;
+      if (!BILLING_MODES.includes(mode)) {
+        return res.status(400).json({ error: 'Invalid billing mode' });
+      }
+      // Lane prerequisites — a profile save must not move a customer into a
+      // lane whose visits then complete unbilled (Codex r1): membership
+      // needs a dues rate, per-application needs the acceptance fee, and
+      // annual prepay needs a live (paid or pending) coverage term.
+      const beforeRow = await db('customers').where({ id: req.params.id }).first('monthly_rate', 'per_application_fee');
+      const effectiveRate = req.body.monthlyRate !== undefined
+        ? parseFloat(req.body.monthlyRate) || 0
+        : parseFloat(beforeRow?.monthly_rate) || 0;
+      if (mode === 'monthly_membership' && !(effectiveRate > 0)) {
+        return res.status(400).json({ error: 'Set a monthly rate before selecting Monthly membership — dues cannot collect at $0' });
+      }
+      if (mode === 'per_application' && !(parseFloat(beforeRow?.per_application_fee) > 0)) {
+        return res.status(400).json({ error: 'Set a per-application fee before selecting Per application — visits would complete unbilled' });
+      }
+      if (mode === 'annual_prepay') {
+        let liveTerm = null;
+        try {
+          // payment_pending deliberately does NOT qualify: the annual-prepay
+          // service only stamps this lane once the prepay invoice is PAID —
+          // pending-window visits must keep billing per application
+          // (Codex r2). The term must also COVER TODAY: an expired or
+          // future-dated term would park the customer in a lane the cron
+          // skips while completion coverage stays false — recurring visits
+          // would complete unbilled until someone noticed (Codex r8 P1).
+          const { etDateString } = require('../utils/datetime-et');
+          const todayEt = etDateString();
+          liveTerm = await db('annual_prepay_terms')
+            .where({ customer_id: req.params.id })
+            .whereIn('status', ['active', 'renewal_pending'])
+            .where('term_start', '<=', todayEt)
+            .where('term_end', '>=', todayEt)
+            .first('id');
+        } catch { /* table absent — treat as no live term */ }
+        if (!liveTerm) {
+          return res.status(400).json({ error: 'Annual prepay requires a PAID term covering today — the lane stamps automatically when the annual invoice is paid' });
+        }
+      }
+      if (mode === 'per_visit' || mode === 'one_time') {
+        // These lanes bill each visit's OWN price, so a future visit
+        // without a positive price completes uninvoiced with only a log
+        // line. Same "would complete unbilled" prerequisite as the other
+        // lanes (Codex r6) — see unpricedFutureBillableVisits above.
+        const billable = await unpricedFutureBillableVisits();
+        if (billable.length > 0) {
+          const laneLabel = mode === 'one_time' ? 'One-time' : 'Per visit';
+          const plural = billable.length !== 1;
+          return res.status(400).json({
+            error: `${laneLabel} bills each visit's own price — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`,
+          });
+        }
+      }
+    } else if (req.body.billingMode !== undefined) {
+      // Clearing the selector to "Not set" re-enters legacy inference — a
+      // tier-less or sentinel-tier customer with a lingering rate RESOLVES
+      // per_visit, and completion refuses the monthly-rate fallback for
+      // that lane, so the same unpriced-visit guard applies to the clear
+      // (Codex r10). Resolve against the EFFECTIVE tier/rate this same
+      // save produces (tier and monthlyRate may change in the same PUT).
+      const { resolveBillingLane } = require('../services/billing-lane');
+      const effectiveTier = req.body.tier !== undefined ? req.body.tier : before.waveguard_tier;
+      const effectiveRateForClear = req.body.monthlyRate !== undefined
+        ? (req.body.monthlyRate === '' ? 0 : parseFloat(req.body.monthlyRate) || 0)
+        : (parseFloat(before.monthly_rate) || 0);
+      const resolvedOnClear = resolveBillingLane({
+        billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear,
+      });
+      if (resolvedOnClear.mode !== 'monthly_membership') {
+        const billable = await unpricedFutureBillableVisits();
+        if (billable.length > 0) {
+          const plural = billable.length !== 1;
+          return res.status(400).json({
+            error: `Not set resolves this customer to per-visit billing — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'}, or pick an explicit lane.`,
+          });
+        }
+      }
     }
     const updates = {};
     for (const [k, v] of Object.entries(fields)) {
@@ -2341,6 +2463,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
+        else if (v === 'billing_mode') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : req.body[k]; }
         else if (v === 'email') { updates[v] = cleanEmail(req.body[k]); }
         else if (v === 'phone') { updates[v] = cleanText(req.body[k]); }
         else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }
@@ -2401,7 +2524,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         });
       }
 
-      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact_role', 'service_contact2_role', 'service_contact3_role', 'payer_id'];
+      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact_role', 'service_contact2_role', 'service_contact3_role', 'payer_id', 'billing_mode'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
       const after = { ...before, ...updates };
       // PRESENCE-triggered, not diff-triggered — matching the IB update path

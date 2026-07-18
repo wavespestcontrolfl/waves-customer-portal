@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { getPrimaryContact } = require('./customer-contact');
+const { getPrimaryContact, getInvoiceEmailRecipients } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { currency } = require('./email-template');
@@ -142,11 +142,12 @@ async function sendTemplate({
   categories = [],
   triggerEventId,
   metadata = {},
+  contactOverride = null,
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
-  const contact = getPrimaryContact(recipientCustomer);
+  const contact = contactOverride || getPrimaryContact(recipientCustomer);
   if (!isEmailLike(contact.email)) {
     await logLifecycleEmailAttempt({
       customerId: recipientCustomer.id,
@@ -361,6 +362,58 @@ async function sendCancellationReceived({
       service_request_id: request.id,
       request_category: request.category,
     },
+  });
+}
+
+// Pre-visit late-balance reminder (owner directive 2026-07-17) — the email
+// half of the previsit-balance-reminder sweep. Eligibility (recurring visit
+// + recurring-lane late balance only) lives entirely in that service; this
+// just renders and sends.
+// A BILLING email follows the billing recipient and the billing prefs, not
+// the primary contact (Codex r10 P1): notification_prefs.billing_email
+// routes AR mail to the payer's bookkeeper, billing_reminder=false is an
+// explicit opt-out of balance nudges, and email_enabled=false kills the
+// channel. The SMS leg's prefs are enforced inside send-customer-message —
+// this is the email leg's equivalent, shared with the sweep so hasEmailLeg
+// is only declared when the email can actually send.
+async function resolvePrevisitBalanceEmailRecipient(customerId) {
+  const customer = await loadCustomer(customerId);
+  if (!customer) return { recipient: null, reason: 'customer_not_found' };
+  let prefs = {};
+  try {
+    prefs = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
+  } catch { prefs = {}; }
+  if (prefs.email_enabled === false) return { recipient: null, reason: 'email_disabled' };
+  if (prefs.billing_reminder === false) return { recipient: null, reason: 'billing_reminder_opted_out' };
+  const [recipient] = getInvoiceEmailRecipients(customer, prefs).filter((r) => isEmailLike(r.email));
+  if (!recipient?.email) return { recipient: null, reason: 'missing_email' };
+  return { recipient, reason: null };
+}
+
+async function sendPrevisitBalanceReminder({
+  customerId,
+  amount,
+  serviceType,
+  visitDate,
+  billingUrl,
+  idempotencyKey,
+} = {}) {
+  const { recipient, reason } = await resolvePrevisitBalanceEmailRecipient(customerId);
+  if (!recipient) return { ok: false, skipped: true, reason };
+  return sendTemplate({
+    contactOverride: recipient,
+    customerId,
+    templateKey: 'billing.previsit_balance',
+    eventType: 'billing.previsit_balance',
+    payload: {
+      amount: clean(amount),
+      service_type: clean(serviceType) || 'service',
+      visit_date: clean(visitDate),
+      billing_url: clean(billingUrl),
+    },
+    idempotencyKey,
+    categories: ['previsit_balance_reminder'],
+    metadata: { amount: clean(amount), visit_date: clean(visitDate) },
   });
 }
 
@@ -624,6 +677,8 @@ module.exports = {
   sendMembershipCanceled,
   sendMembershipPaused,
   sendMembershipReactivated,
+  sendPrevisitBalanceReminder,
+  resolvePrevisitBalanceEmailRecipient,
   _private: {
     hashValue,
     itemSummary,

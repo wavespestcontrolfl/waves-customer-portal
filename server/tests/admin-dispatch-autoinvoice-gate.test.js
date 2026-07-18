@@ -1,5 +1,6 @@
 const { shouldAutoInvoiceCompletion } = require('../routes/admin-dispatch')._test;
 const { completionSavedCardFallbackPolicy } = require('../routes/admin-dispatch')._test;
+const { membershipDuesCoverVisit } = require('../routes/admin-dispatch')._test;
 
 describe('completion saved-card fallback policy', () => {
   test('suppresses fallback rails for a fresh in-progress claim', () => {
@@ -45,6 +46,21 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: 'Gold', invoiceAmount: 49 })).toBe(true);
   });
 
+  test('a sentinel tier (Commercial/One-Time) never takes the membership billing branch — the cron classifies those rows per_visit (Codex r8)', () => {
+    for (const tier of ['Commercial', 'One-Time', 'None']) {
+      expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: tier, invoiceAmount: 49 })).toBe(false);
+    }
+    // A priced sentinel-tier visit still bills via the scheduler flag.
+    expect(shouldAutoInvoiceCompletion({
+      ...base, waveguardTier: 'Commercial', createInvoiceOnComplete: true, hasVisitPrice: true, invoiceAmount: 129,
+    })).toBe(true);
+  });
+
+  test('an explicit tier-less member whose coverage failed still invoices (Codex r1)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: null, explicitMembership: true, invoiceAmount: 33.33 })).toBe(true);
+    expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: null, explicitMembership: false, invoiceAmount: 33.33 })).toBe(false);
+  });
+
   test('GATE OFF: priced self-pay visit still does NOT invoice (behaviour unchanged)', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: false })).toBe(false);
   });
@@ -63,6 +79,17 @@ describe('shouldAutoInvoiceCompletion', () => {
 
   test('GATE ON: a callback / re-treat is NEVER auto-billed even with a stale price', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true, isCallback: true })).toBe(false);
+  });
+
+  test('EXPLICIT per-visit/one-time lane: a priced, performed visit invoices without flag, tier, or gate (Codex r5)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, explicitPerVisitLane: true })).toBe(true);
+  });
+
+  test('EXPLICIT per-visit lane still exempts callbacks, always-free types, and non-performed visits — a lingering tier cannot bill them via fall-through', () => {
+    const lane = { ...pricedSelfPay, explicitPerVisitLane: true, waveguardTier: 'Gold' };
+    expect(shouldAutoInvoiceCompletion({ ...lane, isCallback: true })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...lane, serviceType: 'Pest Control Re-Service' })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...lane, visitPerformed: false })).toBe(false);
   });
 
   test('GATE ON: a paid inspection/rodent visit (ambiguous, not always-free) DOES invoice — price is authoritative at completion', () => {
@@ -252,5 +279,53 @@ describe('shouldAutoInvoiceCompletion — per-application visit outcome', () => 
 
   test('the explicit scheduler flag still outranks a non-performed outcome (operator intent)', () => {
     expect(shouldAutoInvoiceCompletion({ ...perApp, visitPerformed: false, createInvoiceOnComplete: true })).toBe(true);
+  });
+});
+
+// The monthly-membership suppression. The 2026-07 double-billing shape: the
+// cadence generator stamps a per-visit estimated_price on a membership
+// customer's recurring rows, so `!hasVisitPrice` defeated the suppression and
+// completion cut a phantom per-visit invoice on top of the monthly dues.
+describe('membershipDuesCoverVisit', () => {
+  const member = {
+    visitIsPayerBilled: false,
+    perApplicationBilling: false,
+    annualPrepayBilling: false,
+    customerAutopayActive: true,
+    hasVisitPrice: false,
+    isRecurring: false,
+    waveguardTier: 'Bronze',
+    monthlyRate: 33.33,
+  };
+
+  test('unpriced plan visit is covered (legacy behavior preserved)', () => {
+    expect(membershipDuesCoverVisit(member)).toBe(true);
+  });
+
+  test('a RECURRING visit with a stamped per-visit price is covered — the double-billing fix', () => {
+    expect(membershipDuesCoverVisit({ ...member, hasVisitPrice: true, isRecurring: true })).toBe(true);
+  });
+
+  test('a priced ONE-OFF visit (add-on / WDO / special) still bills its price', () => {
+    expect(membershipDuesCoverVisit({ ...member, hasVisitPrice: true, isRecurring: false })).toBe(false);
+  });
+
+  test('every exclusion still defeats coverage', () => {
+    expect(membershipDuesCoverVisit({ ...member, visitIsPayerBilled: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, perApplicationBilling: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, annualPrepayBilling: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, customerAutopayActive: false })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, waveguardTier: null })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, monthlyRate: 0 })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, monthlyRate: null })).toBe(false);
+  });
+
+  test('recurring alone does not cover a non-membership customer', () => {
+    expect(membershipDuesCoverVisit({
+      ...member, hasVisitPrice: true, isRecurring: true, waveguardTier: null,
+    })).toBe(false);
+    expect(membershipDuesCoverVisit({
+      ...member, hasVisitPrice: true, isRecurring: true, monthlyRate: 0,
+    })).toBe(false);
   });
 });

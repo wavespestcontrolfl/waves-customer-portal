@@ -7,6 +7,13 @@ import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/
 import { computePretreatChemistry } from '../../lib/termitePretreatRates';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 import DictationButton from './DictationButton';
+import useModalFocus from '../../hooks/useModalFocus';
+import {
+  useCustomerCards,
+  chargeableCardOnFile,
+  cardOnFileTitle,
+  isCardExpired,
+} from '../../hooks/useCustomerCards';
 
 const ESTIMATE_BG = '#FFFFFF';
 const ESTIMATE_BORDER = '#E4E4E7';
@@ -15,6 +22,15 @@ const ESTIMATE_INPUT_BG = '#FFFFFF';
 const ESTIMATE_TEXT = '#09090B';
 const ESTIMATE_MUTED = '#71717A';
 const ESTIMATE_BUTTON_BG = '#09090B';
+const WDO_PROJECT_TYPE = 'wdo_inspection';
+const PRE_TREATMENT_CERTIFICATE_TYPE = 'pre_treatment_termite_certificate';
+const OFFICIAL_DOCUMENT_TYPES = new Set([WDO_PROJECT_TYPE, PRE_TREATMENT_CERTIFICATE_TYPE]);
+const BANK_PAYMENT_METHOD_TYPES = new Set(['ach', 'us_bank_account', 'bank', 'bank_account']);
+// project_photos.caption is varchar(200) — a longer description (typed or
+// seeded by the prior-treatment extractor) fails the INSERT after the image
+// is already in S3, so the queue clamps everywhere a caption enters.
+const PHOTO_CAPTION_MAX = 200;
+const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 
 /**
  * CreateProjectModal — form for creating a Project (inspection or
@@ -92,6 +108,35 @@ function hasMeaningfulValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== '';
 }
 
+const PRETREAT_APPLICATION_KEYS = [
+  'treatment_method',
+  'product_name',
+  'epa_registration',
+  'active_ingredient',
+  'concentration_pct',
+  'square_footage',
+  'linear_feet',
+  'trench_depth_ft',
+  'gallons_applied',
+];
+
+function normalizeScheduledPretreatApplication(application = {}) {
+  const normalized = { ...application };
+  const chemistry = computePretreatChemistry({ productName: normalized.product_name });
+  if (chemistry.status === 'ok' && !hasMeaningfulValue(normalized.concentration_pct)) {
+    normalized.concentration_pct = chemistry.concentrationPct;
+  }
+  return normalized;
+}
+
+function hasPretreatApplicationContent(findings = {}) {
+  if (PRETREAT_APPLICATION_KEYS.some((key) => hasMeaningfulValue(findings[key]))) return true;
+  return Array.isArray(findings.additional_applications)
+    && findings.additional_applications.some((row) => (
+      row && PRETREAT_APPLICATION_KEYS.some((key) => hasMeaningfulValue(row[key]))
+    ));
+}
+
 function formatCustomerAddress(customer) {
   if (!customer) return '';
   if (typeof customer.address === 'string') return customer.address.replace(/^,\s*/, '').trim();
@@ -158,12 +203,6 @@ function formatStructuresInspected(customer) {
   return 'Single-family residential structure';
 }
 
-// NOTE: structure_sqft is deliberately NOT prefilled from the customer
-// record. customers.property_sqft is the treated LAWN area (initial schema),
-// not the building footprint — the WDO invoice path refuses it for the same
-// reason (admin-projects resolveWdoInspectionFee). Footprint comes from the
-// WDO Intelligence property lookup or the tech on site.
-
 // Construction type is only derivable from the customer record for
 // manufactured/mobile homes (property_type says so, and it's a
 // WDO_CONSTRUCTION_OPTIONS entry). CBS vs wood frame is never guessed here —
@@ -188,6 +227,11 @@ export function wdoFeeSeedFromVisit(service) {
   const hasBillableAddon = addons.some((a) => Number(a?.estimatedPrice ?? a?.basePrice ?? a?.price ?? 0) > 0);
   if (hasBillableAddon) return '';
   return service?.estimatedPrice ?? '';
+}
+
+function wdoFeeIsExplicitZero(value) {
+  const match = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
+  return match != null && Number(match[1]) === 0;
 }
 
 // Populate the WDO contact/address fields from the selected customer. With
@@ -267,6 +311,10 @@ export default function CreateProjectModal({
   defaultProjectType = '',
   allowedProjectTypes = null,
   allowAiDraft = false,
+  // Invoice delivery + project close endpoints are admin-only. Dispatch sets
+  // this true; the technician portal keeps the signed draft for office review
+  // instead of exposing an action that would inevitably 403.
+  allowInvoiceCompletion = false,
   theme = 'dark',
   // 'modal' = the floating ad-hoc dialog. 'sheet' = the Complete Service
   // frame (owner ask 2026-07-13): full-height edge-docked sheet, visit
@@ -325,8 +373,27 @@ export default function CreateProjectModal({
 
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [productCatalog, setProductCatalog] = useState([]);
+  const [scheduledApplicationPrefill, setScheduledApplicationPrefill] = useState(null);
   const [projectType, setProjectType] = useState(defaultProjectType || '');
+  const isOfficialDocument = OFFICIAL_DOCUMENT_TYPES.has(projectType);
   const [customerId, setCustomerId] = useState(defaultCustomerId || '');
+  const { cards: customerCards } = useCustomerCards(customerId);
+  const savedCardCandidate = chargeableCardOnFile(
+    Array.isArray(customerCards)
+      ? customerCards.filter((method) => !BANK_PAYMENT_METHOD_TYPES.has(
+        String(method?.method_type || '').toLowerCase(),
+      ))
+      : customerCards,
+  );
+  // chargeableCardOnFile deliberately returns an expired fallback so read-only
+  // card surfaces can label it. Completion is a mutation, so fail closed and
+  // offer invoice delivery instead of attempting an expired payment method.
+  const savedCard = savedCardCandidate && !isCardExpired(savedCardCandidate)
+    ? savedCardCandidate
+    : null;
+  const savedCardLabel = savedCard
+    ? `${cardOnFileTitle(savedCard).replace(/\s+\d{4}$/, '')} •••• ${savedCard.last_four}`
+    : '';
   const [customerQuery, setCustomerQuery] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLabel, setCustomerLabel] = useState(defaultCustomerLabel || '');
@@ -353,6 +420,10 @@ export default function CreateProjectModal({
   // rewritten while blank or still holding what we wrote, so a hand-typed
   // concentration/gallons override always survives recalculation.
   const chemAutoFillRef = useRef({ concentration_pct: null, gallons_applied: null });
+  // Exact application values seeded from the linked appointment. If the tech
+  // changes customers, remove only values that still match our seed; anything
+  // they edited is their field record and survives (without the old schedule tag).
+  const scheduledApplicationAutoFillRef = useRef(null);
   const [projectDate, setProjectDate] = useState(
     dateInputValueFrom(defaultProjectDate)
     || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
@@ -368,17 +439,42 @@ export default function CreateProjectModal({
   const [aiUseComms, setAiUseComms] = useState(true);
   const [error, setError] = useState(null);
   const [createdProject, setCreatedProject] = useState(null);
-  // One-page create-and-sign (WDO): after a successful save, the sheet stays
-  // open on a licensee-signature step instead of closing — the signature
-  // needs a saved project id and saved content to certify, which now exist.
-  // Shape: { project, applicator: {name, idCardNo}, signature: meta|null }.
+  // One-page official-document completion: after a successful save, the sheet
+  // stays open for the remaining delivery action instead of detouring to the
+  // legacy project editor. WDO adds its canvas signature here; pre-treatment
+  // already carries its typed applicator attestation in the saved certificate.
+  // Shape: { project, requiresSignature, applicator, signature,
+  //          reportHoldAvailable, billingReason, invoiceStatus, noCharge }.
   // onCreated/onClose are DEFERRED to finishSignStep so parents (which
   // unmount the modal from onCreated) don't tear the step down.
   const [signStep, setSignStep] = useState(null);
+  const reportOnlyCompletion = Boolean(
+    signStep?.noCharge
+    || ['prepaid_covered', 'not_billable'].includes(signStep?.billingReason)
+    // An existing invoice that already settled ('paid', or credit-covered
+    // 'prepaid' — the same statuses the hold release treats as settled money)
+    // has nothing left to collect: offer the send-report path instead of
+    // charge/invoice actions that /send-with-invoice would 409.
+    || (signStep?.billingReason === 'invoice_exists'
+      && ['paid', 'prepaid'].includes(String(signStep?.invoiceStatus || '').toLowerCase())),
+  );
   // True while the pad's signature POST/DELETE is in flight — every sign-step
   // exit holds until it settles, or the modal could unmount mid-mutation and
   // hand the parent stale signed/unsigned state (Codex P2).
   const [signBusy, setSignBusy] = useState(false);
+  // Invoice-first official-document completion is two durable server actions:
+  // deliver the invoice/arm the customer-side hold, then close the service.
+  // Keep its own lock so no sign-step exit can unmount either request.
+  const [completionBusy, setCompletionBusy] = useState(false);
+  const [completionAction, setCompletionAction] = useState(null);
+  // Escape follows the same exit contract as the scrim and close button: on
+  // the sign step it must route through finishSignStep so the parent still
+  // learns about the saved project.
+  const dialogRef = useModalFocus(true, () => {
+    if (saving || completionBusy) return;
+    if (signStep) { finishSignStep(); return; }
+    onClose?.();
+  });
 
   // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
   // company's treatment sticker/notice (or visible evidence) into the
@@ -711,6 +807,80 @@ export default function CreateProjectModal({
       .then(d => setProductCatalog(d.products || []))
       .catch(() => { /* product search can still accept free text */ });
   }, [typeCfg, productCatalog.length]);
+
+  useEffect(() => {
+    const linkedCustomerIsActive = projectType === PRE_TREATMENT_CERTIFICATE_TYPE
+      && defaultScheduledServiceId
+      && defaultCustomerId
+      && String(customerId) === String(defaultCustomerId);
+    if (linkedCustomerIsActive) return;
+    setScheduledApplicationPrefill(null);
+    const applied = scheduledApplicationAutoFillRef.current;
+    if (!applied) return;
+    scheduledApplicationAutoFillRef.current = null;
+    setFindings((previous) => {
+      const next = { ...previous };
+      Object.entries(applied.primary).forEach(([key, value]) => {
+        if (next[key] === value) delete next[key];
+      });
+      const currentAdditional = Array.isArray(next.additional_applications)
+        ? next.additional_applications
+        : [];
+      if (JSON.stringify(currentAdditional) === JSON.stringify(applied.additional)) {
+        delete next.additional_applications;
+      } else if (currentAdditional.length) {
+        next.additional_applications = currentAdditional.map((row) => {
+          if (!row || typeof row !== 'object') return row;
+          const { _scheduled_service_label: _scheduleLabel, ...fieldValues } = row;
+          return fieldValues;
+        });
+      }
+      return next;
+    });
+  }, [projectType, customerId, defaultCustomerId, defaultScheduledServiceId]);
+
+  useEffect(() => {
+    setScheduledApplicationPrefill(null);
+    if (projectType !== PRE_TREATMENT_CERTIFICATE_TYPE
+      || !defaultScheduledServiceId
+      || !defaultCustomerId
+      || String(customerId) !== String(defaultCustomerId)
+      || showDraftPrompt) return undefined;
+    // A saved field draft owns these values. Wait for Restore/Discard rather
+    // than racing a schedule prefill into the same application fields.
+    try {
+      if (localStorage.getItem(draftKey)) return undefined;
+    } catch { /* localStorage unavailable — continue with server prefill */ }
+
+    let cancelled = false;
+    adminFetch(`/admin/projects/scheduled-service/${defaultScheduledServiceId}/application-prefill`)
+      .then((response) => response.json().then((body) => ({ response, body })))
+      .then(({ response, body }) => {
+        if (cancelled || !response.ok) return;
+        const applications = Array.isArray(body.applications)
+          ? body.applications.map(normalizeScheduledPretreatApplication)
+          : [];
+        if (!applications.length) return;
+        setFindings((previous) => {
+          if (hasPretreatApplicationContent(previous)) return previous;
+          const [primary, ...additional] = applications;
+          const primaryFields = Object.fromEntries(
+            PRETREAT_APPLICATION_KEYS
+              .filter((key) => primary[key] !== undefined)
+              .map((key) => [key, primary[key]]),
+          );
+          scheduledApplicationAutoFillRef.current = { primary: primaryFields, additional };
+          return {
+            ...previous,
+            ...primaryFields,
+            additional_applications: additional,
+          };
+        });
+        setScheduledApplicationPrefill({ count: applications.length });
+      })
+      .catch(() => { /* optional convenience — manual fields remain available */ });
+    return () => { cancelled = true; };
+  }, [projectType, customerId, defaultCustomerId, defaultScheduledServiceId, showDraftPrompt, draftKey]);
 
   useEffect(() => {
     if (!typeCfg?.findingsFields?.length) return;
@@ -1173,6 +1343,23 @@ export default function CreateProjectModal({
         treatmentExtractAppliedRef.current = record;
         return next;
       });
+      // The same photo is included in the statutory addendum. Carry the
+      // reviewed extraction into its caption so the PDF does not show a bare
+      // "Photo N -" line or force the tech to type the same details twice.
+      if (notes) {
+        const generatedCaption = `Previous treatment evidence: ${notes}`.slice(0, PHOTO_CAPTION_MAX);
+        setPhotoQueue(prev => prev.map(item => (
+          item.id === started.photoId
+            ? {
+              ...item,
+              caption: !item.caption || item.caption === item.generatedCaption
+                ? generatedCaption
+                : item.caption,
+              generatedCaption,
+            }
+            : item
+        )));
+      }
       // Pass the AI's own caveats through (e.g. a smudged handwritten year)
       // so the tech sees WHICH detail needs confirming, not just a generic
       // verify reminder.
@@ -1288,21 +1475,29 @@ export default function CreateProjectModal({
       }
 
       try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
-      if (projectType === 'wdo_inspection' && !signStep) {
+      if ([WDO_PROJECT_TYPE, PRE_TREATMENT_CERTIFICATE_TYPE].includes(projectType) && !signStep) {
         // Fetch the detail payload for the same signer prefill the report
         // page uses (findings applicator → creating tech's name + FDACS
         // license) plus the stripped signature metadata. Prefill-only: if
         // the fetch fails, the pad still works with blank fields.
-        let detail = null;
-        try {
-          const dr = await adminFetch(`/admin/projects/${data.project.id}`);
-          const dd = await dr.json().catch(() => null);
-          if (dr.ok) detail = dd?.project || null;
-        } catch { /* prefill only */ }
+        let detailPayload = null;
+        if (projectType === WDO_PROJECT_TYPE || allowInvoiceCompletion) {
+          try {
+            const dr = await adminFetch(`/admin/projects/${data.project.id}`);
+            const dd = await dr.json().catch(() => null);
+            if (dr.ok) detailPayload = dd || null;
+          } catch { /* prefill only */ }
+        }
+        const detail = detailPayload?.project || null;
         setSignStep({
           project: data.project,
+          requiresSignature: projectType === WDO_PROJECT_TYPE,
           applicator: detail?.wdo_applicator || { name: '', idCardNo: '' },
           signature: detail?.wdo_signature || null,
+          reportHoldAvailable: detail?.report_payment_hold_available === true,
+          billingReason: detailPayload?.closeoutPreview?.billing?.reason || null,
+          invoiceStatus: detailPayload?.closeoutPreview?.billing?.invoiceStatus || null,
+          noCharge: projectType === WDO_PROJECT_TYPE && wdoFeeIsExplicitZero(findings.inspection_fee),
         });
         return;
       }
@@ -1324,15 +1519,266 @@ export default function CreateProjectModal({
     setSignStep(prev => (prev ? { ...prev, signature: meta } : prev));
   }
 
+  async function readProjectAction(response, fallbackMessage) {
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(payload?.error || fallbackMessage);
+      error.payload = payload;
+      throw error;
+    }
+    return payload;
+  }
+
+  async function sendInvoiceAndFinish(forceNoHold = false) {
+    const requiresSignature = signStep?.requiresSignature !== false;
+    if (!allowInvoiceCompletion
+      || !signStep?.project?.id
+      || (requiresSignature && !signStep.signature?.signed && !signStep.invoiceDelivery)) return;
+    const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
+    const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
+    const holdRequested = !forceNoHold && signStep.reportHoldAvailable === true;
+    setCompletionBusy(true);
+    setCompletionAction('invoice');
+    setError(null);
+    let invoiceDelivery = signStep.invoiceDelivery || null;
+    try {
+      if (!invoiceDelivery) {
+        const previewResponse = await adminFetch(
+          `/admin/projects/${signStep.project.id}/send-with-invoice`,
+          {
+            method: 'POST',
+            body: { dry_run: true, ...(holdRequested ? { hold_report_until_paid: true } : {}) },
+          },
+        );
+        const preview = await readProjectAction(previewResponse, `Could not prepare the ${documentLabel} invoice`);
+        const amount = Number(preview?.invoice?.total || 0).toLocaleString('en-US', {
+          style: 'currency',
+          currency: 'USD',
+        });
+        const deliveryExplanation = holdRequested
+          ? `The customer receives the invoice and payment link now. Their ${documentLabel} stays locked until payment, then emails and unlocks automatically.`
+          : `The customer receives the invoice, payment link, and ${documentLabel} now.`;
+        if (!confirm(`Send the ${amount} invoice now and finish this service?\n\n${deliveryExplanation}`)) return;
+
+        const sendResponse = await adminFetch(
+          `/admin/projects/${signStep.project.id}/send-with-invoice`,
+          {
+            method: 'POST',
+            body: {
+              ...(preview?.invoice?.id ? { invoice_id: preview.invoice.id } : {}),
+              ...(holdRequested ? { hold_report_until_paid: true } : {}),
+            },
+          },
+        );
+        const sent = await readProjectAction(sendResponse, `Could not send the ${documentLabel} invoice`);
+        if (!sent.sent) {
+          throw new Error(`The invoice and ${documentLabel} were not delivered. Please retry.`);
+        }
+        invoiceDelivery = sent;
+        // Persist this boundary in local UI state before attempting close. If
+        // closeout fails, Retry finishes the service without emailing a second
+        // invoice.
+        setSignStep(prev => (prev ? { ...prev, invoiceDelivery: sent } : prev));
+      }
+
+      const closeResponse = await adminFetch(`/admin/projects/${signStep.project.id}/close`, {
+        method: 'POST',
+        body: {},
+      });
+      const closed = await readProjectAction(
+        closeResponse,
+        invoiceDelivery
+          ? `The invoice was sent and the ${documentLabel} was ${invoiceDelivery.report_held ? 'held' : 'delivered'}, but the service could not be closed. Tap Finish service to retry.`
+          : `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`,
+      );
+      finishSignStep({
+        project: closed.project || signStep.project,
+        completed: true,
+        invoice: invoiceDelivery.invoice || null,
+      });
+    } catch (e) {
+      if (holdRequested && e.payload?.code === 'hold_statement_accrued') {
+        // NET-terms payer invoices accrue to a consolidated statement, so
+        // there is no individual pay-before-report lifecycle to wait on. The
+        // server refuses the hold before creating an invoice; retry the same
+        // combined delivery without the hold and keep that mode in the UI if
+        // closeout itself needs a retry.
+        setSignStep(prev => (prev ? { ...prev, reportHoldAvailable: false } : prev));
+        await sendInvoiceAndFinish(true);
+        return;
+      }
+      setError(e.message || `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`);
+    } finally {
+      setCompletionBusy(false);
+      setCompletionAction(null);
+    }
+  }
+
+  async function sendReportAndFinish() {
+    const requiresSignature = signStep?.requiresSignature !== false;
+    if (!allowInvoiceCompletion
+      || !signStep?.project?.id
+      || (requiresSignature && !signStep.signature?.signed && !signStep.reportOnlyDelivery)) return;
+    const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
+    const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
+    setCompletionBusy(true);
+    setCompletionAction('report');
+    setError(null);
+    let reportOnlyDelivery = signStep.reportOnlyDelivery || null;
+    try {
+      if (!reportOnlyDelivery) {
+        const sendResponse = await adminFetch(`/admin/projects/${signStep.project.id}/send`, {
+          method: 'POST',
+          body: {},
+        });
+        const sent = await readProjectAction(sendResponse, `Could not send the ${documentLabel}`);
+        if (!sent.sent) throw new Error(`The ${documentLabel} was not delivered. Please retry.`);
+        reportOnlyDelivery = sent;
+        setSignStep(prev => (prev ? { ...prev, reportOnlyDelivery: sent } : prev));
+      }
+
+      const closeResponse = await adminFetch(`/admin/projects/${signStep.project.id}/close`, {
+        method: 'POST',
+        body: {},
+      });
+      const closed = await readProjectAction(
+        closeResponse,
+        `The ${documentLabel} was delivered, but the service could not be closed. Tap Finish service to retry.`,
+      );
+      finishSignStep({ project: closed.project || signStep.project, completed: true });
+    } catch (e) {
+      setError(e.message || `Could not deliver the ${documentLabel} and finish the service`);
+    } finally {
+      setCompletionBusy(false);
+      setCompletionAction(null);
+    }
+  }
+
+  async function chargeCardAndFinish() {
+    const requiresSignature = signStep?.requiresSignature !== false;
+    if (!allowInvoiceCompletion
+      || !savedCard
+      || !signStep?.project?.id
+      || (requiresSignature && !signStep.signature?.signed && !signStep.cardCompletion)) return;
+    const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
+    const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
+    setCompletionBusy(true);
+    setCompletionAction('card');
+    setError(null);
+    let cardCompletion = signStep.cardCompletion || null;
+    try {
+      if (cardCompletion?.blocked) {
+        throw new Error('The previous payment result is uncertain. Do not retry the charge; verify the invoice in Stripe first.');
+      }
+
+      if (!cardCompletion?.charged) {
+        const prepareResponse = await adminFetch(
+          `/admin/projects/${signStep.project.id}/send-with-invoice`,
+          { method: 'POST', body: { prepare_invoice: true } },
+        );
+        const prepared = await readProjectAction(prepareResponse, `Could not create the ${documentLabel} invoice`);
+        if (!prepared?.invoice?.id) throw new Error('The invoice could not be prepared for payment.');
+        if (prepared.invoice.payer_billed) {
+          throw new Error('This invoice is billed to a third-party payer. Send the invoice instead of charging the customer’s saved card.');
+        }
+
+        const quoteResponse = await adminFetch(`/admin/invoices/${prepared.invoice.id}/charge-card-quote`, {
+          method: 'POST',
+          body: { paymentMethodId: savedCard.id },
+        });
+        const quoted = await readProjectAction(quoteResponse, `Could not price the ${savedCardLabel} charge`);
+        const quote = quoted?.quote || {};
+        const total = Number(quote.total || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+        const base = Number(quote.base || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+        const surcharge = Number(quote.surcharge || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+        const pricingDetail = Number(quote.surcharge || 0) > 0
+          ? `Invoice after account credit: ${base}\nCard fee: ${surcharge}\nTotal charge: ${total}`
+          : quote.coveredByCredit
+            ? `Account credit covers the invoice. Card charge: ${total}`
+            : `Total charge: ${total}`;
+        if (!confirm(
+          `Charge ${savedCardLabel} and finish this service?\n\n${pricingDetail}\n\n` +
+          `After payment succeeds, the customer receives the ${documentLabel} immediately.`,
+        )) return;
+
+        try {
+          const chargeResponse = await adminFetch(`/admin/invoices/${prepared.invoice.id}/charge-card`, {
+            method: 'POST',
+            body: { paymentMethodId: savedCard.id, expectedTotal: quote.total },
+          });
+          await readProjectAction(chargeResponse, `Could not charge ${savedCardLabel}`);
+        } catch (chargeError) {
+          const uncertain = chargeError?.payload?.orphan === true
+            || chargeError?.payload?.ambiguous === true
+            || chargeError?.payload?.in_progress === true;
+          if (uncertain) {
+            setSignStep((previous) => previous ? {
+              ...previous,
+              cardCompletion: { invoice: prepared.invoice, blocked: true, charged: false },
+            } : previous);
+            throw new Error(`${chargeError.message} Do not retry this charge; verify the invoice payment first.`);
+          }
+          throw chargeError;
+        }
+
+        cardCompletion = { invoice: prepared.invoice, charged: true, reportSent: false };
+        setSignStep((previous) => previous ? { ...previous, cardCompletion } : previous);
+      }
+
+      if (!cardCompletion.reportSent) {
+        const sendResponse = await adminFetch(`/admin/projects/${signStep.project.id}/send`, {
+          method: 'POST',
+          body: {},
+        });
+        const delivered = await readProjectAction(
+          sendResponse,
+          `Payment succeeded, but the ${documentLabel} could not be delivered. Tap Deliver & finish to retry; the card will not be charged again.`,
+        );
+        if (!delivered.sent) {
+          throw new Error(`Payment succeeded, but the ${documentLabel} was not delivered. Tap Deliver & finish to retry; the card will not be charged again.`);
+        }
+        cardCompletion = { ...cardCompletion, reportSent: true };
+        setSignStep((previous) => previous ? { ...previous, cardCompletion } : previous);
+      }
+
+      const closeResponse = await adminFetch(`/admin/projects/${signStep.project.id}/close`, {
+        method: 'POST',
+        body: {},
+      });
+      const closed = await readProjectAction(
+        closeResponse,
+        `Payment and delivery succeeded, but the service could not be closed. Tap Finish service to retry; the card will not be charged again.`,
+      );
+      finishSignStep({
+        project: closed.project || signStep.project,
+        completed: true,
+        invoice: cardCompletion.invoice || null,
+      });
+    } catch (e) {
+      setError(e.message || `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`);
+    } finally {
+      setCompletionBusy(false);
+      setCompletionAction(null);
+    }
+  }
+
   // The only exit from the sign step — signed or not, the draft is already
   // saved, so leaving always reports the created project to the parent
   // (which refreshes its lists and may open the report) and closes. Held
   // while the pad's mutation is in flight.
-  function finishSignStep() {
-    if (signBusy) return;
-    const project = signStep?.project;
+  function finishSignStep(options = {}) {
+    // The invoice workflow calls this from inside its own busy window after
+    // both server actions have succeeded; user-driven exits remain locked.
+    if (signBusy || (completionBusy && !options?.completed)) return;
+    const project = options?.project || signStep?.project;
     setSignStep(null);
-    if (onCreated && project) onCreated(project);
+    if (onCreated && project) {
+      if (options?.completed) {
+        onCreated(project, { completed: true, invoice: options.invoice || null });
+      } else {
+        onCreated(project);
+      }
+    }
     onClose?.();
   }
 
@@ -1344,15 +1790,19 @@ export default function CreateProjectModal({
   // are unaffected: the card sets P.bodyFont per theme.
   return createPortal(
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-labelledby="create-project-modal-title"
+      data-official-document-flow={isOfficialDocument ? projectType : undefined}
       style={isSheet ? {
         // Complete Service frame: scrim + full-height sheet docked right
         // (100% width on phones via maxWidth), body scrolls inside.
         position: 'fixed', inset: 0, zIndex: 200,
         background: isEstimateStyle ? 'rgba(9, 9, 11, 0.42)' : 'rgba(0,0,0,0.6)',
         display: 'flex', alignItems: 'stretch', justifyContent: 'flex-end',
+        fontFamily: isOfficialDocument ? ROBOTO_FONT : P.bodyFont,
       } : {
         position: 'fixed', inset: 0, zIndex: 200, background: isEstimateStyle ? 'rgba(9, 9, 11, 0.42)' : 'rgba(0,0,0,0.6)',
         display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
@@ -1360,6 +1810,7 @@ export default function CreateProjectModal({
         padding: isEstimateStyle ? '24px 0' : '12px 0',
         paddingTop: `calc(${isEstimateStyle ? 24 : 12}px + env(safe-area-inset-top, 0px))`,
         paddingBottom: `calc(${isEstimateStyle ? 24 : 12}px + env(safe-area-inset-bottom, 0px))`,
+        fontFamily: isOfficialDocument ? ROBOTO_FONT : P.bodyFont,
       }}
       onClick={(e) => {
         if (e.target !== e.currentTarget || saving) return;
@@ -1370,13 +1821,17 @@ export default function CreateProjectModal({
         onClose?.();
       }}
     >
+      {isOfficialDocument && (
+        <style>{`[data-official-document-flow] *, [data-official-document-flow] input, [data-official-document-flow] select, [data-official-document-flow] textarea, [data-official-document-flow] button { font-family: ${ROBOTO_FONT} !important; }`}</style>
+      )}
       <div style={isSheet ? {
-        width: '100%', maxWidth: 640, margin: 0,
+        width: '100%', maxWidth: 640, height: '100dvh', maxHeight: '100dvh', margin: 0,
         background: isEstimateStyle ? P.bg : P.card,
         borderLeft: `1px solid ${P.border}`,
         display: 'flex', flexDirection: 'column',
         overflow: 'hidden',
         paddingTop: 'env(safe-area-inset-top, 0px)',
+        boxSizing: 'border-box',
       } : {
         width: '100%', maxWidth: isEstimateStyle ? 720 : 520, margin: '0 12px',
         background: isEstimateStyle ? P.bg : P.card,
@@ -1415,9 +1870,13 @@ export default function CreateProjectModal({
               lineHeight: 1.35,
             }}>
               {signStep
-                ? 'Draft saved — licensee signature'
-                : projectType === 'wdo_inspection'
+                ? signStep.requiresSignature === false
+                  ? 'Certificate saved — invoice delivery'
+                  : 'Draft saved — licensee signature'
+                : projectType === WDO_PROJECT_TYPE
                   ? 'Wood Destroying Organism (WDO) Inspection Report'
+                  : projectType === PRE_TREATMENT_CERTIFICATE_TYPE
+                    ? 'Pre-Treatment Certificate of Compliance'
                   : 'Inspection or documentation-heavy job'}
             </div>
           </div>
@@ -1447,7 +1906,7 @@ export default function CreateProjectModal({
             )}
             <button
               type="button"
-              onClick={() => !saving && (signStep ? finishSignStep() : onClose?.())}
+              onClick={() => !saving && !completionBusy && (signStep ? finishSignStep() : onClose?.())}
               aria-label="Close"
               style={{
                 background: 'transparent', border: 'none', color: P.muted,
@@ -1457,10 +1916,9 @@ export default function CreateProjectModal({
           </div>
         </div>
 
-        {/* Sign step (WDO): the draft is saved server-side; the licensee signs
-            against that saved content in the same sheet — no detour to the
-            report page. The pad is the same component the report page mounts,
-            posting to /:id/wdo-signature itself. */}
+        {/* Official-document completion: WDO captures its saved-content
+            signature here; a pre-treatment certificate already contains the
+            typed applicator attestation and proceeds directly to delivery. */}
         {signStep ? (
           <>
           <div style={{
@@ -1469,51 +1927,189 @@ export default function CreateProjectModal({
             ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
           }}>
             <div style={{ fontSize: 14, fontWeight: wStrong, color: P.heading, fontFamily: P.bodyFont }}>
-              ✓ Report draft saved
+              {signStep.requiresSignature === false ? '✓ Certificate saved' : '✓ Report draft saved'}
             </div>
             <div style={{ fontSize: 13, color: P.muted, lineHeight: 1.45, fontFamily: P.bodyFont }}>
-              {signStep.signature?.signed
-                ? 'Signed — the report is ready for review and sending.'
-                : 'Sign now to finish in one step — the FDACS-13645 report can’t be sent until the licensee signs. You can also sign later from the saved report.'}
+              {signStep.invoiceDelivery
+                ? signStep.invoiceDelivery.report_held
+                  ? `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} sent. The customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} is locked until payment; finish the service without sending anything again.`
+                  : `Invoice ${signStep.invoiceDelivery.invoice?.invoice_number || ''} and the customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} were delivered; finish the service without sending anything again.`
+                : signStep.reportOnlyDelivery
+                  ? `The customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} was delivered; finish the service without sending anything again.`
+                : signStep.cardCompletion?.charged
+                  ? signStep.cardCompletion.reportSent
+                    ? `Card payment received and the customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} delivered. Finish the service without charging or sending again.`
+                    : `Card payment received. Deliver the customer’s ${signStep.requiresSignature === false ? 'certificate' : 'report'} and finish—this retry will not charge the card again.`
+                : reportOnlyCompletion
+                  ? `This visit is already paid or has no invoice balance. Send the ${signStep.requiresSignature === false ? 'certificate' : 'report'} and finish the service.`
+                : signStep.requiresSignature === false
+                  ? allowInvoiceCompletion
+                    ? savedCard
+                      ? signStep.reportHoldAvailable
+                        ? `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and keep the certificate locked until payment.`
+                        : `Applicator attestation saved — charge ${savedCardLabel} now, or send the invoice and certificate together.`
+                      : signStep.reportHoldAvailable
+                        ? 'Applicator attestation saved — send the invoice now. The customer’s certificate stays locked until payment, then emails and unlocks automatically.'
+                        : 'Applicator attestation saved — send the invoice and certificate now.'
+                    : 'Applicator attestation saved — ready for office invoice delivery.'
+                  : signStep.signature?.signed
+                    ? allowInvoiceCompletion
+                      ? savedCard
+                        ? signStep.reportHoldAvailable
+                          ? `Signed — charge ${savedCardLabel} now, or send the invoice and keep the report locked until payment.`
+                          : `Signed — charge ${savedCardLabel} now, or send the invoice and report together.`
+                        : signStep.reportHoldAvailable
+                          ? 'Signed — send the invoice now. The customer’s report stays locked until payment, then emails and unlocks automatically.'
+                          : 'Signed — send the invoice and report now.'
+                      : 'Signed — saved for office review and invoice delivery.'
+                    : 'Sign now to finish in one step — the FDACS-13645 report can’t be sent until the licensee signs. You can also sign later from the saved report.'}
             </div>
-            <WdoSignaturePad
-              projectId={signStep.project.id}
-              signature={signStep.signature}
-              defaultSignerName={signStep.applicator?.name || ''}
-              defaultSignerIdCard={signStep.applicator?.idCardNo || ''}
-              onChanged={applySignatureOutcome}
-              onBusyChange={setSignBusy}
-            />
+            {error && (
+              <div style={{
+                padding: '9px 12px',
+                background: `${P.red}12`,
+                border: `1px solid ${P.red}`,
+                borderRadius: 8,
+                color: P.red,
+                fontSize: 13,
+                lineHeight: 1.4,
+              }}>
+                {error}
+              </div>
+            )}
+            {signStep.requiresSignature !== false && !signStep.invoiceDelivery && !signStep.reportOnlyDelivery && !signStep.cardCompletion?.charged && (
+              <WdoSignaturePad
+                projectId={signStep.project.id}
+                signature={signStep.signature}
+                defaultSignerName={signStep.applicator?.name || ''}
+                defaultSignerIdCard={signStep.applicator?.idCardNo || ''}
+                onChanged={applySignatureOutcome}
+                onBusyChange={setSignBusy}
+              />
+            )}
           </div>
           <div style={{
             padding: isEstimateStyle ? '16px 24px 20px' : '12px 16px',
             borderTop: `1px solid ${P.border}`,
             background: P.card,
-            display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center',
+            display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'stretch',
             ...(isSheet ? { paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
           }}>
-            {!signStep.signature?.signed && (
-              <span style={{ fontSize: 12, color: P.muted, marginRight: 'auto', fontFamily: P.bodyFont }}>
+            {signStep.requiresSignature !== false && !signStep.signature?.signed && (
+              <span style={{ fontSize: 12, color: P.muted, fontFamily: P.bodyFont }}>
                 Unsigned reports can’t be sent yet.
               </span>
+            )}
+            {allowInvoiceCompletion
+              && reportOnlyCompletion
+              && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.reportOnlyDelivery) && (
+              <button
+                type="button"
+                onClick={sendReportAndFinish}
+                disabled={signBusy || completionBusy}
+                style={{
+                  minHeight: 52,
+                  width: '100%',
+                  padding: '0 18px',
+                  borderRadius: 10,
+                  fontSize: 14,
+                  fontWeight: wStrong,
+                  background: P.accent,
+                  color: P.accentText,
+                  border: 'none',
+                  cursor: signBusy || completionBusy ? 'default' : 'pointer',
+                  opacity: signBusy || completionBusy ? 0.6 : 1,
+                }}
+              >
+                {completionBusy && completionAction === 'report'
+                  ? signStep.reportOnlyDelivery ? 'Finishing service…' : `Sending ${signStep.requiresSignature === false ? 'certificate' : 'report'}…`
+                  : signStep.reportOnlyDelivery ? 'Finish service' : `Send ${signStep.requiresSignature === false ? 'certificate' : 'report'} & finish service`}
+              </button>
+            )}
+            {allowInvoiceCompletion
+              && !reportOnlyCompletion
+              && (savedCard || signStep.cardCompletion)
+              && !signStep.invoiceDelivery
+              && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.cardCompletion) && (
+              <button
+                type="button"
+                onClick={chargeCardAndFinish}
+                disabled={signBusy || completionBusy || signStep.cardCompletion?.blocked}
+                style={{
+                  minHeight: 52,
+                  width: '100%',
+                  padding: '0 18px',
+                  borderRadius: 10,
+                  fontSize: 14,
+                  fontWeight: wStrong,
+                  background: P.accent,
+                  color: P.accentText,
+                  border: 'none',
+                  cursor: signBusy || completionBusy || signStep.cardCompletion?.blocked ? 'default' : 'pointer',
+                  opacity: signBusy || completionBusy || signStep.cardCompletion?.blocked ? 0.6 : 1,
+                }}
+              >
+                {signStep.cardCompletion?.blocked
+                  ? 'Payment needs verification — do not retry'
+                  : completionBusy && completionAction === 'card'
+                    ? signStep.cardCompletion?.reportSent ? 'Finishing service…' : signStep.cardCompletion?.charged ? 'Delivering report…' : 'Charging card…'
+                    : signStep.cardCompletion?.reportSent
+                      ? 'Finish service'
+                      : signStep.cardCompletion?.charged
+                        ? 'Deliver & finish'
+                        : `Charge ${savedCardLabel} & finish service`}
+              </button>
+            )}
+            {allowInvoiceCompletion
+              && !reportOnlyCompletion
+              && !signStep.cardCompletion?.charged
+              && !signStep.cardCompletion?.blocked
+              && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.invoiceDelivery) && (
+              <button
+                type="button"
+                onClick={() => sendInvoiceAndFinish()}
+                disabled={signBusy || completionBusy}
+                style={{
+                  minHeight: 52,
+                  width: '100%',
+                  padding: '0 18px',
+                  borderRadius: 10,
+                  fontSize: 14,
+                  fontWeight: wStrong,
+                  background: savedCard && !signStep.invoiceDelivery ? 'transparent' : P.accent,
+                  color: savedCard && !signStep.invoiceDelivery ? P.text : P.accentText,
+                  border: savedCard && !signStep.invoiceDelivery ? `1px solid ${P.border}` : 'none',
+                  cursor: signBusy || completionBusy ? 'default' : 'pointer',
+                  opacity: signBusy || completionBusy ? 0.6 : 1,
+                }}
+              >
+                {completionBusy && completionAction === 'invoice'
+                  ? signStep.invoiceDelivery ? 'Finishing service…' : 'Sending invoice…'
+                  : signStep.invoiceDelivery
+                    ? 'Finish service'
+                    : signStep.reportHoldAvailable
+                      ? `Send invoice & hold ${signStep.requiresSignature === false ? 'certificate' : 'report'}`
+                      : `Send invoice & ${signStep.requiresSignature === false ? 'certificate' : 'report'}`}
+              </button>
             )}
             <button
               type="button"
               onClick={finishSignStep}
-              disabled={signBusy}
+              disabled={signBusy || completionBusy}
               style={{
                 minHeight: isEstimateStyle || isSheet ? 48 : undefined,
+                width: '100%',
                 padding: isEstimateStyle ? '0 18px' : '10px 18px',
                 borderRadius: isEstimateStyle ? 10 : 8,
                 fontSize: isEstimateStyle ? 14 : 13,
                 fontWeight: wStrong,
-                background: signStep.signature?.signed ? P.accent : 'transparent',
-                color: signStep.signature?.signed ? P.accentText : P.text,
-                border: signStep.signature?.signed ? 'none' : `1px solid ${P.border}`,
-                cursor: signBusy ? 'default' : 'pointer',
-                opacity: signBusy ? 0.5 : 1,
+                background: 'transparent',
+                color: P.text,
+                border: `1px solid ${P.border}`,
+                cursor: signBusy || completionBusy ? 'default' : 'pointer',
+                opacity: signBusy || completionBusy ? 0.5 : 1,
               }}
-            >{signBusy ? 'Saving…' : signStep.signature?.signed ? 'Done' : 'Sign later'}</button>
+            >{signBusy ? 'Saving…' : signStep.requiresSignature === false || signStep.signature?.signed ? 'Save for later' : 'Sign later'}</button>
           </div>
           </>
         ) : (
@@ -1766,6 +2362,21 @@ export default function CreateProjectModal({
                 />
               </div>
 
+              {projectType === PRE_TREATMENT_CERTIFICATE_TYPE && scheduledApplicationPrefill?.count > 0 && (
+                <div style={{
+                  border: `1px solid ${P.border}`,
+                  borderRadius: 10,
+                  background: isEstimateStyle ? '#FAFAFA' : P.bg,
+                  color: P.text,
+                  padding: '11px 13px',
+                  fontSize: 12,
+                  lineHeight: 1.45,
+                }}>
+                  <strong>{scheduledApplicationPrefill.count} planned application{scheduledApplicationPrefill.count === 1 ? '' : 's'} found on the scheduled service.</strong>{' '}
+                  Confirm the product and actual coverage before saving the certificate.
+                </div>
+              )}
+
               {projectType === 'wdo_inspection' && (
                 /* Keyed by customer so switching customers remounts the bar —
                    a finished lookup for the previous customer's property can
@@ -1799,7 +2410,14 @@ export default function CreateProjectModal({
                   {field.section && field.section !== typeCfg.findingsFields[fieldIndex - 1]?.section && (
                     <div style={sectionHeaderStyle}>{field.section}</div>
                   )}
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    marginBottom: 6,
+                    ...(field.key === 'previous_treatment_notes' ? { flexWrap: 'wrap' } : {}),
+                  }}>
                     {/* A field whose label IS its section name (the applications
                         repeater) would stutter under the section header. */}
                     {field.label !== field.section && (
@@ -1824,11 +2442,17 @@ export default function CreateProjectModal({
                       </button>
                     )}
                     {projectType === 'wdo_inspection' && field.key === 'previous_treatment_notes' && (
-                      /* Camera-to-field: photograph a prior company's
-                         treatment sticker (or visible evidence) and let AI
-                         transcribe it into this box. */
-                      <label
-                        style={{
+                      /* Both sources feed the exact same extraction + evidence
+                         queue. `capture` belongs only on Camera; applying it to
+                         the sole input forced iOS to skip the photo library. */
+                      <div style={{ display: 'flex', gap: 10, marginLeft: 'auto' }}>
+                        {[
+                          { label: 'Camera', source: 'camera', capture: 'environment' },
+                          { label: 'Library', source: 'library' },
+                        ].map((option) => (
+                        <label
+                          key={option.source}
+                          style={{
                           background: 'transparent',
                           border: 'none',
                           color: P.accent,
@@ -1838,22 +2462,25 @@ export default function CreateProjectModal({
                           opacity: (saving || aiWriting || treatmentExtract.status === 'working') ? 0.55 : 1,
                           padding: 0,
                           whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {treatmentExtract.status === 'working' ? 'Reading photo…' : 'Extract from photo'}
-                        <input
-                          type="file"
-                          accept="image/*"
-                          capture="environment"
-                          disabled={saving || aiWriting || treatmentExtract.status === 'working'}
-                          onChange={(e) => {
-                            const f = e.target.files?.[0] || null;
-                            e.target.value = '';
-                            if (f) handleTreatmentPhotoExtract(f);
                           }}
-                          style={{ display: 'none' }}
-                        />
-                      </label>
+                        >
+                          {treatmentExtract.status === 'working' ? 'Reading…' : option.label}
+                          <input
+                            type="file"
+                            accept="image/*"
+                            {...(option.capture ? { capture: option.capture } : {})}
+                            data-wdo-prior-treatment-source={option.source}
+                            disabled={saving || aiWriting || treatmentExtract.status === 'working'}
+                            onChange={(e) => {
+                              const f = e.target.files?.[0] || null;
+                              e.target.value = '';
+                              if (f) handleTreatmentPhotoExtract(f);
+                            }}
+                            style={{ display: 'none' }}
+                          />
+                        </label>
+                        ))}
+                      </div>
                     )}
                     {projectType !== 'wdo_inspection' && field.key === addressFieldKey && formatCustomerAddress(selectedCustomer) && (
                       <button
@@ -2046,7 +2673,13 @@ export default function CreateProjectModal({
               cursor: (saving || !projectType || !customerId || treatmentExtract.status === 'working') ? 'default' : 'pointer',
               ...(isSheet ? { flex: 1 } : {}),
             }}
-          >{saving ? 'Saving…' : treatmentExtract.status === 'working' ? 'Reading photo…' : isSheet ? 'Save Report' : 'Save Draft'}</button>
+          >{saving
+            ? 'Saving…'
+            : treatmentExtract.status === 'working'
+              ? 'Reading photo…'
+              : isSheet
+                ? projectType === PRE_TREATMENT_CERTIFICATE_TYPE ? 'Save Certificate' : 'Save Report'
+                : 'Save Draft'}</button>
         </div>
         </>
         )}
@@ -2088,6 +2721,13 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
 
   function removeItem(id) {
     setQueue(q => q.filter(item => item.id !== id));
+  }
+
+  function updateCaption(id, caption) {
+    const bounded = String(caption || '').slice(0, PHOTO_CAPTION_MAX);
+    setQueue(q => q.map(item => (
+      item.id === id ? { ...item, caption: bounded, generatedCaption: undefined } : item
+    )));
   }
 
   const addButtonStyle = {
@@ -2155,6 +2795,21 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
                 <div style={{ fontSize: 10, color: P.muted }}>
                   {item.category.replace(/_/g, ' ')} · {(item.file.size / 1024).toFixed(0)} KB
                 </div>
+                <input
+                  type="text"
+                  value={item.caption || ''}
+                  maxLength={PHOTO_CAPTION_MAX}
+                  onChange={(e) => updateCaption(item.id, e.target.value)}
+                  placeholder="Describe what this shows and where"
+                  aria-label={`Photo description for ${item.file.name}`}
+                  style={{
+                    ...inputStyle,
+                    width: '100%',
+                    marginTop: 6,
+                    padding: '7px 9px',
+                    fontSize: 11,
+                  }}
+                />
               </div>
               <button
                 type="button"

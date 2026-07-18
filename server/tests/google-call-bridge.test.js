@@ -18,11 +18,11 @@ jest.mock('google-ads-api', () => ({
       PAUSED: 'PAUSED',
     },
   },
-}), { virtual: true });
+}));
 
 jest.mock('uuid', () => ({
   v4: jest.fn(() => 'uuid-1'),
-}), { virtual: true });
+}));
 
 const GoogleCallBridge = require('../services/ads/google-call-bridge');
 const GoogleAds = require('../services/ads/google-ads');

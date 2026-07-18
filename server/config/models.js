@@ -18,34 +18,33 @@
  *
  * ── Tiers ─────────────────────────────────────────────────────────
  *
- *  These are QUALITY tiers, not cost tiers. Per owner directive
- *  ("best model regardless of cost"), each tier points at the strongest
- *  model for its job — not the cheapest. The tier names are unchanged so
- *  the 60+ importing services keep working; only the targets moved.
+ *  These are workload tiers. Each points to the least-expensive model that is
+ *  reliably strong for the job, with Opus reserved for high-stakes reasoning
+ *  and Fable explicit-only. The tier names are unchanged so the 60+ importing
+ *  services keep working; only the targets moved.
  *
- *  DEEP       — Deepest reasoning, latency-tolerant. The agronomic brain /
- *               wiki lanes and the adversarial judges (draft verifier,
- *               shadow judge, fact-check gate) — low-volume lanes where a
- *               wrong answer costs more than a slow one. Callers MUST go
- *               through services/llm/deep.js (thinking-block strip +
- *               refusal fallback to FLAGSHIP).                       → Fable 5
+ *  DEEP       — Difficult reasoning and adversarial review. Kept on Opus for
+ *               strong quality without automatically paying Fable rates. → Opus 4.8
+ *  EXTREME    — Explicit, latency-tolerant Fable opt-in. No automatic live
+ *               workflow routes here; callers must deliberately select it. → Fable 5
  *  FLAGSHIP   — Best general reasoning. Admin Intelligence Bar, advisors,
  *               analysis, agents.                                    → Opus 4.8
- *  WORKHORSE  — Drafting + content generation.                       → Opus 4.8
- *  FAST       — High-volume classification, tagging, signals.        → Opus 4.8
+ *  WORKHORSE  — Drafting + content generation.                       → Sonnet 5
+ *  FAST       — High-volume classification, tagging, signals.        → Sonnet 5
  *  VOICE      — Customer-facing copy where a warm, natural human voice beats
  *               raw reasoning: SMS replies, service recaps, social posts.
- *               Sonnet 4.6 reads more natural and less overbuilt; high-stakes
+ *               Sonnet reads more natural and less overbuilt; high-stakes
  *               messages (cancellations, complaints) escalate to FLAGSHIP at
- *               the call site.                                       → Sonnet 4.6
+ *               the call site.                                       → Sonnet 5
  *  VISION     — Image scoring where deterministic output matters more than
  *               raw capability. Sonnet 4.6 because the Opus line removed the
  *               temperature parameter; Sonnet still accepts it so we can pin
  *               Claude to 0.2 to match the Gemini scorer.            → Sonnet 4.6
  *
- * Owner directive (2026-06-16): best model regardless of cost. The three
- * reasoning tiers default to Opus 4.8 (the strongest current Opus). Swap
- * any tier via its env var with no code change.
+ * Cost-aware routing directive (2026-07-16): use the least-expensive model
+ * that is reliably strong for the lane, reserve Opus for difficult/high-stakes
+ * work, and keep Fable explicit rather than automatic. Swap any tier via its
+ * env var with no code change.
  *
  * ── Cross-provider routing (ROUTES) ───────────────────────────────
  *
@@ -61,17 +60,16 @@
  */
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || 'claude-opus-4-8';
-const WORKHORSE = process.env.MODEL_WORKHORSE || 'claude-opus-4-8';
-const FAST      = process.env.MODEL_FAST      || 'claude-opus-4-8';
-const VOICE     = process.env.MODEL_VOICE     || 'claude-sonnet-4-6';
+const WORKHORSE = process.env.MODEL_WORKHORSE || 'claude-sonnet-5';
+const FAST      = process.env.MODEL_FAST      || 'claude-sonnet-5';
+const VOICE     = process.env.MODEL_VOICE     || 'claude-sonnet-5';
 const VISION    = process.env.MODEL_VISION    || 'claude-sonnet-4-6';
 
-// Deepest-reasoning tier (fable-5): always-on thinking, minutes-long turns
-// possible, safety classifiers can refuse benign-adjacent pesticide content.
-// Every DEEP call site goes through services/llm/deep.js, which strips
-// thinking blocks (legacy content[0].text parsing) and retries a refusal on
-// FLAGSHIP. Kill switch: MODEL_DEEP=claude-opus-4-8 (no deploy needed).
-const DEEP = process.env.MODEL_DEEP || 'claude-fable-5';
+// Automatic deep-review work stays on Opus. Fable is available only through
+// the explicit EXTREME tier so routine verifiers/fact checks cannot silently
+// incur its latency, refusal semantics, and premium token rate.
+const DEEP = process.env.MODEL_DEEP || 'claude-opus-4-8';
+const EXTREME = process.env.MODEL_EXTREME || 'claude-fable-5';
 
 // Lawn-diagnostic adversarial-challenge reasoner. Pinned independently of FLAGSHIP
 // (which stays Opus 4.7) so the lawn pipeline can run Opus 4.8 without moving the whole
@@ -86,8 +84,20 @@ const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMIN
 // Cross-provider model defaults (env-overridable; same convention as the #1834
 // lawn pipeline's LAWN_WRITER_MODEL / LAWN_VISION_MODEL). NOT Anthropic IDs, so
 // scripts/check-models.js intentionally skips them (it validates Anthropic only).
-const OPENAI_BEST        = process.env.MODEL_OPENAI_BEST   || 'gpt-5.5';
-const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash';
+const OPENAI_BALANCED      = process.env.MODEL_OPENAI_BALANCED
+  || process.env.MODEL_OPENAI_BEST
+  || 'gpt-5.6-terra';
+const OPENAI_FAST          = process.env.MODEL_OPENAI_FAST          || 'gpt-5.6-luna';
+// Backwards-compatible export for older callers/env configuration. New routes
+// should select BALANCED or FAST explicitly instead of treating one model as
+// universally "best".
+const OPENAI_BEST          = OPENAI_BALANCED;
+// Dedicated customer-report writer. Keep this separate from OPENAI_BEST so a
+// writing-model upgrade does not silently move classification / Q&A lanes.
+// The completed-service report uses this model first, then Claude Opus whenever
+// OpenAI is unavailable, overloaded, empty, or fails the copy-safety gate.
+const OPENAI_REPORT_WRITER = process.env.MODEL_OPENAI_REPORT_WRITER || 'gpt-5.6-sol';
+const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || 'gemini-3.5-flash';
 
 // Gemini vision FALLBACK — the prior GA model the customer vision services
 // (pest-identification.js, lawn-assessment.js) retry when GEMINI_VISION_BEST
@@ -96,15 +106,27 @@ const GEMINI_VISION_BEST = process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash'
 // discoverable in the central registry.
 const GEMINI_VISION_FALLBACK = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
 
+// Knowledge-index embedding model (hybrid knowledge search, lane A2).
+// SINGLE provider BY DESIGN — an embedding space is only comparable to
+// itself, so a cross-provider fallback here would return meaningless
+// similarity scores. This is a deliberate exception to the every-lane
+// Claude-fallback rule (Anthropic ships no embeddings API): if OpenAI
+// embeddings are unavailable, hybrid search degrades to full-text and
+// ingestion leaves rows pending for the next nightly run. Changing this
+// model requires re-embedding the whole corpus
+// (scripts/backfill-knowledge-embeddings.js after truncating embeddings).
+const OPENAI_EMBEDDING = process.env.MODEL_OPENAI_EMBEDDING || 'text-embedding-3-small';
+const EMBEDDING_DIMS = 1536; // must match knowledge_embeddings vector(1536)
+
 // SMS reply-drafting split (owner directive 2026-07-05):
-//   default auto-reply draft              → GPT-5.4-mini (high-volume lane)
+//   default auto-reply draft              → GPT-5.6 Luna (high-volume lane)
 //   tone rewrite + save-the-sale replies  → Claude Sonnet 5 (warm customer voice)
 // "Save-the-sale" = retention-critical inbound (cancellation / complaint /
 // customer-issue intents) — matched by the drafter's SAVE_SALE_INTENT_RE.
 // The drafter's adversarial fact-check verifier runs on DEEP: with a mini
 // model drafting, the verify loop is the safety net, so it gets the
 // deepest-reasoning model (falls back to FLAGSHIP on refusal).
-const OPENAI_SMS_DRAFT = process.env.MODEL_OPENAI_SMS_DRAFT || 'gpt-5.4-mini';
+const OPENAI_SMS_DRAFT = process.env.MODEL_OPENAI_SMS_DRAFT || OPENAI_FAST;
 const SMS_SONNET       = process.env.MODEL_SMS_SONNET       || 'claude-sonnet-5';
 
 // Gemini image-GENERATION models (the "Nano Banana" line) — consumed by
@@ -130,18 +152,58 @@ const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || 'veo-3.1-
 // directly. Call transcription + extraction keep their own providers in
 // call-recording-processor.js (intentionally not routed here).
 const ROUTES = Object.freeze({
-  leadClassify:      Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // lead-triage.js — live, Claude fallback
-  knowledgeAnswer:   Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // knowledge-bridge.js — live, Claude fallback
-  estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // estimate-assistant.js — live, Claude fallback
-  askWaves:          Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // ask-waves-intake.js — live, Claude fallback
-  churnClassify:     Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BEST }), // churn-classifier.js — live, Claude fallback
-  smsDraftDefault:   Object.freeze({ provider: PROVIDER.OPENAI,    model: OPENAI_SMS_DRAFT }), // sms-shadow-drafter default draft — live, FLAGSHIP fallback
-  smsDraftSaveSale:  Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // sms-shadow-drafter cancel/complaint drafts — FLAGSHIP fallback
-  smsToneRewrite:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // admin-communications /rewrite-sms — WORKHORSE fallback
+  leadClassify:      Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }), // low-cost structured lane; Claude fallback
+  knowledgeAnswer:   Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced Q&A; Claude fallback
+  estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced prose; Claude fallback
+  askWaves:          Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced public chat; Claude fallback
+  churnClassify:     Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }), // low-cost structured lane; Claude fallback
+  smsDraftDefault:   Object.freeze({ provider: PROVIDER.OPENAI,    model: OPENAI_SMS_DRAFT }), // default draft; Claude Sonnet backup
+  smsDraftSaveSale:  Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // cancel/complaint draft; OpenAI Sol backup
+  smsToneRewrite:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // tone rewrite; OpenAI Terra backup
+});
+
+// Generated-text policies always cross providers. The shared LLM dispatcher
+// walks primary then fallback; no policy is allowed to list the same provider
+// twice. Provider-specific managed agents and image/audio pipelines are outside
+// this map because they do not have drop-in cross-provider equivalents.
+const TEXT_POLICIES = Object.freeze({
+  report: Object.freeze({
+    primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
+  }),
+  customerCopy: Object.freeze({
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
+  contentDraft: Object.freeze({
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
+  highStakes: Object.freeze({
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
+  fastStructured: Object.freeze({
+    primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FAST }),
+  }),
+  balancedAnswer: Object.freeze({
+    primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
+  }),
+  visionAnalysis: Object.freeze({
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
+  deepAnalysis: Object.freeze({
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: DEEP }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
 });
 
 module.exports = {
   DEEP,
+  EXTREME,
   FLAGSHIP,
   WORKHORSE,
   FAST,
@@ -151,8 +213,14 @@ module.exports = {
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,
+  TEXT_POLICIES,
   OPENAI_BEST,
+  OPENAI_BALANCED,
+  OPENAI_FAST,
+  OPENAI_REPORT_WRITER,
   OPENAI_SMS_DRAFT,
+  OPENAI_EMBEDDING,
+  EMBEDDING_DIMS,
   SMS_SONNET,
   GEMINI_VISION_BEST,
   GEMINI_VISION_FALLBACK,

@@ -46,14 +46,16 @@ export default defineConfig({
         'src/native/nativePush.js',
         'src/pages/LoginPage.jsx',
       ],
-      // Measured 2026-07-16 baseline: 81.33 statements/lines, 64.37
-      // branches, 64.13 functions. These rounded-down floors leave normal
-      // instrumentation variance while preventing an untested regression.
+      // Re-measured 2026-07-17 after the #2788 UI-only revert restored the
+      // pre-audit shell components (whose #2788-era tests left with the new
+      // UI): 73.86 statements, 73.84 lines, 68.08 branches, 65.82 functions.
+      // These rounded-down floors leave normal instrumentation variance
+      // while preventing an untested regression from here.
       thresholds: {
-        statements: 80,
-        branches: 60,
-        functions: 60,
-        lines: 80,
+        statements: 73,
+        branches: 64,
+        functions: 62,
+        lines: 73,
       },
     },
   },
@@ -94,7 +96,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['@waves/lawn-cost-floor'],
+    include: ['@waves/lawn-cost-floor', '@waves/report-redaction'],
   },
   build: {
     outDir: 'dist',
@@ -103,7 +105,7 @@ export default defineConfig({
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.
     commonjsOptions: {
-      include: [/lawn-cost-floor/, /node_modules/],
+      include: [/lawn-cost-floor/, /report-redaction/, /node_modules/],
     },
   },
 });

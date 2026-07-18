@@ -32,9 +32,13 @@ async function getStoredGbpRefreshToken(locationKey) {
   }
 }
 
-async function fetchGraph(path, token) {
+async function fetchGraph(path, token, version = 'v25.0', { method, body } = {}) {
   const separator = path.includes('?') ? '&' : '?';
-  const res = await fetch(`https://graph.facebook.com/v25.0${path}${separator}access_token=${encodeURIComponent(token)}`);
+  const url = `https://graph.facebook.com/${version}${path}${separator}access_token=${encodeURIComponent(token)}`;
+  // Plain reads keep the bare fetch(url) shape; only non-GET probes send an init.
+  const res = method
+    ? await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    : await fetch(url);
   const data = await res.json();
   return { res, data };
 }
@@ -381,6 +385,126 @@ async function checkGBP(locationKey) {
     return result;
   }
 }
+
+// The Meta ADS lanes use their own long-lived tokens (separate from the social
+// FACEBOOK_ACCESS_TOKEN checked above): campaign/insight ingestion, CAPI
+// conversion uploads, and Custom Audience uploads. When one expires the affected
+// lane silently returns no data / stops uploading, so surface it here too.
+//
+// debug_token alone is NOT enough: a token can be is_valid=true yet lack the
+// lane's capability (ads_read/ads_management), belong to another ad account,
+// or have lost pixel access — all of which leave the lane dead while the
+// monitor shows green. Each check therefore also probes the lane's actual
+// configured resource with the lane's token.
+async function probeMetaResource(token, path, laneLabel, version) {
+  try {
+    const { res, data } = await fetchGraph(path, token, version);
+    if (res.ok && !data?.error) return null; // lane reachable
+    const code = data?.error?.code;
+    return { status: graphErrorStatus(code), message: `${laneLabel} probe failed: ${data?.error?.message || `HTTP ${res.status}`}` };
+  } catch (err) {
+    return { status: 'error', message: `${laneLabel} probe failed: ${err.message}` };
+  }
+}
+
+// The CAPI lane POSTs events to /{pixel}/events — a capability a system-user
+// token can hold WITHOUT being able to read the pixel object itself (GET
+// /{pixel} needs ads_read-style asset access the lane never uses; prod's
+// working token fails that read with "(#100) Missing Permission"). So probe
+// the events edge directly with an empty batch: Graph authorizes the request
+// BEFORE validating the payload, so "param data must be non-empty" proves
+// access without sending anything, while permission/token errors surface as
+// themselves.
+async function probeCapiEventsAccess(token, pixelId, version) {
+  try {
+    const { res, data } = await fetchGraph(`/${encodeURIComponent(pixelId)}/events`, token, version, {
+      method: 'POST',
+      body: { data: [] },
+    });
+    const message = data?.error?.message || '';
+    if (/param data\b.*non-?empty|data (is )?required/i.test(message)) return null; // authorized, payload rejected as designed
+    if (res.ok && !data?.error) return null;
+    return { status: graphErrorStatus(data?.error?.code), message: `pixel Events API probe failed: ${message || `HTTP ${res.status}`}` };
+  } catch (err) {
+    return { status: 'error', message: `pixel Events API probe failed: ${err.message}` };
+  }
+}
+
+function metaAdsActId() {
+  const raw = String(process.env.META_ADS_ACCOUNT_ID || '').trim();
+  if (!raw) return null;
+  return raw.startsWith('act_') ? raw : `act_${raw}`;
+}
+
+// Each lane's probe (and its debug_token call) runs on the SAME Graph API
+// version the lane's client uses — the shared default (v25) can diverge from
+// the lane's pinned version, making the monitor disagree with the lane.
+function metaLaneVersion(laneEnvVar) {
+  return process.env[laneEnvVar] || process.env.META_ADS_API_VERSION || 'v23.0';
+}
+
+async function checkMetaAdToken(platform, envVarName, probe, version) {
+  const token = String(process.env[envVarName] || '').trim();
+  if (!token) {
+    const result = { platform, status: 'not_configured', lastError: `Missing: ${envVarName}`, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+    return result;
+  }
+  try {
+    const { res, data } = await fetchGraph(`/debug_token?input_token=${encodeURIComponent(token)}`, token, version);
+    const info = data?.data;
+    if (res.ok && info && info.is_valid) {
+      // expires_at is unix seconds; 0 = never (system-user tokens).
+      const expiresAt = info.expires_at ? new Date(info.expires_at * 1000) : null;
+      const laneErr = probe ? await probe(token) : null;
+      const result = laneErr
+        ? { platform, status: laneErr.status, lastError: laneErr.message, expiresAt }
+        : { platform, status: 'healthy', lastError: null, expiresAt };
+      await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+      return result;
+    }
+    const errCode = data?.error?.code ?? info?.error?.code;
+    const status = (errCode === 190 || errCode === 463 || info?.is_valid === false) ? 'expired' : 'error';
+    const lastError = data?.error?.message || info?.error?.message || 'Token reported not valid';
+    const result = { platform, status, lastError, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+    return result;
+  } catch (err) {
+    const result = { platform, status: 'error', lastError: err.message, expiresAt: null };
+    await upsertResult({ ...result, tokenType: 'oauth', envVarName });
+    return result;
+  }
+}
+
+const checkMetaAds = () => {
+  const version = metaLaneVersion('META_ADS_API_VERSION');
+  return checkMetaAdToken('meta_ads', 'META_ADS_ACCESS_TOKEN', async (token) => {
+    const actId = metaAdsActId();
+    if (!actId) return { status: 'not_configured', message: 'META_ADS_ACCOUNT_ID is not set — the ads ingestion lane cannot run' };
+    // Reading the ad account requires ads_read on THIS account — the capability
+    // meta-ads.js ingestion actually uses.
+    return probeMetaResource(token, `/${actId}?fields=id,account_status`, 'ad account read', version);
+  }, version);
+};
+const checkMetaCapi = () => {
+  const version = metaLaneVersion('META_CAPI_API_VERSION');
+  return checkMetaAdToken('meta_capi', 'META_CAPI_ACCESS_TOKEN', async (token) => {
+    const pixel = String(process.env.META_CAPI_PIXEL_ID || '').trim();
+    if (!pixel) return { status: 'not_configured', message: 'META_CAPI_PIXEL_ID is not set — the CAPI lane cannot run' };
+    // Probe the events edge the lane actually posts to — see probeCapiEventsAccess.
+    return probeCapiEventsAccess(token, pixel, version);
+  }, version);
+};
+const checkMetaAudiences = () => {
+  const version = metaLaneVersion('META_AUDIENCES_API_VERSION');
+  return checkMetaAdToken('meta_audiences', 'META_AUDIENCES_ACCESS_TOKEN', async (token) => {
+    const actId = metaAdsActId();
+    if (!actId) return { status: 'not_configured', message: 'META_ADS_ACCOUNT_ID is not set — the audience upload lane cannot run' };
+    // Listing custom audiences requires ads_management on the account — the
+    // capability meta-audiences.js uploads actually need (ads_read is not enough).
+    return probeMetaResource(token, `/${actId}/customaudiences?fields=id&limit=1`, 'custom audiences access', version);
+  }, version);
+};
 
 async function checkBouncie() {
   const platform = 'bouncie';
@@ -789,6 +913,9 @@ const TokenHealthService = {
       case 'facebook': return checkFacebook();
       case 'instagram': return checkInstagram();
       case 'linkedin': return checkLinkedIn();
+      case 'meta_ads': return checkMetaAds();
+      case 'meta_capi': return checkMetaCapi();
+      case 'meta_audiences': return checkMetaAudiences();
       case 'gbp_lwr': return checkGBP('LWR');
       case 'gbp_parrish': return checkGBP('PARRISH');
       case 'gbp_sarasota': return checkGBP('SARASOTA');
@@ -820,6 +947,9 @@ const TokenHealthService = {
     results.push(await checkFacebook());
     results.push(await checkInstagram());
     results.push(await checkLinkedIn());
+    results.push(await checkMetaAds());
+    results.push(await checkMetaCapi());
+    results.push(await checkMetaAudiences());
 
     for (const key of GBP_LOCATION_KEYS) {
       results.push(await checkGBP(key));
@@ -863,6 +993,7 @@ const TokenHealthService = {
     try {
       const KNOWN = new Set([
         'facebook', 'instagram', 'linkedin',
+        'meta_ads', 'meta_capi', 'meta_audiences',
         'gbp_lwr', 'gbp_parrish', 'gbp_sarasota', 'gbp_venice',
         'bouncie', 'beehiiv', 'dataforseo',
         'stripe', 'twilio', 'anthropic', 'openai', 'gemini', 'google',

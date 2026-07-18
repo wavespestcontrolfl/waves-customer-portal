@@ -2,11 +2,13 @@
  * Intelligence Bar — Stripe Webhook-Health Ops Tools
  * server/services/intelligence-bar/stripe-ops-tools.js
  *
- * Read-only visibility into Stripe webhook delivery — the one billing
- * failure mode that is invisible to the app by definition (if the webhook
- * never lands, nothing local records it). Money/business data itself lives
- * in the local database and is served by the revenue/banking tools — these
- * tools deliberately do NOT duplicate that.
+ * Read-only visibility into Stripe state the app cannot see locally:
+ * webhook delivery (if the webhook never lands, nothing local records it)
+ * and payment attempts that never completed (an abandoned/incomplete
+ * PaymentIntent fires no completion webhook, so it never reaches the
+ * database). Money/business data that DID land lives in the local database
+ * and is served by the revenue/banking tools — these tools deliberately do
+ * NOT duplicate that.
  *
  * Auth: reuses the STRIPE_SECRET_KEY already configured for payments. Every
  * call here is a GET; event payloads (which contain customer data) are never
@@ -31,6 +33,30 @@ const MAX_ENABLED_EVENTS_SHOWN = 25;
 const RECENT_PENDING_MINUTES = 10;
 const EVENTS_PAGE_SIZE = 50;
 const MAX_EVENT_PAGES = 5;
+// Abandoned drafts surface days after the attempt, so the intent window is
+// wider than the webhook window.
+const PI_DEFAULT_HOURS = 72;
+const PI_MAX_HOURS = 24 * 30;
+// Mirrors the Stripe dashboard's Incomplete bucket. Deliberately excludes
+// requires_capture — the one-time card-hold flow parks legitimate
+// authorizations there awaiting capture; a hold is not an abandoned draft.
+const PI_INCOMPLETE_STATUSES = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action']);
+// requires_action with pending ACH micro-deposit verification is an ACTIVE
+// payment session, not an abandoned draft — prepaid-pi-guard.js detects the
+// same subtype. Excluded from the "incomplete" aggregate; still reachable
+// via an explicit status filter, with next_action_type distinguishing it.
+const ACH_VERIFICATION_NEXT_ACTION = 'verify_with_microdeposits';
+// Live re-fetches for intents surfaced by the attempt event sweep
+// (event snapshots go stale — the intent may have succeeded since).
+const RETRY_LOOKUP_CAP = 10;
+// A retried attempt on a reused intent surfaces as payment_failed OR as
+// requires_action (card stopped at 3DS — the webhook handler treats both;
+// see stripe-webhook.js) — sweep both or 3DS-stalled retries are missed.
+const RETRY_EVENT_TYPES = ['payment_intent.payment_failed', 'payment_intent.requires_action'];
+const PI_STATUSES = [
+  'incomplete', 'requires_payment_method', 'requires_confirmation', 'requires_action',
+  'processing', 'requires_capture', 'canceled', 'succeeded',
+];
 
 const STRIPE_OPS_TOOLS = [
   {
@@ -54,6 +80,24 @@ Use for: "did we miss any Stripe events?", "webhook delivery failures today?"`,
       },
     },
   },
+  {
+    name: 'get_stripe_payment_intents',
+    description: `List recent Stripe PaymentIntents (live processor data), filterable by status and exact amount. This is the ONLY view of payment attempts that never completed — an incomplete "draft" fires no completion webhook, so it never reaches the local database and the revenue/banking tools cannot see it. The window covers intents CREATED in it plus older reused intents with a failed or action-stalled ATTEMPT in it (created_before_window + qualifying_event_at/_type mark those); results are ranked by recency before the limit applies. last_payment_error.payment_method_type is the method the failed attempt actually used (payment_method_types is just the allowlist). Completed revenue questions still belong to the revenue tools.
+Use for: "any incomplete payments?", "find the $33.33 drafts in Stripe", "did that payment attempt fail, and why?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        hours: { type: 'number', description: `Look-back window in hours (default ${PI_DEFAULT_HOURS}, max ${PI_MAX_HOURS})` },
+        status: {
+          type: 'string',
+          enum: PI_STATUSES,
+          description: `Filter to one status. "incomplete" matches the dashboard's Incomplete bucket (requires_payment_method / requires_confirmation / requires_action) but excludes active ACH micro-deposit verifications (next_action_type verify_with_microdeposits — an in-progress bank payment, not abandoned). Note: requires_capture is a legitimate card hold awaiting capture, NOT an abandoned draft.`,
+        },
+        amount: { type: 'number', description: 'Match an exact amount in dollars (e.g. 33.33)' },
+        limit: { type: 'number', description: `Max intents to return (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
+      },
+    },
+  },
 ];
 
 const NOT_CONFIGURED_MESSAGE = 'Stripe access is not configured. STRIPE_SECRET_KEY must be set in the Railway dashboard.';
@@ -61,7 +105,13 @@ const NOT_CONFIGURED_MESSAGE = 'Stripe access is not configured. STRIPE_SECRET_K
 async function stripeGet(path, params = {}) {
   const url = new URL(`${STRIPE_API_BASE}${path}`);
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null) url.searchParams.set(key, value);
+    if (value === undefined || value === null) continue;
+    // Stripe repeats array params (types[]=a&types[]=b)
+    if (Array.isArray(value)) {
+      for (const item of value) url.searchParams.append(key, item);
+    } else {
+      url.searchParams.set(key, value);
+    }
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -157,6 +207,212 @@ async function getStripeWebhookFailures(input) {
   };
 }
 
+function paymentIntentMatchesStatus(pi, filter) {
+  if (!filter) return true;
+  if (filter === 'incomplete') {
+    if (!PI_INCOMPLETE_STATUSES.has(pi.status)) return false;
+    // An in-progress ACH micro-deposit verification is not abandoned.
+    return (pi.next_action && pi.next_action.type) !== ACH_VERIFICATION_NEXT_ACTION;
+  }
+  return pi.status === filter;
+}
+
+// Whitelisted view of a payment error — codes, message, and the method TYPE
+// the attempt used (payment_method_types on the intent is only the
+// allowlist). Never the card/payment-method object. Shared by the live
+// mapper and the event-snapshot capture in the retry sweep.
+function mapPaymentError(err) {
+  if (!err) return null;
+  return {
+    code: err.code || null,
+    decline_code: err.decline_code || null,
+    message: err.message || null,
+    payment_method_type: (err.payment_method && err.payment_method.type) || null,
+  };
+}
+
+// Only identifiers, money state, and failure codes leave this mapper — never
+// receipt emails, shipping/billing details, or raw charge/payment-method
+// objects. `description` is app-written and can embed a customer name, which
+// is why the tool is in the route's PII redaction set.
+function mapPaymentIntent(pi) {
+  const out = {
+    id: pi.id,
+    amount: Number((pi.amount / 100).toFixed(2)),
+    currency: pi.currency,
+    status: pi.status,
+    created: new Date(pi.created * 1000).toISOString(),
+    customer: pi.customer || null,
+    description: pi.description || null,
+    payment_method_types: pi.payment_method_types || [],
+    // Type only, never the next_action object (it carries redirect/hosted
+    // URLs). Distinguishes active flows (e.g. verify_with_microdeposits)
+    // from truly abandoned drafts.
+    next_action_type: (pi.next_action && pi.next_action.type) || null,
+  };
+  const lastError = mapPaymentError(pi.last_payment_error);
+  if (lastError) out.last_payment_error = lastError;
+  if (pi.status === 'canceled') {
+    out.canceled_at = pi.canceled_at ? new Date(pi.canceled_at * 1000).toISOString() : null;
+    out.cancellation_reason = pi.cancellation_reason || null;
+  }
+  return out;
+}
+
+async function getStripePaymentIntents(input) {
+  const hours = Math.min(Math.max(Number(input.hours) || PI_DEFAULT_HOURS, 1), PI_MAX_HOURS);
+  const limit = Math.min(Math.max(Number(input.limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
+  const statusFilter = typeof input.status === 'string' ? input.status.trim().toLowerCase() : null;
+  const amountNumber = Number(input.amount);
+  const amountCents = Number.isFinite(amountNumber) && amountNumber > 0 ? Math.round(amountNumber * 100) : null;
+  const createdGte = Math.floor((Date.now() - hours * 60 * 60 * 1000) / 1000);
+
+  // The list API has no status/amount filters — page newest-first and filter
+  // here, same shape as the webhook-failures scan. Matches collect unbounded
+  // (the window is small: ≤5 pages + ≤10 lookups) and the display cap is
+  // applied only after a global recency sort, so a retry that happened today
+  // can never be starved out by older in-window creations.
+  const matches = [];
+  const matchesById = new Map();
+  const scannedIds = new Set();
+  let scanned = 0;
+  const considerIntent = (pi, extra, rankTime) => {
+    scannedIds.add(pi.id);
+    scanned += 1;
+    if (!paymentIntentMatchesStatus(pi, statusFilter)) return;
+    if (amountCents !== null && pi.amount !== amountCents) return;
+    const match = { entry: { ...mapPaymentIntent(pi), ...extra }, rankTime };
+    matches.push(match);
+    matchesById.set(pi.id, match);
+  };
+  let startingAfter = null;
+  let pagesFetched = 0;
+  let morePages = true;
+  while (morePages && pagesFetched < MAX_EVENT_PAGES) {
+    const params = { 'created[gte]': createdGte, limit: EVENTS_PAGE_SIZE };
+    if (startingAfter) params.starting_after = startingAfter;
+    const json = await stripeGet('/v1/payment_intents', params);
+    pagesFetched += 1;
+    const data = json.data || [];
+    for (const pi of data) considerIntent(pi, undefined, pi.created);
+    morePages = Boolean(json.has_more) && data.length > 0;
+    startingAfter = data.length ? data[data.length - 1].id : null;
+  }
+
+  // The list API bounds by ORIGINAL creation time, but the portal reuses
+  // requires_payment_method intents across retries (stripe.js payment
+  // flows), so an attempt today on an intent created before the window
+  // would be invisible to the scan above. Sweep attempt events
+  // (payment_failed + requires_action — a card stopped at 3DS emits the
+  // latter) in the same window and re-fetch the LIVE intent for any id the
+  // scan didn't cover (event snapshots go stale); the same filters apply to
+  // the live state. Runs for every status filter — an older intent can fail
+  // inside the window and be succeeded (or canceled) by now, and its live
+  // state is what the filter sees.
+  let retrySweepExhaustive = true;
+  let retryLookupsDropped = 0;
+  let retryLookupFailures = 0;
+  {
+    // id → newest in-window qualifying event (events arrive newest-first)
+    const retryCandidates = new Map();
+    let eventsAfter = null;
+    let eventPages = 0;
+    let moreEvents = true;
+    while (moreEvents && eventPages < MAX_EVENT_PAGES) {
+      const params = { 'types[]': RETRY_EVENT_TYPES, 'created[gte]': createdGte, limit: EVENTS_PAGE_SIZE };
+      if (eventsAfter) params.starting_after = eventsAfter;
+      const json = await stripeGet('/v1/events', params);
+      eventPages += 1;
+      const data = json.data || [];
+      for (const event of data) {
+        const snapshot = event.data && event.data.object;
+        if (!snapshot || !snapshot.id) continue;
+        if (scannedIds.has(snapshot.id)) {
+          // The creation scan already covered this intent, but its fresh
+          // in-window event still drives ranking and metadata — an intent
+          // retried minutes ago must rank by that retry, not by its older
+          // creation time. Events arrive newest-first, so only the first
+          // (newest) event per id is applied.
+          const match = matchesById.get(snapshot.id);
+          if (match && !match.entry.qualifying_event_at) {
+            match.rankTime = Math.max(match.rankTime, event.created);
+            match.entry.qualifying_event_at = new Date(event.created * 1000).toISOString();
+            match.entry.qualifying_event_type = event.type;
+            const eventError = mapPaymentError(snapshot.last_payment_error);
+            if (eventError) match.entry.qualifying_event_error = eventError;
+          }
+          continue;
+        }
+        if (retryCandidates.has(snapshot.id)) continue;
+        retryCandidates.set(snapshot.id, {
+          eventAt: event.created,
+          eventType: event.type,
+          // The live re-fetch can't answer "why did the attempt fail?" once
+          // the intent has been retried successfully — keep the qualifying
+          // event's whitelisted error alongside the live state.
+          eventError: mapPaymentError(snapshot.last_payment_error),
+        });
+      }
+      moreEvents = Boolean(json.has_more) && data.length > 0;
+      eventsAfter = data.length ? data[data.length - 1].id : null;
+    }
+    retrySweepExhaustive = !moreEvents;
+    retryLookupsDropped = Math.max(0, retryCandidates.size - RETRY_LOOKUP_CAP);
+    // Concurrent lookups bound the whole phase to ~one request timeout
+    // instead of cap × timeout when Stripe degrades. Results are folded in
+    // candidate order so output stays deterministic.
+    const candidateEntries = [...retryCandidates.entries()].slice(0, RETRY_LOOKUP_CAP);
+    const lookups = await Promise.allSettled(
+      candidateEntries.map(([id]) => stripeGet(`/v1/payment_intents/${id}`)),
+    );
+    for (let i = 0; i < lookups.length; i++) {
+      const lookup = lookups[i];
+      if (lookup.status !== 'fulfilled') {
+        // An unevaluated candidate means the window may hold more than
+        // shown — reported via retry_lookup_failures and scan_exhaustive.
+        retryLookupFailures += 1;
+        logger.warn(`[intelligence-bar:stripe-ops] Retry-sweep lookup failed: ${lookup.reason && lookup.reason.message}`);
+        continue;
+      }
+      const pi = lookup.value;
+      const { eventAt, eventType, eventError } = candidateEntries[i][1];
+      // Only present because a failed/stalled attempt happened inside the
+      // window. The timestamp is honestly labeled as that QUALIFYING event —
+      // the live intent may have been retried successfully since, and
+      // successful attempts are not part of the sweep, so this is not
+      // claimed to be the last attempt. Flag intents that predate the
+      // window.
+      considerIntent(pi, {
+        qualifying_event_at: new Date(eventAt * 1000).toISOString(),
+        qualifying_event_type: eventType,
+        ...(eventError ? { qualifying_event_error: eventError } : {}),
+        ...(pi.created < createdGte ? { created_before_window: true } : {}),
+      }, eventAt);
+    }
+  }
+
+  // Global recency ranking BEFORE the display cap — scan entries rank by
+  // creation time, sweep entries by their in-window qualifying event — so
+  // the newest activity is always shown regardless of which phase found it.
+  matches.sort((a, b) => b.rankTime - a.rankTime);
+  return {
+    window_hours: hours,
+    status_filter: statusFilter,
+    amount_filter: amountCents !== null ? Number((amountCents / 100).toFixed(2)) : null,
+    payment_intents: matches.slice(0, limit).map(m => m.entry),
+    total_matched: matches.length,
+    total_scanned: scanned,
+    retry_lookup_failures: retryLookupFailures,
+    // Pending pages, a truncated retry sweep, or a failed lookup all mean
+    // the window may hold more than reported. A display cap alone does NOT
+    // clear this — total_matched stays honest and the returned entries are
+    // the most recent.
+    scan_exhaustive: !morePages && retrySweepExhaustive
+      && retryLookupsDropped === 0 && retryLookupFailures === 0,
+    note: 'Live Stripe data; amounts are dollars. payment_intents holds the most recent matches up to the limit; total_matched counts every match in the window. Incomplete intents never reach the local database, so the revenue tools cannot see them. requires_capture intents are card holds awaiting capture, and next_action_type verify_with_microdeposits marks an active ACH verification — neither is an abandoned draft. created_before_window marks an older intent surfaced by an in-window failed/stalled attempt; qualifying_event_at/_type describe that event and qualifying_event_error preserves its failure codes even if the intent has since been retried (so this is not necessarily the last attempt).',
+  };
+}
+
 async function executeStripeOpsTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state, not a failure — an
   // { error } result would count against the shared admin circuit breaker
@@ -168,6 +424,7 @@ async function executeStripeOpsTool(toolName, input = {}) {
     switch (toolName) {
       case 'get_stripe_webhook_endpoints': return await getStripeWebhookEndpoints();
       case 'get_stripe_webhook_failures': return await getStripeWebhookFailures(input);
+      case 'get_stripe_payment_intents': return await getStripePaymentIntents(input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {

@@ -11,6 +11,7 @@
  * calls, no new copy that isn't grounded in those facts.
  */
 
+const { dateOnlyToNoonUtc } = require('./time-format');
 const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-diagnosis');
 const { buildLawnInsightCards } = require('./lawn-report-insights');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
@@ -464,7 +465,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // Applied to `categories` BEFORE the diagnosis/insights/snapshot derive, so a
   // cool-stretch low-color reading is framed as seasonal EVERYWHERE — not surfaced
   // as a needs-attention hero/insight that contradicts the "seasonal" card copy.
-  const assessMonth = lawnAssessment.assessmentDate ? (new Date(lawnAssessment.assessmentDate).getMonth() + 1) : null;
+  // Noon-UTC anchor + getUTCMonth keeps the dormancy month host-timezone
+  // independent (local getMonth() on a UTC-midnight date shifts near month
+  // boundaries on non-UTC hosts).
+  const assessDate = lawnAssessment.assessmentDate ? dateOnlyToNoonUtc(lawnAssessment.assessmentDate) : null;
+  const assessMonth = assessDate ? (assessDate.getUTCMonth() + 1) : null;
   const dormancy = dormancyLikely({ colorHealth: scores.colorHealth, stressDamage: scores.stressDamage, month: assessMonth });
   if (dormancy.likely) {
     const colorCat = categories.find((c) => c.key === 'color_vigor');

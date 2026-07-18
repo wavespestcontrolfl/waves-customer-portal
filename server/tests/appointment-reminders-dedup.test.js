@@ -25,7 +25,9 @@ const AppointmentReminders = require('../services/appointment-reminders');
 function chain(overrides = {}) {
   return {
     where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereExists: jest.fn().mockReturnThis(),
     whereNotExists: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
@@ -528,6 +530,130 @@ describe('appointment reminder reschedule windows', () => {
     }));
     expect(finalReminderUpdate.update).not.toHaveBeenCalled();
     expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  test('notice attempt that THROWS re-arms the 72h fallback on a pre-covered row', async () => {
+    // The DB sync trigger pre-covers the row (appointment_time already equals
+    // the new start, 72h flag sent), so a same-start notifying reschedule
+    // preserves the covered flag. If the notice attempt then throws (customer
+    // lookup here), the finally block must re-arm the 72h window or the cron
+    // never delivers the fallback for a 24-72h-out appointment.
+    const reminder = {
+      id: 'reminder-reschedule',
+      scheduled_service_id: 'svc-reschedule',
+      customer_id: 'customer-1',
+      appointment_time: new Date('2026-05-08T14:00:00.000Z'), // 10:00 AM ET, ~48h out
+      service_type: 'Pest Control',
+      reminder_72h_sent: true,
+      reminder_24h_sent: false,
+    };
+    const lookupReminder = chain({ first: jest.fn().mockResolvedValue(reminder) });
+    const updateReminder = chain();
+    const rearmUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const reminderQueries = [lookupReminder, updateReminder, rearmUpdate];
+    const throwingCustomerLookup = chain({
+      first: jest.fn().mockRejectedValue(new Error('db connection reset')),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return reminderQueries.shift();
+      if (table === 'customers') return throwingCustomerLookup;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    const result = await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-08T10:00', // same start the trigger already synced
+    );
+
+    // Guarded by the appointment time this invocation handled (so a stale
+    // failure can't clobber a newer overlapping reschedule), by this
+    // invocation's own updated_at claim (so a successful SAME-time overlap
+    // isn't clobbered either), and by the sibling-suppression marker (so a
+    // suppressed slot sibling stays quiet).
+    expect(rearmUpdate.where).toHaveBeenCalledWith({
+      id: 'reminder-reschedule',
+      appointment_time: expect.any(Date),
+      updated_at: expect.any(Date),
+      suppressed_by_sibling: false,
+    });
+    const [{ appointment_time: rearmTime }] = rearmUpdate.where.mock.calls[0];
+    expect(rearmTime.toISOString()).toBe('2026-05-08T14:00:00.000Z');
+    expect(rearmUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: false,
+      reminder_72h_sent_at: null,
+    }));
+    expect(result).toBeNull(); // outer catch still swallows the throw
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('failed notice within the 24h band leaves the 72h window covered (cron can never deliver it)', async () => {
+    const reminder = {
+      id: 'reminder-reschedule',
+      scheduled_service_id: 'svc-reschedule',
+      customer_id: 'customer-1',
+      appointment_time: new Date('2026-05-07T13:00:00.000Z'), // 9:00 AM ET tomorrow, ~23h out
+      service_type: 'Pest Control',
+      reminder_72h_sent: true,
+      reminder_24h_sent: false,
+    };
+    const lookupReminder = chain({ first: jest.fn().mockResolvedValue(reminder) });
+    const updateReminder = chain();
+    const rearmUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const reminderQueries = [lookupReminder, updateReminder, rearmUpdate];
+    const throwingCustomerLookup = chain({
+      first: jest.fn().mockRejectedValue(new Error('db connection reset')),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return reminderQueries.shift();
+      if (table === 'customers') return throwingCustomerLookup;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-07T09:00', // same start, inside 24.25h of fixedNow
+    );
+
+    // hoursUntil <= 24.25 means the cron's 72h branch can never fire for this
+    // time — re-arming would only park the row in every 15-minute scan. The
+    // still-armed 24h window carries the fallback.
+    expect(rearmUpdate.update).not.toHaveBeenCalled();
+  });
+
+  test('notifying reschedule with no reachable customer re-arms the 72h fallback', async () => {
+    const reminder = {
+      id: 'reminder-reschedule',
+      scheduled_service_id: 'svc-reschedule',
+      customer_id: 'customer-1',
+      appointment_time: new Date('2026-05-08T14:00:00.000Z'), // 10:00 AM ET, ~48h out
+      service_type: 'Pest Control',
+      reminder_72h_sent: true,
+      reminder_24h_sent: false,
+    };
+    const lookupReminder = chain({ first: jest.fn().mockResolvedValue(reminder) });
+    const updateReminder = chain();
+    const rearmUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const reminderQueries = [lookupReminder, updateReminder, rearmUpdate];
+    const nullCustomerLookup = chain({ first: jest.fn().mockResolvedValue(null) });
+    const techQuery = chain({ first: jest.fn().mockResolvedValue({ tech_name: 'Sam' }) });
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return reminderQueries.shift();
+      if (table === 'customers') return nullCustomerLookup;
+      if (table === 'scheduled_services') return techQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await AppointmentReminders.handleReschedule(
+      'svc-reschedule',
+      '2026-05-08T10:00', // same start the trigger already synced
+    );
+
+    // With no customer row nothing can send; the row must not stay covered.
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(rearmUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      reminder_72h_sent: false,
+      reminder_72h_sent_at: null,
+    }));
   });
 });
 

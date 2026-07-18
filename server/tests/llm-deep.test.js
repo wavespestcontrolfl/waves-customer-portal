@@ -1,19 +1,24 @@
 /**
- * Contract tests for services/llm/deep.js — the DEEP-tier (fable-5) wrapper.
+ * Contract tests for services/llm/deep.js — Opus primary, OpenAI backup.
  *
  * fable-5 emits thinking blocks ahead of the text block (always-on thinking)
  * and can refuse benign-adjacent content via safety classifiers. Every DEEP
  * call site relies on this helper to hide both, so the contract is:
  *   - thinking blocks never reach the caller (content[0].text stays valid)
- *   - a refusal retries once on FLAGSHIP with the identical request
+ *   - a refusal or API error crosses providers to OpenAI
  *   - both calls share ONE deadline: when the client has a configured
  *     timeout, the retry only gets the time remaining on it (and is skipped
  *     entirely near the deadline) — a refusal can never hold a caller like
  *     the fact-check publish lock for ~2× its timeout
- *   - API errors throw exactly like client.messages.create
+ *   - API errors throw when the OpenAI backup also misses
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/models', () => ({ DEEP: 'deep-model', FLAGSHIP: 'flagship-model' }));
+jest.mock('../config/models', () => ({
+  DEEP: 'deep-model',
+  TEXT_POLICIES: { deepAnalysis: { fallback: { provider: 'openai', model: 'openai-backup' } } },
+}));
+const mockCallOpenAI = jest.fn();
+jest.mock('../services/llm/call', () => ({ callOpenAI: (...args) => mockCallOpenAI(...args) }));
 
 const { createDeepMessage, stripThinkingBlocks } = require('../services/llm/deep');
 
@@ -24,6 +29,7 @@ function clientReturning(...responses) {
 }
 
 describe('createDeepMessage', () => {
+  beforeEach(() => mockCallOpenAI.mockReset());
   test('defaults model to DEEP and passes params through', async () => {
     const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
     await createDeepMessage(client, { max_tokens: 4096, messages: [{ role: 'user', content: 'q' }] });
@@ -59,45 +65,36 @@ describe('createDeepMessage', () => {
     expect(resp.content).toHaveLength(2);
   });
 
-  test('a refusal retries once on FLAGSHIP with the identical request', async () => {
-    const client = clientReturning(
-      { stop_reason: 'refusal', stop_details: { category: 'cyber' }, content: [] },
-      { stop_reason: 'end_turn', content: [{ type: 'text', text: 'fallback answer' }] },
-    );
+  test('a refusal crosses providers to OpenAI with the same prompt', async () => {
+    const client = clientReturning({ stop_reason: 'refusal', stop_details: { category: 'cyber' }, content: [] });
+    mockCallOpenAI.mockResolvedValue({ ok: true, model: 'openai-backup', text: 'fallback answer' });
     const params = { max_tokens: 4096, system: 'sys', messages: [{ role: 'user', content: 'q' }] };
     const resp = await createDeepMessage(client, params);
-    expect(client.messages.create).toHaveBeenCalledTimes(2);
-    expect(client.messages.create).toHaveBeenNthCalledWith(1, expect.objectContaining({ model: 'deep-model', system: 'sys' }));
-    expect(client.messages.create).toHaveBeenNthCalledWith(2, expect.objectContaining({ model: 'flagship-model', system: 'sys', max_tokens: 4096 }));
+    expect(client.messages.create).toHaveBeenCalledTimes(1);
+    expect(mockCallOpenAI).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'openai-backup', system: 'sys', text: 'user: q', maxTokens: 4096,
+    }));
     expect(resp.content[0].text).toBe('fallback answer');
   });
 
-  test('a refusal on both models returns the second response without further retries', async () => {
-    const client = clientReturning(
-      { stop_reason: 'refusal', content: [] },
-      { stop_reason: 'refusal', content: [] },
-    );
+  test('a refusal on both providers returns the original refusal', async () => {
+    const client = clientReturning({ stop_reason: 'refusal', content: [] });
+    mockCallOpenAI.mockResolvedValue({ ok: false, reason: 'openai_503' });
     const resp = await createDeepMessage(client, { max_tokens: 100, messages: [] });
-    expect(client.messages.create).toHaveBeenCalledTimes(2);
+    expect(client.messages.create).toHaveBeenCalledTimes(1);
     expect(resp.stop_reason).toBe('refusal');
   });
 
   describe('refusal fallback shares the client timeout budget', () => {
     afterEach(() => jest.restoreAllMocks());
 
-    test('retry gets only the time remaining on the client timeout', async () => {
+    test('OpenAI backup gets only the time remaining on the client timeout', async () => {
       jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(10000);
-      const client = clientReturning(
-        { stop_reason: 'refusal', content: [] },
-        { stop_reason: 'end_turn', content: [{ type: 'text', text: 'fallback answer' }] },
-      );
+      const client = clientReturning({ stop_reason: 'refusal', content: [] });
       client.timeout = 60000;
+      mockCallOpenAI.mockResolvedValue({ ok: true, model: 'openai-backup', text: 'fallback answer' });
       const resp = await createDeepMessage(client, { max_tokens: 100, messages: [] });
-      expect(client.messages.create).toHaveBeenNthCalledWith(
-        2,
-        expect.objectContaining({ model: 'flagship-model' }),
-        { timeout: 50000 },
-      );
+      expect(mockCallOpenAI).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 50000 }));
       expect(resp.content[0].text).toBe('fallback answer');
     });
 
@@ -107,24 +104,66 @@ describe('createDeepMessage', () => {
       client.timeout = 60000;
       const resp = await createDeepMessage(client, { max_tokens: 100, messages: [] });
       expect(client.messages.create).toHaveBeenCalledTimes(1);
+      expect(mockCallOpenAI).not.toHaveBeenCalled();
       expect(resp.stop_reason).toBe('refusal');
     });
 
-    test('a client with no configured timeout retries without a per-request override', async () => {
-      const client = clientReturning(
-        { stop_reason: 'refusal', content: [] },
-        { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] },
-      );
+    test('a client with no configured timeout uses no OpenAI timeout override', async () => {
+      const client = clientReturning({ stop_reason: 'refusal', content: [] });
+      mockCallOpenAI.mockResolvedValue({ ok: true, model: 'openai-backup', text: 'ok' });
       await createDeepMessage(client, { max_tokens: 100, messages: [] });
-      expect(client.messages.create).toHaveBeenNthCalledWith(2, expect.objectContaining({ model: 'flagship-model' }));
+      expect(mockCallOpenAI.mock.calls[0][0].timeoutMs).toBeUndefined();
     });
   });
 
-  test('API errors throw exactly like client.messages.create (callers keep their catch paths)', async () => {
+  // The error path must share the client's timeout budget exactly like the
+  // refusal path — otherwise an Anthropic request that THROWS after burning
+  // its budget passes a non-positive remaining number, which maps to
+  // undefined and lets callOpenAI apply its 10-minute default (holding
+  // 60s-budget callers like the quarantine arbiter ~10 extra minutes).
+  describe('error fallback shares the client timeout budget', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    test('OpenAI backup gets only the time remaining on the client timeout', async () => {
+      jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(10000);
+      const create = jest.fn().mockRejectedValueOnce(new Error('api 529'));
+      const client = { messages: { create }, timeout: 60000 };
+      mockCallOpenAI.mockResolvedValue({ ok: true, model: 'openai-backup', text: 'ok' });
+      const resp = await createDeepMessage(client, { max_tokens: 100, messages: [] });
+      expect(mockCallOpenAI).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 50000 }));
+      expect(resp.content[0].text).toBe('ok');
+    });
+
+    test('near the deadline the backup is skipped and the error rethrows', async () => {
+      jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(58000);
+      const create = jest.fn().mockRejectedValueOnce(new Error('api 529'));
+      const client = { messages: { create }, timeout: 60000 };
+      await expect(createDeepMessage(client, { max_tokens: 100, messages: [] })).rejects.toThrow('api 529');
+      expect(mockCallOpenAI).not.toHaveBeenCalled();
+    });
+
+    test('an exhausted budget (negative remaining) never becomes the 10-minute default', async () => {
+      jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(70000);
+      const create = jest.fn().mockRejectedValueOnce(new Error('Request timed out'));
+      const client = { messages: { create }, timeout: 60000 };
+      await expect(createDeepMessage(client, { max_tokens: 100, messages: [] })).rejects.toThrow('Request timed out');
+      expect(mockCallOpenAI).not.toHaveBeenCalled();
+    });
+  });
+
+  test('API errors fall back to OpenAI', async () => {
     const create = jest.fn().mockRejectedValueOnce(new Error('api 529'));
+    mockCallOpenAI.mockResolvedValue({ ok: true, model: 'openai-backup', text: 'ok' });
+    const response = await createDeepMessage({ messages: { create } }, { max_tokens: 100, messages: [] });
+    expect(response.content[0].text).toBe('ok');
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  test('API errors throw when the OpenAI backup also misses', async () => {
+    const create = jest.fn().mockRejectedValueOnce(new Error('api 529'));
+    mockCallOpenAI.mockResolvedValue({ ok: false, reason: 'openai_503' });
     await expect(createDeepMessage({ messages: { create } }, { max_tokens: 100, messages: [] }))
       .rejects.toThrow('api 529');
-    expect(create).toHaveBeenCalledTimes(1);
   });
 });
 

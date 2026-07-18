@@ -116,7 +116,23 @@ const CONTEXT_COLORS = {
   estimates: D.teal,
 };
 
-function detectContext(pathname) {
+function detectContext(pathname, search = "") {
+  // /admin/pipeline hosts both the Leads pipeline and the consolidated
+  // Estimates workspace (the old /admin/estimates now redirects here with
+  // ?tab=…), so pathname alone can't pick the context — the tab query
+  // decides. Estimates / Create Estimate / Pricing Logic keep the
+  // quote-agent tools; Leads (or no tab) keeps lead quick actions. An
+  // ?estimateId= deep link with no tab lands on the Estimates list
+  // (EstimatesPageV2 initialTab), so it maps to estimates too.
+  if (pathname === "/admin/pipeline" || pathname.startsWith("/admin/pipeline/")) {
+    const params = new URLSearchParams(search);
+    const tab = params.get("tab");
+    if (tab === "estimates" || tab === "new" || tab === "pricing") {
+      return "estimates";
+    }
+    if (!tab && params.get("estimateId")) return "estimates";
+    return "leads";
+  }
   if (ROUTE_CONTEXT_MAP[pathname]) return ROUTE_CONTEXT_MAP[pathname];
   const routes = Object.entries(ROUTE_CONTEXT_MAP).sort(
     (a, b) => b[0].length - a[0].length,
@@ -271,7 +287,7 @@ function GlobalCommandPalette(_props, ref) {
   const location = useLocation();
   const isMobile = useIsMobile(768);
 
-  const context = detectContext(location.pathname);
+  const context = detectContext(location.pathname, location.search);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
 
@@ -943,8 +959,8 @@ function MobileSheet({
             onClick={close}
             aria-label="Close"
             style={{
-              width: 36,
-              height: 36,
+              width: 44,
+              height: 44,
               borderRadius: 8,
               border: "none",
               background: "#F4F4F5",
@@ -999,13 +1015,13 @@ function MobileSheet({
                 <AttachButton
                   onClick={() => fileInputRef.current?.click()}
                   color="#A1A1AA"
-                  size={38}
+                  size={44}
                   disabled={attachmentsLoading}
                 />{" "}
                 <DictationButton
                   onAppend={appendTranscript}
                   title="Tap to talk"
-                  size={38}
+                  size={44}
                   palette={{ accent: accentColor, muted: "#A1A1AA", red: "#EF4444", card: "#fff" }}
                 />{" "}
               </div>
@@ -1038,6 +1054,7 @@ function MobileSheet({
               style={{
                 flex: 1,
                 padding: "12px 16px",
+                minHeight: 44,
                 borderRadius: 10,
                 border: "none",
                 background: prompt.trim() && !loading && !attachmentsLoading ? "#18181B" : "#E4E4E7",

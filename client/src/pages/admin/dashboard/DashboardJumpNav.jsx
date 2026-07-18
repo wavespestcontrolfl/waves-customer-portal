@@ -140,7 +140,7 @@ export default function DashboardJumpNav({
               onSelectPeriod(v);
               setShowRangePicker(false);
             }}
-            className="md:hidden w-full h-9 text-13 border-hairline border-zinc-200 rounded-sm bg-white px-2 text-zinc-900 u-focus-ring"
+            className="md:hidden w-full h-11 text-16 border-hairline border-zinc-200 rounded-sm bg-white px-2 text-zinc-900 u-focus-ring"
           >
             {PERIODS.map((p) => (
               <option key={p.id} value={p.id}>
@@ -163,7 +163,7 @@ export default function DashboardJumpNav({
                 setDraftFrom(customRange?.from || "");
                 setShowRangePicker((v) => !v);
               }}
-              className="md:hidden shrink-0 h-9 px-2.5 text-11 uppercase tracking-label font-medium border-hairline border-zinc-200 rounded-sm bg-white text-ink-secondary u-focus-ring"
+              className="md:hidden shrink-0 h-11 px-2.5 text-11 uppercase tracking-label font-medium border-hairline border-zinc-200 rounded-sm bg-white text-ink-secondary u-focus-ring"
             >
               Edit
             </button>
@@ -215,7 +215,7 @@ export default function DashboardJumpNav({
                   max={todayISO}
                   value={draftFrom}
                   onChange={(e) => setDraftFrom(e.target.value)}
-                  className="text-12 border-hairline border-zinc-300 rounded-sm px-2 py-1 u-focus-ring"
+                  className="h-11 md:h-auto text-16 md:text-12 border-hairline border-zinc-300 rounded-sm px-2 py-1 u-focus-ring"
                 />
               </label>
               <div className="text-11 text-ink-tertiary">through today</div>

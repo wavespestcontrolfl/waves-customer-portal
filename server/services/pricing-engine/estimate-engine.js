@@ -27,6 +27,29 @@ function guardedLineCost(item) {
   }
   return null;
 }
+
+// Post-discount protected annual for a lawn line: the greater of the program
+// minimum and the line's own 35% collected-margin floor, never above the
+// line's current annual (legacy below-floor lines stay merely undiscountable,
+// they are never raised). Shared by the hard manual-discount guard and the
+// per-line manual audit so the aggregate cap and the per-line allocation can
+// never disagree about where lawn's floor sits.
+function lawnLineProtectedAnnual(item) {
+  const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  const programFloorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
+    ? roundMoney(minMonthly * 12)
+    : 0;
+  const rawMarginFloor = Number(item.minimumCollectedAnnualPrice ?? item.costFloorAnnual);
+  const marginFloorAnnual = Number.isFinite(rawMarginFloor) && rawMarginFloor > 0
+    ? rawMarginFloor
+    : 0;
+  const lineAnnual = Number(item.annualAfterDiscount || item.annual || 0);
+  return {
+    lineAnnual,
+    protectedAnnual: Math.min(lineAnnual, Math.max(programFloorAnnual, marginFloorAnnual)),
+    marginFloorBinding: marginFloorAnnual > programFloorAnnual,
+  };
+}
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const {
@@ -524,6 +547,16 @@ function generateEstimate(input) {
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
   const modifiers = deriveModifiers(property);
+  // Caller-supplied overrides for modifiers the caller computed from richer
+  // data than the profile carries — e.g. the property lookup's graduated
+  // mosquitoWaterMult (POND_ON_PROPERTY 1.75 … vs the profile scale's
+  // ADJACENT 1.35 ceiling). Only keys deriveModifiers already emits apply;
+  // unknown keys are ignored, and each pricer still normalizes its value.
+  for (const [key, value] of Object.entries(input.modifierOverrides || {})) {
+    if (key in modifiers && value != null && Number.isFinite(Number(value))) {
+      modifiers[key] = Number(value);
+    }
+  }
   const structuralNotes = deriveNotes(property);
 
   // ── 3. Price each requested service ────────────────────────
@@ -1503,26 +1536,44 @@ function generateEstimate(input) {
         }
         item.annualAfterDiscount = guarded.finalAnnual;
       } else if (item.service === 'lawn_care') {
-        // Lawn program minimum (owner directive 2026-07-09) holds POST-
-        // WaveGuard: a floor-priced lawn line must not leave the engine
-        // below the floor after Silver/Gold/Platinum. Never raise
-        // a line above its own pre-discount price (min() keeps legacy
-        // below-floor lines merely undiscounted, not repriced upward here).
+        // Lawn's customer price is already built from BOTH the program
+        // minimum and the 35% collected-margin floor. WaveGuard must not undo
+        // either one. The old guard protected only the $50/mo program floor,
+        // which let a line whose real cost floor was higher (for example
+        // $630.82/yr) discount all the way to $600 and silently miss margin.
+        // Never raise above the pre-discount line: a stale/legacy floor that
+        // exceeds the authored price merely makes the line undiscountable.
         const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
-        const floorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
-          ? Math.min(Math.round(minMonthly * 12 * 100) / 100, item.annualBeforeDiscount)
+        const programFloorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
+          ? Math.round(minMonthly * 12 * 100) / 100
           : 0;
+        const rawMarginFloorAnnual = Number(
+          item.minimumCollectedAnnualPrice ?? item.costFloorAnnual,
+        );
+        const marginFloorAnnual = Number.isFinite(rawMarginFloorAnnual) && rawMarginFloorAnnual > 0
+          ? Math.round(rawMarginFloorAnnual * 100) / 100
+          : 0;
+        const floorAnnual = Math.min(
+          Math.max(programFloorAnnual, marginFloorAnnual),
+          item.annualBeforeDiscount,
+        );
         if (floorAnnual > 0 && discountedAnnual < floorAnnual) {
           if (logger) {
-            logger.info('[pricing-engine] lawn post-discount program-minimum guard applied', {
+            logger.info('[pricing-engine] lawn post-discount floor guard applied', {
               annualBeforeDiscount: item.annualBeforeDiscount,
               discountedAnnual,
               floorAnnual,
+              programFloorAnnual,
+              marginFloorAnnual,
             });
           }
           item.annualAfterDiscount = floorAnnual;
           item.discountCapped = true;
-          item.programMinimumGuardApplied = true;
+          item.programMinimumGuardApplied = programFloorAnnual > 0
+            && floorAnnual <= programFloorAnnual;
+          item.marginFloorGuardApplied = marginFloorAnnual > programFloorAnnual
+            && floorAnnual <= marginFloorAnnual;
+          item.postDiscountFloorAnnual = floorAnnual;
           item.requestedDiscountPct = discount.effectiveDiscount || 0;
           item.actualDiscountPct = item.annualBeforeDiscount > 0
             ? Math.round((1 - floorAnnual / item.annualBeforeDiscount) * 1000) / 1000
@@ -1533,7 +1584,15 @@ function generateEstimate(input) {
       } else {
         item.annualAfterDiscount = discountedAnnual;
       }
-      item.monthlyAfterDiscount = Math.round(item.annualAfterDiscount / 12 * 100) / 100;
+      // CEIL the monthly when the lawn floor binds: nearest-cent rounding of
+      // floor/12 can rebuild an annual a cent BELOW the floor (630.85 →
+      // 52.57/mo → 630.84/yr). The public ladder ceils this exact case
+      // (clampLawnLadderEntry in estimate-public.js) — round() here would
+      // have the operator confirm and store a monthly one cent under what
+      // the customer is shown and accepts.
+      item.monthlyAfterDiscount = item.postDiscountFloorAnnual !== undefined
+        ? Math.ceil(item.annualAfterDiscount / 12 * 100) / 100
+        : Math.round(item.annualAfterDiscount / 12 * 100) / 100;
       if (serviceKey === 'palm_injection') {
         item.annualBeforeCredits = item.annualBeforeCredits ?? item.annualBeforeDiscount;
         item.flatCreditAnnual = discount.flatCreditAnnual || 0;
@@ -1569,7 +1628,8 @@ function generateEstimate(input) {
   let manualDiscountAmount = 0;          // recurring slice (margin logic + recurringAnnualAfter use this)
   let manualDiscountOneTimeAmount = 0;   // one-time slice
   let manualDiscountSpecialtyAmount = 0; // specialty slice
-  let manualDiscountLawnFloorCapped = false; // recurring slice capped at the lawn program minimum
+  let manualDiscountLawnCapReason = null; // recurring slice capped at lawn program/margin floor
+  let manualDiscountLawnFloorPinned = false; // recurring slice left lawn sitting exactly on its floor
   let manualDiscountInfo = null;
   const manualEligibleItems = recurringItems.filter(isManualRecurringDiscountEligible);
   const manualExcludedItems = recurringItems.filter(i => !isManualRecurringDiscountEligible(i));
@@ -1607,19 +1667,27 @@ function generateEstimate(input) {
         manualDiscountSpecialtyAmount = roundMoney(applied - manualDiscountAmount - manualDiscountOneTimeAmount);
       }
     }
-    // Lawn program minimum (owner directive 2026-07-09): unlike the warn-only
-    // margin stance below, the lawn floor is a HARD post-discount minimum —
-    // the recurring slice may spend all non-lawn room plus lawn's above-floor
-    // headroom, but never the floor itself. min(line, floor) protects legacy
-    // below-floor lines in full (they cannot be manually discounted lower)
-    // without ever raising them.
-    const lawnProgramMinimumMonthlyValue = Number(LAWN_PRICING_V2.programMinimumMonthly);
-    if (Number.isFinite(lawnProgramMinimumMonthlyValue) && lawnProgramMinimumMonthlyValue > 0) {
-      const lawnFloorAnnual = roundMoney(lawnProgramMinimumMonthlyValue * 12);
-      const lawnFloorProtectedAnnual = roundMoney(manualEligibleItems
-        .filter((i) => i.service === 'lawn_care')
-        .reduce((sum, i) => sum + Math.min(i.annualAfterDiscount || i.annual || 0, lawnFloorAnnual), 0));
+    // Lawn program and collected-margin floors are HARD post-discount
+    // minimums. Enforce them here, before summary totals are persisted or
+    // emailed; the public ladder re-clamps only as defense in depth. The
+    // recurring slice may spend all non-lawn room plus lawn's above-floor
+    // headroom, but never either protected floor. min(line, floor) protects
+    // legacy below-floor lines in full without raising them.
+    const manualLawnItems = manualEligibleItems.filter((i) => i.service === 'lawn_care');
+    if (manualLawnItems.length) {
+      let lawnMarginFloorBinding = false;
+      const lawnFloorProtectedAnnual = roundMoney(manualLawnItems
+        .reduce((sum, i) => {
+          const line = lawnLineProtectedAnnual(i);
+          if (line.marginFloorBinding) lawnMarginFloorBinding = true;
+          return sum + line.protectedAnnual;
+        }, 0));
       const recurringManualHeadroom = Math.max(0, roundMoney(manualDiscountableRecurringAnnual - lawnFloorProtectedAnnual));
+      // Consuming ALL recurring headroom leaves lawn sitting exactly on its
+      // protected floor — the summary monthly must then CEIL (same rule as
+      // the WaveGuard floor guard above), or a floor like $630.85 rounds to
+      // a monthly that rebuilds the annual a cent short.
+      if (manualDiscountAmount >= recurringManualHeadroom) manualDiscountLawnFloorPinned = true;
       if (manualDiscountAmount > recurringManualHeadroom) {
         const blockedRecurring = roundMoney(manualDiscountAmount - recurringManualHeadroom);
         manualDiscountAmount = recurringManualHeadroom;
@@ -1642,7 +1710,11 @@ function generateEstimate(input) {
             stillBlocked = roundMoney(stillBlocked - toSpecialty);
           }
         }
-        if (stillBlocked > 0) manualDiscountLawnFloorCapped = true;
+        if (stillBlocked > 0) {
+          manualDiscountLawnCapReason = lawnMarginFloorBinding
+            ? 'lawn_margin_floor'
+            : 'lawn_program_minimum';
+        }
       }
     }
     const appliedTotal = roundMoney(
@@ -1670,10 +1742,9 @@ function generateEstimate(input) {
       discountableBase: manualDiscountableTotal,
       recurringDiscountableBase: manualDiscountableRecurringAnnual,
       oneTimeDiscountableBase: roundMoney(manualDiscountableOneTime + manualDiscountableSpecialty),
-      capped: requestedAmount > appliedTotal || manualDiscountLawnFloorCapped,
-      capReason: manualDiscountLawnFloorCapped
-        ? 'lawn_program_minimum'
-        : (requestedAmount > appliedTotal ? 'discountable_base' : null),
+      capped: requestedAmount > appliedTotal || !!manualDiscountLawnCapReason,
+      capReason: manualDiscountLawnCapReason
+        || (requestedAmount > appliedTotal ? 'discountable_base' : null),
       scope: nonRecurringAmount > 0 ? 'recurring_and_one_time_after_waveguard' : 'recurring_annual_after_waveguard',
       stackingOrder: 'after_waveguard',
       eligibleServices: [
@@ -1686,27 +1757,61 @@ function generateEstimate(input) {
     };
   }
 
-  // Warn-only margin check on the manual discount stack. Manual owner discounts
-  // are intentionally NOT capped (loss-leader / goodwill pricing is allowed),
-  // but we surface a hard warning + per-line audit when a manual discount drops
-  // a guarded service below the margin floor. The manual discount is a single
-  // pooled amount, so each line's share is distributed proportionally to its
-  // post-WaveGuard annual.
+  // Warn-only margin check on the manual discount stack for services other
+  // than lawn. Lawn's collected-margin floor is enforced above so stored/email
+  // totals agree with the public ladder; other owner-entered loss-leader or
+  // goodwill discounts remain allowed with a hard warning + per-line audit.
+  // The pooled recurring slice is attributed NON-LAWN-FIRST, mirroring the
+  // hard guard above: the public ladder re-clamps lawn at its floor at
+  // view/accept time, so the dollars really come out of the non-lawn lines
+  // first and lawn only absorbs the spill-over its above-floor headroom can
+  // cover. A flat proportional split would attribute discount to a
+  // floor-protected lawn line and publish below-floor manualFinalAnnual/
+  // manualFinalMargin audit fields for a quote whose lawn price never moved.
   const manualMarginWarnings = [];
   if (manualDiscountAmount > 0 && manualDiscountableRecurringAnnual > 0) {
+    const manualCutByItem = new Map();
+    const nonLawnEligible = manualEligibleItems.filter((i) => i.service !== 'lawn_care');
+    const nonLawnAnnual = nonLawnEligible
+      .reduce((sum, i) => sum + (i.annualAfterDiscount || i.annual || 0), 0);
+    const nonLawnCut = Math.min(manualDiscountAmount, nonLawnAnnual);
+    if (nonLawnAnnual > 0) {
+      for (const item of nonLawnEligible) {
+        const lineAnnual = item.annualAfterDiscount || item.annual || 0;
+        manualCutByItem.set(item, nonLawnCut * (lineAnnual / nonLawnAnnual));
+      }
+    }
+    const lawnSpill = Math.max(0, manualDiscountAmount - nonLawnCut);
+    if (lawnSpill > 0) {
+      const lawnEligible = manualEligibleItems.filter((i) => i.service === 'lawn_care');
+      const lawnHeadrooms = lawnEligible.map((i) => {
+        const { lineAnnual, protectedAnnual } = lawnLineProtectedAnnual(i);
+        return Math.max(0, lineAnnual - protectedAnnual);
+      });
+      const totalLawnHeadroom = lawnHeadrooms.reduce((sum, h) => sum + h, 0);
+      if (totalLawnHeadroom > 0) {
+        // The hard guard already capped the slice at non-lawn + lawn
+        // headroom; min() is defense in depth so no lawn line is ever
+        // attributed a cut below its floor.
+        const lawnCut = Math.min(lawnSpill, totalLawnHeadroom);
+        lawnEligible.forEach((item, idx) => {
+          manualCutByItem.set(item, lawnCut * (lawnHeadrooms[idx] / totalLawnHeadroom));
+        });
+      }
+    }
     for (const item of manualEligibleItems) {
+      const lineAnnualAfterWG = item.annualAfterDiscount || item.annual || 0;
+      if (lineAnnualAfterWG <= 0) continue;
+      const lineManualCut = manualCutByItem.get(item) || 0;
+      const lineFinalAnnual = Math.round((lineAnnualAfterWG - lineManualCut) * 100) / 100;
+      item.manualFinalAnnual = lineFinalAnnual;
       const guard = guardedLineCost(item);
       if (!guard || guard.cost < 0) continue;
       const { cost: allInCost, floor: marginFloor } = guard;
-      const lineAnnualAfterWG = item.annualAfterDiscount || item.annual || 0;
-      if (lineAnnualAfterWG <= 0) continue;
-      const lineManualCut = manualDiscountAmount * (lineAnnualAfterWG / manualDiscountableRecurringAnnual);
-      const lineFinalAnnual = Math.round((lineAnnualAfterWG - lineManualCut) * 100) / 100;
       const lineMargin = lineFinalAnnual > 0 ? (lineFinalAnnual - allInCost) / lineFinalAnnual : -1;
+      item.manualFinalMargin = Math.round(lineMargin * 1000) / 1000;
       if (lineMargin < marginFloor) {
         item.manualMarginWarning = true;
-        item.manualFinalAnnual = lineFinalAnnual;
-        item.manualFinalMargin = Math.round(lineMargin * 1000) / 1000;
         manualMarginWarnings.push({
           service: item.service,
           type: 'manual_discount_below_margin_floor',
@@ -1740,7 +1845,15 @@ function generateEstimate(input) {
   }
 
   const recurringAnnualAfter = Math.round((recurringAnnualAfterWG - manualDiscountAmount) * 100) / 100;
-  const recurringMonthlyAfter = Math.round(recurringAnnualAfter / 12 * 100) / 100;
+  // Summary monthly mirrors the per-line rule: CEIL whenever a lawn floor is
+  // pinned (WaveGuard-capped line, or the manual slice consumed all recurring
+  // headroom), so the stored/confirmed monthly never rebuilds an annual a
+  // cent under the protected floor the public ladder collects.
+  const lawnFloorPinned = manualDiscountLawnFloorPinned
+    || recurringItems.some((i) => i.postDiscountFloorAnnual !== undefined);
+  const recurringMonthlyAfter = lawnFloorPinned
+    ? Math.ceil(recurringAnnualAfter / 12 * 100) / 100
+    : Math.round(recurringAnnualAfter / 12 * 100) / 100;
 
   const oneTimeTotalGross = oneTimeItems.reduce((sum, i) => sum + (i.priceAfterDiscount ?? i.price ?? 0), 0);
   const specialtyTotalGross = specialtyItems.reduce((sum, i) => sum + (i.totalAfterDiscount ?? i.total ?? 0), 0);

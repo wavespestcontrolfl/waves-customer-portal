@@ -6,10 +6,8 @@
  * mornings", or "this weekend" into a structured booking window:
  *   { dateFrom, dateTo, timeOfDay, understood, source }
  *
- * Primary path: Claude (FAST tier, env-overridable via SCHEDULE_SEARCH_MODEL)
- * with a single forced tool call so the model returns structured dates rather
- * than prose. Falls back to a deterministic regex parser when the API key is
- * missing or the call fails — same fallback discipline as estimate-assistant.js.
+ * Primary path: OpenAI Luna with Claude Sonnet backup, returning structured
+ * JSON. Falls back to a deterministic regex parser when both providers miss.
  *
  * Everything is anchored to Eastern Time (the fleet's timezone). The caller
  * passes its own min/max horizon; this module clamps the result into it.
@@ -17,9 +15,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
-
-let Anthropic = null;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('../llm/call');
 
 const VALID_TIME_OF_DAY = new Set(['morning', 'afternoon', 'evening', 'any']);
 
@@ -149,26 +145,7 @@ function fallbackParse(query, now) {
   return { dateFrom: null, dateTo: null, timeOfDay, understood: false };
 }
 
-// ---------- Claude path ----------
-
-const SET_WINDOW_TOOL = {
-  name: 'set_date_window',
-  description: 'Record the service date range and time-of-day the customer is asking about.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      date_from: { type: 'string', description: 'Earliest acceptable date, YYYY-MM-DD in Eastern Time. For a single requested day, equal to date_to.' },
-      date_to: { type: 'string', description: 'Latest acceptable date, YYYY-MM-DD in Eastern Time.' },
-      time_of_day: {
-        type: 'string',
-        enum: ['morning', 'afternoon', 'evening', 'any'],
-        description: 'Preferred time of day. morning = before noon, afternoon = 12pm-5pm, evening = late afternoon. "any" when unspecified.',
-      },
-      understood: { type: 'boolean', description: 'true if the message expressed a real date or time preference; false if it had no schedulable meaning.' },
-    },
-    required: ['date_from', 'date_to', 'time_of_day', 'understood'],
-  },
-};
+// ---------- Cross-provider AI path ----------
 
 function buildSystemPrompt(now) {
   const todayStr = etDateString(now);
@@ -184,24 +161,19 @@ Interpret relative phrases against today:
 - A single requested day uses the same value for date_from and date_to.
 - If no specific date is mentioned, set understood=false and use a sensible near-term window (today through ~14 days out).
 
-Always respond by calling the set_date_window tool. Never write prose.`;
+Return only JSON with this shape:
+{"date_from":"YYYY-MM-DD","date_to":"YYYY-MM-DD","time_of_day":"morning|afternoon|evening|any","understood":true}`;
 }
 
-async function parseWithAnthropic(query, now) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const response = await client.messages.create({
-    model: process.env.SCHEDULE_SEARCH_MODEL || MODELS.FAST,
-    max_tokens: 300,
+async function parseWithAI(query, now) {
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    maxTokens: 300,
+    jsonMode: true,
     system: buildSystemPrompt(now),
-    tools: [SET_WINDOW_TOOL],
-    tool_choice: { type: 'tool', name: 'set_date_window' },
-    messages: [{ role: 'user', content: String(query || '').slice(0, 500) }],
+    text: String(query || '').slice(0, 500),
   });
-  const toolUse = (Array.isArray(response.content) ? response.content : [])
-    .find((part) => part.type === 'tool_use' && part.name === 'set_date_window');
-  if (!toolUse || !toolUse.input) return null;
-  const { date_from, date_to, time_of_day, understood } = toolUse.input;
+  if (!response.ok || !response.json) return null;
+  const { date_from, date_to, time_of_day, understood } = response.json;
   if (!isYmd(date_from) || !isYmd(date_to)) return null;
   return {
     dateFrom: date_from,
@@ -232,8 +204,8 @@ async function parseWhen(query, opts = {}) {
   let parsed = null;
   let source = 'fallback';
   try {
-    parsed = await parseWithAnthropic(query, now);
-    if (parsed) source = 'anthropic';
+    parsed = await parseWithAI(query, now);
+    if (parsed) source = 'ai';
   } catch (err) {
     logger.warn(`[parse-when] AI parse failed: ${err.message}`);
   }

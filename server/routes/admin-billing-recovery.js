@@ -140,9 +140,13 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
   // bill route's round-7 exemption): per-application customers are on autopay BY
   // DESIGN — the saved card is HOW per-visit charges collect and the monthly cron
   // skips them — so their leaked visits are exactly what this workbench recovers
-  // and must surface in the UI, not just be billable by direct POST.
+  // and must surface in the UI, not just be billable by direct POST. The
+  // explicit per_visit/one_time lanes (billing lane build, 2026-07-17) join the
+  // exemption for the same reason: the cron skips them too (GUARD 3b), so an
+  // active saved method never means monthly coverage and their uninvoiced
+  // completions are genuine leaks this workbench must surface (Codex r7).
   if (perAppAware) {
-    q.whereRaw(`(NOT ${autopay.sql} OR c.billing_mode = 'per_application')`, [autopay.binding]);
+    q.whereRaw(`(NOT ${autopay.sql} OR c.billing_mode IN ('per_application', 'per_visit', 'one_time'))`, [autopay.binding]);
   } else {
     q.whereRaw(`NOT ${autopay.sql}`, [autopay.binding]); // exclude active-autopay customers
   }
@@ -391,10 +395,12 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
       // is HOW each visit charge collects, and the monthly cron skips them
       // (GUARD 3b), so "autopay = monthly-covered" is exactly wrong for
       // them: a per-app visit that completion failed to invoice/charge is
-      // THE case this workbench exists to recover (Codex round-7).
-      // annual_prepay stays blocked (uncovered visits belong to the renewal
-      // flow, covered ones to the prepaid stamps).
-      if (recoveryBillingMode !== 'per_application') {
+      // THE case this workbench exists to recover (Codex round-7). The
+      // explicit per_visit/one_time lanes get the same exemption — the cron
+      // skips them too, and their uninvoiced completions are real leaks
+      // (Codex billing-lane r7). annual_prepay stays blocked (uncovered
+      // visits belong to the renewal flow, covered ones to prepaid stamps).
+      if (!['per_application', 'per_visit', 'one_time'].includes(recoveryBillingMode)) {
         return res.status(409).json({ error: 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.' });
       }
     }

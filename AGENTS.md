@@ -160,6 +160,18 @@ finding and warns on P1. Reviewers must return JSON matching
   `async (req, res) => { … }` that isn't awaited and isn't deliberately
   fire-and-forget. Mark intentional fire-and-forget with
   `void someAsync().catch(err => logger.error(...))`.
+- **No `{ virtual: true }` jest mocks of real modules.** A virtual mock
+  registers under a synthesized name key instead of the resolved module
+  path; in a shared jest worker whose resolver was warmed by an earlier
+  suite, the module under test can require the REAL package and bypass
+  the mock — order-dependent, so it passes locally and goes red only in
+  CI (2026-07-18 incident: `google-ads-sync.test.js` drove the real
+  `google-ads-api` into a live OAuth call, #2843). Flag (P1) any
+  `jest.mock(name, factory, { virtual: true })` where `name` actually
+  resolves (installed package or existing relative file). `virtual` is
+  only for modules that genuinely don't exist — e.g. the
+  `./stripe-webhook-helpers` mock in
+  `server/tests/stripe-webhook-refund-failed.test.js:29`.
 - **Feature-flag fail-closed.** `useFeatureFlag` in
   `client/src/hooks/useFeatureFlag.js` is fail-closed by design (returns
   `false` on API error). Adding `|| true`, `?? true`, `localStorage`
@@ -824,14 +836,15 @@ finding and warns on P1. Reviewers must return JSON matching
   - 14px text minimum on both. Customer-facing brand styling
     (Luckiest Guy / Baloo 2 / gold pill / mascot) is **not** applied
     inside `/admin/*`.
-- **Anthropic model IDs.** Imported from `server/config/models.js`
-  (`FLAGSHIP` / `WORKHORSE` / `FAST` / `VISION`). The three reasoning
-  tiers currently resolve to `claude-opus-4-7`; `VISION` resolves to
-  `claude-sonnet-4-6` because Opus 4.7 removed the `temperature`
-  parameter and image scoring needs it. Tiers are env-swappable
-  (`MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VISION`,
-  `INTELLIGENCE_BAR_MODEL` / `INTELLIGENCE_BAR_TECH_MODEL`). Never
-  hardcode a model ID outside this file.
+- **AI model IDs and generated-text fallback.** All IDs live in
+  `server/config/models.js`. Cost-aware Anthropic tiers are Opus 4.8 for
+  `FLAGSHIP`/`DEEP`, Sonnet 5 for `WORKHORSE`/`FAST`/`VOICE`, Sonnet 4.6 for
+  `VISION`, and explicit-only Fable 5 for `EXTREME`. Generated text uses a
+  named `TEXT_POLICIES` entry through `services/llm/call.js`; every policy
+  must cross OpenAI and Anthropic, and the dispatcher rejects a same-provider
+  fallback. Reports are Sol → Opus; customer/content copy is Sonnet → Terra;
+  structured high-volume work is Luna → Sonnet. Never hardcode a model ID
+  outside the registry.
 - **Feature flags.** `useFeatureFlag('<key>')` from
   `client/src/hooks/useFeatureFlag.js`. DB-backed
   (`user_feature_flags`), session-cached, fails closed. No localStorage,

@@ -64,6 +64,84 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
   }
 }
 
+// Trust gates shared by the FTS and ILIKE paths of unifiedSearch.
+// Agent-facing callers pass trustedOnly so red pages awaiting review never
+// feed an agent; the admin browse/review UI omits it and sees everything.
+function applyKbTrustGate(queryBuilder, trustedOnly) {
+  if (!trustedOnly) return queryBuilder;
+  // Wiki-sync MIRRORS inherit the wiki's review gate on agent-facing
+  // reads; merely-linked curated articles stay visible.
+  return queryBuilder.whereNot(function untrustedWikiMirror() {
+    this.where('source', 'wiki-sync').whereIn(
+      'wiki_entry_id',
+      db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
+    );
+  });
+}
+
+function applyWikiTrustGate(queryBuilder, trustedOnly) {
+  if (!trustedOnly) return queryBuilder;
+  return queryBuilder.whereIn('review_status', TRUSTED_STATUSES);
+}
+
+const KB_SEARCH_COLUMNS = ['id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id'];
+const WIKI_SEARCH_COLUMNS = ['id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status'];
+
+function kbFtsQuery(q, trustedOnly, limit) {
+  return applyKbTrustGate(
+    db('knowledge_base')
+      .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q])
+      .where({ status: 'active' }),
+    trustedOnly,
+  )
+    .select(...KB_SEARCH_COLUMNS, db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]))
+    .orderBy('rank', 'desc')
+    .orderBy('updated_at', 'desc')
+    .limit(limit);
+}
+
+function kbIlikeQuery(term, trustedOnly, limit) {
+  return applyKbTrustGate(
+    db('knowledge_base')
+      .where(function () {
+        this.where('title', 'ilike', term)
+          .orWhere('content', 'ilike', term);
+      })
+      .where({ status: 'active' }),
+    trustedOnly,
+  )
+    .orderBy('updated_at', 'desc')
+    .limit(limit)
+    .select(...KB_SEARCH_COLUMNS);
+}
+
+function wikiFtsQuery(q, trustedOnly, limit) {
+  return applyWikiTrustGate(
+    db('knowledge_entries')
+      .whereRaw("search_vector @@ websearch_to_tsquery('english', ?)", [q]),
+    trustedOnly,
+  )
+    .select(...WIKI_SEARCH_COLUMNS, db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [q]))
+    .orderBy('rank', 'desc')
+    .orderBy('data_point_count', 'desc')
+    .limit(limit);
+}
+
+function wikiIlikeQuery(term, trustedOnly, limit) {
+  return applyWikiTrustGate(
+    db('knowledge_entries')
+      .where(function () {
+        this.where('title', 'ilike', term)
+          .orWhere('content', 'ilike', term)
+          .orWhere('summary', 'ilike', term);
+      }),
+    trustedOnly,
+  )
+    .orderBy('data_point_count', 'desc')
+    .limit(limit)
+    .select(...WIKI_SEARCH_COLUMNS);
+}
+
 // ══════════════════════════════════════════════════════════════
 // KNOWLEDGE BRIDGE SERVICE
 // ══════════════════════════════════════════════════════════════
@@ -208,67 +286,74 @@ const KnowledgeBridge = {
 
   // ────────────────────────────────────────────────────────────
   // unifiedSearch — search both knowledge systems at once
+  // Ranked full-text first (websearch_to_tsquery + ts_rank over the
+  // generated search_vector columns); each corpus INDEPENDENTLY falls
+  // back to the historical ILIKE substring path when its FTS matches
+  // nothing — stopword-only queries and partial tokens ("K-Fl") still
+  // answer, one corpus's FTS hits never suppress the other's substring
+  // matches, and a missing search_vector column degrades instead of
+  // erroring.
   // ────────────────────────────────────────────────────────────
   async unifiedSearch(query, options = {}) {
     if (!query?.trim()) return { claudeopedia: [], wiki: [], bridged: [] };
 
-    const term = `%${query.trim().toLowerCase()}%`;
+    const q = query.trim();
+    const term = `%${q.toLowerCase()}%`;
     const limit = Math.min(options.limit || 20, 50);
 
-    // Search Claudeopedia
-    let claudeopediaQuery = db('knowledge_base')
-      .where(function () {
-        this.where('title', 'ilike', term)
-          .orWhere('content', 'ilike', term);
-      })
-      .where({ status: 'active' });
-    if (options.trustedOnly) {
-      // Wiki-sync MIRRORS inherit the wiki's review gate on agent-facing
-      // reads; merely-linked curated articles stay visible.
-      claudeopediaQuery = claudeopediaQuery.whereNot(function untrustedWikiMirror() {
-        this.where('source', 'wiki-sync').whereIn(
-          'wiki_entry_id',
-          db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
-        );
-      });
-    }
-    const claudeopedia = await claudeopediaQuery
-      .orderBy('updated_at', 'desc')
-      .limit(limit)
-      .select('id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id');
+    let claudeopedia = [];
+    let wiki = [];
+    let kbMethod = 'fts';
+    let wikiMethod = 'fts';
 
-    // Search Agronomic Wiki. Agent-facing callers pass trustedOnly so red
-    // pages awaiting review never feed an agent; the admin browse/review UI
-    // omits it and sees everything.
-    let wikiQuery = db('knowledge_entries')
-      .where(function () {
-        this.where('title', 'ilike', term)
-          .orWhere('content', 'ilike', term)
-          .orWhere('summary', 'ilike', term);
-      });
-    if (options.trustedOnly) {
-      wikiQuery = wikiQuery.whereIn('review_status', TRUSTED_STATUSES);
+    try {
+      claudeopedia = await kbFtsQuery(q, options.trustedOnly, limit);
+    } catch (err) {
+      logger.warn(`[knowledge-bridge] KB FTS search failed, falling back to ILIKE: ${err.message}`);
     }
-    const wiki = await wikiQuery
-      .orderBy('data_point_count', 'desc')
-      .limit(limit)
-      .select('id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status');
+    if (!claudeopedia.length) {
+      kbMethod = 'ilike';
+      claudeopedia = await kbIlikeQuery(term, options.trustedOnly, limit);
+    }
 
-    // Find bridged pairs
-    const allKbIds = claudeopedia.map(e => e.id).filter(Boolean);
-    const allWikiIds = wiki.map(e => e.id).filter(Boolean);
-    const bridges = (allKbIds.length || allWikiIds.length) ? await db('knowledge_bridge')
-      .where(function () {
-        if (allKbIds.length) this.whereIn('kb_entry_id', allKbIds);
-        if (allWikiIds.length) this.orWhereIn('wiki_entry_id', allWikiIds);
-      })
-      .select('*') : [];
+    try {
+      wiki = await wikiFtsQuery(q, options.trustedOnly, limit);
+    } catch (err) {
+      logger.warn(`[knowledge-bridge] wiki FTS search failed, falling back to ILIKE: ${err.message}`);
+    }
+    if (!wiki.length) {
+      wikiMethod = 'ilike';
+      wiki = await wikiIlikeQuery(term, options.trustedOnly, limit);
+    }
+
+    const searchMethod = kbMethod === wikiMethod ? kbMethod : 'mixed';
+
+    // Find bridged pairs. Migration 20260718000004 reshaped knowledge_bridge
+    // to the kb_entry_id/wiki_entry_id schema this service targets (000015's
+    // source/target shape had shipped instead, breaking every bridge
+    // read/write). The try/catch stays as defense in depth: a schema mismatch
+    // must degrade to bridged:[] — never take the whole knowledge tool down,
+    // which is what happened from April until lane A1's guard.
+    let bridges = [];
+    try {
+      const allKbIds = claudeopedia.map(e => e.id).filter(Boolean);
+      const allWikiIds = wiki.map(e => e.id).filter(Boolean);
+      bridges = (allKbIds.length || allWikiIds.length) ? await db('knowledge_bridge')
+        .where(function () {
+          if (allKbIds.length) this.whereIn('kb_entry_id', allKbIds);
+          if (allWikiIds.length) this.orWhereIn('wiki_entry_id', allWikiIds);
+        })
+        .select('*') : [];
+    } catch (err) {
+      logger.warn(`[knowledge-bridge] bridged-pairs lookup failed (schema drift): ${err.message}`);
+    }
 
     return {
       claudeopedia: claudeopedia.map(e => ({ ...e, source: 'claudeopedia' })),
       wiki: wiki.map(e => ({ ...e, source: 'agronomic_wiki' })),
       bridged: bridges,
       totalResults: claudeopedia.length + wiki.length,
+      searchMethod,
     };
   },
 

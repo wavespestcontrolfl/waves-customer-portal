@@ -4,6 +4,7 @@ import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import useIsMobile from "../../hooks/useIsMobile";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -456,6 +457,9 @@ function Input({ label, value, onChange, type, placeholder, style, options }) {
 function Modal({ title, onClose, children }) {
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
       style={{
         position: "fixed",
         inset: 0,
@@ -464,6 +468,11 @@ function Modal({ title, onClose, children }) {
         alignItems: "center",
         justifyContent: "center",
         zIndex: 1000,
+        boxSizing: "border-box",
+        paddingTop: "max(16px, env(safe-area-inset-top, 0px))",
+        paddingRight: "max(16px, env(safe-area-inset-right, 0px))",
+        paddingBottom: "max(16px, env(safe-area-inset-bottom, 0px))",
+        paddingLeft: "max(16px, env(safe-area-inset-left, 0px))",
       }}
       onClick={onClose}
     >
@@ -474,17 +483,20 @@ function Modal({ title, onClose, children }) {
           backgroundColor: C.card,
           borderRadius: 16,
           border: `1px solid ${C.border}`,
-          padding: 24,
+          padding: "clamp(16px, 4vw, 24px)",
           maxWidth: 520,
-          width: "90%",
-          maxHeight: "80vh",
+          width: "100%",
+          maxHeight: "100%",
           overflowY: "auto",
+          boxSizing: "border-box",
+          overscrollBehavior: "contain",
         }}
       >
         {" "}
         <div
           style={{
             display: "flex",
+            alignItems: "center",
             justifyContent: "space-between",
             marginBottom: 16,
           }}
@@ -494,13 +506,21 @@ function Modal({ title, onClose, children }) {
             {title}
           </h3>{" "}
           <button
+            type="button"
             onClick={onClose}
+            aria-label="Close"
             style={{
               background: "none",
               border: "none",
               color: C.muted,
               cursor: "pointer",
               fontSize: 20,
+              width: 44,
+              height: 44,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: 8,
             }}
           >
             x
@@ -654,6 +674,7 @@ export function LeadsSection() {
   const navigate = useNavigate();
   const [, setSearchParams] = useSearchParams();
   const isMobile = useIsMobile();
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const [tab, setTab] = useState("pipeline");
   const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
@@ -1283,7 +1304,8 @@ export function LeadsSection() {
                 borderRadius: 8,
                 padding: "6px 12px",
                 color: C.text,
-                fontSize: 13,
+                height: isMobile ? 44 : undefined,
+                fontSize: isMobile ? 16 : 13,
               }}
             >
               {" "}
@@ -1308,8 +1330,10 @@ export function LeadsSection() {
               borderRadius: 8,
               padding: "8px 12px",
               color: C.text,
-              fontSize: 14,
-              minWidth: 200,
+              height: isMobile ? 44 : undefined,
+              fontSize: isMobile ? 16 : 14,
+              minWidth: isMobile ? 0 : 200,
+              width: isMobile ? "100%" : undefined,
             }}
           />
           {pipelineView === "table" && (
@@ -1324,7 +1348,8 @@ export function LeadsSection() {
                 borderRadius: 8,
                 padding: "6px 12px",
                 color: C.text,
-                fontSize: 13,
+                height: isMobile ? 44 : undefined,
+                fontSize: isMobile ? 16 : 13,
               }}
             >
               {" "}
@@ -2131,6 +2156,15 @@ export function LeadsSection() {
                                   >
                                     Create Estimate
                                   </Btn>{" "}
+                                  {agentEstimateEnabled && OPEN_FILTER_STATUSES.includes(lead.status) && (
+                                    <Btn
+                                      small
+                                      color={C.purple}
+                                      onClick={() => navigate(`/admin/agent-estimate?leadId=${encodeURIComponent(lead.id)}`)}
+                                    >
+                                      Agent Estimate
+                                    </Btn>
+                                  )}{" "}
                                   <Btn
                                     small
                                     color={C.amber}
