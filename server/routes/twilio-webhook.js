@@ -354,17 +354,18 @@ router.post('/sms', async (req, res) => {
 
     // ESTIMATOR SMS DRAFTS (GATE_ESTIMATOR_SMS_DRAFTS, default OFF): a
     // quote-flavored inbound text runs the estimator engine against the
-    // thread — priced DRAFT + one phone-scoped bell, never a send. Cheap by
-    // construction (regex prefilter → FAST classifier → engine) and
-    // fire-and-forget so TwiML latency is untouched. Intake-machine replies
-    // return above and draft through lead-intake's own engine handoff.
+    // thread — priced DRAFT + one phone-scoped bell, never a send. The
+    // AWAITED part is cheap and bounded (regex prefilter → FAST classifier
+    // → one durable owed-quote bell); the DEEP composer detaches inside
+    // startSmsThreadDraft AFTER that bell exists, so a restart mid-compose
+    // leaves the manual task instead of a silent loss. Intake-machine
+    // replies return above and draft through lead-intake's own handoff.
     try {
-      const { smsThreadDraftsEnabled, maybeDraftEstimateForSmsThread } = require('../services/estimator-engine/sms-thread');
+      const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
       if (smsThreadDraftsEnabled() && Body && String(Body).trim()) {
-        maybeDraftEstimateForSmsThread({ phone: From, triggerBody: Body })
-          .catch((e) => logger.warn(`[estimator-sms] thread draft failed: ${e.message}`));
+        await startSmsThreadDraft({ phone: From, triggerBody: Body });
       }
-    } catch (e) { logger.warn(`[estimator-sms] trigger setup failed: ${e.message}`); }
+    } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
 
     // DOMAIN TRACKING — new lead from a domain-specific number
     if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {

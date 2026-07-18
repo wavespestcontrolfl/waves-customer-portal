@@ -456,14 +456,30 @@ async function handleLeadInquiry(email, classification) {
     });
     // A follow-up email often supplies exactly what the first lacked (phone,
     // address, concrete service) — behind the gate, try the same draft path
-    // with gaps back-filled from the lead row. The confidence floor still
-    // applies (this branch sits before the shared guards), and the phone
-    // duplicate guard prevents double-drafting an already-quoted lead.
+    // with gaps back-filled from the lead row. This branch sits before the
+    // shared guards, so it re-applies the two that matter here: the
+    // confidence floor, and the live-customer check — a lead that belongs
+    // to a now-live (or inactive-CRM) customer must not be priced as a
+    // prospect without membership context. The phone duplicate guard
+    // prevents double-drafting an already-quoted lead.
     let followUpDraft = null;
     const followUpConfidence = Number(classification.confidence);
+    let followUpCustomerMatch = { live: null, inactive: null };
     if (emailQuoteDraftsEnabled()
       && Number.isFinite(followUpConfidence)
       && followUpConfidence >= leadMinConfidence()) {
+      try {
+        followUpCustomerMatch = await findExistingCustomerForLead(email, extracted);
+      } catch (e) {
+        // Unknown customer state must not price as a prospect — skip.
+        followUpCustomerMatch = { live: true, inactive: null };
+      }
+    }
+    if (emailQuoteDraftsEnabled()
+      && Number.isFinite(followUpConfidence)
+      && followUpConfidence >= leadMinConfidence()
+      && !followUpCustomerMatch.live
+      && !followUpCustomerMatch.inactive) {
       try {
         followUpDraft = await maybeDraftEstimateFromEmailLead({
           email,

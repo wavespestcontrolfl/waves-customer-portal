@@ -8,12 +8,20 @@
  * the LLM composes intent only, drafts are never sent, and every failure
  * degrades to a bell instead of a silent drop.
  *
+ * Durability contract (mirrors the call pipeline's synchronous generic
+ * bell): startSmsThreadDraft AWAITS the cheap phase — gates, quote-intent
+ * classifier, and a durable owed-quote bell — and only then detaches the
+ * DEEP composer run. A restart mid-compose leaves the bell as the manual
+ * task; on success the engine upgrades that same bell in place (thread-key
+ * dedupe), so there is never a second ring and never a silent loss.
+ *
  * Trigger cheapness: every inbound SMS passes through here, so a regex
  * prefilter gates the FAST-tier confirm classifier, which gates the DEEP
- * composer. Repeated quote-y texts on one number dedupe three ways: the
- * open-automated-estimate precheck (skip before any model call), the
- * phone-advisory-locked duplicate guard at draft time, and the
- * phone-scoped bell key (`sms:<last10>`).
+ * composer. There is deliberately NO phone-only duplicate precheck: an open
+ * estimate can be for a DIFFERENT property, and only the composer can read
+ * the address out of the thread — the draft-time guard keeps its
+ * address-aware bypass, and true duplicates exit through the blocked path's
+ * single thread-keyed bell.
  */
 
 const logger = require('../logger');
@@ -92,47 +100,18 @@ function smsOrigin(threadKey) {
   };
 }
 
-/**
- * Non-throwing, mirrors maybeDraftEstimateForCall's contract. `skipIntentGate`
- * is for callers that already established quote intent (the lead-intake state
- * machine, where the customer explicitly picked a service).
- */
-async function maybeDraftEstimateForSmsThread({ phone, triggerBody = '', skipIntentGate = false, dryRun = false }) {
-  const digits = last10(phone);
-  const result = { phone: digits ? `…${digits.slice(-4)}` : null, lane: null, created: false, skipped: null };
+// The heavy detached phase: context build → shared pipeline. Non-throwing.
+async function runThreadDraft({ phone, digits, triggerBody, origin, dryRun }) {
+  const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
-    if (!smsThreadDraftsEnabled()) {
-      result.skipped = 'gate_off';
-      return result;
-    }
-    if (!digits) {
-      result.skipped = 'no_usable_phone';
-      return result;
-    }
-    if (!skipIntentGate) {
-      const signal = await threadQuoteSignal(triggerBody);
-      if (!signal.quoteRequest) {
-        result.skipped = `no_quote_intent_${signal.method}`;
-        return result;
-      }
-    }
-
-    // No phone-only duplicate precheck here: an open estimate on this phone
-    // can be for a DIFFERENT property (multi-property owners are real), and
-    // only the composer can read the address out of the thread. The
-    // draft-time guard has the address-aware bypass; a true duplicate exits
-    // through the blocked path's single thread-keyed bell. Cost is bounded
-    // by the FAST quote-intent gate above — only genuine quote requests
-    // reach the DEEP composer.
     const { buildSmsThreadContext } = require('./context-builder');
     const { runDraftPipeline, notify } = require('./index');
-    const origin = smsOrigin(`sms:${digits}`);
     const context = await buildSmsThreadContext({ phone, triggerBody });
     if (context.error) {
       result.lane = 'red';
       result.reasons = [context.error];
-      // Intent was established (gate or classifier) — the request must not
-      // die silently just because the thread was unreadable/ambiguous.
+      // Quote intent was already established — the request must not die
+      // silently because the thread was unreadable/ambiguous/unloadable.
       if (!dryRun) {
         await notify({
           call: null,
@@ -147,7 +126,6 @@ async function maybeDraftEstimateForSmsThread({ phone, triggerBody = '', skipInt
       return result;
     }
     context.origin = origin;
-
     return await runDraftPipeline({
       context,
       origin,
@@ -164,8 +142,66 @@ async function maybeDraftEstimateForSmsThread({ phone, triggerBody = '', skipInt
   }
 }
 
+/**
+ * The awaited entry (callers: Twilio webhook, lead-intake handoff). Cheap
+ * and bounded — gate checks, the FAST classifier, and one durable bell
+ * insert; the DEEP composer runs detached afterwards (returned as
+ * `draftPromise` for tests/replay, deliberately not awaited by callers).
+ * `skipIntentGate` is for callers that already established quote intent
+ * (the lead-intake state machine, where the customer picked a service).
+ */
+async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = false, dryRun = false }) {
+  const digits = last10(phone);
+  const result = { phone: digits ? `…${digits.slice(-4)}` : null, started: false, skipped: null };
+  try {
+    if (!smsThreadDraftsEnabled()) {
+      result.skipped = 'gate_off';
+      return result;
+    }
+    if (!digits) {
+      result.skipped = 'no_usable_phone';
+      return result;
+    }
+    if (!skipIntentGate) {
+      const signal = await threadQuoteSignal(triggerBody);
+      if (!signal.quoteRequest) {
+        result.skipped = `no_quote_intent_${signal.method}`;
+        return result;
+      }
+    }
+    const origin = smsOrigin(`sms:${digits}`);
+    if (!dryRun) {
+      // Durable owed-quote task BEFORE any detached work — a restart or
+      // deploy mid-compose must leave a bell, never a silent loss. The
+      // pipeline upgrades this same bell in place on success; red-lane and
+      // blocked outcomes leave it standing (same manual instruction).
+      const { notify } = require('./index');
+      await notify({
+        call: null,
+        context: null,
+        lane: 'red',
+        quotePromised: true,
+        threadKey: origin.threadKey,
+        title: origin.strings.redTitle,
+        body: 'A customer text is asking for a quote. The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.',
+      });
+    }
+    result.started = true;
+    result.draftPromise = runThreadDraft({ phone, digits, triggerBody, origin, dryRun })
+      .catch((err) => {
+        logger.error(`[estimator-sms] detached draft failed: ${err.message}`);
+        return null;
+      });
+    return result;
+  } catch (err) {
+    logger.error(`[estimator-sms] start failed: ${err.message}`);
+    result.skipped = result.skipped || `error: ${err.message}`;
+    return result;
+  }
+}
+
 module.exports = {
   smsThreadDraftsEnabled,
-  maybeDraftEstimateForSmsThread,
-  _private: { threadQuoteSignal, smsOrigin, QUOTE_HINT_RE },
+  startSmsThreadDraft,
+  _private: { threadQuoteSignal, smsOrigin, runThreadDraft, QUOTE_HINT_RE },
 };

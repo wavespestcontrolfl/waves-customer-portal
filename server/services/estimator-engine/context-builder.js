@@ -314,6 +314,10 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBod
   if (!last10(phone)) return { error: 'no_usable_phone' };
   const customerMatch = await loadCustomerByPhone(phone, null);
   if (customerMatch.ambiguous) return { error: 'ambiguous_phone' };
+  // A FAILED lookup is not a no-match: an existing member could be hiding
+  // behind the error, and pricing them as a prospect would drop membership
+  // discounts and fee waivers. Red out; the bell owns the manual path.
+  if (customerMatch.unavailable) return { error: 'customer_lookup_unavailable' };
   const customer = customerMatch.customer;
   const before = new Date(triggerAt);
   const smsSince = new Date(before.getTime() - 30 * 86400000);

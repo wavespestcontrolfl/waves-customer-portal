@@ -2,10 +2,12 @@
  * Estimator SMS-thread entry (GATE_ESTIMATOR_SMS_DRAFTS).
  *
  * Pins: the double gate (SMS flag AND engine flag), the cheap trigger
- * ladder (regex prefilter → FAST classifier → engine, fail-closed), the
- * open-automated-estimate precheck that skips before any model call, the
- * unreadable-thread red bell keyed on the phone-scoped thread key, and the
- * happy-path handoff into the shared pipeline with the SMS origin.
+ * ladder (regex prefilter → FAST classifier, fail-closed), the durability
+ * contract (the awaited phase inserts ONE owed-quote bell on the
+ * phone-scoped thread key BEFORE any detached composer work), the
+ * triggering text riding into the context build, the unreadable-thread red
+ * bell, and that there is NO phone-only duplicate precheck — the
+ * draft-time guard owns duplicates so different-property quotes survive.
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -37,13 +39,8 @@ jest.mock('../services/estimator-engine/context-builder', () => ({
   buildSmsThreadContext: (...args) => mockBuildSmsThreadContext(...args),
 }));
 
-const mockDuplicateCheck = jest.fn();
-jest.mock('../services/estimate-automation-duplicates', () => ({
-  blockIfAutomatedEstimateDuplicate: (...args) => mockDuplicateCheck(...args),
-}));
-
 const {
-  maybeDraftEstimateForSmsThread,
+  startSmsThreadDraft,
   smsThreadDraftsEnabled,
   _private,
 } = require('../services/estimator-engine/sms-thread');
@@ -54,10 +51,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_ESTIMATOR_SMS_DRAFTS = 'true';
   mockEngineEnabled.mockReturnValue(true);
-  mockDuplicateCheck.mockResolvedValue(null);
   mockDispatch.mockResolvedValue({ ok: true, json: { quote_request: true, confidence: 0.9 } });
   mockBuildSmsThreadContext.mockResolvedValue({ call: null, transcript: 'x'.repeat(60), phone: PHONE });
   mockRunDraftPipeline.mockImplementation(async ({ result }) => ({ ...result, lane: 'yellow', created: true }));
+  mockNotify.mockResolvedValue(undefined);
 });
 
 afterAll(() => {
@@ -75,53 +72,67 @@ describe('smsThreadDraftsEnabled', () => {
   });
 });
 
-describe('maybeDraftEstimateForSmsThread', () => {
+describe('startSmsThreadDraft', () => {
   test('gate off skips before any work', async () => {
     delete process.env.GATE_ESTIMATOR_SMS_DRAFTS;
-    const result = await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'how much for pest control?' });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much for pest control?' });
+    expect(result.started).toBe(false);
     expect(result.skipped).toBe('gate_off');
     expect(mockDispatch).not.toHaveBeenCalled();
-    expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
   });
 
-  test('non-quote chatter never reaches the classifier or the engine', async () => {
-    const result = await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'Thanks! See you tomorrow.' });
+  test('non-quote chatter never reaches the classifier, a bell, or the engine', async () => {
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'Thanks! See you tomorrow.' });
     expect(result.skipped).toBe('no_quote_intent_regex');
     expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 
   test('classifier rejection (or failure) fails closed', async () => {
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { quote_request: false, confidence: 0.9 } });
-    let result = await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'is my service scheduled? no ants lately' });
+    let result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'is my service scheduled? no ants lately' });
     expect(result.skipped).toBe('no_quote_intent_ai');
     mockDispatch.mockRejectedValueOnce(new Error('llm down'));
-    result = await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'can I get a quote for pest control' });
+    result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'can I get a quote for pest control' });
     expect(result.skipped).toBe('no_quote_intent_ai_failed');
+    expect(mockNotify).not.toHaveBeenCalled();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 
+  test('the durable owed-quote bell lands in the AWAITED phase, before the detached composer', async () => {
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+    expect(result.started).toBe(true);
+    // Bell was inserted synchronously (thread-keyed), before draftPromise
+    // resolution — this is the restart-loss guarantee.
+    expect(mockNotify).toHaveBeenCalledWith(expect.objectContaining({
+      threadKey: 'sms:9415550123',
+      title: 'Quote asked by text — send it',
+      quotePromised: true,
+    }));
+    const draft = await result.draftPromise;
+    expect(draft.created).toBe(true);
+    const args = mockRunDraftPipeline.mock.calls[0][0];
+    expect(args.origin.channel).toBe('sms_thread');
+    expect(args.origin.threadKey).toBe('sms:9415550123');
+    expect(args.quotePromised).toBe(true);
+    expect(args.context.origin).toBe(args.origin);
+  });
+
   test('the triggering text rides into the context build (sms_log races the webhook insert)', async () => {
-    await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+    await result.draftPromise;
     expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
       triggerBody: 'what would a quote for pest control run me?',
     }));
   });
 
-  test('an open estimate on the phone does NOT precheck-skip — the draft-time guard owns duplicates', async () => {
-    // Multi-property owners text about a second property while an estimate
-    // is open; only the composer can read the address, so the address-aware
-    // duplicate bypass at draft time must get its chance.
-    mockDuplicateCheck.mockResolvedValue({ blocked: true, existingEstimateId: 'est-1' });
-    const result = await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'quote for lawn care please' });
-    expect(result.created).toBe(true);
-    expect(mockRunDraftPipeline).toHaveBeenCalledTimes(1);
-  });
-
-  test('unreadable thread bells red on the phone-scoped thread key', async () => {
+  test('unreadable thread bells red on the thread key from the detached phase', async () => {
     mockBuildSmsThreadContext.mockResolvedValueOnce({ error: 'ambiguous_phone' });
-    const result = await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'how much is quarterly pest control' });
-    expect(result.lane).toBe('red');
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much is quarterly pest control' });
+    const draft = await result.draftPromise;
+    expect(draft.lane).toBe('red');
     expect(mockNotify).toHaveBeenCalledWith(expect.objectContaining({
       threadKey: 'sms:9415550123',
       lane: 'red',
@@ -130,20 +141,21 @@ describe('maybeDraftEstimateForSmsThread', () => {
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 
-  test('happy path runs the shared pipeline with the SMS origin', async () => {
-    const result = await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
-    expect(result.created).toBe(true);
+  test('skipIntentGate bypasses the classifier for lead-intake handoffs', async () => {
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'anything', skipIntentGate: true });
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(result.started).toBe(true);
+    await result.draftPromise;
     expect(mockRunDraftPipeline).toHaveBeenCalledTimes(1);
-    const args = mockRunDraftPipeline.mock.calls[0][0];
-    expect(args.origin.channel).toBe('sms_thread');
-    expect(args.origin.threadKey).toBe('sms:9415550123');
-    expect(args.quotePromised).toBe(true);
-    expect(args.context.origin).toBe(args.origin);
   });
 
-  test('skipIntentGate bypasses the classifier for lead-intake handoffs', async () => {
-    await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'anything', skipIntentGate: true });
-    expect(mockDispatch).not.toHaveBeenCalled();
+  test('no phone-only duplicate precheck exists — the pipeline always gets its chance', async () => {
+    // Multi-property owners text about a second property while an estimate
+    // is open; only the composer can read the address, so the address-aware
+    // duplicate bypass at draft time must not be short-circuited here.
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for lawn care please' });
+    const draft = await result.draftPromise;
+    expect(draft.created).toBe(true);
     expect(mockRunDraftPipeline).toHaveBeenCalledTimes(1);
   });
 });
