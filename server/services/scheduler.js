@@ -422,6 +422,22 @@ function initScheduledJobs() {
   setTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
 
+  // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
+  // alerts Adam when real /book visitors keep entering the funnel but ZERO
+  // bookings confirm across a whole window (the July slot_sig outage ran 8
+  // days unnoticed exactly because this signal had no alarm). Dark until
+  // GATE_BOOKING_FUNNEL_CANARY=true (feature-gates registry); read-only on
+  // booking_intents.
+  const bookingFunnelCanaryTick = async () => {
+    try {
+      await runExclusive('booking-funnel-canary', () => require('./booking-funnel-canary').runBookingFunnelCanary());
+    } catch (err) {
+      logger.error(`[booking-funnel-canary] tick failed: ${err.message}`);
+    }
+  };
+  setTimeout(bookingFunnelCanaryTick, 90 * 1000);
+  cron.schedule('37 */6 * * *', bookingFunnelCanaryTick, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
   cron.schedule('*/5 * * * *', async () => {
     try {

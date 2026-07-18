@@ -31,6 +31,7 @@
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
+ *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -74,6 +75,13 @@ const gates = {
   // 404s while off (same unobservable-when-dark contract as payerStatements).
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
+
+  // Booking-funnel conversion canary (2026-07-18): alerts Adam when real
+  // /book funnel entries see zero conversions across a window — the July
+  // slot_sig outage signature. Opt-in in EVERY environment (it texts
+  // ADAM_PHONE; dev/test must not fire it by accident). Kill switch: unset —
+  // the scheduler tick no-ops and nothing else changes.
+  bookingFunnelCanary: process.env.GATE_BOOKING_FUNNEL_CANARY === 'true',
 
   // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
   // IB's search_field_intelligence, plus the nightly knowledge-index sync
