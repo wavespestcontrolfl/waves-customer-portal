@@ -218,10 +218,24 @@ async function extractResearchChunks(call, customer, { model = GEMINI_CALL_RESEA
 
   const { chunks, dropped } = normalizeChunks(res.json.chunks, transcript);
   const contexts = buildRedactionContexts(call, customer);
+  // topics / service_mentioned are model-produced strings too — anything
+  // redaction would alter carries PII and is useless as a facet, so it is
+  // DROPPED rather than stored with markers (quote/context keep markers:
+  // the surrounding words still carry research value there).
+  const dropIfPii = (value) => {
+    if (!value) return null;
+    if (redactChunkText(value, contexts) !== value) {
+      dropped.pii_facet_dropped = (dropped.pii_facet_dropped || 0) + 1;
+      return null;
+    }
+    return value;
+  };
   const redacted = chunks.map((c) => ({
     ...c,
     quote: redactChunkText(c.quote, contexts),
     context: c.context ? redactChunkText(c.context, contexts) : null,
+    topics: c.topics.map(dropIfPii).filter(Boolean),
+    service_mentioned: dropIfPii(c.service_mentioned),
     segment_refs: mapSegmentRefs(c.quote, call.transcript_structured),
   }));
 

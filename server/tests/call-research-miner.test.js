@@ -144,6 +144,17 @@ describe('redaction contract (double-pass, multi-context)', () => {
     expect(buildRedactionContexts({ ai_extraction_enriched: '{not json' }, null)).toHaveLength(0);
     expect(buildRedactionContexts({}, { first_name: 'Marisol' })).toHaveLength(1);
   });
+
+  test('PII-bearing topics and service_mentioned are dropped, never stored with markers', () => {
+    const contexts = [{ first_name: 'Marisol', last_name: 'Vegatron' }];
+    const probe = (value) => redactChunkText(value, contexts) === value;
+    // Mirror of the miner's dropIfPii predicate: any facet redaction would
+    // alter must not survive as a facet.
+    expect(probe('marisol callback request')).toBe(false);
+    expect(probe('call me at 941-555-0000')).toBe(false);
+    expect(probe('german roaches')).toBe(true);
+    expect(probe('prepay discount')).toBe(true);
+  });
 });
 
 describe('segment refs (mechanical jump-to-audio)', () => {
