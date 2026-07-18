@@ -28,6 +28,7 @@ const MODELS = require('../config/models');
 const MIN_CALLS = 100;
 const SCHEMA_PASS_THRESHOLD = 0.95;
 const AGREEMENT_THRESHOLD = 0.95;
+const MIN_FALLBACK_ROWS = 5;
 
 // The promotion gate must reflect ONLY the currently-deployed extractor.
 // Shadow rows from a prior model/prompt (e.g. the pre-Gemini-Pro/JSON-mode
@@ -126,7 +127,10 @@ async function main() {
   // lifecycle change, not evidence that v1 declined to auto-create at the time.
   // Filtering those out would falsely read as "v1 didn't create" and skew the
   // v1↔v2 routing-decision agreement metric.
-  const sids = rows.map((r) => r.twilio_call_sid).filter(Boolean);
+  // From the WHOLE route — semantic scoring iterates allRouteRows, so a
+  // fallback-produced call needs its real v1 outcome too, not a default
+  // v1DidCreate=false.
+  const sids = allRouteRows.map((r) => r.twilio_call_sid).filter(Boolean);
   const appts = sids.length
     ? await db('scheduled_services')
         .where((q) => sids.forEach((s) => q.orWhere('notes', 'like', `%Call SID: ${s}%`)))
@@ -251,8 +255,20 @@ async function main() {
     }
   }
 
+  // The fallback leg must be ASSESSED before the route is called safe:
+  // production routes from it during a primary outage, so an untested (or
+  // failing) fallback blocks the verdict. Threshold is deliberately small —
+  // fallback rows only accrue when the primary fails, so demanding a large
+  // sample would deadlock a healthy primary; the pre-swap bake-off plus a
+  // handful of live rescues is the assessment bar.
+  const fbValidCount = fallbackRows.filter((r) => r.v2_extraction_status === 'valid').length;
+  const fallbackAssessed = fallbackRows.length >= MIN_FALLBACK_ROWS
+    && fbValidCount / fallbackRows.length >= SCHEMA_PASS_THRESHOLD;
+  console.log(`6. Fallback leg assessed (≥ ${MIN_FALLBACK_ROWS} rows @ ≥ ${SCHEMA_PASS_THRESHOLD * 100}% valid): ${pass(fallbackAssessed)}  (${fbValidCount}/${fallbackRows.length})`);
+
   const allPass = rows.length >= MIN_CALLS && schemaPassRate >= SCHEMA_PASS_THRESHOLD &&
-    agreementRate >= AGREEMENT_THRESHOLD && smsWithoutConsent === 0 && phantomRisks.length === 0;
+    agreementRate >= AGREEMENT_THRESHOLD && smsWithoutConsent === 0 && phantomRisks.length === 0 &&
+    fallbackAssessed;
   console.log(`\n${allPass ? '✅ ALL CRITERIA PASS — safe to flip CALL_EXTRACTION_V2_DRIVES_ROUTING=true (after reviewing disagreements).' : '⛔ NOT READY — criteria above still failing.'}\n`);
 }
 
