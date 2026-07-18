@@ -400,11 +400,28 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
   if (!Number(activeCount)) throw new Error('no active sealed items — seal the eval set first');
 
-  // Default baseline: the most recent COMPLETE run on the same leg with a
-  // different prompt version — "how does this version compare to the last
-  // one we examined". Explicit baselineRunId (any complete run) overrides.
-  let baseline = baselineRunId || null;
-  if (!baseline) {
+  // Baseline: an explicit baselineRunId must identify a COMPLETE run on the
+  // SAME leg — a failed/partial baseline would compare against a fragment,
+  // and a cross-provider one would attribute the other model's behavior to
+  // this leg's history. Default: the most recent complete same-leg run with
+  // a different prompt version — "how does this version compare to the last
+  // one we examined".
+  let baseline = null;
+  if (baselineRunId) {
+    let base = null;
+    try {
+      base = await dbi('sms_sealed_eval_runs').where({ id: baselineRunId }).first();
+    } catch (err) {
+      // e.g. 22P02 — a malformed UUID must read as a bad request, not a 500.
+      base = null;
+    }
+    if (!base || base.status !== 'complete' || base.provider_leg !== providerLeg) {
+      const invalid = new Error('baselineRunId must identify a COMPLETE sealed-eval run on the same provider leg');
+      invalid.code = 'INVALID_BASELINE';
+      throw invalid;
+    }
+    baseline = base.id;
+  } else {
     const prior = await dbi('sms_sealed_eval_runs')
       .where({ provider_leg: providerLeg, status: 'complete' })
       .whereNot('prompt_version', drafter.PROMPT_VERSION)
@@ -593,14 +610,23 @@ async function getSealedExamSummary({ dbi = db } = {}) {
   const [counts] = await dbi('sms_sealed_eval_items')
     .count('* as total')
     .select(dbi.raw('COUNT(*) FILTER (WHERE active)::int as active'));
-  const runs = await dbi('sms_sealed_eval_runs').orderBy('started_at', 'desc').limit(20);
+  // The 20-row history is DISPLAY-ONLY. Each leg's headline run is queried
+  // independently — picking it out of the limited history would let 20+
+  // newer reruns (possibly all on the other leg) push a valid completed leg
+  // out of the window, and evaluateExamGate would falsely block graduation
+  // on "no completed run".
+  const [runs, ...legRows] = await Promise.all([
+    dbi('sms_sealed_eval_runs').orderBy('started_at', 'desc').limit(20),
+    ...EXAM_LEGS.map((leg) => dbi('sms_sealed_eval_runs')
+      .where({ provider_leg: leg, status: 'complete', prompt_version: currentVersion })
+      .orderBy('started_at', 'desc')
+      .first()),
+  ]);
 
   const legs = {};
-  for (const leg of EXAM_LEGS) {
-    legs[leg] = shapeRun(
-      runs.find((r) => r.provider_leg === leg && r.status === 'complete' && r.prompt_version === currentVersion)
-    ) || null;
-  }
+  EXAM_LEGS.forEach((leg, i) => {
+    legs[leg] = shapeRun(legRows[i]) || null;
+  });
   return {
     currentVersion,
     items: { active: Number(counts?.active) || 0, total: Number(counts?.total) || 0 },

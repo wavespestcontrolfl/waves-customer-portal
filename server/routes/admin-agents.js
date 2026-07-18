@@ -1670,6 +1670,7 @@ router.post('/sealed-eval/runs', requireAdmin, async (req, res, next) => {
         if (err.code === 'RUN_IN_PROGRESS') {
           return res.status(409).json({ error: err.message, resumeRunId: err.runId });
         }
+        if (err.code === 'INVALID_BASELINE') return res.status(400).json({ error: err.message });
         if (/no active sealed items/.test(err.message)) return res.status(409).json({ error: err.message });
         throw err;
       }

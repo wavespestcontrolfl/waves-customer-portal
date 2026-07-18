@@ -110,15 +110,20 @@ describe('computeSignificance — paired run comparison', () => {
  */
 function makeSummaryDb({ active = 0, total = 0, runs = [] } = {}) {
   const dbi = (table) => {
-    const builder = {};
-    const chain = () => builder;
-    for (const m of ['where', 'whereIn', 'orderBy', 'limit', 'count', 'select', 'first']) builder[m] = chain;
-    builder.then = (resolve, reject) => {
-      const rows = table === 'sms_sealed_eval_items'
-        ? [{ total: String(total), active }]
-        : runs;
-      return Promise.resolve(rows).then(resolve, reject);
+    const builder = { _wheres: [], _first: false, _limit: null };
+    const rec = (name) => (...args) => {
+      if (name === 'where' && typeof args[0] === 'object') builder._wheres.push(args[0]);
+      if (name === 'first') builder._first = true;
+      if (name === 'limit') builder._limit = args[0];
+      return builder;
     };
+    for (const m of ['where', 'whereIn', 'whereNot', 'orderBy', 'limit', 'count', 'select', 'first']) builder[m] = rec(m);
+    builder.then = (resolve, reject) => Promise.resolve().then(() => {
+      if (table === 'sms_sealed_eval_items') return [{ total: String(total), active }];
+      let rows = runs.filter((r) => builder._wheres.every((w) => Object.entries(w).every(([k, v]) => r[k] === v)));
+      if (builder._limit != null) rows = rows.slice(0, builder._limit);
+      return builder._first ? rows[0] : rows;
+    }).then(resolve, reject);
     return builder;
   };
   dbi.raw = (sql) => sql;
@@ -184,6 +189,19 @@ describe('evaluateExamGate — fail-closed blockers', () => {
     const blockers = await evaluateExamGate({ dbi });
     expect(blockers).toHaveLength(1);
     expect(blockers[0]).toMatch(/significant regression/);
+  });
+
+  test("a leg's headline run is found even when 20+ newer reruns push it out of the display window", async () => {
+    // 25 newer openai reruns + one older completed anthropic run. Selecting
+    // legs from the 20-row history would lose the anthropic run and falsely
+    // block graduation on "no completed anthropic run".
+    const filler = Array.from({ length: 25 }, (_, i) => completeRun('openai', { id: `f${i}`, started_at: `2026-07-18T05:${String(i).padStart(2, '0')}:00Z` }));
+    const dbi = makeSummaryDb({
+      active: 50,
+      total: 50,
+      runs: [...filler, completeRun('anthropic', { started_at: '2026-07-01T00:00:00Z' })],
+    });
+    await expect(evaluateExamGate({ dbi })).resolves.toEqual([]);
   });
 
   test('a stale version run does not satisfy the current-version requirement', async () => {

@@ -326,4 +326,20 @@ describe('runSealedExam — replay loop', () => {
     await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
       .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS' });
   });
+
+  test('an explicit baseline must be a COMPLETE run on the SAME leg', async () => {
+    const runs = [
+      { id: 'r-failed', status: 'failed', provider_leg: 'anthropic', prompt_version: 'v7' },
+      { id: 'r-other-leg', status: 'complete', provider_leg: 'openai', prompt_version: 'v7' },
+      { id: 'r-good', status: 'complete', provider_leg: 'anthropic', prompt_version: 'v7' },
+    ];
+    for (const bad of ['r-failed', 'r-other-leg', 'r-missing']) {
+      const dbi = makeRunnerDb({ runs, items: [item('i1')] });
+      await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', baselineRunId: bad, dbi }))
+        .rejects.toMatchObject({ code: 'INVALID_BASELINE' });
+    }
+    const dbi = makeRunnerDb({ runs, items: [item('i1')] });
+    const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', baselineRunId: 'r-good', dbi });
+    expect(run.baseline_run_id).toBe('r-good');
+  });
 });
