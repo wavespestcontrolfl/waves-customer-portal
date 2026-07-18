@@ -131,6 +131,15 @@ describe('redaction contract (double-pass, multi-context)', () => {
     expect(out).not.toContain('Marisol');
   });
 
+  test('unsplit name_full from the persisted extraction schema still redacts standalone first names', () => {
+    const call = { ai_extraction_enriched: { caller: { name_full: 'Rodrigo Quintanilla' } } };
+    const contexts = buildRedactionContexts(call, null);
+    expect(contexts).toHaveLength(1);
+    const out = redactChunkText('Rodrigo asked about the Quintanilla account this morning', contexts);
+    expect(out).not.toContain('Rodrigo');
+    expect(out).not.toContain('Quintanilla');
+  });
+
   test('malformed enriched payloads degrade to the customer context alone', () => {
     expect(buildRedactionContexts({ ai_extraction_enriched: '{not json' }, null)).toHaveLength(0);
     expect(buildRedactionContexts({}, { first_name: 'Marisol' })).toHaveLength(1);

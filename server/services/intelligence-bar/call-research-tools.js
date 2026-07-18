@@ -10,7 +10,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { parseETDateTime, addETDays, etDateString } = require('../../utils/datetime-et');
+const { parseETDateTime, etDateString } = require('../../utils/datetime-et');
 const { RESEARCH_TAGS } = require('../call-research-taxonomy');
 
 // Topic aggregation counts in JS over a bounded scan (corpus is thousands
@@ -75,6 +75,18 @@ function parseTopics(value) {
   return [];
 }
 
+// ET midnight for a YYYY-MM-DD string, offset by `plusDays` calendar days
+// (Date.UTC handles month/year rollover). Returns null on malformed input
+// so a bad date silently drops the filter instead of crashing the query.
+// NOT addETDays — that helper anchors at noon UTC, which would leak the
+// following morning's calls into a date_to bound.
+function etDayBoundary(dateStr, plusDays = 0) {
+  const [y, m, d] = String(dateStr).split('-').map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+  const day = new Date(Date.UTC(y, m - 1, d + plusDays)).toISOString().slice(0, 10);
+  return parseETDateTime(`${day}T00:00:00`);
+}
+
 // Shared filter set for both modes. ET day boundaries via datetime-et so a
 // "June" window doesn't leak evening calls across the UTC date line.
 function baseQuery(input) {
@@ -82,12 +94,10 @@ function baseQuery(input) {
   if (Array.isArray(input.tags) && input.tags.length) {
     q = q.whereIn('tag', input.tags.filter((t) => RESEARCH_TAGS.includes(t)));
   }
-  if (input.date_from) {
-    q = q.where('occurred_at', '>=', parseETDateTime(`${input.date_from}T00:00:00`));
-  }
-  if (input.date_to) {
-    q = q.where('occurred_at', '<', addETDays(parseETDateTime(`${input.date_to}T00:00:00`), 1));
-  }
+  const from = input.date_from ? etDayBoundary(input.date_from) : null;
+  if (from) q = q.where('occurred_at', '>=', from);
+  const to = input.date_to ? etDayBoundary(input.date_to, 1) : null;
+  if (to) q = q.where('occurred_at', '<', to);
   if (input.service) {
     q = q.where('service_mentioned', 'ilike', `%${input.service}%`);
   }

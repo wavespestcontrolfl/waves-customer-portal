@@ -54,6 +54,14 @@ if (limitFlag >= 0 && (!Number.isInteger(BATCH) || BATCH <= 0)) {
       console.log(`  batch: ${batch.mined}/${batch.examined} calls mined, +${batch.chunksInserted} chunks, skipped ${JSON.stringify(batch.skipped)}`);
       if (batch.skipped.no_gemini_key || batch.skipped.consent_column_missing) return total;
       if (batch.exhausted) return total;
+      if (batch.mined === 0) {
+        // Failed extractions are deliberately left unstamped for the nightly
+        // retry — but that means a full batch of failures would re-select
+        // the SAME calls here and spend Gemini calls forever. Zero progress
+        // in a full batch = stop and let the nightly sweep chip at it.
+        console.log('  no calls stamped this batch (failures retry nightly) — stopping to avoid re-spending on the same calls');
+        return total;
+      }
     }
   }, { recordHealth: false });
 

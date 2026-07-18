@@ -67,9 +67,20 @@ function redactChunkText(text, contexts = []) {
 
 function nameContext(source) {
   if (!source || typeof source !== 'object') return null;
-  const first = typeof source.first_name === 'string' ? source.first_name : null;
-  const last = typeof source.last_name === 'string' ? source.last_name : null;
-  const full = typeof source.name === 'string' ? source.name : null;
+  let first = typeof source.first_name === 'string' ? source.first_name : null;
+  let last = typeof source.last_name === 'string' ? source.last_name : null;
+  // Persisted call-extraction schema stores unsplit names as name_full.
+  const full = typeof source.name === 'string' ? source.name
+    : typeof source.name_full === 'string' ? source.name_full : null;
+  if (full && !first && !last) {
+    // redactText matches each context name as a whole string, so split an
+    // unsplit full name too — a quote often carries just the first name.
+    const parts = full.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      first = parts[0];
+      last = parts[parts.length - 1];
+    }
+  }
   if (!first && !last && !full) return null;
   return { first_name: first, last_name: last, customer_name: full };
 }
