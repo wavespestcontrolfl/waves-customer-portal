@@ -381,6 +381,11 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
 app.use('/api/admin/auth', ...staffAuthBodyParsers);
 
+// MCP knowledge endpoint: authenticate (403/503/401 fail-closed) BEFORE any
+// body parsing, then parse with its own 256kb cap — same reason as staff
+// auth above; unauthenticated callers must not force 50 MB JSON parse work.
+app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -613,6 +618,8 @@ app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/integrations', require('./routes/admin-integrations'));
 app.use('/api/integrations/backlink-worker', require('./routes/integrations-backlink-worker'));
+// MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
+app.use('/api/mcp', require('./routes/mcp'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
