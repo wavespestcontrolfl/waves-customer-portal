@@ -162,7 +162,23 @@ function predictCompletionBilling({
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
   const none = { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
   if (payerBilled) return { kind: 'payer', amount: hasVisitPrice ? Number(estimatedPrice) : null, conflictStampedPrice: false };
-  const prepaid = prepaidAmount != null ? Number(prepaidAmount) : 0;
+  // Completion's numeric prepaid fallback covers ONLY out-of-band methods
+  // (cash/Zelle) — an annual_prepay_invoice stamp is governed exclusively
+  // by the term-validated gate, so a STALE annual stamp's amount must not
+  // read as prepaid here either or the card says "no new charge" for a
+  // visit completion will invoice (Codex r7; mirrors admin-dispatch
+  // prepaidCovered).
+  const prepaid = prepaidMethod === ANNUAL_PREPAY_PREPAID_METHOD
+    ? 0
+    : (prepaidAmount != null ? Number(prepaidAmount) : 0);
+  // The completion gate for explicit per-visit lanes bills PERFORMED
+  // applications only — never a callback/re-treat or an always-free type,
+  // even with a stale price on the row. Mirror that here or the sheet
+  // promises an invoice completion will not cut (Codex r7).
+  if ((billingMode === 'per_visit' || billingMode === 'one_time')
+    && (isCallback || isAlwaysFreeServiceType(serviceType))) {
+    return none;
+  }
   if (lane === 'annual_prepay') {
     // Coverage is the TERM-VALIDATED per-visit stamp (prepaid_method
     // 'annual_prepay_invoice'), never the amount — discounted plans stamp

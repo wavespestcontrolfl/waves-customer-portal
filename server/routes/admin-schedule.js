@@ -1339,6 +1339,24 @@ const ZONE_LABELS = {
   sarasota: 'Sarasota', venice_north_port: 'Venice/N.Port', ellenton: 'Ellenton',
 };
 
+// Completion reuses a non-void invoice already attached to the visit
+// (pre-minted Charge Now / accept-minted first-visit with setup fee / payer
+// AP) BEFORE any fresh billing decision (admin-dispatch preMintedInvoice +
+// existingCompletionInvoice) — so when one exists, the sheet's prediction
+// must mirror it, not recompute from the visit price/fee, or the card
+// quotes an amount (or a paying party) completion will ignore (Codex r7).
+function predictionFromAttachedInvoice(invoice) {
+  if (!invoice || invoice.status === 'void') return null;
+  const amount = invoice.total != null
+    ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
+    : null;
+  if (['paid', 'prepaid'].includes(invoice.status)) {
+    return { kind: 'prepaid', amount, conflictStampedPrice: false, source: 'attached_invoice' };
+  }
+  if (invoice.payer_id) return { kind: 'payer', amount, conflictStampedPrice: false, source: 'attached_invoice' };
+  return { kind: 'invoice', amount, conflictStampedPrice: false, source: 'attached_invoice' };
+}
+
 // Compact, client-safe summary of an attached invoice's line items for the
 // schedule payloads. An invoice attached to a scheduled service is what the
 // visit actually collects — completion billing and Charge-now both reuse it
@@ -1556,7 +1574,7 @@ router.get('/', async (req, res, next) => {
         hasOverdue: openInvoices.overdue,
         duesPaidThisMonth,
         servicePausedAt: s.service_paused_at || null,
-        prediction: predictCompletionBilling({
+        prediction: predictionFromAttachedInvoice(checkoutInvoice) || predictCompletionBilling({
           lane: lane.mode,
           billingMode: s.billing_mode || null,
           autopayActive,
@@ -1860,6 +1878,17 @@ router.get('/week', async (req, res, next) => {
         if (lane.mode === 'monthly_membership') {
           try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
         }
+        // Same attached-invoice precedence as the day payload — the week
+        // sheet must not quote a fresh computation when completion will
+        // reuse an invoice already minted for this visit (Codex r7).
+        let attachedInvoice = null;
+        try {
+          attachedInvoice = await db('invoices')
+            .where({ scheduled_service_id: s.id })
+            .whereNot('status', 'void')
+            .orderBy('created_at', 'desc')
+            .first('id', 'status', 'total', 'credit_applied', 'payer_id');
+        } catch { /* scheduled_service_id may be absent before migration */ }
         const billingLane = {
           mode: lane.mode,
           source: lane.source,
@@ -1870,7 +1899,7 @@ router.get('/week', async (req, res, next) => {
           hasOverdue: openInvoices.overdue,
           duesPaidThisMonth,
           servicePausedAt: s.service_paused_at || null,
-          prediction: predictCompletionBilling({
+          prediction: predictionFromAttachedInvoice(attachedInvoice) || predictCompletionBilling({
             lane: lane.mode,
             billingMode: s.billing_mode || null,
             autopayActive,

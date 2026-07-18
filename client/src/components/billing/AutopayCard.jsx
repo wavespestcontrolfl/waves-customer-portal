@@ -473,7 +473,7 @@ export default function AutopayCard({ onStateChange }) {
                 : annualPrepayBilling
                   ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
                   : perVisitBilling
-                    ? 'Auto Pay is on — your saved payment method is charged after each completed service.'
+                    ? 'Your payment method is saved — we send an invoice after each completed service.'
                     : monthlyUnpriced
                     ? 'Auto Pay is on — your monthly rate is being finalized, so no charge is scheduled yet.'
                     // No date → drop the "on <date>" clause instead of

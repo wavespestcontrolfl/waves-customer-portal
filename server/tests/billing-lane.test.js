@@ -186,6 +186,34 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
   });
 
+  test('per-visit lane: a PRICED callback or always-free visit predicts no charge — the completion gate will not bill it (Codex r7)', () => {
+    const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null };
+    expect(predictCompletionBilling({ ...perVisit, estimatedPrice: 129, isCallback: true }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perVisit, estimatedPrice: 129, serviceType: 'Pest Control Re-Service' }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+    expect(predictCompletionBilling({
+      ...perVisit, billingMode: 'one_time', lane: 'one_time', estimatedPrice: 129, isCallback: true,
+    })).toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+  });
+
+  test('a stale annual-prepay stamp amount never reads as prepaid — completion excludes it from the numeric fallback (Codex r7)', () => {
+    const staleStamp = {
+      ...memberBase,
+      lane: 'annual_prepay',
+      billingMode: 'annual_prepay',
+      estimatedPrice: 100,
+      prepaidAmount: 500,
+      prepaidMethod: 'annual_prepay_invoice',
+      annualCoverageValidated: false,
+    };
+    expect(predictCompletionBilling(staleStamp))
+      .toEqual({ kind: 'invoice', amount: 100, conflictStampedPrice: false });
+    // Out-of-band prepay (cash/Zelle) still covers by amount.
+    expect(predictCompletionBilling({ ...staleStamp, prepaidMethod: 'cash' }))
+      .toEqual({ kind: 'prepaid', amount: 500, conflictStampedPrice: false });
+  });
+
   test('inferred membership (NULL mode, tier+rate) predicts coverage like the completion path', () => {
     expect(predictCompletionBilling({ ...memberBase, billingMode: null, estimatedPrice: 100 }))
       .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: true });

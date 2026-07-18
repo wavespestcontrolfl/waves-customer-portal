@@ -4292,7 +4292,7 @@ function BillingTab({ customer }) {
         : annualPrepayBilling
           ? 'Auto Pay is on — plan prepaid'
           : perVisitBilling
-            ? 'Auto Pay is on — charged per service visit'
+            ? 'Auto Pay is on — invoiced per visit'
             : autopayMonthlyUnpriced
             ? 'Auto Pay is on — rate being finalized'
             : daysUntilDue === 0
@@ -4300,9 +4300,11 @@ function BillingTab({ customer }) {
               : dueDate
                 ? `Next charge ${money(amountDue)} on ${dueDateLabel}`
                 : `Next charge ${money(amountDue)}`,
-      detail: perApplicationBilling || perVisitBilling
+      detail: perApplicationBilling
         ? 'Your saved payment method is charged for each service visit after it is completed.'
-        : annualPrepayBilling
+        : perVisitBilling
+          ? 'We send an invoice after each completed service visit — your saved payment method makes paying it quick.'
+          : annualPrepayBilling
           ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
           : autopayMonthlyUnpriced
             ? 'Your monthly rate is being finalized, so no charge is scheduled yet.'
@@ -4540,7 +4542,7 @@ function BillingTab({ customer }) {
           {[
             // No scheduled date → "Next Not scheduled" reads broken; show a
             // neutral sub instead (eyeball 07-12 finding 3).
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Charged per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Invoiced per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.

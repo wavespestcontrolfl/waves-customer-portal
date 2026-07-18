@@ -254,14 +254,14 @@ describe('charge timing line by billing mode (Codex r3)', () => {
       .toBe('Your card is charged for your service invoices as agreed, and you get a receipt every time.');
   });
 
-  test('explicit per-visit accounts get the per-service line even with a lingering monthly rate (Codex r6)', async () => {
+  test('explicit per-visit accounts get INVOICE wording, never the monthly or auto-charge promise (Codex r6+r7)', async () => {
     expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'per_visit', monthly_rate: '89.00' }))
-      .toBe("After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.");
+      .toBe('After each completed service, we send your invoice — your card on file makes paying it quick.');
   });
 
-  test('explicit one-time accounts get the per-service line even with a lingering monthly rate (Codex r6)', async () => {
+  test('explicit one-time accounts get INVOICE wording, never the monthly or auto-charge promise (Codex r6+r7)', async () => {
     expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'one_time', monthly_rate: '89.00' }))
-      .toBe("After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.");
+      .toBe('After each completed service, we send your invoice — your card on file makes paying it quick.');
   });
 });
 

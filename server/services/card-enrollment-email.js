@@ -104,12 +104,20 @@ async function chargeTimingLine(customerId, { tender = 'your card', verb = 'char
     // a charge cadence the annual flow doesn't have.
     return `${Tender} is ${verb} for your service invoices as agreed, and you get a receipt every time.`;
   }
+  // The explicit per-visit lanes are INVOICE-on-completion — the saved
+  // method is never auto-charged after a visit (that collection behavior
+  // belongs to per_application only; admin-dispatch's auto-charge block is
+  // gated on it) — so the copy must promise an invoice, not an off-session
+  // charge (Codex r7).
+  if (mode === 'per_visit' || mode === 'one_time') {
+    return `After each completed service, we send your invoice — ${tender} on file makes paying it quick.`;
+  }
   // The monthly line is promised only when the dues cron will actually run:
-  // ANY explicit non-monthly lane (per_application, per_visit, one_time) is
-  // skipped by GUARD 3b, so those get the per-service line even with a
-  // lingering monthly_rate (Codex r6). NULL modes keep the legacy rate>0
-  // copy — that mirrors the cron's own NULL-mode selection, which has no
-  // tier requirement.
+  // ANY explicit non-monthly lane is skipped by GUARD 3b, so per_application
+  // falls through to the auto-charge line below even with a lingering
+  // monthly_rate (Codex r6). NULL modes keep the legacy rate>0 copy — that
+  // mirrors the cron's own NULL-mode selection, which has no tier
+  // requirement.
   const explicitNonMonthly = mode !== null && mode !== 'monthly_membership';
   if (!explicitNonMonthly && monthlyRate > 0) {
     return `${Tender} is ${verb} your monthly plan amount on your billing day each month, and you get a receipt every time.`;
