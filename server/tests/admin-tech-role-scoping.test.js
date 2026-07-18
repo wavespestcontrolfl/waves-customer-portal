@@ -77,6 +77,7 @@ jest.mock('../models/db', () => {
       whereIn() { return builder; },
       modify(cb) { cb(builder); return builder; },
       leftJoin() { return builder; },
+      forUpdate() { return builder; },
       orderBy() { return builder; },
       select() { return builder; },
       async first() {
@@ -95,6 +96,11 @@ jest.mock('../models/db', () => {
   };
   dbFn.fn = { now: () => new Date() };
   dbFn.raw = (sql) => sql;
+  dbFn.transaction = async (cb) => {
+    const trx = (table) => dbFn(table);
+    trx.raw = async () => ({});
+    return cb(trx);
+  };
   dbFn.__state = state;
   return dbFn;
 });
@@ -323,6 +329,23 @@ describe('customer routes: assigned-customer proxy (technician role)', () => {
   });
 });
 
+describe('invoice mint in-lock ownership recheck', () => {
+  const { mintScheduledServiceInvoiceWithDeposit } = scheduleRouter._test;
+
+  test('an assertEligibleInTrx failure aborts inside the lock — no invoice, no retry masking', async () => {
+    const denied = Object.assign(new Error('Scheduled service not found'), { status: 404 });
+    await expect(mintScheduledServiceInvoiceWithDeposit({
+      // source_estimate_id set: without the fast rethrow, the deposit
+      // retry ladder would swallow the auth failure into two extra
+      // attempts before surfacing it.
+      svc: { id: 'svc-own', source_estimate_id: 'est-1' },
+      buildCreateParams: () => ({}),
+      assertEligibleInTrx: async () => { throw denied; },
+    })).rejects.toMatchObject({ status: 404 });
+    expect(db.__state.writes).toHaveLength(0);
+  });
+});
+
 describe('tech directory filter/sort sanitization', () => {
   test('techSafeListFilters drops CRM/financial filters — membership under ?hasBalance=true IS the stripped field', () => {
     const sanitized = techSafeListFilters({
@@ -336,8 +359,8 @@ describe('tech directory filter/sort sanitization', () => {
     expect(techSafeSort('revenue')).toBe('name');
     expect(techSafeSort('lead_score')).toBe('name');
     expect(techSafeSort('last_contact')).toBe('name');
+    expect(techSafeSort('rate')).toBe('name'); // monthlyRate is stripped — its sort goes too
     expect(techSafeSort('name')).toBe('name');
-    expect(techSafeSort('rate')).toBe('rate');
   });
 });
 
@@ -357,7 +380,8 @@ describe('techSafeListRow', () => {
     }
     expect(safe).toEqual(expect.objectContaining({
       id: 'c1', firstName: 'Pat', lastName: 'Lee', phone: '941',
-      address: '1 Main St', tier: 'gold', monthlyRate: 89,
+      address: '1 Main St', tier: 'gold',
     }));
+    expect(safe).not.toHaveProperty('monthlyRate');
   });
 });

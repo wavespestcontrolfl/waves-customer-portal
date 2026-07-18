@@ -4773,7 +4773,7 @@ const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-gua
 // (this helper's callers and Charge-now) so a double-tap can't race a visit
 // into two open invoices; the in-lock re-check returns the first request's
 // invoice to the replay.
-async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }) {
+async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, assertEligibleInTrx = null }) {
   const InvoiceService = require('../services/invoice');
   const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
   const sourceEstimateId = svc.source_estimate_id || null;
@@ -4786,6 +4786,12 @@ async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['schedule.invoice.mint', String(svc.id)],
         );
+        // Caller-supplied in-lock authorization recheck (technician
+        // ownership): the caller's pre-transaction SELECT alone leaves a
+        // window where dispatch reassigns the visit before this lock
+        // lands, letting the FORMER tech mint and receive the invoice's
+        // bearer payment token.
+        if (assertEligibleInTrx) await assertEligibleInTrx(trx);
         // Replay = the double-tap window returning the FIRST request's fresh
         // invoice. Terminal invoices (refunded/cancelled — every payment
         // route rejects them) are not replay candidates: returning one here
@@ -4824,6 +4830,8 @@ async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }
       });
     } catch (err) {
       lastErr = err;
+      // Authorization failures are terminal — retrying can't fix them.
+      if (err.status) throw err;
       if (!withDeposit) throw err;
       logger.warn(`[schedule] mint deposit roll-forward failed for service ${svc.id} (attempt ${attempt + 1}): ${err.message}`);
       if (attempt === 1) {
@@ -5507,6 +5515,22 @@ router.post('/:id/invoice', async (req, res, next) => {
     // price on top of it.
     const minted = await mintScheduledServiceInvoiceWithDeposit({
       svc,
+      // In-lock ownership recheck: substantial async work happens between
+      // the authorized SELECT at the top of this route and the mint
+      // transaction — re-verify (row-locked) that the visit is still this
+      // technician's live job before an invoice is minted or replayed.
+      assertEligibleInTrx: async (trx) => {
+        if (!isTechnicianRequest(req)) return;
+        const still = await technicianLiveVisitFilter(
+          req,
+          trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
+        ).forUpdate().first('scheduled_services.id');
+        if (!still) {
+          const e = new Error('Scheduled service not found');
+          e.status = 404;
+          throw e;
+        }
+      },
       buildCreateParams: () => ({
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
@@ -5558,7 +5582,10 @@ router.post('/:id/invoice', async (req, res, next) => {
       status: invoice.status,
       alreadyPaid: mintAlreadyPaid,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 // PUT /api/admin/schedule/:id/status — change status with automations.
@@ -5700,6 +5727,23 @@ router.put('/:id/status', async (req, res, next) => {
 
     try {
       await db.transaction(async (trx) => {
+        // Re-validate technician ownership INSIDE the transaction, row-
+        // locked: the predicate on the pre-transaction SELECT alone leaves
+        // a window where dispatch reassigns the visit and the former
+        // tech's transition (and its billing/customer side effects) still
+        // lands. The lock also serializes against /:id/assign until this
+        // transition commits.
+        if (isTechnicianRequest(req)) {
+          const still = await technicianLiveVisitFilter(
+            req,
+            trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
+          ).forUpdate().first('scheduled_services.id');
+          if (!still) {
+            const e = new Error('Service not found');
+            e.code = 'TECH_OWNERSHIP_LOST';
+            throw e;
+          }
+        }
         // Lifecycle / metadata columns the route owns. Same trx as
         // transitionJobStatus's status flip so a race rollback also
         // rolls back these timestamps + flags.
@@ -5725,6 +5769,12 @@ router.put('/:id/status', async (req, res, next) => {
         });
       });
     } catch (err) {
+      if (err && err.code === 'TECH_OWNERSHIP_LOST') {
+        // Visit reassigned between the authorized read and the transition
+        // transaction — nothing was written. 404 (not 403): same
+        // no-existence-oracle contract as the pre-check.
+        return res.status(404).json({ error: 'Service not found' });
+      }
       if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
         // Expected block from the shared writer's review-booking guard —
         // conflict, not a 500 (mirrors the pre-guard above for statuses it

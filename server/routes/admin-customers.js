@@ -73,6 +73,10 @@ const TECH_LIST_STRIPPED_FIELDS = [
   'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'lastContactType', 'nextFollowUp',
   'lastRating', 'tags',
+  // Account pricing is office-only — the field flows that search customers
+  // never render plan price, and the server-priced estimate builder doesn't
+  // take it from directory rows.
+  'monthlyRate',
 ];
 
 function techSafeListRow(mapped) {
@@ -92,7 +96,9 @@ function techSafeListFilters(filters) {
   return { search, tier, area, city, lastVisited };
 }
 
-const TECH_SAFE_SORTS = new Set(['name', 'rate']);
+// 'rate' is NOT safe: sorting by a stripped field (monthlyRate) is the same
+// inference channel as filtering by one.
+const TECH_SAFE_SORTS = new Set(['name']);
 
 function techSafeSort(sort) {
   return TECH_SAFE_SORTS.has(sort) ? sort : 'name';
