@@ -63,6 +63,23 @@ describe('miner upsert: skipped is sticky, expired revives', () => {
     expect(caseMatch[1]).not.toContain("'expired'");
   });
 
+  test('the metadata refresh preserves the runner gate_retry marker (one-shot redraft survives the morning mine)', async () => {
+    db.raw.mockResolvedValue({ rowCount: 1 });
+    await miner.persistAll([{
+      bucket: 'seasonal_rising', action_type: 'new_supporting_blog',
+      query: 'termite swarm season', page_url: null, service: 'termite', city: null,
+      score: 80, score_breakdown: {}, signal_metadata: {}, dedupe_key: 'k1',
+    }]);
+
+    const [sql] = db.raw.mock.calls[0];
+    // The 7:30 ET mine runs BEFORE the 9AM engine; a wholesale
+    // signal_metadata replace here would erase the runner's one-shot
+    // gate_retry marker and turn the single feedback-informed redraft into
+    // repeated blind first attempts.
+    expect(sql).toContain("jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')");
+    expect(sql).toContain("jsonb_build_object('gate_retry', opportunity_queue.signal_metadata->'gate_retry')");
+  });
+
   test('the intercept SEEDER deliberately keeps revive-on-reseed (operator signal)', async () => {
     // Contrast case: seedAll's CASE must NOT include 'skipped' — an operator
     // re-running the seed script is an explicit "run these".

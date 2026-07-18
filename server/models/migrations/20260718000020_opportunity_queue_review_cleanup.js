@@ -9,10 +9,11 @@
  *     publish autonomously. expires_at is pushed out so the expireStale
  *     janitor can't expire them before that window opens.
  *  2. Hard-gate failures (content guardrails / comparison table / quality
- *     gate_fail) — writer mistakes, not human decisions. New code gives one
- *     feedback-informed redraft then skips; these old rows had no feedback
- *     recorded, so they go straight to 'skipped' (the miner re-mines a
- *     still-live signal).
+ *     gate_fail) — writer mistakes, not human decisions. These become
+ *     'expired' (NOT the miner-sticky 'skipped'): a still-live signal is
+ *     revived to pending by the next mine and flows through the new
+ *     one-redraft-then-skip path; a disappeared signal stays retired.
+ *     Rows whose run history shows a gate INFRA failure stay parked.
  *  3. By-design protected pages (money pages etc.) — a refusal, not an
  *     exception. 'skipped'. protected_check_error stays parked: that one IS
  *     an engine fault a human should see.
@@ -65,6 +66,12 @@ exports.up = async function up(knex) {
         OR ar.reviewer_notes ILIKE '%load fail%'
         OR ar.reviewer_notes ILIKE '%named_competitor_disabled%'
       )`;
+  // 'expired', NOT 'skipped': the miner's upsert keeps 'skipped' STICKY for
+  // matching dedupe keys (operator dismissals must not resurrect), so a
+  // skipped disposition would permanently retire these opportunities. An
+  // 'expired' row is exactly the revivable state — a still-live signal
+  // re-pends with fresh metadata on the next mine and flows through the new
+  // one-redraft-then-skip path; a disappeared signal stays retired.
   const gateRows = await knex('opportunity_queue')
     .where('status', 'pending_review')
     .whereIn('skip_reason', ['content_guardrails_failed', 'comparison_table_failed', 'gate_fail'])
@@ -73,7 +80,7 @@ exports.up = async function up(knex) {
       WHERE ar.opportunity_id = opportunity_queue.id
         AND ${INFRA_MARKERS_SQL}
     )`)
-    .update({ status: 'skipped', updated_at: knex.fn.now() });
+    .update({ status: 'expired', updated_at: knex.fn.now() });
 
   const protectedRows = await knex('opportunity_queue')
     .where('status', 'pending_review')
@@ -82,7 +89,7 @@ exports.up = async function up(knex) {
     .update({ status: 'skipped', updated_at: knex.fn.now() });
 
    
-  console.log(`[20260718000020] review-queue cleanup: ${capRows} cap-parked → pending, ${gateRows} gate-fail → skipped, ${protectedRows} protected-page → skipped`);
+  console.log(`[20260718000020] review-queue cleanup: ${capRows} cap-parked → pending, ${gateRows} gate-fail → expired (revivable), ${protectedRows} protected-page → skipped`);
 };
 
 // Data-disposition change: the prior pending_review states are not
