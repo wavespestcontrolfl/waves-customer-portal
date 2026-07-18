@@ -229,7 +229,11 @@ router.post('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
     // quiz attribution, instead of dropping them on the generic service picker.
     const bookUrl = quizBookingUrl(quizId);
     const heading = "Thanks — we've got you.";
-    const bodyHtml = `
+    // landingCtaSuppressed (e.g. the stay-subscribed win-back): the answer
+    // isn't a service interest, so no booking pitch on the thank-you page.
+    const bodyHtml = quiz?.landingCtaSuppressed
+      ? `<p style="margin-bottom:0;">${escapeHtml(landingLine)}</p>`
+      : `
           <p>${escapeHtml(landingLine)}</p>
           <p style="margin-bottom:6px;">Want it sooner?</p>
           <p style="margin:0 0 10px;"><a href="${escapeHtml(bookUrl)}" class="btn">${escapeHtml(bookLabel)}</a></p>
@@ -491,7 +495,12 @@ router.get('/posts/:id', async (req, res) => {
   try {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id);
     if (!isUuid) return res.status(404).json({ error: 'not found' });
-    const row = await db('newsletter_sends').where({ id: req.params.id, status: 'sent' }).first();
+    const row = await db('newsletter_sends')
+      .where({ id: req.params.id, status: 'sent' })
+      // Win-backs are list hygiene, never public content (mirrors the
+      // getPublishedPosts exclusion); IS DISTINCT FROM keeps legacy NULL types.
+      .whereRaw("newsletter_type IS DISTINCT FROM 'reengagement'")
+      .first();
     if (!row) return res.status(404).json({ error: 'not found' });
     res.json({
       id: row.id,

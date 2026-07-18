@@ -411,6 +411,11 @@ export function ComposeView({
   // AI Draft modal). Plumbed into /draft-ai so AI drafts land in the
   // selected template's structure + voice.
   const [selectedTemplate, setSelectedTemplate] = useState(null);
+  // newsletter_type of a loaded draft that has NO template card (e.g. the
+  // sunset job's 'reengagement' win-back). While set, it is what saveDraft
+  // persists — so editing the draft can't relabel it to a template lane.
+  // Cleared when the operator explicitly applies a template.
+  const [loadedNewsletterType, setLoadedNewsletterType] = useState(null);
   // Initial prompt seed for the AI Draft modal. Set when an event was
   // handed off from DashboardView's "Draft newsletter" click; cleared
   // after the modal opens (so reopening from the regular button isn't
@@ -430,7 +435,6 @@ export function ComposeView({
     setAiInitialPrompt(buildEventPrompt(pendingEvent));
     setAiOpen(true);
     if (onPendingEventConsumed) onPendingEventConsumed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingEvent]);
 
   // Auto-select the flagship template for brand-new composes so the
@@ -445,7 +449,6 @@ export function ComposeView({
         setSelectedTemplate('weekend');
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const segmentFilter = useMemo(() => {
@@ -482,9 +485,41 @@ export function ComposeView({
     segmentLineCount,
   ]);
 
+  // Dirty flag for the segment controls, set ONLY by the interactive
+  // handlers below — never by programmatic hydration. saveDraft omits
+  // segmentFilter on PATCH while clean (the route preserves the stored
+  // value), so merely loading/editing a draft can't overwrite its saved
+  // audience — e.g. retargeting the sunset win-back's
+  // { tags: ['reengagement_due'] } at every active subscriber.
+  const segmentDirtyRef = useRef(false);
+  const markSegmentDirty = () => { segmentDirtyRef.current = true; };
+
+  // Reflect a loaded draft's stored segment_filter into the compose controls
+  // so the audience the operator SEES (and anything a dirty save writes)
+  // matches the saved one. Programmatic — does not mark the segment dirty.
+  const applySegmentFromFilter = (f) => {
+    const sf = f || {};
+    setSegmentMode(
+      sf.customersOnly || sf.audience === "customers" ? "customers"
+        : sf.leadsOnly || sf.audience === "leads" ? "leads"
+          : Array.isArray(sf.sources) && sf.sources.length ? "custom" : "all",
+    );
+    setSegmentSources(Array.isArray(sf.sources) ? sf.sources : []);
+    setSegmentTags(Array.isArray(sf.tags) ? sf.tags : []);
+    setSegmentHasLines(Array.isArray(sf.has_service) ? sf.has_service : []);
+    setSegmentMissingLines(Array.isArray(sf.missing_service) ? sf.missing_service : []);
+    setSegmentRegions(Array.isArray(sf.region_zone) ? sf.region_zone : []);
+    setSegmentLineCount(
+      sf.min_line_count === 1 && sf.max_line_count === 1 ? "single"
+        : sf.min_line_count === 2 ? "multi"
+          : sf.min_line_count === 1 ? "members" : "any",
+    );
+  };
+
   // Apply a one-click cross-sell preset (sets the service-line controls and
   // forces customers-only, since service-line membership implies a customer).
   const applyCampaignPreset = (p) => {
+    markSegmentDirty();
     setSegmentMode("customers");
     setSegmentHasLines(p.has || []);
     setSegmentMissingLines(p.missing || []);
@@ -493,6 +528,7 @@ export function ComposeView({
   };
 
   const clearServiceLineSegment = () => {
+    markSegmentDirty();
     setSegmentHasLines([]);
     setSegmentMissingLines([]);
     setSegmentRegions([]);
@@ -532,12 +568,14 @@ export function ComposeView({
   useEffect(() => {
     if (draftId || pendingEventRef.current) return; // already editing a draft or event-seeded
     let cancelled = false;
-    // ?autopilotType= comes from autopilot notifications (e.g. the monthly
-    // Pest Insider) so the click lands on THAT lane's draft instead of the
-    // weekly default.
+    // ?autopilotType= comes from autopilot/sunset notifications (e.g. the
+    // monthly Pest Insider, or the newsletter-sunset win-back bell) so the
+    // click lands on THAT lane's draft instead of the weekly default.
     const laneParam = autopilotTypeParam === "pest-insider-monthly"
       ? "?type=pest-insider-monthly"
-      : "";
+      : autopilotTypeParam === "reengagement"
+        ? "?type=reengagement"
+        : "";
     adminFetch(`/admin/newsletter/sends/latest-autopilot${laneParam}`)
       .then((d) => {
         if (cancelled || pendingEventRef.current || userHasEdited.current) return;
@@ -549,13 +587,27 @@ export function ComposeView({
         setHtmlBody(ap.html_body || "");
         setTextBody(ap.text_body || "");
         setAutoShareSocial(ap.auto_share_social !== false);
+        // Show the draft's saved audience in the controls and re-baseline the
+        // dirty flag — loading is not an operator edit.
+        applySegmentFromFilter(ap.segment_filter);
+        segmentDirtyRef.current = false;
         const tplForType = TEMPLATES.find((t) => t.newsletterType === ap.newsletter_type);
-        setSelectedTemplate(tplForType?.key || "weekend");
+        if (tplForType) {
+          setSelectedTemplate(tplForType.key);
+        } else if (ap.newsletter_type) {
+          // A draft whose type has no template card (e.g. 'reengagement' from
+          // the sunset job): keep ITS type authoritative so saving the draft
+          // doesn't relabel it to a template lane — a rewrite would break the
+          // sunset job's newsletter_type join and leak it into other lanes.
+          setSelectedTemplate(null);
+          setLoadedNewsletterType(ap.newsletter_type);
+        } else {
+          setSelectedTemplate("weekend");
+        }
         setAutopilotBanner(true);
       })
       .catch(() => { /* no autopilot draft — nothing to do */ });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Recalculate segment match count when the filter changes.
@@ -577,6 +629,9 @@ export function ComposeView({
   }, [segmentFilter]);
 
   const activeNewsletterType = (() => {
+    // A loaded draft whose type has no template card (e.g. 'reengagement')
+    // keeps its own type until the user explicitly picks a template.
+    if (loadedNewsletterType) return loadedNewsletterType;
     const key = selectedTemplate || "blank";
     const t = TEMPLATES.find((x) => x.key === key);
     return t?.newsletterType || null;
@@ -593,6 +648,8 @@ export function ComposeView({
     userHasEdited.current = true;
     setHtmlBody(t.html);
     setSelectedTemplate(key === "blank" ? null : key);
+    // Explicit template choice overrides a loaded draft's off-template type.
+    setLoadedNewsletterType(null);
     // A hand-picked template body isn't anchored to AI-locked events — clear the
     // ids and mark dirty so the save writes the empty set (the prior AI events
     // no longer match this body).
@@ -611,10 +668,14 @@ export function ComposeView({
         textBody,
         fromName,
         fromEmail,
-        segmentFilter,
         newsletterType: activeNewsletterType,
         autoShareSocial,
       };
+      // Send segmentFilter on create always; on edit only when the operator
+      // touched the segment controls. The PATCH route preserves the stored
+      // segment when the field is omitted, so an untouched edit of a loaded
+      // draft keeps its saved audience (see segmentDirtyRef above).
+      if (!draftId || segmentDirtyRef.current) body.segmentFilter = segmentFilter;
       // Send eventIds only when the event association changed this session
       // (dirty). Omitting them lets the server preserve the stored ids on an
       // ordinary edit or when editing a loaded draft; including them on a fresh
@@ -769,6 +830,15 @@ export function ComposeView({
     setEventIdsDirty(false);
     setScheduleAt("");
     setSelectedTemplate(null);
+    // A fresh compose is no longer the loaded off-template draft — without
+    // this, the next save would mislabel new content with its type (e.g.
+    // 'reengagement'), skipping claim validation and the public archive.
+    setLoadedNewsletterType(null);
+    // Reset the audience too: a segment hydrated from the previous draft
+    // (e.g. the win-back's reengagement_due tag) must not silently carry
+    // into the NEXT campaign's POST and shrink its audience.
+    applySegmentFromFilter(null);
+    segmentDirtyRef.current = false;
   };
 
   const handleAiDraft = async ({
@@ -800,6 +870,9 @@ export function ComposeView({
     // the modal, and we want that to clear the prior selection so the
     // next modal opens defaulting to no template.
     setSelectedTemplate(template || null);
+    // An AI redraft replaces the loaded draft's content wholesale — the
+    // off-template type (e.g. 'reengagement') no longer describes it.
+    setLoadedNewsletterType(null);
     setAiOpen(false);
     // Clear the event-seeded prompt on success too (mirror of the
     // onClose handler). Otherwise the next "Draft with AI" toolbar
@@ -840,7 +913,16 @@ export function ComposeView({
           action={
             <div className="flex items-center gap-2">
               {draftId && <Badge tone="neutral">Draft saved</Badge>}
-              <Button onClick={() => setAiOpen(true)} variant="secondary">
+              {/* Off-template loaded drafts (e.g. the sunset win-back) are
+                  house-written by type contract — /draft-ai also refuses them
+                  server-side, so disable the affordance rather than surface
+                  the 400. */}
+              <Button
+                onClick={() => setAiOpen(true)}
+                variant="secondary"
+                disabled={!!loadedNewsletterType}
+                title={loadedNewsletterType ? "This draft's type is house-written — AI drafting is disabled for it" : undefined}
+              >
                 {" "}
                 <Wand2
                   size={14}
@@ -1081,7 +1163,7 @@ export function ComposeView({
                 <button
                   key={o.key}
                   type="button"
-                  onClick={() => setSegmentMode(o.key)}
+                  onClick={() => { markSegmentDirty(); setSegmentMode(o.key); }}
                   className={cn(
                     "h-8 px-3 text-12 font-medium rounded-sm border-hairline u-focus-ring",
                     segmentMode === o.key
@@ -1101,13 +1183,14 @@ export function ComposeView({
                     <button
                       key={src.value}
                       type="button"
-                      onClick={() =>
+                      onClick={() => {
+                        markSegmentDirty();
                         setSegmentSources((cur) =>
                           on
                             ? cur.filter((x) => x !== src.value)
                             : [...cur, src.value],
-                        )
-                      }
+                        );
+                      }}
                       className={cn(
                         "h-7 px-2.5 text-11 rounded-full border-hairline u-focus-ring",
                         on
@@ -1134,9 +1217,10 @@ export function ComposeView({
                   <button
                     key={t}
                     type="button"
-                    onClick={() =>
-                      setSegmentTags((cur) => cur.filter((x) => x !== t))
-                    }
+                    onClick={() => {
+                      markSegmentDirty();
+                      setSegmentTags((cur) => cur.filter((x) => x !== t));
+                    }}
                     className="h-7 px-2.5 text-11 rounded-full bg-zinc-900 text-white border-hairline border-zinc-900 u-focus-ring"
                     title="Click to remove"
                   >
@@ -1152,14 +1236,17 @@ export function ComposeView({
                     if (e.key === "Enter" || e.key === ",") {
                       e.preventDefault();
                       const v = tagDraft.trim().toLowerCase();
-                      if (v && !segmentTags.includes(v))
+                      if (v && !segmentTags.includes(v)) {
+                        markSegmentDirty();
                         setSegmentTags((cur) => [...cur, v]);
+                      }
                       setTagDraft("");
                     } else if (
                       e.key === "Backspace" &&
                       !tagDraft &&
                       segmentTags.length
                     ) {
+                      markSegmentDirty();
                       setSegmentTags((cur) => cur.slice(0, -1));
                     }
                   }}
@@ -1220,11 +1307,12 @@ export function ComposeView({
               <ChipRow
                 options={SERVICE_LINES}
                 selected={segmentHasLines}
-                onToggle={(v) =>
+                onToggle={(v) => {
+                  markSegmentDirty();
                   setSegmentHasLines((cur) =>
                     cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  )
-                }
+                  );
+                }}
               />
               <div className="text-11 text-ink-secondary mt-2 mb-1">
                 Missing all of
@@ -1232,11 +1320,12 @@ export function ComposeView({
               <ChipRow
                 options={SERVICE_LINES}
                 selected={segmentMissingLines}
-                onToggle={(v) =>
+                onToggle={(v) => {
+                  markSegmentDirty();
                   setSegmentMissingLines((cur) =>
                     cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  )
-                }
+                  );
+                }}
               />
               <div className="text-11 text-ink-secondary mt-3 mb-1">
                 Membership
@@ -1246,7 +1335,7 @@ export function ComposeView({
                   <button
                     key={o.key}
                     type="button"
-                    onClick={() => setSegmentLineCount(o.key)}
+                    onClick={() => { markSegmentDirty(); setSegmentLineCount(o.key); }}
                     className={cn(
                       "h-7 px-2.5 text-11 rounded-sm border-hairline u-focus-ring",
                       segmentLineCount === o.key
@@ -1262,11 +1351,12 @@ export function ComposeView({
               <ChipRow
                 options={REGION_ZONES}
                 selected={segmentRegions}
-                onToggle={(v) =>
+                onToggle={(v) => {
+                  markSegmentDirty();
                   setSegmentRegions((cur) =>
                     cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  )
-                }
+                  );
+                }}
               />
               <div className="text-11 text-ink-tertiary mt-2">
                 Lines come from each customer&rsquo;s active recurring services.

@@ -625,6 +625,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY NEWSLETTER INACTIVITY SUNSET (gated: GATE_NEWSLETTER_SUNSET)
+  // Monday 7:30am ET — flags subscribers with 90+ days of zero opens/clicks
+  // across 6+ delivered campaigns, parks ONE win-back draft for the owner to
+  // send, and suppresses (status='inactive') non-responders 30 days after the
+  // win-back delivers. Never sends email itself. The gate check lives INSIDE
+  // runNewsletterSunset, so the off state is a cheap no-op.
+  // =========================================================================
+  cron.schedule('30 7 * * 1', async () => {
+    try {
+      // runExclusive: read-then-act (flag writes + a single draft insert) —
+      // a deploy overlap must not double-flag or park two drafts.
+      await runExclusive('newsletter-sunset', async () => {
+        const { runNewsletterSunset } = require('./newsletter-sunset');
+        const result = await runNewsletterSunset();
+        if (!result?.skipped) logger.info(`[newsletter-sunset] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly newsletter sunset failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY BACKLINK PROFILE → ASTRO sameAs SYNC (gated: cronJobs AND backlinkProfileSync)
   // Opens a PR adding verifier-confirmed (status='live') directory/citation/social
   // profile URLs from seo_link_prospects to the marketing site's
