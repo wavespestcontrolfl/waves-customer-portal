@@ -2529,6 +2529,7 @@ export default function DispatchPageV2({
               ? [projectService.completionProfile.projectType]
               : null
           }
+          allowInvoiceCompletion={getAdminUser()?.role === "admin"}
           onViewDetails={
             isMobile
               ? () => {
@@ -2542,7 +2543,7 @@ export default function DispatchPageV2({
               : undefined
           }
           onClose={() => setProjectService(null)}
-          onCreated={(p) => {
+          onCreated={(p, outcome = {}) => {
             const svc = projectService;
             setProjectService(null);
             // Silent: this chains straight into the continue editor below,
@@ -2559,9 +2560,10 @@ export default function DispatchPageV2({
             // create sheet (and a second POST) for the same visit
             // (Codex r3 P2).
             setScheduleRefreshKey((k) => k + 1);
-            // Chain straight into the report editor so fill → review → send
-            // all happens without leaving the schedule.
-            if (p?.id) {
+            // A completed WDO already sent its invoice, armed the customer-side
+            // report hold, and closed the linked visit inside the same sheet.
+            // Do not detour into the legacy Project editor afterward.
+            if (p?.id && !outcome.completed) {
               setContinueProjectId(p.id);
               // Seed the snapshot with the created project (Codex r5 P2):
               // week rows (and day rows before the refetch lands) carry no

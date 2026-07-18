@@ -1504,7 +1504,10 @@ describe('Astro publisher hero image republish', () => {
       // a P0. The manual/calendar lane previously ran NO comparison scan at
       // all, so this could go fully live unattended via the scheduler
       // auto-merge.
-      content: '## How the options compare\n\n<ComparisonTable\n  caption="Pest control options in Bradenton"\n  columns={["What to weigh","National chains","DIY"]}\n  rows={[["Follow-up","Worst follow-up in the area","Your schedule"]]}\n/>\n\nEvery option has trade-offs worth weighing.',
+      // Object-row shape only: ComparisonTable.astro reads row.label /
+      // row.values[cIdx], so array rows crash the astro build and the
+      // component schema rejects them by design (Codex round-10).
+      content: '## How the options compare\n\n<ComparisonTable\n  caption="Pest control options in Bradenton"\n  columns={["What to weigh","National chains","DIY"]}\n  rows={[{ "label": "Follow-up", "values": ["Worst follow-up in the area","Your schedule"] }]}\n/>\n\nEvery option has trade-offs worth weighing.',
     };
     const read = chain({ first: jest.fn().mockResolvedValue(post) });
     const update = chain();
@@ -1541,7 +1544,7 @@ describe('Astro publisher hero image republish', () => {
       // produce fail-closed UNCLASSIFIED_OPTION ambiguity, which must not
       // strand a legitimate category comparison at publish_failed on a
       // human-initiated lane.
-      content: '## How the options compare\n\n<ComparisonTable\n  caption="Pest control options in Bradenton"\n  columns={["What to weigh","National chains","Local pest control company","DIY"]}\n  rows={[["Response time","Call center queue","Same day","Your schedule"]]}\n/>\n\nEvery option has trade-offs worth weighing before you choose.',
+      content: '## How the options compare\n\n<ComparisonTable\n  caption="Pest control options in Bradenton"\n  columns={["What to weigh","National chains","Local pest control company","DIY"]}\n  rows={[{ "label": "Response time", "values": ["Call center queue","Same day","Your schedule"] }]}\n/>\n\nEvery option has trade-offs worth weighing before you choose.',
     };
     const read = chain({ first: jest.fn().mockResolvedValue(post) });
     const update = chain();

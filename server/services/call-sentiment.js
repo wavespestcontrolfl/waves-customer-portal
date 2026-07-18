@@ -3,12 +3,9 @@
 // Call Sentiment Analysis — uses Claude to analyze call transcripts
 // ============================================================
 
-const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../models/db');
 const MODELS = require('../config/models');
-
-let anthropic;
-try { anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); } catch { anthropic = null; }
+const { dispatchWithFallback } = require('./llm/call');
 
 /**
  * Analyze sentiment for a completed voice agent call.
@@ -18,8 +15,6 @@ try { anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }); } ca
  * @returns {Object} { overall, customerSatisfaction, keyMoments, escalationRisk }
  */
 async function analyzeSentiment(callSid) {
-  if (!anthropic) throw new Error('Anthropic API not configured');
-
   // Fetch transcript from call_log
   const callRecord = await db('call_log')
     .where(function () {
@@ -34,13 +29,10 @@ async function analyzeSentiment(callSid) {
     throw new Error(`No transcription available for call: ${callSid}`);
   }
 
-  const response = await anthropic.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 1024,
-    messages: [
-      {
-        role: 'user',
-        content: `Analyze the sentiment of this customer service phone call transcript from Waves Pest Control. Return a JSON object with exactly these fields:
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    maxTokens: 1024,
+    jsonMode: true,
+    text: `Analyze the sentiment of this customer service phone call transcript from Waves Pest Control. Return a JSON object with exactly these fields:
 
 {
   "overall": "positive" | "neutral" | "negative" | "frustrated",
@@ -54,26 +46,15 @@ Transcript:
 ${transcript}
 
 Return ONLY the JSON, no markdown formatting.`,
-      },
-    ],
   });
-
-  const text = response.content[0]?.text || '{}';
-  let result;
-  try {
-    // Strip markdown code fences if present
-    const cleaned = text.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
-    result = JSON.parse(cleaned);
-  } catch {
-    result = {
-      overall: 'neutral',
-      customerSatisfaction: 3,
-      keyMoments: [],
-      escalationRisk: false,
-      summary: 'Unable to parse sentiment analysis.',
-      raw: text,
-    };
+  if (!response.ok || !response.json) {
+    // An analysis outage must stay visible as an outage: a fabricated
+    // neutral/non-escalation result would be persisted below and make the
+    // call read as genuinely low-risk. Pre-failover behavior (an unavailable
+    // client threw before any metadata write) is preserved.
+    throw new Error(`Sentiment analysis unavailable: ${response.reason || 'invalid JSON from providers'}`);
   }
+  const result = response.json;
 
   // Store sentiment result in call_log metadata
   try {

@@ -65,7 +65,7 @@ async function classifyChurnReason(text) {
     if (liveCode) return { code: liveCode, source: 'live' };
 
     // Fallback — Claude (FLAGSHIP), so a provider issue never causes a gap.
-    const fb = await callAnthropic({ model: MODELS.FLAGSHIP, ...payload });
+    const fb = await callAnthropic({ model: MODELS.FAST, ...payload });
     const fbCode = fb?.ok ? normalize(fb.json?.code) : null;
     if (fbCode) return { code: fbCode, source: 'fallback' };
   } catch (err) {

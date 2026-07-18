@@ -30,7 +30,7 @@ function isAvailable(element) {
 // dialogs are stacked (for example, an error alert over a form).
 const modalStack = [];
 
-export default function useModalFocus(active = true, onEscape = null, returnFocusRef = null) {
+export default function useModalFocus(active = true, onEscape = null) {
   const dialogRef = useRef(null);
   const modalEntryRef = useRef({});
   const onEscapeRef = useRef(onEscape);
@@ -101,19 +101,12 @@ export default function useModalFocus(active = true, onEscape = null, returnFocu
       const stackIndex = modalStack.lastIndexOf(modalEntry);
       if (stackIndex !== -1) modalStack.splice(stackIndex, 1);
       openedRef.current = false;
-      const fallback = returnFocusRef && typeof returnFocusRef === 'object' && 'current' in returnFocusRef
-        ? returnFocusRef.current
-        : returnFocusRef;
-      const isConnectedNode = (candidate) => Boolean(
-        candidate && typeof candidate.nodeType === 'number' && document.contains(candidate)
-      );
-      const focusTarget = isConnectedNode(previouslyFocused)
-        ? previouslyFocused
-        : isConnectedNode(fallback)
-          ? fallback
-          : null;
-      if (focusTarget && typeof focusTarget.focus === 'function') {
-        focusTarget.focus({ preventScroll: true });
+      if (
+        previouslyFocused &&
+        typeof previouslyFocused.focus === 'function' &&
+        document.contains(previouslyFocused)
+      ) {
+        previouslyFocused.focus();
       }
     };
   }, [active]);

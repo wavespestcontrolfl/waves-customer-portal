@@ -329,33 +329,28 @@ function draftRouteFor({ intentName, inboundMessage } = {}) {
 /**
  * One draft generation, routed per the SMS reply-drafting split in
  * config/models.js. Any routed miss — missing provider key, provider error,
- * unparseable output — falls back to the original Anthropic FLAGSHIP call, so
- * a provider issue never causes a gap. Returns { parsed, model } (model = the
+ * unparseable output — falls back to the opposite provider, so a provider
+ * issue never causes a gap. Returns { parsed, model } (model = the
  * one that actually produced the draft, persisted on the row for the judge),
  * or null when both paths are unusable.
  */
 async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault) {
   try {
-    const { dispatch } = require('./llm/call');
-    const routed = await dispatch(route, { system, text: userContent, jsonMode: false, maxTokens: 600 });
-    if (routed.ok) {
-      const parsed = parseShadowResponse(routed.text || '');
-      if (parsed) return { parsed, model: routed.model };
-      logger.warn(`[sms-shadow] routed draft unparseable (${route.provider}/${route.model}); falling back to ${MODELS.FLAGSHIP}`);
-    } else {
-      logger.warn(`[sms-shadow] routed draft unavailable (${route.provider}/${route.model}: ${routed.reason}); falling back to ${MODELS.FLAGSHIP}`);
-    }
+    const { dispatchWithFallback } = require('./llm/call');
+    const fallback = route.provider === MODELS.PROVIDER.ANTHROPIC
+      ? MODELS.TEXT_POLICIES.highStakes.fallback
+      : MODELS.TEXT_POLICIES.fastStructured.fallback;
+    const routed = await dispatchWithFallback(
+      { primary: route, fallback },
+      { system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
+      { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
+    );
+    if (routed.ok) return { parsed: parseShadowResponse(routed.text), model: routed.model };
+    logger.warn(`[sms-shadow] both draft providers unavailable (${routed.reason})`);
   } catch (err) {
-    logger.warn(`[sms-shadow] draft route dispatch failed (${err.message}); falling back to ${MODELS.FLAGSHIP}`);
+    logger.warn(`[sms-shadow] draft route dispatch failed (${err.message})`);
   }
-  const resp = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 600,
-    system,
-    messages: [{ role: 'user', content: userContent }],
-  });
-  const parsed = parseShadowResponse(resp.content?.[0]?.text || '');
-  return parsed ? { parsed, model: MODELS.FLAGSHIP } : null;
+  return null;
 }
 
 /**
@@ -366,7 +361,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * { parsed, passes, converged, model }. converged=true means the verifier
  * signed off (or the reply was empty — nothing to assert). model is whichever
  * model produced the FINAL draft (routed default / save-the-sale, or the
- * FLAGSHIP fallback) — persist it, don't assume FLAGSHIP. Verify failures
+ * opposite-provider fallback) — persist it, don't assume a provider. Verify failures
  * degrade gracefully: keep the current draft, stop, converged=false — a
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.

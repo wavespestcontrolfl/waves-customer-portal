@@ -77,11 +77,16 @@ function fetchModels() {
   // checker. Exclude the non-tier exports by KEY, not by value — so a MISCONFIGURED
   // tier (e.g. MODEL_FLAGSHIP set to a non-claude id) is still validated and warned
   // about, rather than silently dropped. DEFAULT is an alias of FLAGSHIP; PROVIDER/
-  // ROUTES are objects; OPENAI_BEST/GEMINI_VISION_BEST belong to OpenAI/Gemini and
+  // ROUTES/TEXT_POLICIES are objects; OPENAI_*/GEMINI_* belong to other providers and
   // are validated by their own providers, not Anthropic's /v1/models list.
   // OPENAI_SMS_DRAFT is an OpenAI ID (SMS reply-drafting split); SMS_SONNET is
   // Anthropic and intentionally NOT excluded — it validates like a tier.
-  const NON_TIER_KEYS = new Set(['DEFAULT', 'PROVIDER', 'ROUTES', 'OPENAI_BEST', 'GEMINI_VISION_BEST', 'OPENAI_SMS_DRAFT']);
+  const NON_TIER_KEYS = new Set([
+    'DEFAULT', 'PROVIDER', 'ROUTES', 'TEXT_POLICIES',
+    'OPENAI_BEST', 'OPENAI_BALANCED', 'OPENAI_FAST', 'OPENAI_REPORT_WRITER', 'OPENAI_SMS_DRAFT',
+    'GEMINI_VISION_BEST', 'GEMINI_IMAGE_BEST', 'GEMINI_IMAGE_STABLE',
+    'GEMINI_VIDEO_FAST', 'GEMINI_VIDEO_QUALITY',
+  ]);
   const TIERS = Object.keys(MODELS).filter(
     (k) => !NON_TIER_KEYS.has(k) && typeof MODELS[k] === 'string',
   );

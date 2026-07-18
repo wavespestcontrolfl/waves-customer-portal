@@ -24,7 +24,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
-import { refetchFlags } from "../hooks/useFeatureFlag";
+import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { adminFetch } from "../utils/admin-fetch";
 import {
   ADMIN_DESKTOP_NAV_SECTIONS,
@@ -55,6 +55,7 @@ export default function AdminLayoutV2() {
   const [user, setUser] = useState(null);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
 
   // Give Safari home-screen bookmarks the admin app identity and launch URL.
   // index.html defaults to the customer portal, so without this swap an admin
@@ -418,6 +419,7 @@ export default function AdminLayoutV2() {
               </h2>
               {items
                 .filter((item) => !item.adminOnly || user?.role === "admin")
+                .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
                 .map((item) => {
                 const { path, icon: Icon, label } = item;
                 const isActive = isAdminNavItemActive(

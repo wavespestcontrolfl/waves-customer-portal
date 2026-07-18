@@ -46,6 +46,17 @@ const { callBookingDateOnly } = require('./call-booking-catalog');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 const TEMPLATE_KEY = 'secure_appointment_card';
+// Deliberately NOT 'rescheduled' (Codex #2821 P1): the customer-portal
+// reschedule request (routes/schedule.js) flips the visit to 'rescheduled'
+// while leaving the ORIGINAL date/window on the row — it is a pending-
+// rebook PLACEHOLDER (reschedule-public.js calls it exactly that) whose
+// slot no longer exists, and the dispatch board excludes those rows as
+// phantoms (admin-schedule.js day endpoint). Treating it as live would
+// send the secure-card SMS with the obsolete date, render /secure ready
+// with the same stale date/window, and enroll Auto Pay before a
+// replacement appointment exists. When the office re-slots the visit, the
+// rebooker restores 'confirmed' (rebooker.js) and this funnel / the
+// /secure page reopen with the REAL new date.
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // Lease for both claim mechanics (the visit's card_link_sent_at send claim
 // and the request row's pending → completing completion claim): a claim

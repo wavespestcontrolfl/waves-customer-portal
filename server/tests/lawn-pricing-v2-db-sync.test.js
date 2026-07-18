@@ -37,7 +37,7 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
     });
 
     expect(constants.LAWN_PRICING_V2).toMatchObject({
-      pricingVersion: 'LAWN_PRICING_V2_DENSE_35_FLOOR',
+      pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
       pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
       targetCollectedMarginFloor: 0.35,
       laborRateLoaded: 35,
@@ -52,18 +52,18 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
         SPARSE: 20,
       },
     });
-    // Under the 35% floor the cost floor (~$572/yr) drops below the market
-    // table (~$576/yr = $48/mo) — but the $50/mo program minimum (owner
-    // directive 2026-07-09, #2540) clamps this property up to $603/yr, so the
-    // program minimum is the final price, not the market table.
+    // With spot reserves folded in the 35% cost floor (~$594/yr) sits above
+    // the market table (~$576/yr = $48/mo) — but the $50/mo program minimum
+    // (owner directive 2026-07-09, #2540) clamps this property up to $603/yr,
+    // so the program minimum is the final price, not the market table.
     expect(lawn.perApp).toBe(67);
     expect(lawn.annual).toBe(603);
     expect(lawn.monthly).toBe(50.25);
-    expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
-    expect(lawn.costs.total).toBeLessThan(372);
-    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(571);
-    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(572);
-    expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
+    expect(lawn.costs.total).toBeGreaterThanOrEqual(385);
+    expect(lawn.costs.total).toBeLessThan(386);
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(593);
+    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(594);
+    expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_SPOT_RESERVE');
     expect(lawn.pricingSource).toBe('PROGRAM_MINIMUM');
     expect(lawn.pricingBasis).toBe('PROGRAM_MINIMUM_MONTHLY');
     expect(lawn.marketAnnual).toBe(576);

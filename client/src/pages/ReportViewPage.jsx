@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
@@ -342,10 +342,13 @@ function formatReportTitleDate(value) {
   const date = value instanceof Date && !Number.isNaN(value.getTime())
     ? new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate(), 12))
     : (() => {
-      const raw = String(value);
-      const dateOnly = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
-      if (dateOnly) return new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12));
-      const parsed = new Date(raw);
+      // calendarDateFromDateOnlyValue is ANCHORED: true timestamps fall
+      // through to instant-based NY formatting, matching the body's
+      // formatDate. An unanchored prefix match would pin a timestamp's UTC
+      // date to noon and disagree with the body by a day.
+      const dateOnly = calendarDateFromDateOnlyValue(value);
+      if (dateOnly) return dateOnly;
+      const parsed = new Date(String(value));
       return Number.isNaN(parsed.getTime()) ? null : parsed;
     })();
   if (!date) return '';
@@ -456,12 +459,14 @@ function nextServiceName(serviceType) {
 
 function formatNextAppointmentLabel(nextAppointment) {
   if (!nextAppointment?.scheduledDate) return null;
-  const dateLabel = (() => {
-    try {
-      return new Date(`${nextAppointment.scheduledDate}T12:00:00Z`)
-        .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
-    } catch { return null; }
-  })();
+  // calendarDateFromDateOnlyValue instead of string-concatenating T12:00:00Z:
+  // if scheduledDate ever arrives as a full timestamp, the concat produced an
+  // Invalid Date that toLocaleDateString renders as the literal "Invalid
+  // Date" (it doesn't throw, so the old try/catch never fired).
+  const scheduledCalendarDate = calendarDateFromDateOnlyValue(nextAppointment.scheduledDate);
+  const dateLabel = scheduledCalendarDate
+    ? scheduledCalendarDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+    : null;
   if (!dateLabel) return null;
   const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppointment.windowStart || ''));
   const noWindowName = nextServiceName(nextAppointment.serviceType);
@@ -1260,52 +1265,6 @@ function ReentryTargetTile({ target, nowMs, mode, timezone }) {
   );
 }
 
-function ReentryTimer({ context, mode, token, compact = false }) {
-  const generatedAtMs = Date.parse(context.generatedAt) || Date.now();
-  const [nowMs, setNowMs] = useState(generatedAtMs);
-  const timezone = context.displayTimezone || SERVICE_REPORT_TIME_ZONE;
-  const allReady = (context.targets || []).every((target) => Date.parse(target.readyAt) <= nowMs);
-  const rootClass = compact ? 'hero-reentry-status reentry-timer' : 'report-card reentry-timer';
-
-  useEffect(() => {
-    if (mode !== 'live') return undefined;
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [mode]);
-
-  useEffect(() => {
-    if (mode !== 'live') return;
-    trackReportEvent(token, 'reentry_timer_viewed');
-  }, [mode, token]);
-
-  useEffect(() => {
-    if (mode !== 'live' || !allReady) return;
-    trackReportEvent(token, 'reentry_timer_completed');
-  }, [allReady, mode, token]);
-
-  return (
-    <section className={rootClass} data-section="reentry-timer">
-      <div className="reentry-heading">
-        <div className="section-eyebrow">Ready to re-enter</div>
-        <h2>{allReady ? 'Treated areas are ready' : 'Re-entry timing'}</h2>
-      </div>
-      <div className="reentry-details">
-        <div className="reentry-target-grid">
-          {(context.targets || []).map((target) => (
-            <ReentryTargetTile
-              key={target.key}
-              target={target}
-              nowMs={nowMs}
-              mode={mode}
-              timezone={timezone}
-            />
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function PressureTrendChart({ points = [], neighborhood, summary }) {
   const width = 320;
   const height = 120;
@@ -1346,7 +1305,7 @@ function PressureTrendChart({ points = [], neighborhood, summary }) {
       {points.length > 1 && <path d={path} className="pressure-line" fill="none" />}
       {points.map((point, index) => (
         <g
-          key={point.serviceRecordId}
+          key={point.serviceRecordId ?? index}
           className="pressure-point-hit"
           tabIndex={0}
           role="img"
@@ -1701,10 +1660,18 @@ function readinessSummary(context, mode = 'live', nowMsOverride) {
   });
   const allReady = targets.length > 0 && readyTargets.length === targets.length;
   const areaTypes = targets.map((target) => target.label).filter(Boolean);
+  // "Ready time pending" only when NO target has a concrete ready-at —
+  // otherwise the chip claimed the time was pending while a live countdown
+  // ticked right beside it. With known times, name the last one.
+  const readyAtTimes = targets.map((target) => Date.parse(target.readyAt)).filter(Number.isFinite);
+  const lastReadyAtMs = readyAtTimes.length ? Math.max(...readyAtTimes) : null;
+  const pendingStatus = lastReadyAtMs != null
+    ? `Ready after ${formatReadyTime(new Date(lastReadyAtMs).toISOString(), context?.displayTimezone)}`
+    : 'Ready time pending';
   return {
     allReady,
     areaType: areaTypes.length ? areaTypes.join(', ') : 'Treatment areas',
-    status: targets.length ? (allReady ? 'Ready now' : 'Ready time pending') : 'See advisory',
+    status: targets.length ? (allReady ? 'Ready now' : pendingStatus) : 'See advisory',
     badge: targets.length ? (allReady ? 'Ready now' : 'Re-entry timing') : 'Readiness noted',
     headline: allReady
       ? (areaTypes.length ? `Treated ${areaTypes.join(', ').toLowerCase()} areas are ready now.` : 'Treated areas are ready now.')
@@ -1728,7 +1695,18 @@ function useReadinessNow(context, mode) {
 
   useEffect(() => {
     if (mode !== 'live' || !context) return undefined;
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    // Tick only while a countdown is actually running: once every target's
+    // readyAt has passed (or none has one) the 1 Hz re-render is pure waste —
+    // and previously it never stopped for the life of the page.
+    const readyAts = (Array.isArray(context.targets) ? context.targets : [])
+      .map((target) => Date.parse(target.readyAt))
+      .filter(Number.isFinite);
+    const lastReadyMs = readyAts.length ? Math.max(...readyAts) : null;
+    if (lastReadyMs == null || lastReadyMs <= Date.now()) return undefined;
+    const id = window.setInterval(() => {
+      setNowMs(Date.now());
+      if (Date.now() >= lastReadyMs) window.clearInterval(id);
+    }, 1000);
     return () => window.clearInterval(id);
   }, [context, mode]);
 
@@ -1786,8 +1764,8 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           ].map(displayContactLine).filter(Boolean);
           return contactLines.length ? (
             <div className="service-meta-contact">
-              {contactLines.map((line) => (
-                <div key={line} className="service-meta-address">{line}</div>
+              {contactLines.map((line, index) => (
+                <div key={`${index}-${line}`} className="service-meta-address">{line}</div>
               ))}
             </div>
           ) : null;
@@ -1862,11 +1840,16 @@ function InternalReviewBar() {
 
 function ReportActionBar({ pdfUrl, token, onShare }) {
   const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef(null);
+  // Clear the copied-feedback timer on unmount so it can't fire setState on
+  // an unmounted component.
+  useEffect(() => () => window.clearTimeout(copiedTimerRef.current), []);
   const handleShare = async () => {
     const result = await onShare();
     if (result === 'copied') {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
     }
   };
   return (
@@ -1892,7 +1875,7 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
               }}
               style={actionButtonStyle('primary')}
             ><Download size={16} /> Download PDF</a>
-          : <span data-glass-accent="" style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
+          : <button data-glass-accent="" type="button" disabled style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }}><Download size={16} /> Download PDF</button>}
         <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? 'Link copied' : 'Share'}</button>
         {/* window.print() is a no-op in the Capacitor webview — hide the
             button there; the Download PDF share sheet carries Print on iOS. */}
@@ -2532,266 +2515,6 @@ function CompanionSectionHeader({ companion }) {
   );
 }
 
-function pressureProgressHeadline(pressureTrend, fallback = 'Service is complete.') {
-  if (pressureTrend?.direction === 'first_visit') return 'Your first pressure marker';
-  if (pressureTrend?.direction === 'down') return 'Pressure is moving your way';
-  if (pressureTrend?.direction === 'up') return 'Pressure needs a closer watch';
-  if (pressureTrend?.direction === 'flat') return 'Pressure is holding steady';
-  if (pressureTrend?.current?.pressureIndex != null) return 'Pressure snapshot';
-  return fallback;
-}
-
-function WavesAiSummary({ context = {}, mode, token, pressureTrend, neighborhood, lawnAssessment, serviceLine }) {
-  useEffect(() => {
-    if (mode !== 'live') return;
-    trackReportEvent(token, 'ai_summary_viewed');
-  }, [mode, token]);
-
-  const isLawn = serviceLine === 'lawn' && lawnAssessment?.scores;
-  const headline = isLawn
-    ? (lawnAssessment.customerSummary || 'Lawn assessment is complete.')
-    : pressureProgressHeadline(pressureTrend, context.headline || 'Service is complete.');
-  const body = isLawn ? lawnAssessmentBody(lawnAssessment) : context.body;
-
-  return (
-    <section data-glass="card" className="report-card ai-summary-card" data-section="waves-ai-summary">
-      {isLawn && <div className="section-eyebrow">Lawn intelligence</div>}
-      <h2>{headline}</h2>
-      {isLawn ? <LawnMethodologyDropdown /> : <PressureMethodologyDropdown />}
-      {body && <p className="ai-summary-body">{body}</p>}
-      {!isLawn && Array.isArray(context.bullets) && context.bullets.length > 0 && (
-        <div className="ai-summary-bullets">
-          {context.bullets.slice(0, 4).map((bullet) => (
-            <div className="ai-summary-bullet" key={bullet.text}>{bullet.text}</div>
-          ))}
-        </div>
-      )}
-      {isLawn ? (
-        <LawnAssessmentCard assessment={lawnAssessment} mode={mode} token={token} embedded />
-      ) : pressureTrend && (
-        <PressureTrendCard
-          context={pressureTrend}
-          neighborhood={neighborhood}
-          mode={mode}
-          token={token}
-          embedded
-        />
-      )}
-    </section>
-  );
-}
-
-function LawnMethodologyDropdown() {
-  return (
-    <details className="pressure-methodology report-accordion">
-      <summary>
-        <span>How we score lawn health</span>
-        <span className="accordion-action">Details</span>
-      </summary>
-      <div className="accordion-body">
-        <p>
-          Lawn health is a 0-100 assessment built from turf photos captured during
-          the visit, dual-model vision scoring, technician review, and seasonal
-          normalization for Southwest Florida turf. The score weighs turf density,
-          weed suppression, color health, fungus control, and thatch level. We also
-          compare the current assessment to this property’s baseline and prior
-          readings, then interpret it against the treatment plan, expected residual
-          activity from products applied, irrigation context, and visible stress
-          signals. Higher is better.
-        </p>
-      </div>
-    </details>
-  );
-}
-
-function PressureMethodologyDropdown() {
-  return (
-    <details className="pressure-methodology report-accordion">
-      <summary>
-        <span>How we calculate pest pressure</span>
-        <span className="accordion-action">Details</span>
-      </summary>
-      <div className="accordion-body">
-        <p>
-          Pest pressure is a 0-5 operational index. The current visit starts with
-          documented findings, affected zones, activity level, severity, and the main
-          driver observed by the technician. We then compare that signal against this
-          property’s historical pressure curve and the treatment plan already in place,
-          including residual exterior protection, targeted bait placements, application
-          method, treated-zone coverage, and the expected remaining effectiveness window
-          for the materials applied. Lower is better. The final reading blends current
-          activity with prior visits so a single spike does not overwhelm the trend, while
-          recurring pressure still stays visible.
-        </p>
-      </div>
-    </details>
-  );
-}
-
-function WavesAiPersonalitySummary({ context, mode, token, pressureTrend, neighborhood }) {
-  const variants = context.variants || {};
-  const active = variants.straight || variants[context.defaultMode] || Object.values(variants)[0];
-
-  useEffect(() => {
-    if (mode !== 'live') return;
-    trackReportEvent(token, 'ai_summary_personality_viewed', { mode: 'straight' });
-  }, [mode, token]);
-
-  if (!active) return null;
-  const headline = pressureProgressHeadline(pressureTrend, active.headline || 'Service is complete.');
-
-  return (
-    <section data-glass="card" className="report-card ai-summary-card premium-ai-summary" data-section="waves-ai-summary">
-      <div className="premium-section-header">
-        <div>
-          <h2>{headline}</h2>
-        </div>
-      </div>
-      {pressureTrend && (
-        <PressureTrendCard
-          context={pressureTrend}
-          neighborhood={neighborhood}
-          mode={mode}
-          token={token}
-          embedded
-        />
-      )}
-      <PressureMethodologyDropdown />
-      {active.body && <p className="ai-summary-body">{active.body}</p>}
-      {Array.isArray(active.bullets) && active.bullets.length > 0 && (
-        <div className="ai-summary-bullets">
-          {active.bullets.slice(0, 4).map((bullet) => (
-            <div className="ai-summary-bullet" key={bullet.text}>{bullet.text}</div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function TheOneThing({ move }) {
-  if (!move?.title) return null;
-  return (
-    <section data-glass="card" className="report-card the-one-thing" data-section="the-one-thing">
-      <div className="section-eyebrow">The one thing</div>
-      <h2>{move.title}</h2>
-      {(move.why || move.impact) && (
-        <div className="one-thing-detail">
-          {move.why && (
-            <div>
-              <div className="sr-cell-label">Why</div>
-              <p>{move.why}</p>
-            </div>
-          )}
-          {move.impact && (
-            <div>
-              <div className="sr-cell-label">Impact</div>
-              <p>{move.impact}</p>
-            </div>
-          )}
-        </div>
-      )}
-      {move.dueLabel && <p className="sr-muted">{move.dueLabel}</p>}
-    </section>
-  );
-}
-
-function statusLabel(value) {
-  const labels = {
-    active: 'Active',
-    clear: 'Clear',
-    watched: 'Watched',
-    needs_attention: 'Needs attention',
-    not_checked: 'Not checked',
-  };
-  return labels[value] || formatEnumLabel(value);
-}
-
-function PropertyDefenseStatus({ context }) {
-  if (!context?.items?.length) return null;
-  return (
-    <section data-glass="card" className="report-card property-defense-status" data-section="property-defense-status">
-      <div className="section-eyebrow">Property defense status</div>
-      <h2>{context.summary}</h2>
-      <div className="defense-status-grid">
-        {context.items.map((item) => (
-          <div className={`defense-status-item status-${item.status}`} key={item.key}>
-            <div className="sr-cell-label">{item.label}</div>
-            <div className="defense-status-value">{statusLabel(item.status)}</div>
-            {item.detail && <div className="sr-row-detail">{item.detail}</div>}
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function BugFileList({ bugFiles = [], mode = 'live', embedded = false }) {
-  if (!bugFiles.length) return null;
-  const Root = embedded ? 'div' : 'section';
-  return (
-    <Root className={`${embedded ? 'bug-file-section bug-file-section-embedded' : 'sr-section bug-file-section'}`} data-section="bug-file">
-      <h2>The bug file</h2>
-      <div className="bug-file-grid">
-        {bugFiles.map((bug) => (
-          <details className="bug-file-card report-accordion" key={bug.pestKey} open={mode !== 'live'}>
-            <summary>
-              <span>
-                <span className="sr-cell-label">Suspect</span>
-                <span className="bug-file-suspect">{bug.suspectLabel}</span>
-              </span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              {bug.whereSeen?.text && (
-                <div className="bug-file-row">
-                  <div className="sr-cell-label">Where we saw it</div>
-                  <p>{bug.whereSeen.text}</p>
-                </div>
-              )}
-              {bug.whyItMatters?.text && (
-                <div className="bug-file-row">
-                  <div className="sr-cell-label">Why it matters</div>
-                  <p>{bug.whyItMatters.text}</p>
-                </div>
-              )}
-              {bug.whatWeDid?.text && (
-                <div className="bug-file-row">
-                  <div className="sr-cell-label">What we did</div>
-                  <p>{bug.whatWeDid.text}</p>
-                </div>
-              )}
-              {bug.yourMove?.text && (
-                <div className="bug-file-row">
-                  <div className="sr-cell-label">Your move</div>
-                  <p>{bug.yourMove.text}</p>
-                </div>
-              )}
-            </div>
-          </details>
-        ))}
-      </div>
-    </Root>
-  );
-}
-
-function WhyActivityCard({ context, embedded = false }) {
-  if (!context?.title || !context.body) return null;
-  const Root = embedded ? 'div' : 'section';
-  return (
-    <Root className={`${embedded ? 'why-activity-card why-activity-card-embedded' : 'sr-section why-activity-card'}`} data-section="why-activity">
-      <h2>{context.title}</h2>
-      <p>{context.body}</p>
-      {context.whenToTextUs && (
-        <div className="when-to-text">
-          <div className="sr-cell-label">When to text us</div>
-          <p>{context.whenToTextUs}</p>
-        </div>
-      )}
-    </Root>
-  );
-}
-
 export function reviewRequestCopy(placement = 'top') {
   if (placement === 'bottom') {
     return {
@@ -2825,77 +2548,6 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
       >
         {copy.cta}
       </a>
-    </section>
-  );
-}
-
-function ExecutiveStatusGrid({ data, pressureTrend, reentry, mode }) {
-  const nowMs = mode === 'live' ? Date.now() : Date.parse(reentry?.generatedAt) || Date.now();
-  const targets = reentry?.targets || [];
-  const readySummary = targets.length
-    ? targets.map((target) => {
-      const readyAtMs = Date.parse(target.readyAt);
-      const value = Number.isFinite(readyAtMs) && readyAtMs <= nowMs
-        ? 'Ready now'
-        : `Ready after ${formatReadyTime(target.readyAt, reentry.displayTimezone)}`;
-      return `${target.label}: ${value}`;
-    }).join(' · ')
-    : 'See customer advisory';
-  const pressureValue = pressureTrend?.current?.pressureIndex ?? data.pressureIndex;
-
-  return (
-    <section className="executive-status-grid" aria-label="Executive summary">
-      <div className="executive-status-cell">
-        <div className="sr-cell-label">Pressure trend</div>
-        <div className="executive-status-value">{pressureTrend?.customerSummary || `${formatPressureIndex(pressureValue)} pressure index`}</div>
-        <div className="sr-row-detail">Lower is better</div>
-      </div>
-      <div className="executive-status-cell">
-        <div className="sr-cell-label">Ready to re-enter</div>
-        <div className="executive-status-value">{readySummary}</div>
-      </div>
-      <div className="executive-status-cell">
-        <div className="sr-cell-label">Today's service</div>
-        <div className="executive-status-value">{serviceDisplayName(data)}</div>
-        <div className="sr-row-detail">{formatDate(data.serviceDate)}</div>
-      </div>
-    </section>
-  );
-}
-
-function SinceLastVisit({ context }) {
-  const rows = [
-    context.pressureLine ? ['Pressure', context.pressureLine.replace(/^Pressure:\s*/i, '')] : null,
-    context.activityLine ? ['Activity', context.activityLine] : null,
-    context.actionLine ? ['Customer action', context.actionLine.replace(/^Customer action:\s*/i, '')] : null,
-  ].filter(Boolean);
-  if (!rows.length) return null;
-  return (
-    <section data-glass="card" className="sr-section since-last-visit">
-      <h2>Since last visit</h2>
-      <div className="sr-list">
-        {rows.map(([label, value]) => (
-          <div className="sr-row" key={label}>
-            <div>
-              <div className="sr-cell-label">{label}</div>
-              <div className="sr-row-title">{value}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function RecommendedActionCard({ findings = [], aiSummary, primaryMove }) {
-  const aiAction = aiSummary?.recommendedNextStep?.text;
-  const finding = recommendedFinding(findings);
-  const text = primaryMove?.title || aiAction || finding?.recommendation;
-  if (!text) return null;
-  return (
-    <section data-glass="card" className="sr-section recommended-action-card">
-      <h2>Recommended next step</h2>
-      <p className="recommended-action-text">{text}</p>
     </section>
   );
 }
@@ -3943,28 +3595,32 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
             {merged.map((zone) => {
               const isActive = zone.entries.some((entry) => entry.id === activeItemId);
               const allProducts = Array.from(new Set(zone.entries.flatMap((entry) => entry.products)));
+              // A11y: the activator is a real <button> inside the h3 —
+              // role="button" on the <article> flattened the heading for AT,
+              // and the old onFocus handler activated rows just by tabbing
+              // through them. The article keeps onClick as a pointer-size
+              // convenience only.
               return (
                 <article
                   className={`coverage-summary-row zone-service-row service-coverage-item${isActive ? ' is-active' : ''}`}
                   key={zone.key}
-                  tabIndex={0}
-                  role="button"
-                  aria-pressed={isActive ? 'true' : 'false'}
                   onClick={() => onActivate(zone.firstItemId)}
-                  onFocus={() => onActivate(zone.firstItemId)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      onActivate(zone.firstItemId);
-                    }
-                  }}
                 >
                   <div className="zone-service-identity">
                     <span className="zone-letter-badge" aria-label={zone.markerLabel ? `Coverage marker ${zone.markerLabel}` : 'Service coverage marker'}>
                       {zone.markerLabel}
                     </span>
                     <div className="zone-service-copy">
-                      <h3>{zone.areaName}</h3>
+                      <h3>
+                        <button
+                          type="button"
+                          className="zone-activate-button"
+                          aria-pressed={isActive ? 'true' : 'false'}
+                          onClick={() => onActivate(zone.firstItemId)}
+                        >
+                          {zone.areaName}
+                        </button>
+                      </h3>
                       {zone.entries.map((entry) => (
                         <p key={`desc-${entry.id}`} className="zone-status-description">
                           {entry.description}
@@ -6123,6 +5779,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 800;
           letter-spacing: 0;
         }
+        /* The in-heading activator inherits the h3's look 1:1. */
+        .coverage-summary-row h3 .zone-activate-button {
+          appearance: none;
+          background: none;
+          border: 0;
+          padding: 0;
+          margin: 0;
+          font: inherit;
+          color: inherit;
+          letter-spacing: inherit;
+          text-align: left;
+          cursor: pointer;
+        }
         .coverage-summary-row p,
         .coverage-evidence-note {
           margin: 4px 0 0;
@@ -8017,7 +7686,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         /* V2 hero eyebrows hide under glass; the heroes are h2 now (one h1 per
            page — codex P3 on #2567), so match them by class alongside the h1. */
         html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1),
-        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h2.sr-v2-hero-title) { display: none; }
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h2.sr-v2-hero-title),
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ div > h2.sr-v2-hero-title) { display: none; }
         /* EXCEPT the hero kicker — owner ruling 2026-07-16: every report leads
            with "[Report kind] · [the service performed]" above the header,
            mirroring the project report's kicker. */
@@ -8516,14 +8186,23 @@ export default function ReportViewPage() {
     const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`;
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
-    // and customers never have one. Same-origin localStorage only.
-    const staffToken = localStorage.getItem('waves_admin_token');
+    // and customers never have one. Same-origin localStorage only. Guarded:
+    // sandboxed webviews can throw on localStorage access, and an unguarded
+    // throw here stranded the page on the loading skeleton — degrade to an
+    // unauthenticated fetch instead.
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     fetch(dataUrl, {
       cache: 'no-store',
       headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
     })
       .then((r) => {
-        if (r.status === 404 || r.status === 410) return r.json();
+        // Static sentinel, not r.json(): a 404/410 with an HTML body (proxy
+        // error pages) made the parse reject into the retryable error state
+        // when the truth is "this report does not exist".
+        if (r.status === 404 || r.status === 410) {
+          return r.json().catch(() => ({ error: 'not_found' }));
+        }
         if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
         return r.json();
       })

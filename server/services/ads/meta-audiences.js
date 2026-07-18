@@ -19,6 +19,7 @@ const logger = require('../logger');
 const { runExclusive } = require('../../utils/cron-lock');
 const { sha256Hex, normalizeEmail, normalizePhone } = require('./data-manager')._private;
 const { whereLiveCustomer } = require('../customer-stages');
+const { filterMarketingSuppressed, partitionMarketingSuppressed, loadMarketingSuppression, canonicalEmail } = require('./ad-audience-consent');
 
 const GRAPH = 'https://graph.facebook.com';
 const STATE_TABLE = 'ad_audience_syncs';
@@ -72,18 +73,26 @@ const AUDIENCES = {
   },
 };
 
-// ── Member collection — returns [{ key, email, phone }] ──────────────
-async function collectCustomerMembers() {
+// ── Member collection — returns [{ key, email, phone }] (or, with
+// partition:true, { kept, dropped } so sync engines can derive removal
+// hashes from the dropped members' raw source values) ────────────────
+async function collectCustomerMembers({ partition = false, suppression = null } = {}) {
   // REAL customers only. `customers.active` is also true for CRM lead/prospect rows
   // (public quote leads are inserted as customers at pipeline_stage 'new_lead'), so
   // use the canonical live-customer predicate, not just `active`.
   const rows = await whereLiveCustomer(db('customers'))
     .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
     .select('id', 'email', 'phone');
-  return rows.map((r) => ({ key: `customer:${r.id}`, email: r.email, phone: r.phone }));
+  const members = rows.map((r) => ({ key: `customer:${r.id}`, email: r.email, phone: r.phone }));
+  // identifiers-only: this audience is the prospecting EXCLUSION list — an
+  // opted-out customer must STAY in it or they start seeing prospecting ads
+  // again. Only invalid identifiers (wrong_number = a stranger's phone) are
+  // stripped. Google Customer Match shares this collector and semantics.
+  const opts = { audienceKey: 'customers', mode: 'identifiers-only', suppression };
+  return partition ? partitionMarketingSuppressed(members, opts) : filterMarketingSuppressed(members, opts);
 }
 
-async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAYS } = {}) {
+async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAYS, partition = false, suppression = null } = {}) {
   const cutoff = new Date(Date.now() - windowDays * 86400000).toISOString();
   const placeholders = LEAD_CLOSED.map(() => '?').join(',');
   // Recent, not-closed leads who are NOT already real customers. We can't filter on
@@ -99,7 +108,9 @@ async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAY
       whereLiveCustomer(this.select(db.raw('1')).from('customers as c').whereRaw('c.id = leads.customer_id'));
     })
     .select('id', 'email', 'phone');
-  return rows.map((r) => ({ key: `lead:${r.id}`, email: r.email, phone: r.phone }));
+  const members = rows.map((r) => ({ key: `lead:${r.id}`, email: r.email, phone: r.phone }));
+  const opts = { audienceKey: 'unbooked_leads', suppression };
+  return partition ? partitionMarketingSuppressed(members, opts) : filterMarketingSuppressed(members, opts);
 }
 
 // ── PII hashing → a data row aligned to SCHEMA, or null if no match keys ──
@@ -178,7 +189,14 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
   const dryRun = validateOnly === true || !uploadsAllowed();
 
   return runExclusive(`meta-audiences:${audienceKey}`, async () => {
-    const members = await def.collect();
+    // ONE suppression snapshot drives both collection filtering and the
+    // removal calculation below — separate loads could disagree about an
+    // opt-out landing between them, leaving the contact uploaded this run
+    // with no matching removal.
+    const suppression = await loadMarketingSuppression();
+    const collected = await def.collect({ partition: true, suppression });
+    const members = Array.isArray(collected) ? collected : collected.kept;
+    const suppressedMembers = Array.isArray(collected) ? [] : collected.dropped;
 
     // Keep only members with usable match keys, and store the hashed row in state.
     // Persisting the hash (not just the entity key) means: (a) members skipped for
@@ -190,7 +208,14 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     let skippedNoKeys = 0;
     for (const m of members) {
       const data = hashMember(m);
-      if (data) current.push({ k: m.key, d: data }); else skippedNoKeys++;
+      if (!data) { skippedNoKeys++; continue; }
+      // c: canonical-email consent hash persisted WITH the row. Meta's match
+      // hashes (d) come from the RAW source string, so once the source row is
+      // hard-deleted a suppression stored under a different gmail variant can
+      // never be matched from d alone — c survives deletion and lets a later
+      // sync recognize the opt-out (still a SHA-256 hash, no plaintext PII).
+      const canonical = canonicalEmail(m.email);
+      current.push({ k: m.key, d: data, c: canonical ? sha256Hex(canonical) : '' });
     }
     const hashId = (d) => `${d[0]}|${d[1]}`;
 
@@ -217,19 +242,83 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     }
     const safeToDelete = (d) => !((d[0] && currentHashes.has(d[0])) || (d[1] && currentHashes.has(d[1])));
 
+    // Identifier hashes of active marketing opt-outs (and wrong_number phones),
+    // hashed exactly like uploaded members. A prior row carrying one of these
+    // must be removed even when it shares its OTHER identifier with a current
+    // member — shared-identifier retention must not keep an opted-out email
+    // matchable forever via a household phone. (Gmail dot-variants uploaded
+    // under a different raw string hash differently and can't be derived here;
+    // the collector-level canonical match prevents new ones from uploading.)
+    const suppressedIdHashes = new Set();
+    const suppressedCanonicalHashes = new Set();
+    for (const raw of suppression.rawOptOutEmails) {
+      const email = normalizeEmail(raw);
+      if (email) suppressedIdHashes.add(sha256Hex(email));
+      const canonical = canonicalEmail(raw);
+      if (canonical) suppressedCanonicalHashes.add(sha256Hex(canonical));
+    }
+    for (const raw of suppression.rawOptOutPhones) {
+      const phone = normalizePhone(raw);
+      if (phone) suppressedIdHashes.add(sha256Hex(phone.replace(/^\+/, '')));
+    }
+    // Meta rows hash the RAW normalized email (no gmail canonicalization), so
+    // a suppression stored under a different dot/+tag variant hashes to a
+    // DIFFERENT value than the uploaded row. The dropped members carry the
+    // exact source strings the original upload hashed — hash those too, so a
+    // canonically-matched opt-out removes the row uploaded under any variant
+    // still present in the source tables. (A hard-deleted source row whose
+    // suppression uses a different variant remains untraceable — hashes are
+    // one-way and the state stores no plaintext PII by design.)
+    for (const m of suppressedMembers) {
+      const d = hashMember(m);
+      if (d) {
+        if (d[0]) suppressedIdHashes.add(d[0]);
+        if (d[1]) suppressedIdHashes.add(d[1]);
+      }
+    }
+    // Match by raw identifier hash OR by the row's persisted canonical consent
+    // hash (rows written before this field exists simply lack c and fall back
+    // to raw-hash matching until the next state rewrite refreshes them).
+    const hasSuppressedId = (e) => !!(
+      (e.d[0] && suppressedIdHashes.has(e.d[0]))
+      || (e.d[1] && suppressedIdHashes.has(e.d[1]))
+      || (e.c && suppressedCanonicalHashes.has(e.c))
+    );
+
     const addRows = [];
     for (const [h, e] of currentByHash) if (!priorByHash.has(h)) addRows.push(e.d);
 
     const removeRows = [];
     const retained = []; // uploaded rows no longer current but unsafe to delete now
+    const removedSuppressedIds = new Set(); // ALL identifiers on consent-removed rows
+    let consentRemovals = 0;
     for (const [h, e] of priorByHash) {
       if (currentByHash.has(h)) continue; // still a current member
+      if (hasSuppressedId(e)) {
+        // Consent removal overrides shared-identifier retention.
+        removeRows.push(e.d);
+        consentRemovals += 1;
+        if (e.d[0]) removedSuppressedIds.add(e.d[0]);
+        if (e.d[1]) removedSuppressedIds.add(e.d[1]);
+        continue;
+      }
       if (safeToDelete(e.d)) removeRows.push(e.d); else retained.push(e);
     }
 
     // Persist current rows + retained orphans, so a future sync deletes each orphan
     // once its shared identifier leaves the audience (self-healing, no orphan leak).
-    const persisted = [...currentByHash.values(), ...retained];
+    // EXCEPT: a current member sharing an identifier with a consent-removed row is
+    // dropped from state — Meta's DELETE matches by ANY identifier, so the remove
+    // (which runs AFTER this run's adds) may knock them out too; absent from state,
+    // the next sync re-adds them. One-cycle flicker, guaranteed consent removal.
+    const persisted = [];
+    let deferredReAdds = 0;
+    for (const e of currentByHash.values()) {
+      const sharesRemoved = (e.d[0] && removedSuppressedIds.has(e.d[0])) || (e.d[1] && removedSuppressedIds.has(e.d[1]));
+      if (sharesRemoved) { deferredReAdds += 1; continue; }
+      persisted.push(e);
+    }
+    persisted.push(...retained);
 
     const summary = {
       audienceKey,
@@ -242,6 +331,8 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       toAdd: addRows.length,
       toRemove: removeRows.length,
       retained: retained.length,
+      consentRemovals,
+      deferredReAdds,
     };
 
     if (dryRun) {

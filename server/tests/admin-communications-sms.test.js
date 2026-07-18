@@ -259,6 +259,44 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  // Codex 07-18: the registry defines smsToneRewrite on SMS_SONNET
+  // (config/models.js) and sms-draft-canary deliberately skips a separate
+  // probe because this endpoint shares the save-the-sale model. Dispatching
+  // the generic customer-copy policy (MODEL_VOICE) here would silently run
+  // rewrites on the wrong model whenever MODEL_SMS_SONNET/MODEL_VOICE
+  // diverge, bypassing the SMS override/canary contract. Identity pins (toBe)
+  // so an equal-but-different route object still fails.
+  test('rewrite-sms dispatches the dedicated smsToneRewrite registry route with the Terra backup', async () => {
+    const MODELS = require('../config/models');
+    const llmCall = require('../services/llm/call');
+    const dispatchSpy = jest.spyOn(llmCall, 'dispatchWithFallback')
+      .mockResolvedValue({ ok: true, text: 'Hi Ada — we can be there tomorrow at 8am.' });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/rewrite-sms`, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer admin',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ body: 'can be there tomorow at 8' }),
+        });
+        const resBody = await res.json();
+        expect(res.status).toBe(200);
+        expect(resBody.body).toBe('Hi Ada — we can be there tomorrow at 8am.');
+      });
+
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      const [policy, payload] = dispatchSpy.mock.calls[0];
+      expect(policy.primary).toBe(MODELS.ROUTES.smsToneRewrite);
+      expect(policy.fallback).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback);
+      expect(payload).toMatchObject({ jsonMode: false, maxTokens: 500 });
+    } finally {
+      dispatchSpy.mockRestore();
+    }
+  });
+
   test('returns a readable error when policy blocks a send', async () => {
     sendCustomerMessage.mockResolvedValue({
       sent: false,

@@ -21,6 +21,7 @@ import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
+import BillingLaneCard from './BillingLaneCard';
 import { useCustomerCards } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
 
@@ -543,6 +544,12 @@ export default function MobileAppointmentDetailSheet({
             style={{ marginTop: 16 }}
           />
         )}
+
+        {/* Billing lane + what completing this visit will do — server-computed
+            from the same predicates the completion path uses, so the office
+            sees the money outcome before the visit instead of after. */}
+        <BillingLaneCard billingLane={service.billingLane} style={{ marginTop: 12 }} />
+
 
         {/* Date and time */}
         <section className="mt-8">

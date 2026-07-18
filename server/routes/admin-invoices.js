@@ -860,9 +860,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     res.json(invoice);
   } catch (err) {
     // Editability guards (status race, live PaymentIntent, payment plan,
-    // annual prepay, deposit/account credit) are operator-actionable conflicts,
-    // not server faults — surface them so the UI can toast the reason.
-    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied/i.test(err.message)) {
+    // annual prepay, deposit/account credit, applied-money/dispute fence)
+    // are operator-actionable conflicts, not server faults — surface them
+    // so the UI can toast the reason. "could not verify the" covers every
+    // fail-closed verify fence ("Could not verify the X — refusing to
+    // edit"): a transient read failure is a retry, not a server fault.
+    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied|payment already applied|payment dispute|sending right now|just went out|saved-card charge|could not verify the/i.test(err.message)) {
       return res.status(409).json({ error: err.message });
     }
     if (/Invalid line-item discount/i.test(err.message)) {
@@ -977,13 +980,28 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:id/charge-card-quote — exact saved-card amount, including the
+// funding-aware card fee and projected account credit. No money moves here.
+router.post('/:id/charge-card-quote', async (req, res) => {
+  try {
+    const { paymentMethodId } = req.body || {};
+    if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+    const StripeService = require('../services/stripe');
+    const quote = await StripeService.quoteInvoiceSavedCardCharge(req.params.id, paymentMethodId);
+    return res.json({ quote });
+  } catch (err) {
+    logger.warn(`[admin-invoices] charge-card quote failed: ${err.message}`);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
 // POST /:id/charge-card — charge a saved card on file against this invoice.
 // Body: { paymentMethodId } (our internal payment_methods.id).
 // The card must belong to the invoice customer. Succeeds by calling
 // Stripe off-session with confirm:true; webhook marks the invoice paid.
-router.post('/:id/charge-card', async (req, res, next) => {
+router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
   try {
-    const { paymentMethodId } = req.body || {};
+    const { paymentMethodId, expectedTotal } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
 
     // Account credit is auto-applied INSIDE chargeInvoiceWithSavedCard — after it
@@ -993,7 +1011,11 @@ router.post('/:id/charge-card', async (req, res, next) => {
     // stale/invalid paymentMethodId would otherwise consume credit before the
     // card check throws, leaving the invoice reduced/edit-locked with no charge.
     const StripeService = require('../services/stripe');
-    const result = await StripeService.chargeInvoiceWithSavedCard(req.params.id, paymentMethodId);
+    const result = await StripeService.chargeInvoiceWithSavedCard(
+      req.params.id,
+      paymentMethodId,
+      { expectedTotal },
+    );
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[admin-invoices] charge-card failed: ${err.message}`);

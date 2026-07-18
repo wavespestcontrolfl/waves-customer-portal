@@ -1,4 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+// The hold-arming guard under test sits behind the report-payment-hold gate,
+// which is read once at module load — enable it before any require.
+process.env.GATE_WDO_REPORT_PAYMENT_HOLD = 'true';
 
 const mockS3Send = jest.fn();
 const mockAnthropicCreate = jest.fn();
@@ -776,12 +779,87 @@ describe('admin projects routes', () => {
         propertyType: 'Single Family',
         squareFootage: 1840,
       }));
-      expect(mockAnthropicCreate).toHaveBeenCalledWith(expect.objectContaining({
-        model: expect.any(String),
-        messages: expect.any(Array),
-      }));
+      // The chain runs under dispatchWithFallback's default budget, so the
+      // Anthropic leg always carries per-request options (bounded timeout,
+      // SDK retries off) — pinning the budgeted two-arg shape on a real lane.
+      expect(mockAnthropicCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: expect.any(String),
+          messages: expect.any(Array),
+        }),
+        expect.objectContaining({ maxRetries: 0, timeout: expect.any(Number) }),
+      );
     });
     delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  // Codex 07-18: /wdo-intelligence runs on a two-provider TEXT_POLICIES lane,
+  // so the old Anthropic-only guard returned 400 "AI not configured" exactly
+  // when the OpenAI failover leg should have carried the request.
+  test('wdo intelligence 400s only when NEITHER provider key is configured', async () => {
+    const savedOpenAI = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ property_address: '100 Test St, Bradenton, FL 34202' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(400);
+        expect(body.error).toBe('AI not configured');
+      });
+    } finally {
+      if (savedOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = savedOpenAI;
+    }
+  });
+
+  test('wdo intelligence serves from the OpenAI leg when only OPENAI_API_KEY is configured', async () => {
+    const savedOpenAI = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'openai-test';
+    lookupPropertyFromAITrio.mockResolvedValue(null);
+    const realFetch = global.fetch;
+    // The route harness itself talks over fetch, so only intercept the OpenAI
+    // Responses call; everything else (the local test server) passes through.
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation((url, opts) => {
+      if (String(url).includes('api.openai.com')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            output_text: JSON.stringify({
+              suggestedFindings: {
+                inspection_scope: 'Visible and readily accessible interior areas, garage, and exterior perimeter.',
+              },
+              confidence: 'medium',
+              reviewNotes: ['Verify detached structures in the field.'],
+            }),
+          }),
+        });
+      }
+      return realFetch(url, opts);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ property_address: '100 Test St, Bradenton, FL 34202' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.suggestedFindings.inspection_scope).toContain('Visible and readily accessible');
+        expect(body.confidence).toBe('medium');
+      });
+      // The Anthropic leg had no key: it must fail closed, not be called.
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      if (savedOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = savedOpenAI;
+    }
   });
 
   test('wdo intelligence blanks unsupported construction suggestions without supporting facts', async () => {
@@ -1488,6 +1566,85 @@ describe('admin projects routes', () => {
       expect(body.missing.map(item => item.key)).not.toContain('photos');
       expect(body.missing.map(item => item.key)).not.toContain('recommendations');
       expect(projectRead.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('hold-until-paid refuses a pre-treatment certificate with missing soft fields even under an override', async () => {
+    // The automatic release revalidates every required certificate field with
+    // no operator present, and the interactive override is not persisted — so
+    // arming a hold over missing fields would collect payment and then never
+    // deliver. The route must refuse the hold at preview time instead.
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'cert-1',
+        customer_id: 'customer-1',
+        project_type: 'pre_treatment_termite_certificate',
+        project_date: '2026-07-17',
+        findings: { treatment_address: '123 Slab Ct', applicator_name: 'Adam Benetti' },
+        sent_at: null,
+        status: 'draft',
+      }),
+    });
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'customer-1', first_name: 'Van', last_name: 'Lee', email: 'van@example.com' }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/cert-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dry_run: true,
+          hold_report_until_paid: true,
+          override_reason: 'Thin draft, customer needs it today',
+        }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('hold_requires_complete_certificate');
+      expect(body.missing.length).toBeGreaterThan(0);
+      expect(projectRead.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('photo captions are clamped to the 200-char column before insert', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'project-1', customer_id: 'customer-1', created_by_tech_id: 'tech-1' }),
+    });
+    const photoInsert = chain({
+      returning: jest.fn().mockResolvedValue([{ id: 'photo-1', category: 'other', visit: 'primary' }]),
+    });
+    const activityInsert = chain();
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectRead;
+      if (table === 'project_photos') return photoInsert;
+      if (table === 'activity_log') return activityInsert;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      // Valid 8-byte PNG signature plus padding so the magic-byte sniff passes.
+      const pngBytes = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.alloc(16, 0),
+      ]);
+      const fd = new FormData();
+      fd.append('photo', new Blob([pngBytes], { type: 'image/png' }), 'slab.png');
+      fd.append('caption', 'x'.repeat(1200));
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/photos`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tech-1' },
+        body: fd,
+      });
+      expect(res.status).toBe(200);
+      expect(photoInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        caption: 'x'.repeat(200),
+      }));
     });
   });
 

@@ -78,6 +78,10 @@ jest.mock('../services/project-email', () => ({
 jest.mock('../services/invoice', () => ({
   markDeliverySent: jest.fn(async () => ({})),
   previewInvoiceTotals: jest.fn(async () => ({ total: 175 })),
+  buildLineItemsForScheduledService: jest.fn(async () => ({
+    lineItems: [{ description: 'Pre-treatment termite service', quantity: 1, unit_price: 425, amount: 425 }],
+    discountIds: [],
+  })),
   update: jest.fn(async () => null),
   create: jest.fn(async () => ({ id: 'inv-new' })),
 }));
@@ -151,6 +155,7 @@ const InvoiceService = require('../services/invoice');
 const PayerService = require('../services/payer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
+const logger = require('../services/logger');
 const projectsRouter = require('../routes/admin-projects');
 const reportsRouter = require('../routes/reports-public');
 const { releaseHeldProjectReport } = projectsRouter;
@@ -224,8 +229,11 @@ async function withServer(fn) {
 }
 
 // Mirror of wdoContentHash in routes/admin-projects.js (deliberately
-// duplicated — see wdo-signature-binding.test.js).
+// duplicated — see wdo-signature-binding.test.js). The hash covers the
+// CUSTOMER-SAFE findings (internal-key strip + fee-cue scrub) — the same
+// representation the FDACS PDF renders (codex #2817).
 function expectedContentHash(findings, projectDate) {
+  const { stripInternalFindingKeys } = require('../services/project-types');
   const stable = (value) => {
     if (Array.isArray(value)) return value.map(stable);
     if (value && typeof value === 'object') {
@@ -236,7 +244,8 @@ function expectedContentHash(findings, projectDate) {
     }
     return value;
   };
-  const payload = JSON.stringify({ findings: stable(findings), project_date: projectDate });
+  const { projectRecordedFeeValues } = require('../services/project-types');
+  const payload = JSON.stringify({ findings: stable(stripInternalFindingKeys(findings, { redactValues: true, feeValues: projectRecordedFeeValues({ findings }), freeTextKeys: require('../services/project-types').projectTypeFreeTextKeys('wdo_inspection') }) || {}), project_date: projectDate });
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
@@ -254,6 +263,19 @@ const FINDINGS = {
   applicator_name: 'Adam B',
   applicator_fdacs_id: 'JF111111',
   report_sent_to: 'ABC Title <closing@abctitle.com>',
+};
+
+const PRE_TREATMENT_FINDINGS = {
+  treatment_address: '456 Palm Dr, Sarasota, FL 34236',
+  treatment_method: 'Soil barrier (chemical)',
+  product_name: 'Termidor SC',
+  active_ingredient: 'fipronil',
+  concentration_pct: '0.060',
+  square_footage: '2200',
+  gallons_applied: '220',
+  applicator_name: 'Adam B',
+  applicator_fdacs_id: 'JF111111',
+  applicator_attestation: 'I certify this treatment record is true and complete.',
 };
 
 function wdoProject(overrides = {}) {
@@ -275,6 +297,15 @@ function wdoProject(overrides = {}) {
     report_hold_attempts: 0,
     ...overrides,
   };
+}
+
+function preTreatmentProject(overrides = {}) {
+  return wdoProject({
+    project_type: 'pre_treatment_termite_certificate',
+    wdo_signature: null,
+    findings: PRE_TREATMENT_FINDINGS,
+    ...overrides,
+  });
 }
 
 const CUSTOMER = {
@@ -299,7 +330,16 @@ function invoiceRow(overrides = {}) {
   };
 }
 
-function mockTables({ project = wdoProject(), invoice = invoiceRow(), updates = {}, projectUpdateResult = null } = {}) {
+function mockTables({
+  project = wdoProject(),
+  invoice = invoiceRow(),
+  customer = CUSTOMER,
+  invoiceFirstResults = null,
+  updates = {},
+  projectUpdateResult = null,
+  smsRows = [],
+} = {}) {
+  const activityRows = [];
   const recordUpdate = (table) => jest.fn(async (payload) => {
     (updates[table] = updates[table] || []).push(payload);
     if (table === 'projects' && projectUpdateResult) return projectUpdateResult(payload);
@@ -307,23 +347,63 @@ function mockTables({ project = wdoProject(), invoice = invoiceRow(), updates = 
   });
   const projectUpdate = recordUpdate('projects');
   const invoiceUpdate = recordUpdate('invoices');
+  const queuedInvoiceFirstResults = Array.isArray(invoiceFirstResults)
+    ? [...invoiceFirstResults]
+    : null;
   db.mockImplementation((table) => {
     if (table === 'projects' || table === 'projects as p') {
       return chain({ first: jest.fn(async () => project), update: projectUpdate });
     }
     if (table === 'invoices') {
-      return chain({ first: jest.fn(async () => invoice), update: invoiceUpdate });
+      return chain({
+        first: jest.fn(async () => (
+          queuedInvoiceFirstResults?.length ? queuedInvoiceFirstResults.shift() : invoice
+        )),
+        update: invoiceUpdate,
+      });
     }
-    if (table === 'customers') return chain({ first: jest.fn(async () => CUSTOMER) });
+    if (table === 'customers') return chain({ first: jest.fn(async () => customer) });
     if (table === 'notification_prefs') return chain({ first: jest.fn(async () => null) });
+    if (table === 'sms_log') {
+      const filters = { where: [], raw: [] };
+      const c = chain();
+      c.where = jest.fn((value) => { filters.where.push(value); return c; });
+      c.whereRaw = jest.fn((sql, bindings) => { filters.raw.push({ sql, bindings }); return c; });
+      c.first = jest.fn(async () => {
+        const releaseKey = filters.raw.find((r) => r.sql.includes('report_hold_release_key'))?.bindings?.[0];
+        if (releaseKey) {
+          return smsRows.find((row) => {
+            const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+            return meta.report_hold_release_key === releaseKey;
+          }) || null;
+        }
+        const scheduledId = filters.raw.find((r) => r.sql.includes('scheduled_sms_log_id'))?.bindings?.[0];
+        if (scheduledId) {
+          return smsRows.find((row) => {
+            const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+            return String(meta.scheduled_sms_log_id || '') === String(scheduledId)
+              && ['queued', 'sent', 'delivered'].includes(row.status);
+          }) || null;
+        }
+        return null;
+      });
+      c.insert = jest.fn(async (row) => { smsRows.push({ ...row }); return [1]; });
+      c.update = jest.fn(async (payload) => {
+        const id = filters.where.find((value) => value?.id)?.id;
+        const row = smsRows.find((candidate) => candidate.id === id);
+        if (row) Object.assign(row, payload);
+        return row ? 1 : 0;
+      });
+      return c;
+    }
     if (table === 'project_photos') return chain({ resolvesTo: [] });
     if (table === 'technicians') return chain({ first: jest.fn(async () => null) });
-    if (table === 'activity_log') return chain();
+    if (table === 'activity_log') return chain({ insert: jest.fn(async (row) => { activityRows.push(row); return [1]; }) });
     if (table === 'service_records') return chain();
     throw new Error(`Unexpected table query: ${table}`);
   });
   db.transaction.mockImplementation(async (cb) => cb(db));
-  return { updates };
+  return { updates, smsRows, activityRows };
 }
 
 beforeEach(() => {
@@ -333,7 +413,85 @@ beforeEach(() => {
   mockGates.wdoReportPaymentHold = true;
 });
 
+describe('scheduled pre-treatment application prefill', () => {
+  test('maps the appointment service defaults into editable product applications', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        return chain({
+          first: jest.fn(async () => ({
+            id: 'sched-55',
+            customer_id: 'customer-1',
+            technician_id: 'tech-1',
+            service_id: 'service-1',
+            service_type: 'Termite Pretreatment Service',
+          })),
+        });
+      }
+      if (table === 'scheduled_service_addons') return chain({ resolvesTo: [] });
+      if (table === 'services') {
+        return chain({
+          resolvesTo: [{
+            id: 'service-1',
+            name: 'Termite Pretreatment Service',
+            default_products: ['Termidor SC', 'Bora-Care'],
+          }],
+        });
+      }
+      if (table === 'products_catalog') {
+        return chain({
+          resolvesTo: [
+            { name: 'Termidor SC', epa_reg_number: '7969-210', active_ingredient: 'fipronil' },
+            { name: 'Bora-Care', epa_reg_number: '64405-1', active_ingredient: 'borate' },
+          ],
+        });
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/scheduled-service/sched-55/application-prefill`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.applications).toEqual([
+        expect.objectContaining({
+          product_name: 'Termidor SC',
+          treatment_method: 'Soil barrier (chemical)',
+          epa_registration: '7969-210',
+        }),
+        expect.objectContaining({
+          product_name: 'Bora-Care',
+          treatment_method: 'Wood treatment (borate)',
+          epa_registration: '64405-1',
+        }),
+      ]);
+    });
+  });
+});
+
 describe('send-with-invoice hold_report_until_paid', () => {
+  test('prepare_invoice returns a durable draft for an explicit card-on-file charge without sending', async () => {
+    const { updates } = mockTables();
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prepare_invoice: true, invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body).toEqual(expect.objectContaining({
+        prepared: true,
+        invoice: expect.objectContaining({ id: 'inv-1', status: 'draft', payer_billed: false }),
+      }));
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect(ProjectEmail.sendProjectReportWithInvoice).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(updates.projects || []).toHaveLength(0);
+    });
+  });
+
   test('self-pay hold: invoice-only delivery, hold stamped, no report artifacts', async () => {
     const { updates } = mockTables();
     await withServer(async (baseUrl) => {
@@ -378,7 +536,85 @@ describe('send-with-invoice hold_report_until_paid', () => {
     });
   });
 
-  test('hold is rejected for non-WDO projects', async () => {
+  test('hold is accepted for a pre-treatment certificate without a second signature', async () => {
+    const { updates } = mockTables({ project: preTreatmentProject() });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hold_report_until_paid: true, invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.sent).toBe(true);
+      expect(body.report_held).toBe(true);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).toHaveBeenCalledTimes(1);
+      expect(buildWdoReportPDFBuffer).not.toHaveBeenCalled();
+      expect(mockS3Send).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(true);
+    });
+  });
+
+  test('phone-only certificate hold promises automatic release by text, not email', async () => {
+    mockTables({
+      project: preTreatmentProject(),
+      customer: { ...CUSTOMER, email: '' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hold_report_until_paid: true, invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.sent).toBe(true);
+      expect(body.report_held).toBe(true);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      const smsBody = sendCustomerMessage.mock.calls[0][0].body;
+      expect(smsBody).toMatch(/sent by text automatically/i);
+      expect(smsBody).not.toMatch(/emailed automatically/i);
+    });
+  });
+
+  test('pre-treatment preview builds its invoice from the appointment before a service record exists', async () => {
+    const project = preTreatmentProject({
+      invoice_id: null,
+      scheduled_service_id: 'sched-55',
+      service_record_id: null,
+    });
+    const createdInvoice = invoiceRow({ id: 'inv-new', total: 425, invoice_number: 'INV-2001' });
+    mockTables({
+      project,
+      invoice: createdInvoice,
+      // No reusable draft, no already-paid invoice, then the row created by
+      // InvoiceService.create. This mirrors the first completion attempt.
+      invoiceFirstResults: [null, null, createdInvoice],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hold_report_until_paid: true, dry_run: true }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.dry_run).toBe(true);
+      expect(body.invoice).toEqual(expect.objectContaining({ id: 'inv-new', total: 425 }));
+      expect(InvoiceService.buildLineItemsForScheduledService).toHaveBeenCalledWith(
+        'sched-55',
+        expect.objectContaining({ fallbackDescription: expect.stringMatching(/Pre-Treatment/i) }),
+      );
+      expect(InvoiceService.create).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'customer-1',
+        scheduledServiceId: 'sched-55',
+        serviceRecordId: undefined,
+      }));
+    });
+  });
+
+  test('hold is rejected for ordinary non-compliance projects', async () => {
     mockTables({
       project: wdoProject({ project_type: 'pest_inspection', wdo_signature: null }),
     });
@@ -478,7 +714,7 @@ describe('send-with-invoice hold_report_until_paid', () => {
 describe('releaseHeldProjectReport', () => {
   test('delivers the held report once the invoice is paid', async () => {
     const project = wdoProject({ report_hold_status: 'held' });
-    const { updates } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
+    const { updates, activityRows } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
 
     const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
 
@@ -501,6 +737,71 @@ describe('releaseHeldProjectReport', () => {
     expect(releaseEmail.attachments).toHaveLength(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].body).toContain('/report/project/');
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.scheduled_sms_log_id).toBeTruthy();
+    const releaseActivity = activityRows.find((row) => row.action === 'project_report_released_after_payment');
+    expect(releaseActivity.metadata.report_token).toBeUndefined();
+    const releaseLog = logger.info.mock.calls.find(([message]) => String(message).includes('hold release delivered'))?.[0];
+    expect(releaseLog).not.toContain(project.report_token);
+  });
+
+  test('does not send the release SMS twice when the project stamp retries', async () => {
+    const project = wdoProject({ report_hold_status: 'held' });
+    let releaseStampFailures = 1;
+    mockTables({
+      project,
+      invoice: invoiceRow({ status: 'paid' }),
+      projectUpdateResult: (payload) => {
+        if (payload.report_hold_status === 'released' && releaseStampFailures > 0) {
+          releaseStampFailures -= 1;
+          throw new Error('release stamp unavailable');
+        }
+        return 1;
+      },
+    });
+
+    const first = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+    const second = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+
+    expect(first.released).toBe(false);
+    expect(second.released).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(second.channels.sms).toEqual({ ok: true, deduplicated: true });
+  });
+
+  test('releases a paid pre-treatment certificate by report link without a WDO PDF', async () => {
+    const project = preTreatmentProject({ report_hold_status: 'held', status: 'closed' });
+    const { updates } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
+
+    const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+
+    expect(result.released).toBe(true);
+    expect(buildWdoReportPDFBuffer).not.toHaveBeenCalled();
+    expect(mockS3Send).not.toHaveBeenCalled();
+    expect(ProjectEmail.sendProjectReportReady).toHaveBeenCalledTimes(1);
+    expect(ProjectEmail.sendProjectReportReady.mock.calls[0][0].attachments).toEqual([]);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    const releasedStamp = (updates.projects || []).find((u) => u.report_hold_status === 'released');
+    expect(releasedStamp).toBeTruthy();
+    expect(releasedStamp.status).toBe('closed');
+  });
+
+  test('does not release a paid certificate whose required fields were cleared while held', async () => {
+    const project = preTreatmentProject({
+      report_hold_status: 'held',
+      status: 'closed',
+      findings: { ...PRE_TREATMENT_FINDINGS, treatment_address: '' },
+    });
+    const { updates } = mockTables({ project, invoice: invoiceRow({ status: 'paid' }) });
+
+    const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+
+    expect(result.released).toBe(false);
+    expect(result.reason).toMatch(/Missing required certificate details/i);
+    expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+    expect(revert).toBeTruthy();
+    expect(revert.report_hold_last_error).toMatch(/Treatment address/i);
   });
 
   test('does not release while the invoice is unsettled, without burning an attempt', async () => {
@@ -644,6 +945,11 @@ describe('public report routes while held', () => {
       // No report content leaks on the 402 payload.
       expect(body.findings).toBeUndefined();
       expect(body.photos).toBeUndefined();
+      // The held payload carries the invoice number and a bearer pay URL —
+      // it gets the same privacy headers as the report itself (codex #2817).
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     });
   });
 
@@ -692,6 +998,11 @@ describe('public report routes while held', () => {
       const body = await res.json();
       expect(res.status).toBe(402);
       expect(body.code).toBe('report_payment_required');
+      // The early 402 carries the same privacy headers as the PDF itself —
+      // they are set before any return (codex #2817).
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     });
   });
 });

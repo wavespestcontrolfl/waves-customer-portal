@@ -77,7 +77,7 @@ function loadClientEstimator(source) {
     logLevel: 'silent',
   });
   const module = { exports: {} };
-  // eslint-disable-next-line no-new-func
+   
   new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
   return module.exports;
 }
@@ -88,7 +88,7 @@ function loadAdminPreviewOneTimeHelpers(source) {
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
   const helperSource = source.slice(start, end);
-  // eslint-disable-next-line no-new-func
+   
   return new Function('serviceDetailText', 'fmtInt', `
     ${helperSource}
     return { oneTimePestChoiceRowsForCustomerPreview };

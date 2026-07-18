@@ -665,8 +665,10 @@ function protocolTemplateCounts() {
     pest: Math.max(0, (protocols.pest?.visits || []).length - 2),
     termite: (protocols.termite?.visits || []).length,
     lawn: Object.keys(protocols.lawn || {}).length,
-    mosquito: (protocols.pest?.visits || []).filter((v) => String(v.primary || '').toLowerCase().includes('mosquito')).length,
-    rodent: (protocols.pest?.visits || []).filter((v) => String(v.primary || '').toLowerCase().includes('rodent')).length,
+    // Dedicated programs now exist for these — counting keyword hits inside
+    // the PEST visit text predates them and returned stale zeros.
+    mosquito: (protocols.mosquito?.visits || []).length,
+    rodent: (protocols.rodent?.visits || []).length,
     tree_shrub: (protocols.tree_shrub?.visits || []).length,
   };
 }

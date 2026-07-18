@@ -19,7 +19,7 @@ const NewsletterSender = require('../services/newsletter-sender');
 const { linkToCustomer, subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
-const { isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
+const { isFlagshipType, requiresClaimValidation, getNewsletterType } = require('../config/newsletter-types');
 const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt, weekLockKey } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
@@ -27,9 +27,7 @@ const { createNewsletterDraft } = require('../services/newsletter-draft');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('../services/llm/call');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -285,10 +283,18 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
     // so stale drafts from previous cycles don't resurface in Compose.
     const type = req.query.type === 'pest-insider-monthly'
       ? 'pest-insider-monthly'
-      : 'local-weekly-fresh-events';
+      : req.query.type === 'reengagement'
+        ? 'reengagement'
+        : 'local-weekly-fresh-events';
 
     let windowStart;
-    if (type === 'pest-insider-monthly') {
+    if (type === 'reengagement') {
+      // As-needed lane: no freshness window. newsletter-sunset.js refuses to
+      // stage a replacement while ANY reengagement draft is open, so an age
+      // filter here would strand a stale-but-open draft — the bell would land
+      // on a blank Compose while the job kept pointing at the parked row.
+      windowStart = null;
+    } else if (type === 'pest-insider-monthly') {
       // Current ET month.
       const mm = String(nowET.month).padStart(2, '0');
       windowStart = parseETDateTime(`${nowET.year}-${mm}-01T00:00:00`);
@@ -298,12 +304,12 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
       windowStart = parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T00:00:00`);
     }
 
-    const draft = await db('newsletter_sends')
+    let draftQuery = db('newsletter_sends')
       .where({ newsletter_type: type, status: 'draft' })
       .whereNull('created_by')
-      .where('created_at', '>=', windowStart)
-      .orderBy('created_at', 'desc')
-      .first();
+      .orderBy('created_at', 'desc');
+    if (windowStart) draftQuery = draftQuery.where('created_at', '>=', windowStart);
+    const draft = await draftQuery.first();
     res.json({ draft: draft || null });
   } catch (err) { next(err); }
 });
@@ -490,6 +496,32 @@ router.patch('/sends/:id', async (req, res, next) => {
       return res.status(400).json({
         error: 'Cannot change a fresh-events (flagship) newsletter to another type — it would bypass the factual-locking send gate. Delete and recreate instead.',
       });
+    }
+
+    // Same class of guard for the sunset win-back: retyping the parked
+    // reengagement draft would orphan the sunset lane (its delivered-win-back
+    // join keys on newsletter_type='reengagement') and leak the row into the
+    // public archive surfaces that exclude that type.
+    if (newsletterType !== undefined
+        && send.newsletter_type === 'reengagement'
+        && newsletterType !== 'reengagement') {
+      return res.status(400).json({
+        error: 'Cannot change a re-engagement (win-back) newsletter to another type — the sunset lane keys on it. Delete and recreate instead.',
+      });
+    }
+
+    // The win-back's audience belongs to the sunset lane: any saved segment
+    // MUST keep the reengagement_due tag, or a segment edit (or a client
+    // sending the UI-default null) would broadcast the "we'll stop sending"
+    // note to every active subscriber. Narrowing on top of the tag (region,
+    // customers-only, …) stays allowed.
+    if (segmentFilter !== undefined && send.newsletter_type === 'reengagement') {
+      const tags = Array.isArray(segmentFilter?.tags) ? segmentFilter.tags : [];
+      if (!tags.includes('reengagement_due')) {
+        return res.status(400).json({
+          error: "A re-engagement newsletter's audience must keep the 'reengagement_due' tag — the sunset lane targets exactly the flagged cohort. Narrow on top of the tag instead of replacing it.",
+        });
+      }
     }
 
     // Validate from_email only when the caller is changing it. Skipping
@@ -852,18 +884,21 @@ router.post('/segment-preview', async (req, res, next) => {
 //     Claude drafts from real event data instead of inventing.
 router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
   try {
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      return res.status(400).json({ error: 'Anthropic API not configured' });
-    }
     const { prompt, template, newsletterType, eventIds, audience, tone, includeCTA } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
+    }
+    // Type-autonomy contract: types declaring aiDraftAllowed:false (the
+    // sunset win-back) are house-written — refuse to AI-draft them here so
+    // the registry flag is enforced server-side, not just by UI affordances.
+    const typeCfg = getNewsletterType(newsletterType);
+    if (typeCfg && typeCfg.autonomy?.aiDraftAllowed === false) {
+      return res.status(400).json({ error: `newsletter type '${newsletterType}' is house-written — AI drafting is disabled for it` });
     }
     if (prompt.length > 4000) {
       return res.status(400).json({ error: 'prompt too long (max 4000 chars)' });
     }
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const month = new Date().toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' });
 
     // ── Flagship flow: local-weekly-fresh-events ──────────────────────
@@ -1003,18 +1038,14 @@ No prose outside the JSON.`;
 ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}`;
 
-    const response = await anthropic.messages.create({
-      model: MODELS.WORKHORSE,
-      max_tokens: 2000,
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      maxTokens: 2000,
+      jsonMode: true,
       system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      text: userPrompt,
     });
-
-    const text = response.content?.[0]?.text || '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('Claude did not return JSON');
-
-    const draft = JSON.parse(jsonMatch[0]);
+    if (!response.ok || !response.json) throw new Error('Newsletter AI providers did not return valid JSON');
+    const draft = response.json;
     res.json({ success: true, draft });
   } catch (err) {
     logger.error(`[newsletter] draft-ai failed: ${err.message}`);

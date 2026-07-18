@@ -223,7 +223,77 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           .modify((qb) => { if (city) qb.where('city', city); })
           .select('id', 'slug', 'title', 'tag', 'city', 'keyword', 'status')
           .limit(20);
-        return { keyword, city, matches };
+        // Autonomous-lane drafts have NO blog_posts row — a PR-backed draft
+        // parked in review is invisible to the query above, so two briefs on
+        // the same intent could each see "no match" and ship parallel
+        // competing pages. Surface in-flight autonomous runs too (own
+        // try/catch: a miss here must not hide the blog_posts matches).
+        let pendingAutonomous = [];
+        try {
+          const kwFilter = (qb) => {
+            qb.whereRaw("LOWER(draft_payload->'frontmatter'->>'title') LIKE ?", [`%${keyword.toLowerCase()}%`])
+              .orWhereRaw("LOWER(draft_payload->'frontmatter'->>'primary_keyword') LIKE ?", [`%${keyword.toLowerCase()}%`]);
+          };
+          // Round-10 (Codex P2): the legacy blog_posts query above is
+          // city-scoped, but these autonomous lookups were not — on a broad
+          // keyword ("ant control") a pending/published Sarasota draft
+          // suppressed every OTHER city's brief, because the writer prompt
+          // treats any returned in-flight draft as same-intent. Frontmatter
+          // city lives in service_areas_tag (required, minItems 1 — see
+          // packages/blog-schema/schema.json), so a city-scoped call only
+          // returns runs tagged for that city; multi-city drafts still match
+          // every city they cover. No city → global dedupe, unchanged.
+          const cityFilter = (qb) => {
+            if (city) {
+              qb.whereRaw("draft_payload->'frontmatter'->'service_areas_tag' @> ?::jsonb", [JSON.stringify([String(city)])]);
+            }
+          };
+          const runColumns = [
+            'autonomous_runs.id',
+            'autonomous_runs.action_type',
+            'autonomous_runs.outcome',
+            'autonomous_runs.astro_pr_url',
+            db.raw("draft_payload->'frontmatter'->>'title' AS title"),
+            db.raw("draft_payload->'frontmatter'->>'primary_keyword' AS keyword"),
+            db.raw("draft_payload->'frontmatter'->>'slug' AS slug"),
+            db.raw("draft_payload->'frontmatter'->>'canonical' AS canonical"),
+          ];
+          // In-flight drafts: only runs whose queue row is STILL parked at
+          // the PR-pending review state — an operator dismiss/requeue moves
+          // the opportunity_queue row, not the old run, and such drafts will
+          // never publish (they must not suppress a replacement angle or get
+          // linked).
+          const inFlight = await db('autonomous_runs')
+            .where({ 'autonomous_runs.outcome': 'completed_pending_review' })
+            .join('opportunity_queue as oq', 'oq.id', 'autonomous_runs.opportunity_id')
+            .where('oq.status', 'pending_review')
+            .where('oq.skip_reason', 'astro_pr_pending_merge')
+            .where(kwFilter)
+            .modify(cityFilter)
+            .select(runColumns)
+            .limit(20);
+          // LIVE autonomous pages: they never get a blog_posts row either,
+          // and after finalizeMerged their queue row is done — they must
+          // stay visible to the overlap check forever, no queue-state join.
+          const published = await db('autonomous_runs')
+            .where({ 'autonomous_runs.outcome': 'completed_published' })
+            .where(kwFilter)
+            .modify(cityFilter)
+            .select(runColumns)
+            .limit(20);
+          // Future/live route: the publisher normalizes flat slugs into
+          // /{category}/{slug}/ and mirrors the result into CANONICAL — the
+          // writer-emitted slug can be stale, so the linkable route derives
+          // from canonical first.
+          pendingAutonomous = [...inFlight, ...published].map((r) => {
+            let route = r.slug || null;
+            try { if (r.canonical) route = new URL(r.canonical).pathname; } catch (_) { /* keep slug */ }
+            return { ...r, route };
+          });
+        } catch (pendingErr) {
+          pendingAutonomous = [{ error: `autonomous_runs read failed: ${pendingErr.message}` }];
+        }
+        return { keyword, city, matches, pending_autonomous_drafts: pendingAutonomous };
       } catch (err) {
         return { error: `blog_posts read failed: ${err.message}` };
       }

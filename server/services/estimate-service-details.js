@@ -557,13 +557,14 @@ const SERVICE_DETAILS_COPY = {
   tree_shrub: {
     title: 'Tree & Shrub Care — Service Details',
     // Products from the T&S protocols: Dominion 2L is the primary systemic
-    // (is_primary in the protocol usage seed); SuffOil-X is the
-    // horticultural spray oil in the T&S catalog.
+    // (is_primary in the protocol usage seed). TriTek replaced SuffOil-X as
+    // the horticultural spray oil (SiteOne repricing, owner-approved
+    // 2026-07-16) — no TriTek artwork yet, so the packet shows Dominion only
+    // rather than advertising a product the protocol no longer uses.
     productImages: {
       heading: 'A few of the products doing the work',
       images: [
         { file: 'product-dominion-2l.png', product: 'Dominion', caption: 'Dominion® 2L — systemic insecticide (imidacloprid)' },
-        { file: 'product-suffoil-x.png', product: 'SuffOil', caption: 'SuffOil-X® — horticultural spray oil' },
       ],
       note: 'Stylized product illustrations — product selection follows the plant, the diagnosis, and the label, and your service report names the exact products applied at your home.',
     },

@@ -722,17 +722,110 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
   }
 }
 
+// ── Subdivision living-sqft median (estimator engine, new-construction) ──
+// When the annual roll shows a parcel as vacant/unassessed but the caller
+// lives there (new construction), the already-assessed neighbors in the same
+// recorded subdivision are the best sourceable size signal. Positive-only,
+// fail-open: any miss returns null and the caller falls to its next source.
+// Charlotte's ownership layer carries no living-area figure — unsupported.
+const SUBDIVISION_MEDIAN_FIELDS = {
+  Manatee: { nameField: 'PAR_SUBDIV_NAME', livingField: 'BLDGS_SQFT_LIVING' },
+  Sarasota: { nameField: 'subd', livingField: 'living' },
+};
+const SUBDIVISION_MEDIAN_MIN_SAMPLES = 8;
+
+// Recorded plat names carry phase/unit suffixes ("PARRISH LAKES PH IIE
+// PB81/164"); when the exact phase has too few assessed homes the query
+// widens to the base plat name.
+function subdivisionBaseName(name) {
+  return String(name || '')
+    .replace(/\s+(PH|PHASE|UNIT|SEC|SECTION|PB)\b.*$/i, '')
+    .trim();
+}
+
+async function querySubdivisionLivingSqft(county, whereName, timeoutMs) {
+  const cfg = SUBDIVISION_MEDIAN_FIELDS[county];
+  // Injection guard: plat names are alnum/space/slash/dash/&/' — drop quotes
+  // entirely rather than escaping (ArcGIS string WHERE, county-hosted layers).
+  const safe = String(whereName || '').replace(/'/g, '').trim();
+  if (!cfg || !safe) return null;
+  const params = new URLSearchParams({
+    f: 'json',
+    where: `UPPER(${cfg.nameField}) LIKE '${safe.toUpperCase()}%' AND ${cfg.livingField} > 0`,
+    outFields: cfg.livingField,
+    returnGeometry: 'false',
+    resultRecordCount: '1000',
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${COUNTY_LAYERS[county].url}?${params.toString()}`, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`subdivision layer ${resp.status}`);
+    const data = await resp.json();
+    if (data?.error) throw new Error(`subdivision layer error: ${data.error.message || data.error.code}`);
+    const values = (Array.isArray(data?.features) ? data.features : [])
+      .map((f) => positiveOrNull(ciAttr(f?.attributes || {})(cfg.livingField)))
+      .filter(Boolean)
+      .sort((a, b) => a - b);
+    return values;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Returns { medianSqft, sampleCount, p25, p75, subdivisionQueried } or null
+// (unsupported county, no subdivision, too few samples, provider failure).
+async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, options = {}) {
+  if (isDisabled()) return null;
+  const key = normalizeCountyName(county);
+  if (!SUBDIVISION_MEDIAN_FIELDS[key] || !String(subdivision || '').trim()) return null;
+  const timeoutMs = timeoutMsFor(options);
+  const t0 = Date.now();
+  try {
+    let queried = String(subdivision).trim();
+    let values = await querySubdivisionLivingSqft(key, queried, timeoutMs);
+    if ((values?.length || 0) < SUBDIVISION_MEDIAN_MIN_SAMPLES) {
+      const base = subdivisionBaseName(queried);
+      if (base && base.toUpperCase() !== queried.toUpperCase()) {
+        queried = base;
+        values = await querySubdivisionLivingSqft(key, base, timeoutMs);
+      }
+    }
+    if (!values || values.length < SUBDIVISION_MEDIAN_MIN_SAMPLES) return null;
+    const mid = Math.floor(values.length / 2);
+    const median = values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+    logger.info('[county-parcel-gis] subdivision median resolved', {
+      county: key, samples: values.length, elapsedMs: Date.now() - t0,
+    });
+    return {
+      medianSqft: Math.round(median),
+      sampleCount: values.length,
+      p25: values[Math.floor(values.length / 4)],
+      p75: values[Math.floor((values.length * 3) / 4)],
+      subdivisionQueried: queried,
+    };
+  } catch (err) {
+    // Subdivision names never appear in logs (PII-adjacent parcel data rule).
+    logger.warn('[county-parcel-gis] subdivision median lookup failed', {
+      county: key || null, error: err?.message || String(err), elapsedMs: Date.now() - t0,
+    });
+    return null;
+  }
+}
+
 module.exports = {
   lookupCountyParcelByPoint,
   queryStreetSitusAddresses,
   countyUseDescToPropertyType,
   dorMajorCategory,
   normalizeCountyName,
+  lookupSubdivisionMedianLivingSqft,
   _private: {
     COUNTY_LAYERS,
     queryCountyLayer,
     paoParcelIdFrom,
     zip5,
     yesNoFlag,
+    subdivisionBaseName,
   },
 };

@@ -7,6 +7,7 @@ const BlogWriter = require('../services/content/blog-writer');
 const BlogAuditor = require('../services/content/blog-auditor');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('../services/llm/call');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { invalidSpokeSites } = require('../services/content-astro/spoke-sites');
 const autonomousReviewQueue = require('../services/content/autonomous-review-queue');
@@ -1167,16 +1168,13 @@ router.post('/generate', aiContentLimiter, async (req, res, next) => {
       ? `\n\nEXISTING CONTENT (differentiate from these):\n${existing.map(e => `- "${e.title}" (${e.city})`).join('\n')}`
       : '';
 
-    // Generate via Claude if available, otherwise return a structured outline
+    // Generate via Sonnet with OpenAI Terra backup; otherwise return an outline.
     let content, title, metaDesc, keyword;
 
     try {
-      const Anthropic = require('@anthropic-ai/sdk');
-      const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-      const response = await anthropic.messages.create({
-        model: MODELS.FLAGSHIP,
-        max_tokens: 4000,
+      const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+        maxTokens: 4000,
+        jsonMode: false,
         system: `You write hyper-local pest control and lawn care content for Waves Pest Control in Southwest Florida.
 
 VOICE: ${voiceDesc}
@@ -1194,9 +1192,7 @@ REQUIREMENTS FOR EVERY ARTICLE:
 
 FORMAT: ${config.wordRange} words. ${config.format}
 CITY: ${targetCity} — mention it by name multiple times, reference local conditions.`,
-        messages: [{
-          role: 'user',
-          content: `Write a ${contentType.replace(/_/g, ' ')} about: ${topic}
+        text: `Write a ${contentType.replace(/_/g, ' ')} about: ${topic}
 
 Target city: ${targetCity}
 
@@ -1208,11 +1204,11 @@ TITLE: [the article title]
 META: [meta description, max 160 chars]
 KEYWORD: [primary SEO keyword]
 
-Then a blank line, then the full content.`
-        }]
+Then a blank line, then the full content.`,
       });
+      if (!response.ok) throw new Error('content providers unavailable');
 
-      const raw = response.content[0].text;
+      const raw = response.text;
 
       // Parse title/meta/keyword from the header
       const titleMatch = raw.match(/^TITLE:\s*(.+)/m);

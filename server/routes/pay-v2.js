@@ -286,6 +286,11 @@ router.get('/:token', async (req, res, next) => {
         invoiceNumber: data.invoice_number,
         title: data.title,
         status: data.status,
+        // Opaque render version (updated_at ms). Delivered invoices are
+        // editable (2026-07-17): /setup refuses to mint a PI when the page
+        // echoes a version older than the row, so a customer can never
+        // confirm a charge against line items an admin has since rewritten.
+        version: data.updated_at ? new Date(data.updated_at).getTime() : null,
         saveRequired: getSaveRequired,
         captureNeeded: getCaptureNeeded,
         lineItems,
@@ -396,12 +401,33 @@ router.get('/:token/attachments/:attachmentId', async (req, res, next) => {
 router.post('/:token/setup', async (req, res, next) => {
   let invoice = null;
   try {
-    const { saveCard, cardOnly } = req.body || {};
+    const { saveCard, cardOnly, invoiceVersion } = req.body || {};
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     // Phase 2: an accrued invoice is payable only via its consolidated statement.
     if (invoice.payer_statement_id) {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
+    }
+    // Stale-render fence: delivered invoices are editable (2026-07-17), and
+    // a page opened before an edit still shows the pre-edit line items while
+    // stripe_payment_intent_id is null (the edit lock only engages once a PI
+    // exists). When the client echoes the version its render came from and
+    // it no longer matches the row, refuse the mint — the page reloads to
+    // the updated invoice instead of charging against details the customer
+    // isn't looking at. Backward-compatible: clients that don't echo a
+    // version (older bundles) skip the check, matching today's behavior.
+    // This unlocked read is only the cheap early exit — the authoritative
+    // recheck runs against the FOR UPDATE row inside the mint transaction
+    // (expectedVersion below), closing the check→lock edit window.
+    if (
+      invoiceVersion != null
+      && invoice.updated_at
+      && String(new Date(invoice.updated_at).getTime()) !== String(invoiceVersion)
+    ) {
+      return res.status(409).json({
+        error: 'This invoice was just updated — refreshing to the latest version.',
+        staleInvoice: true,
+      });
     }
     // A committed saved-card claim is a cross-rail fence, not only a guard
     // for repeated saved-card clicks. Do not mint a public PaymentIntent
@@ -443,6 +469,7 @@ router.post('/:token/setup', async (req, res, next) => {
       saveCard: !!saveCard || requireSave,
       cardOnly: !!cardOnly,
       holdCoverageForCapture,
+      expectedVersion: invoiceVersion,
     });
     const captureNeeded = !!result.covered_by_credit && holdCoverageForCapture;
 
@@ -477,7 +504,10 @@ router.post('/:token/setup', async (req, res, next) => {
     //     card PI merely stuck in requires_action is no longer a 409 — setup now
     //     cancels and re-mints it so the customer can pay (no operator needed).
     if (err.statusCode === 409) {
-      if (!err.inProgress) {
+      // A stale-render refusal from the in-txn version recheck is the same
+      // benign reload-and-retry as the unlocked pre-check above — no
+      // operator alert, the page just refreshes to the updated invoice.
+      if (!err.inProgress && !err.staleInvoice) {
         // Never log the raw pay-link token — it is the bearer credential for
         // this invoice and errors.log is broadly readable. When the invoice id
         // is unavailable, fall back to a masked suffix that still aids
@@ -499,6 +529,7 @@ router.post('/:token/setup', async (req, res, next) => {
         microdepositPending: !!err.microdepositPending,
         savedCardPending: !!err.savedCardPending,
         reconciliationRequired: !!err.reconciliationRequired,
+        staleInvoice: !!err.staleInvoice,
       });
     }
     logger.error(`[pay-v2] Setup error: ${err.message}`);

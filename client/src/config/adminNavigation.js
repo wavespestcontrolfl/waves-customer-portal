@@ -26,6 +26,7 @@ import {
   Settings,
   Share2,
   ShieldCheck,
+  Sparkles,
   Star,
   Tags,
   Users,
@@ -157,6 +158,13 @@ export const ADMIN_NAV_ITEMS = {
     label: "Agent Ops",
     icon: Bot,
   },
+  agentEstimate: {
+    id: "agentEstimate",
+    path: "/admin/agent-estimate",
+    label: "Agent Estimate",
+    icon: Sparkles,
+    flag: "agent_estimate",
+  },
   equipment: {
     id: "equipment",
     path: "/admin/equipment",
@@ -274,7 +282,7 @@ const NAV_SECTION_DEFINITIONS = [
     section: "Marketing",
     itemIds: ["email", "ppc", "seo", "social", "blog", "newsletter"],
   },
-  { section: "Team & Automation", itemIds: ["staff", "agents"] },
+  { section: "Team & Automation", itemIds: ["staff", "agents", "agentEstimate"] },
   {
     section: "Billing & Finance",
     itemIds: [
@@ -325,6 +333,7 @@ function materializeItem(itemId, surface) {
         ? item.mobileTabIcon
         : item.icon,
     adminOnly: Boolean(item.adminOnly),
+    flag: item.flag || null,
   };
 }
 

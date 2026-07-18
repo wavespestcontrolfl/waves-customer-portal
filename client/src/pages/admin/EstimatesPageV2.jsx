@@ -156,7 +156,11 @@ function summarizeEstimateSend(data) {
   return parts.join(" / ");
 }
 
-async function sendEstimateFromPipeline(id, sendMethod = "both") {
+async function sendEstimateFromPipeline(
+  id,
+  sendMethod = "both",
+  { acknowledgeEngineReview = false } = {},
+) {
   const r = await fetch(`${API_BASE}/admin/estimates/${id}/send`, {
     method: "POST",
     headers: {
@@ -168,11 +172,21 @@ async function sendEstimateFromPipeline(id, sendMethod = "both") {
       idempotencyKey:
         globalThis.crypto?.randomUUID?.() ||
         `estimate-send-${Date.now()}-${Math.random()}`,
+      ...(acknowledgeEngineReview ? { acknowledgeEngineReview: true } : {}),
     }),
   });
   const data = await r.json().catch(() => ({}));
+  // Engine-review gate: a yellow-lane AI draft's first send returns 409 with
+  // the review reasons. Surface them and retry with the acknowledgment only
+  // on the operator's explicit confirm.
+  if (r.status === 409 && data?.code === "ENGINE_REVIEW_REQUIRED" && !acknowledgeEngineReview) {
+    if (window.confirm(`${data.error}\n\nReviewed — send now?`)) {
+      return sendEstimateFromPipeline(id, sendMethod, { acknowledgeEngineReview: true });
+    }
+    throw new Error("Send cancelled — review the AI draft first (open AI Review on the estimate).");
+  }
   const summary = summarizeEstimateSend(data);
-  if (!r.ok) throw new Error(summary || `HTTP ${r.status}`);
+  if (!r.ok) throw new Error(summary || data?.error || `HTTP ${r.status}`);
   if (data.partialFailure) window.alert(`Send had issues: ${summary}`);
   return data;
 }
@@ -1469,7 +1483,127 @@ const SOURCE_ICON = {
   referral: { Icon: Users, title: "Referral" },
   ai_agent: { Icon: Bot, title: "AI agent draft — review before sending" },
   call_recording: { Icon: Phone, title: "Phone call recording draft" },
+  estimator_engine: {
+    Icon: Bot,
+    title: "Estimator engine draft — review before sending",
+  },
 };
+
+// Estimator-engine drafts carry their operator review material (lane,
+// reasons, evidence notes) in the list payload — it lives in estimate_data
+// because the notes COLUMN is customer-visible via the public endpoint.
+// This badge is the operator's pre-send surface for it.
+function EngineReviewBadge({ engine, onOpen }) {
+  if (!engine?.lane) return null;
+  const flagged = engine.lane !== "green";
+  return (
+    <button
+      type="button"
+      onClick={(evt) => {
+        evt.stopPropagation();
+        onOpen();
+      }}
+      className="bg-transparent border-0 p-0 cursor-pointer"
+      title={
+        flagged
+          ? "AI draft flagged for review — open the engine's reasons before sending"
+          : "AI draft — open the engine's review notes"
+      }
+    >
+      <Badge tone={flagged ? "alert" : "neutral"}>
+        <Bot size={11} strokeWidth={1.75} aria-hidden />
+        {flagged ? "AI Review" : "AI Draft"}
+      </Badge>
+    </button>
+  );
+}
+
+function EngineReviewModal({ estimate, onClose }) {
+  const engine = estimate.estimatorEngine || {};
+  const flagged = engine.lane !== "green";
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[1000] bg-black/45 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="AI draft review"
+      style={{ fontFamily: ROBOTO }}
+      onClick={onClose}
+    >
+      <div
+        className="bg-white border-hairline border-zinc-200 rounded-lg shadow-xl w-full max-w-2xl max-h-[88vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">
+          <div>
+            <div className="text-16 font-semibold text-zinc-900">
+              AI Draft Review
+            </div>
+            <div className="text-12 text-ink-secondary mt-1">
+              {estimate.customerName || "Unknown"} ·{" "}
+              {estimate.address || "No address"}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-9 w-9 inline-flex items-center justify-center rounded-xs border-hairline border-zinc-300 text-zinc-700 hover:bg-zinc-50"
+            aria-label="Close AI draft review"
+          >
+            <X size={16} strokeWidth={1.75} />
+          </button>
+        </div>
+        <div className="p-5 overflow-auto space-y-4">
+          <Badge tone={flagged ? "alert" : "neutral"}>
+            {flagged ? "Flagged for review" : "No gaps flagged"}
+          </Badge>
+          {(engine.laneReasons || []).length > 0 && (
+            <div>
+              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                Review reasons
+              </div>
+              <ul className="list-disc pl-5 space-y-1 text-13 text-zinc-800">
+                {engine.laneReasons.map((reason, i) => (
+                  <li key={i}>{reason}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {engine.reviewNotes && (
+            <div>
+              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+                Engine notes and evidence
+              </div>
+              <pre className="whitespace-pre-wrap font-sans text-13 text-zinc-800 bg-zinc-50 border-hairline border-zinc-200 rounded-xs p-3">
+                {engine.reviewNotes}
+              </pre>
+            </div>
+          )}
+          {!engine.reviewNotes && !(engine.laneReasons || []).length && (
+            <div className="text-13 text-ink-secondary">
+              No review material recorded for this draft.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
 
 // Deep-link from a notification: /admin/estimates?estimateId=<id> scrolls the
 // matching estimate into view and briefly highlights it (estimate_expired and
@@ -1529,6 +1663,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const [followUpTarget, setFollowUpTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
+  const [engineReviewTarget, setEngineReviewTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
@@ -1864,6 +1999,12 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
           onClose={() => setAuditTarget(null)}
         />
       )}
+      {engineReviewTarget && (
+        <EngineReviewModal
+          estimate={engineReviewTarget}
+          onClose={() => setEngineReviewTarget(null)}
+        />
+      )}
 
       {outlineTarget && (
         <ServiceOutlineComposerModal
@@ -2052,6 +2193,12 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           }
                         />
                         <AutomationStatusBadge automation={e.automation} />
+                        {e.estimatorEngine && (
+                          <EngineReviewBadge
+                            engine={e.estimatorEngine}
+                            onOpen={() => setEngineReviewTarget(e)}
+                          />
+                        )}
                         {e.riskTypeNeedsReview && (
                           <>
                             {" "}
@@ -2922,6 +3069,7 @@ export function MobileEstimateRow({
   onCopyLink,
   onExtend,
   onLawnOutline,
+  onEngineReview,
   v3Flag = false,
   highlighted = false,
 }) {
@@ -2991,6 +3139,12 @@ export function MobileEstimateRow({
               onLowMargin={() => onAudit?.(estimate, "low_margin")}
             />
             <AutomationStatusBadge automation={estimate.automation} />
+            {estimate.estimatorEngine && (
+              <EngineReviewBadge
+                engine={estimate.estimatorEngine}
+                onOpen={() => onEngineReview?.(estimate)}
+              />
+            )}
             {estimate.riskTypeNeedsReview && (
               <>
                 {" "}
@@ -3072,6 +3226,21 @@ export function MobileEstimateRow({
                 title={(estimate.automation?.review || []).join(" · ")}
               >
                 {automationBadgeLabel(estimate.automation)}
+              </span>
+            )}
+            {estimate.estimatorEngine?.lane && (
+              <span
+                className={cn(
+                  "ml-2",
+                  estimate.estimatorEngine.lane !== "green"
+                    ? "text-alert-fg"
+                    : "text-ink-tertiary",
+                )}
+                title={(estimate.estimatorEngine.laneReasons || []).join(" · ")}
+              >
+                {estimate.estimatorEngine.lane !== "green"
+                  ? "AI Review"
+                  : "AI Draft"}
               </span>
             )}
             {estimate.lawnServiceOutline && (
@@ -3245,6 +3414,12 @@ export function MobileEstimateRow({
             icon: <SlidersHorizontal size={16} strokeWidth={1.75} />,
             onClick: () => onAudit?.(estimate, "all"),
           },
+          Boolean(estimate.estimatorEngine) && {
+            key: "engine-review",
+            label: "AI draft review",
+            icon: <Bot size={16} strokeWidth={1.75} />,
+            onClick: () => onEngineReview?.(estimate),
+          },
           estimate.customerId && {
             key: "new-estimate",
             label: "New estimate for customer",
@@ -3309,6 +3484,7 @@ function EstimatesMobileListView({
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
+  const [engineReviewTarget, setEngineReviewTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
   const [sort, setSort] = useState("newest");
@@ -3701,6 +3877,7 @@ function EstimatesMobileListView({
               onCopyLink={copyEstimateLinkMobile}
               onExtend={setExtendTarget}
               onLawnOutline={setOutlineTarget}
+              onEngineReview={setEngineReviewTarget}
               v3Flag={v3Flag}
             />
           ))}
@@ -3718,6 +3895,12 @@ function EstimatesMobileListView({
           estimate={auditTarget.estimate || auditTarget}
           initialFocus={auditTarget.focus || "all"}
           onClose={() => setAuditTarget(null)}
+        />
+      )}
+      {engineReviewTarget && (
+        <EngineReviewModal
+          estimate={engineReviewTarget}
+          onClose={() => setEngineReviewTarget(null)}
         />
       )}
       {extendTarget && (

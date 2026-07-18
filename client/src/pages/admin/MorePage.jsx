@@ -4,7 +4,7 @@ import {
   ExternalLink,
   ChevronRight,
 } from "lucide-react";
-import { refetchFlags } from "../../hooks/useFeatureFlag";
+import { refetchFlags, useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { ADMIN_MOBILE_MORE_SECTIONS } from "../../config/adminNavigation";
 
 export default function MorePage() {
@@ -15,6 +15,7 @@ export default function MorePage() {
   } catch {
     currentRole = null;
   }
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
 
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
@@ -42,7 +43,10 @@ export default function MorePage() {
             {section}
           </div>{" "}
           <ul className="bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
-            {items.filter((item) => !item.adminOnly || currentRole === "admin").map(({ path, icon: Icon, label }) => (
+            {items
+              .filter((item) => !item.adminOnly || currentRole === "admin")
+              .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
+              .map(({ path, icon: Icon, label }) => (
               <li key={path}>
                 {" "}
                 <Link

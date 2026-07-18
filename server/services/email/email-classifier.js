@@ -1,9 +1,7 @@
-const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-
-const anthropic = new Anthropic();
+const { dispatchWithFallback } = require('../llm/call');
 
 function parseClaudeJson(text) {
   try {
@@ -31,12 +29,10 @@ async function classifyEmailContent(email) {
 
   const bodyPreview = (email.body_text || email.snippet || '').substring(0, 2000);
 
-  const response = await anthropic.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 512,
-    messages: [{
-      role: 'user',
-      content: `You are an email classifier for Waves Pest Control & Lawn Care, a family-owned pest control company in Southwest Florida.
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    maxTokens: 512,
+    jsonMode: true,
+    text: `You are an email classifier for Waves Pest Control & Lawn Care, a family-owned pest control company in Southwest Florida.
 
 Classify this email into exactly ONE category and extract relevant entities.
 
@@ -80,10 +76,9 @@ Respond ONLY in JSON, no markdown:
     "urgency_reason": "why this is urgent, if applicable"
   }
 }`,
-    }],
   });
-
-  const result = parseClaudeJson(response.content[0].text);
+  if (!response.ok) throw new Error(`classification providers unavailable: ${response.reason}`);
+  const result = response.json || parseClaudeJson(response.text);
   if (!result) {
     logger.warn(`[email-classifier] Unparseable response for email ${email.id}`);
     return null;

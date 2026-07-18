@@ -154,3 +154,109 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
     });
   });
 });
+
+describe('POST /api/pay/:token/setup stale-render (invoiceVersion) fence', () => {
+  // Delivered invoices are editable (2026-07-17): a page opened before an
+  // edit still renders the old line items while the invoice has no PI. The
+  // client echoes the version its render came from; a mismatch must refuse
+  // the mint so the customer never confirms a charge against details they
+  // are not looking at.
+  const UPDATED_AT = '2026-07-17T12:00:00.000Z';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        return invoiceQuery({
+          id: 'inv-1',
+          token: 'public-token',
+          customer_id: 'cust-1',
+          status: 'sent',
+          total: 100,
+          credit_applied: 0,
+          payer_statement_id: null,
+          updated_at: UPDATED_AT,
+        });
+      }
+      if (table === 'customers') {
+        return invoiceQuery({ billing_mode: null, monthly_rate: 0 });
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+  });
+
+  test('refuses to mint a PaymentIntent when the page rendered an older invoice version', async () => {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceVersion: new Date(UPDATED_AT).getTime() - 5000 }),
+      });
+      const body = await response.json();
+      expect(response.status).toBe(409);
+      expect(body.staleInvoice).toBe(true);
+      expect(StripeService.createInvoicePaymentIntent).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a matching version passes the fence (request proceeds to the saved-card fence)', async () => {
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValue(
+      Object.assign(new Error('saved-card collection is fenced'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }),
+    );
+    StripeService.savedCardChargeNeedsReconciliation.mockReturnValue(false);
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceVersion: new Date(UPDATED_AT).getTime() }),
+      });
+      const body = await response.json();
+      expect(body.staleInvoice).toBeUndefined();
+      expect(body.savedCardPending).toBe(true);
+    });
+  });
+
+  test('a lock-window edit is caught by the in-txn recheck and maps to the reload 409', async () => {
+    // The unlocked pre-check passes (the route read still matches the echoed
+    // version) but an edit commits before the mint's FOR UPDATE lock — the
+    // service recheck refuses and the route must surface the same
+    // staleInvoice reload signal as the pre-check, not a generic conflict.
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+    StripeService.createInvoicePaymentIntent.mockRejectedValue(Object.assign(
+      new Error('This invoice was just updated — refreshing to the latest version.'),
+      { statusCode: 409, inProgress: false, staleInvoice: true },
+    ));
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceVersion: new Date(UPDATED_AT).getTime() }),
+      });
+      const body = await response.json();
+      expect(response.status).toBe(409);
+      expect(body.staleInvoice).toBe(true);
+    });
+    // The echoed version must ride into the mint so the service CAN recheck
+    // it against the locked row.
+    expect(StripeService.createInvoicePaymentIntent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+      expectedVersion: new Date(UPDATED_AT).getTime(),
+    }));
+  });
+
+  test('clients that do not echo a version skip the check (backward compatible)', async () => {
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValue(
+      Object.assign(new Error('saved-card collection is fenced'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }),
+    );
+    StripeService.savedCardChargeNeedsReconciliation.mockReturnValue(false);
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await response.json();
+      expect(body.staleInvoice).toBeUndefined();
+      expect(body.savedCardPending).toBe(true);
+    });
+  });
+});

@@ -50,7 +50,8 @@ export default function CustomerDialogHost() {
 
   // Dialog events can arrive while the native shell is backgrounded (for
   // example, an async request settling after the biometric lock appeared).
-  // Keep them queued, but expose no portaled DOM or focus trap until unlock.
+  // Keep them queued, but expose no portaled DOM or focus trap until unlock —
+  // the portal mounts under document.body, outside the lock's inert container.
   if (!active || biometricLocked || typeof document === 'undefined') return null;
 
   const { kind, message, options } = active;
@@ -86,7 +87,6 @@ export default function CustomerDialogHost() {
         aria-describedby="customer-dialog-message"
         data-glass="modal"
         style={{
-          '--glass-modal-radius': '16px',
           width: 'min(420px, 100%)',
           position: 'relative',
           padding: 24,
@@ -141,7 +141,7 @@ export default function CustomerDialogHost() {
               data-glass="chip"
               onClick={() => settle(false)}
               style={{
-                minHeight: 44,
+                minHeight: 42,
                 padding: '0 17px',
                 borderRadius: 10,
                 border: `1px solid ${CUSTOMER_SURFACE.borderStrong}`,
@@ -162,7 +162,7 @@ export default function CustomerDialogHost() {
             data-glass-accent={danger ? undefined : ''}
             onClick={() => settle(true)}
             style={{
-              minHeight: 44,
+              minHeight: 42,
               padding: '0 18px',
               borderRadius: 10,
               border: danger ? `1px solid ${COLORS.red}` : '1px solid rgba(4,57,94,0.16)',

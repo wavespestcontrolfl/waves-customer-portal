@@ -2,6 +2,7 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('./llm/call');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
 const { sendNewRecurringWelcome, isNewRecurringSignupCandidate } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -126,9 +127,11 @@ class AppointmentTagger {
         return null;
       });
 
-      // Generate brief (simplified — uses template if no Claude API key)
+      // Generate brief — AI when EITHER provider key exists
+      // (dispatchWithFallback handles a per-provider no_key miss);
+      // deterministic template only when no provider is configured.
       let brief;
-      if (process.env.ANTHROPIC_API_KEY) {
+      if (process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY) {
         brief = await this.generateWDOBriefAI(service, propertyData);
       } else {
         brief = this.generateWDOBriefTemplate(service, propertyData);
@@ -206,17 +209,16 @@ class AppointmentTagger {
 
   async generateWDOBriefAI(service, rc) {
     try {
-      const Anthropic = require('@anthropic-ai/sdk');
-      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-      const resp = await client.messages.create({
-        model: MODELS.FLAGSHIP, max_tokens: 4000,
+      const resp = await dispatchWithFallback(MODELS.TEXT_POLICIES.deepAnalysis, {
+        // Documented DEEP floor — MODEL_DEEP may point at a thinking model
+        // (fable line) where thinking spends from the same token budget.
+        maxTokens: 4096,
+        jsonMode: true,
         system: 'You are a pre-inspection research assistant for a Florida pest control company. Analyze public property data and return a JSON WDO pre-inspection brief with: risk_score (Low/Moderate/High), risk_reason, top_3_priorities, top_3_unknowns, vulnerabilities, homeowner_questions. Return VALID JSON ONLY.',
-        messages: [{ role: 'user', content: `WDO brief for ${service.address_line1}, ${service.city}, FL ${service.zip}. Client: ${service.first_name} ${service.last_name}. Date: ${service.scheduled_date}.\n\nProperty data: ${JSON.stringify(rc)}` }],
+        text: `WDO brief for ${service.address_line1}, ${service.city}, FL ${service.zip}. Client: ${service.first_name} ${service.last_name}. Date: ${service.scheduled_date}.\n\nProperty data: ${JSON.stringify(rc)}`,
       });
-
-      const text = resp.content[0].text.replace(/```json|```/g, '').trim();
-      return JSON.parse(text);
+      if (!resp.ok || !resp.json) throw new Error('WDO brief providers unavailable');
+      return resp.json;
     } catch (err) {
       logger.error('[appointment-tagger] AI WDO brief failed', {
         serviceId: service.id,

@@ -4,7 +4,14 @@ const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
-const { getProjectType } = require('../services/project-types');
+const {
+  getProjectType,
+  customerSafeServiceNotes,
+  redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeHasInternalFindingKeys,
+} = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
@@ -384,7 +391,10 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT WE DID
   // ══════════════════════════════════════════════════════
-  const notes = (service.technician_notes || '').trim();
+  // Same legacy inspection-fee scrub as the service-history JSON — this PDF
+  // (and its auto_report share links) is a customer render of the same notes
+  // (codex #2817).
+  const notes = (customerSafeServiceNotes(service.technician_notes, structuredNotes) || '').trim();
   if (notes) {
     if (y > 620) { doc.addPage(); y = 50; }
     y = sectionHeader(doc, 'What We Did', L, y);
@@ -792,7 +802,19 @@ router.get('/', authenticate, async (req, res, next) => {
       return {
         id: `project_${p.id}`,
         documentType,
-        title: p.title || (isCertificate ? label : `${label} Report`),
+        // same type-gated fee scrub as the report page headline, cue AND
+        // recorded-value passes — covers a legacy title (or a CAS-skipped
+        // concurrent write) at this egress even when it paraphrases the fee
+        // without the literal cue (codex #2817)
+        title: (p.title
+          ? (() => {
+            const safe = redactInspectionFeeCuesForType(p.title, p.project_type);
+            return projectTypeHasInternalFindingKeys(p.project_type)
+              ? redactSpecificAmounts(safe, projectRecordedFeeValues(p))
+              : safe;
+          })()
+          : null)
+          || (isCertificate ? label : `${label} Report`),
         description: p.sent_at ? `Report sent ${formatDate(p.sent_at)}` : label,
         fileName: `${label.replace(/\s+/g, '_')}_${p.sent_at ? new Date(p.sent_at).toISOString().slice(0, 10) : 'report'}.pdf`,
         uploadedBy: 'auto_generated',

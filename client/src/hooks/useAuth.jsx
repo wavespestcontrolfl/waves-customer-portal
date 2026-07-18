@@ -14,7 +14,7 @@ const AuthContext = createContext(null);
 // refresh of the SAME customer's token — api.js persists refreshed tokens to
 // localStorage too, and those must not blank a working tab. Null (missing /
 // undecodable token) is treated by the caller as an identity change.
-function tokenCustomerId(token) {
+export function tokenCustomerId(token) {
   try {
     const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
     const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));

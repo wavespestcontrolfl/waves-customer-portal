@@ -48,7 +48,19 @@ const PROJECT_TYPES = {
     short: 'WDO',
     defaultTitle: 'WDO Inspection Service',
     requiresFollowup: false,
-    photoCategories: ['exterior', 'living_area', 'kitchen', 'bathroom', 'garage', 'attic', 'crawlspace', 'previous_treatment', 'other'],
+    photoCategories: [
+      'other',
+      'wdo_evidence',
+      'wdo_damage',
+      'previous_treatment',
+      'treatment_document',
+      'notice',
+      'inaccessible_area',
+      'exterior',
+      'interior',
+      'attic',
+      'crawlspace',
+    ],
     // `section` groups the form into scannable blocks (rendered as inline
     // headers by CreateProjectModal, same pattern as the typed completion's
     // sectioned findings). Presentation-only: field order is unchanged, the
@@ -57,7 +69,6 @@ const PROJECT_TYPES = {
       { key: 'property_address', label: 'Property inspected', type: 'text', section: 'Property & scope', placeholder: 'Street address, city, state, ZIP' },
       { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', section: 'Property & scope', placeholder: 'Main home, attached garage, detached garage, shed, addition…' },
       { key: 'structure_type', label: 'Structure type', type: 'select', section: 'Property & scope', options: WDO_CONSTRUCTION_OPTIONS },
-      { key: 'structure_sqft', label: 'Structure footprint (approx. sq ft)', type: 'text', section: 'Property & scope', placeholder: 'Under-roof area, e.g. 2200 — used for the fee tier if no fee is picked' },
       { key: 'inspection_fee', label: 'Inspection fee ($)', type: 'text', section: 'Property & scope', placeholder: 'Any amount, e.g. 175 — varies by construction (wood frame), new build, prior termite history' },
       { key: 'requested_by', label: 'Inspection requested by', type: 'customer_search', customerValue: 'contact_summary', section: 'Property & scope', placeholder: 'Search customer database or type name and contact information' },
       { key: 'report_sent_to', label: 'Report sent to', type: 'customer_search', customerValue: 'contact_summary', section: 'Property & scope', placeholder: 'Search customer database or type name and contact information if different' },
@@ -975,8 +986,8 @@ const PROJECT_TYPES = {
         itemLabel: 'Application',
         // Row headers continue the numbering after the primary application.
         itemIndexOffset: 2,
-        addLabel: 'Add another application',
-        description: 'Record each additional product applied on this job (e.g. a wood treatment alongside the soil barrier).',
+        addLabel: 'Add unplanned application',
+        description: 'Applications planned on the scheduled service load here automatically. Add a row only for an extra product applied in the field.',
         fields: [
           { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
           { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', showWhen: { field: 'treatment_method', value: 'Other' } },
@@ -1006,6 +1017,250 @@ const PROJECT_TYPES = {
 
 const PROJECT_TYPE_KEYS = Object.keys(PROJECT_TYPES);
 
+// Internal/office-only finding keys — captured on the create form but NEVER
+// customer-facing (audit 2026-07-16). inspection_fee is an invoicing fee-tier
+// helper. Enforced at every egress: the public /data payload, the narrative
+// prompt (so the model can't echo it into recommendations), and the project
+// report assistant. The registry and the fee-cue scrubber live in
+// @waves/report-redaction — the client report surfaces
+// (client/src/lib/wdoReportFields.js) import the SAME module, so the admin
+// preview and the public page cannot drift from these guards.
+const {
+  INTERNAL_FINDING_KEYS,
+  redactInspectionFeeCues,
+  containsInspectionFeeCue,
+  redactSpecificAmounts,
+  resolveFeeValuesForScrub,
+  WDO_DEFAULT_INSPECTION_FEE,
+} = require('@waves/report-redaction');
+
+// Whether a project type's form carries any internal finding key (today:
+// inspection_fee, WDO only). The narrative/finding scrubs are gated on this —
+// on a type with no internal fee field, "a follow-up inspection fee of $100
+// applies" is a legitimate customer disclosure and must never be redacted
+// (codex #2817 P1). Unknown/missing types fail CLOSED (treated as carrying
+// the fee) so an unrecognized key can't skip the privacy guard.
+function fieldsCarryInternalKeys(fields) {
+  return (fields || []).some((field) => INTERNAL_FINDING_KEYS.includes(field.key)
+    || fieldsCarryInternalKeys(field.fields));
+}
+function projectTypeConfigHasInternalFindingKeys(cfg) {
+  if (!cfg) return true;
+  return fieldsCarryInternalKeys(cfg.findingsFields) || fieldsCarryInternalKeys(cfg.fields);
+}
+function projectTypeHasInternalFindingKeys(typeKey) {
+  return projectTypeConfigHasInternalFindingKeys(PROJECT_TYPES[typeKey]);
+}
+
+// Type-gated wrapper for the write/egress boundaries: scrub only when the
+// project type actually carries the internal fee field.
+function redactInspectionFeeCuesForType(text, projectTypeKey) {
+  return projectTypeHasInternalFindingKeys(projectTypeKey)
+    ? redactInspectionFeeCues(text)
+    : text;
+}
+
+// projects.title is varchar(200) and the scrub can LENGTHEN text ("$1" →
+// "[fee removed]"), so every persisted title is clamped after redaction —
+// otherwise a near-limit title aborts the write (or the backfill migration)
+// on the column constraint (codex #2817).
+const PROJECT_TITLE_MAX_LENGTH = 200;
+function redactProjectTitleForWrite(title, projectTypeKey, feeValues) {
+  let scrubbed = redactInspectionFeeCuesForType(title, projectTypeKey);
+  if (typeof scrubbed === 'string' && projectTypeHasInternalFindingKeys(projectTypeKey)
+    && feeValues && feeValues.length) {
+    scrubbed = redactSpecificAmounts(scrubbed, feeValues);
+  }
+  return typeof scrubbed === 'string' ? scrubbed.slice(0, PROJECT_TITLE_MAX_LENGTH) : scrubbed;
+}
+
+// Value-pass variant of the write guard for free text (recommendations): cue
+// scrub plus the recorded-value scrub with the fee set this save produces —
+// a paraphrase with no literal cue ("the quoted $250 charge") must not be
+// PERSISTED by a post-deploy save; the migration only cleans rows at rest
+// (codex #2817). Callers pass projectRecordedFeeValues over the incoming
+// findings merged with the existing row's filings.
+function redactProjectFreeTextForWrite(text, projectTypeKey, feeValues) {
+  if (!projectTypeHasInternalFindingKeys(projectTypeKey)) return text;
+  if (typeof text !== 'string') return text;
+  let safe = redactInspectionFeeCues(text);
+  if (feeValues && feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+  return safe;
+}
+
+// Every fee amount a project ever recorded: the live structured field plus
+// each archived filing's snapshot (a stale draft fee an old narrative quoted
+// may only survive there). Feeds the VALUE-based scrub at egress and in the
+// backfill so paraphrased fees ("the quoted $250 charge") are caught without
+// the literal cue (codex #2817).
+const parseJsonish = (v) => {
+  if (!v) return null;
+  if (typeof v === 'object') return v;
+  try { return JSON.parse(v); } catch { return null; }
+};
+
+// Raw fee values from the ARCHIVED filing snapshots alone (a stale draft fee
+// an old narrative quoted may only survive there). Deliberately un-resolved:
+// callers merge these with whichever live fee applies to them — the stored
+// row at egress, the unsaved edit state in the admin preview, the request
+// body in the AI-write prompt — before resolveFeeValuesForScrub.
+function projectArchivedFeeValues(project) {
+  const values = [];
+  const filings = parseJsonish(project?.wdo_sent_filings);
+  if (Array.isArray(filings)) {
+    for (const filing of filings) {
+      const snap = parseJsonish(filing?.findings) || filing?.findings;
+      // EVERY filing contributes its fee entry — '' when the field was
+      // blank/omitted: that filing BILLED at the flat default, so the
+      // default must stay a scrub target even after the live fee is edited
+      // to a different number (codex #2817).
+      values.push(snap && typeof snap === 'object' && snap.inspection_fee != null
+        ? snap.inspection_fee
+        : '');
+    }
+  }
+  return values;
+}
+
+function projectRecordedFeeValues(project) {
+  const findings = parseJsonish(project?.findings);
+  // The live entry ALWAYS contributes — an absent fee bills at the flat
+  // default just like a blank one, so it must count as digit-free in the
+  // resolve step even when archived filings carry numeric fees
+  // (codex #2817 r31).
+  const values = [findings?.inspection_fee ?? ''];
+  values.push(...projectArchivedFeeValues(project));
+  return resolveFeeValuesForScrub(values);
+}
+
+// Deep cue detection over a findings object (or JSON string of one).
+function findingsContainFeeCue(rawFindings) {
+  let parsed = rawFindings;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return false; } }
+  const walk = (value) => {
+    if (typeof value === 'string') return containsInspectionFeeCue(value);
+    if (Array.isArray(value)) return value.some(walk);
+    if (value && typeof value === 'object') return Object.values(value).some(walk);
+    return false;
+  };
+  return walk(parsed);
+}
+
+// Whether an archived FDACS binary may print a raw fee. Filings stamped with
+// pdf_renderer were rendered through the customer-safe scrub — clean by
+// construction, always served (a cue in their deliberately-raw snapshot is
+// fine; the PDF itself is scrubbed). EVERY unmarked legacy binary is gated:
+// the archive entry stores no caption snapshot and project_photos rows are
+// mutable (editable AND deletable after filing), so no live row can ever
+// prove a legacy binary clean — findings-only heuristics kept reopening
+// caption/deletion holes (codex #2817 r15–r18). A re-send re-archives
+// through the sanitized renderer with the marker, restoring availability.
+// Shared by the public /data + /fdacs-pdf gates AND the admin detail
+// serializer so the staff preview can never advertise a filing the customer
+// page withholds.
+function filingBinaryMayDiscloseFee(filing) {
+  if (!filing) return false;
+  return !filing.pdf_renderer;
+}
+
+// A WDO project completion copies the narrative into
+// service_records.technician_notes — rows written before the write-time
+// scrub can still carry the internal fee, so every customer-facing render
+// of those notes (service-history JSON, service-report PDF, share links)
+// applies this scrub at egress (codex #2817). Gated on the completing
+// project's type: on any other service, "inspection fee" prose is a
+// legitimate disclosure and must not be touched.
+function customerSafeServiceNotes(notes, structuredNotes) {
+  if (!notes) return notes || null;
+  let parsed = structuredNotes;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { parsed = null; } }
+  const type = parsed?.projectType;
+  if (!type || !projectTypeHasInternalFindingKeys(type)) return notes;
+  // Cue + value passes: a CAS-skipped/restored legacy row can paraphrase
+  // the fee without the literal cue. Fee values are stamped into
+  // structured_notes at completion time; older rows fall back to the flat
+  // default (their true values were covered by the backfill migration).
+  let safe = redactInspectionFeeCues(notes);
+  const feeValues = resolveFeeValuesForScrub(
+    Array.isArray(parsed?.feeValues) ? parsed.feeValues : [],
+  );
+  return redactSpecificAmounts(safe, feeValues);
+}
+
+// Finding VALUES need the fee scrub too, not just the dedicated internal key
+// — an inspection fee typed into a free-text field (most plausibly the WDO
+// "Comments / financial disclosure notes") would otherwise ride the public
+// payload and the narrative prompt verbatim (codex #2817). The walk covers
+// arrays and nested objects — dropping internal KEYS at every depth (a nested
+// { details: { inspection_fee } } must not survive the top-level filter) and
+// scrubbing string values when redactValues is on.
+function sanitizeFindingValue(value, redactValues, feeValues, applyValueScrub) {
+  if (typeof value === 'string') {
+    if (!redactValues) return value;
+    let safe = redactInspectionFeeCues(value);
+    // The VALUE pass only runs on free-prose (textarea) fields — a
+    // structured single-line field like property_address can legitimately
+    // contain the fee's digits ("175 Main Street" with a $175 fee) and must
+    // never be corrupted by a numeric coincidence (codex #2817).
+    if (applyValueScrub && feeValues && feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+    return safe;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeFindingValue(item, redactValues, feeValues, applyValueScrub));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key))
+        .map(([key, nested]) => [key, sanitizeFindingValue(nested, redactValues, feeValues, applyValueScrub)]),
+    );
+  }
+  return value;
+}
+
+// Keys whose values are free prose (textarea fields) for a project type —
+// the only finding values eligible for the VALUE-based fee scrub. Falls
+// back to an empty set for unknown types (value scrub then never fires on
+// findings; the cue scrub still does).
+function collectFreeTextKeys(fields, acc) {
+  for (const field of fields || []) {
+    if (field.type === 'textarea' && field.key) acc.add(field.key);
+    if (field.fields) collectFreeTextKeys(field.fields, acc);
+  }
+  return acc;
+}
+function projectTypeConfigFreeTextKeys(cfg) {
+  const acc = new Set();
+  if (!cfg) return acc;
+  collectFreeTextKeys(cfg.findingsFields, acc);
+  collectFreeTextKeys(cfg.fields, acc);
+  return acc;
+}
+function projectTypeFreeTextKeys(typeKey) {
+  return projectTypeConfigFreeTextKeys(PROJECT_TYPES[typeKey]);
+}
+
+// redactValues gates the VALUE scrub — callers on a known project type pass
+// projectTypeHasInternalFindingKeys(type) so a type with no internal fee
+// field keeps its legitimate "inspection fee" prose (codex #2817 P1).
+// Internal KEYS are dropped regardless (they only exist on types that define
+// them, so the filter is free elsewhere). Default fails closed: values are
+// scrubbed.
+// freeTextKeys (a Set) limits the VALUE pass to prose fields; null means
+// "all values eligible" (used by tests and non-findings shapes).
+function stripInternalFindingKeys(findings, { redactValues = true, feeValues = [], freeTextKeys = null } = {}) {
+  let parsed = findings;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return {}; } }
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  if (Array.isArray(parsed)) return sanitizeFindingValue(parsed, redactValues, feeValues, !freeTextKeys);
+  return Object.fromEntries(
+    Object.entries(parsed)
+      .filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key))
+      .map(([key, value]) => [key,
+        sanitizeFindingValue(value, redactValues, feeValues, freeTextKeys ? freeTextKeys.has(key) : true)]),
+  );
+}
+
 function getProjectType(key) {
   return PROJECT_TYPES[key] || null;
 }
@@ -1023,4 +1278,24 @@ module.exports = {
   TERMITE_PERIMETER_METHODS,
   getProjectType,
   isValidProjectType,
+  INTERNAL_FINDING_KEYS,
+  stripInternalFindingKeys,
+  redactInspectionFeeCues,
+  containsInspectionFeeCue,
+  redactSpecificAmounts,
+  resolveFeeValuesForScrub,
+  projectRecordedFeeValues,
+  projectArchivedFeeValues,
+  findingsContainFeeCue,
+  filingBinaryMayDiscloseFee,
+  customerSafeServiceNotes,
+  redactInspectionFeeCuesForType,
+  redactProjectTitleForWrite,
+  redactProjectFreeTextForWrite,
+  PROJECT_TITLE_MAX_LENGTH,
+  WDO_DEFAULT_INSPECTION_FEE,
+  projectTypeFreeTextKeys,
+  projectTypeConfigFreeTextKeys,
+  projectTypeHasInternalFindingKeys,
+  projectTypeConfigHasInternalFindingKeys,
 };

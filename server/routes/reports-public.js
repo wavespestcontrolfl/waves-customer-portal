@@ -9,6 +9,24 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { answerProjectReportQuestion } = require('../services/project-report-assistant');
+const {
+  stripInternalFindingKeys,
+  redactInspectionFeeCues,
+  redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeFreeTextKeys,
+  projectTypeHasInternalFindingKeys,
+  // A legacy archived FDACS PDF was rendered from RAW findings AND raw photo
+  // captions — if either carries a fee disclosure, the S3 binary discloses
+  // it and cannot be sanitized in place. Those filings are GATED here (the
+  // /data payload stops advertising the PDF; /fdacs-pdf 404s) while the
+  // report page still renders the scrubbed findings and the legal archive
+  // stays intact in S3. Filings stamped pdf_renderer were rendered through
+  // the scrub and always serve. Shared with the admin detail serializer so
+  // the staff preview matches (codex #2817).
+  filingBinaryMayDiscloseFee,
+} = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
@@ -454,6 +472,13 @@ async function heldReportPaymentContext(project) {
 
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
+  // Same privacy headers as the sibling /fdacs-pdf route, set before ANY
+  // response leaves — the payment-held 402 carries the invoice number and a
+  // bearer pay URL, so it needs the no-store/noindex/no-referrer protection
+  // just as much as the successful report payload (codex #2817).
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.setHeader('Referrer-Policy', 'no-referrer');
   if (!extractProjectReportTokenLookup(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
@@ -496,6 +521,21 @@ router.get('/project/:token/data', async (req, res, next) => {
       }
     }
 
+    // Computed early: gates every free-text scrub on this route (finding
+    // values, recommendations, photo captions). Only a type carrying the
+    // internal fee field (WDO) gets text redacted. feeValues powers the
+    // VALUE pass — a paraphrase without the literal cue ("the $250 charge")
+    // is caught on every one of these surfaces (codex #2817).
+    const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
+    const feeValues = typeCarriesFee ? projectRecordedFeeValues(project) : [];
+    const freeTextKeys = projectTypeFreeTextKeys(project.project_type);
+    const scrubText = (text) => {
+      if (!typeCarriesFee || !text) return text;
+      let safe = redactInspectionFeeCues(text);
+      if (feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+      return safe;
+    };
+
     const photos = await db('project_photos')
       .where({ project_id: project.id })
       .orderBy(['visit', 'sort_order', 'created_at']);
@@ -519,7 +559,11 @@ router.get('/project/:token/data', async (req, res, next) => {
           url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: CUSTOMER_DWELL_TTL_SECONDS });
         } catch { /* fall through — photo will render as missing */ }
       }
-      return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
+      // Captions are technician free text — same cue+value scrub as finding
+      // values (codex #2817: a caption quoting the fee rode the public JSON
+      // verbatim; a paraphrased amount would too).
+      const caption = scrubText(ph.caption);
+      return { id: ph.id, category: ph.category, caption, visit: ph.visit, url };
     }));
 
     // The report labels this "Follow-up" / "your next visit", so it must be
@@ -554,14 +598,28 @@ router.get('/project/:token/data', async (req, res, next) => {
         viewerFindings = lastFiling.findings;
         if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
       }
-      fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket);
+      fdacsPdfAvailable = Boolean(lastFiling?.s3_key && config.s3?.bucket)
+        // unmarked legacy binary — may print a raw fee, gated; see
+        // filingBinaryMayDiscloseFee
+        && !filingBinaryMayDiscloseFee(lastFiling);
     }
+
+    // Internal/office-only finding keys must never ride the public JSON — the
+    // client registry hides them visually, but any token holder can read the
+    // raw payload, so the strip is enforced at the egress point too (audit
+    // 2026-07-16). The narrative fee (an inspection fee an old draft may have
+    // baked into prose) is handled by the redactInspectionFeeCues guard on
+    // `recommendations` below. The value scrub is type-gated via
+    // typeCarriesFee (computed above the photos block).
+    viewerFindings = stripInternalFindingKeys(viewerFindings, { redactValues: typeCarriesFee, feeValues, freeTextKeys });
 
     res.json({
       projectType: project.project_type,
       fdacsPdfAvailable,
       status: project.status,
-      title: project.title,
+      // The title is the report's customer-facing headline — free prose with
+      // the same cue+value scrub as every other free-text field (codex #2817).
+      title: scrubText(project.title),
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
       // Customer email/phone for the hero contact lines — the report hero
       // mirrors the customer estimate, which prints the recipient's own
@@ -587,15 +645,24 @@ router.get('/project/:token/data', async (req, res, next) => {
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
       findings: viewerFindings,
-      recommendations: project.recommendations,
+      // Serve-time inspection-fee guard: covers legacy narratives and any
+      // written by an old instance during the deploy window. Two passes —
+      // the literal-cue scrub plus the VALUE scrub with the fee this project
+      // recorded, so a paraphrase ("the quoted $250 charge") can't ride the
+      // public payload either (codex #2817).
+      recommendations: scrubText(project.recommendations),
       followupDate: project.followup_date,
-      followupFindings: project.followup_findings,
+      // Follow-up findings are findings-shaped jsonb rendered key→value on
+      // the page — same internal-key strip + fee scrub as the main findings.
+      followupFindings: stripInternalFindingKeys(project.followup_findings, { redactValues: typeCarriesFee, feeValues, freeTextKeys }),
       followupCompletedAt: project.followup_completed_at,
       upcomingAppointment: upcomingAppointment ? {
         serviceType: upcomingAppointment.service_type,
         scheduledDate: upcomingAppointment.scheduled_date,
         windowStart: upcomingAppointment.window_start,
-        windowEnd: upcomingAppointment.window_end,
+        // NO window_end: it is the internal job-duration block — the customer
+        // arrival window is always window_start + 2h, computed client-side
+        // (owner rule; the client already ignored this field).
         technicianName: upcomingAppointment.technician_name,
         status: upcomingAppointment.status,
       } : null,
@@ -664,6 +731,13 @@ router.post('/project/:token/ask', async (req, res, next) => {
 });
 
 router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
+  // Signed legal filing behind a long-lived token — never cache, index, or
+  // leak the URL. Set before ANY return so the 402/404/NoSuchKey early paths
+  // carry the same protection as the PDF itself, matching /project/:token/data
+  // (codex #2817).
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.setHeader('Referrer-Policy', 'no-referrer');
   if (!extractProjectReportTokenLookup(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
@@ -682,6 +756,12 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
     const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
     if (!lastFiling?.s3_key || !config.s3?.bucket) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    // Same generic 404 as a missing archive: an unmarked LEGACY binary may
+    // print a raw fee and is never served; the /data payload also stops
+    // advertising it — see filingBinaryMayDiscloseFee.
+    if (filingBinaryMayDiscloseFee(lastFiling)) {
       return res.status(404).json({ error: 'Report not found' });
     }
     const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
@@ -705,10 +785,6 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     }
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="FDACS-13645.pdf"');
-    // Signed legal filing behind a long-lived token — never cache, index, or leak the URL.
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Robots-Tag', 'noindex');
-    res.setHeader('Referrer-Policy', 'no-referrer');
     object.Body.on('error', (err) => {
       logger.warn(`[reports-public] FDACS filing stream failed for ${project.id}: ${err.message}`);
       if (!res.headersSent) res.status(502).end();
@@ -936,6 +1012,11 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
           serviceLine: resolvedServiceLine || null,
           limit: 8,
           beforeOrOnServiceDate: service.service_date || null,
+          // Same-day trim, same as buildReportV1Data: without it this
+          // response replaces the page's trimmed history client-side and
+          // leaks a later same-day sibling the moment a rating is submitted
+          // (codex P2 #2824 r2).
+          currentServiceRecordId: service.id || null,
         }).catch(() => [])
       : [];
 

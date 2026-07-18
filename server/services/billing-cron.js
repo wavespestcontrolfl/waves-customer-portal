@@ -9,6 +9,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const AccountMembershipEmail = require('./account-membership-email');
 const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+const { resolveBillingLane } = require('./billing-lane');
 const { isEnabled } = require('../config/feature-gates');
 
 /**
@@ -191,9 +192,32 @@ const BillingCron = {
         // (resetBillingModeAfterTermCancel), returning the customer to
         // per-visit (estimate-flow terms) or legacy monthly (manual
         // prepays). NULL/'monthly_membership' = legacy behavior unchanged.
-        if (['per_application', 'annual_prepay'].includes(customer.billing_mode)) {
+        // 'per_visit' and 'one_time' are explicit owner-set lanes (billing
+        // lane build, 2026-07-17): a customer classified into either must
+        // never be monthly-charged no matter what tier/rate fields linger.
+        if (['per_application', 'annual_prepay', 'per_visit', 'one_time'].includes(customer.billing_mode)) {
           await logAutopay(customer.id, 'skipped_billing_mode', {
             details: { billing_mode: customer.billing_mode },
+          });
+          skipped++;
+          continue;
+        }
+
+        // GUARD 3c: unclassified rows follow the ONE lane classifier (Codex
+        // r7 P1). The legacy select (rate > 0) predates the resolver: a
+        // tier-less or sentinel-tier NULL row resolves per_visit, and
+        // booking/completion treat its visits as per-visit — dues-charging
+        // it here would recreate the exact two-lanes double-bill this build
+        // kills. Prod-verified 2026-07-17: every currently cron-billable
+        // customer resolves monthly (the 4 tier-less rate>0 rows all have
+        // autopay off), so this guard changes no live charge; it closes the
+        // divergence by construction. The skip is logged loudly so an
+        // unclassified customer who enables autopay surfaces for the owner
+        // to classify instead of silently double-billing.
+        const resolvedLane = resolveBillingLane(customer);
+        if (resolvedLane.mode !== 'monthly_membership') {
+          await logAutopay(customer.id, 'skipped_unclassified_lane', {
+            details: { resolved_mode: resolvedLane.mode, waveguard_tier: customer.waveguard_tier || null },
           });
           skipped++;
           continue;
@@ -693,7 +717,15 @@ const BillingCron = {
       // discriminate either). Disarmed rows stay visible for manual triage;
       // the owner-run staged backfill supersedes the KNOWN mis-created July
       // cohort explicitly, with human eyes on each row.
-      if (isMonthlyObligation && customer.billing_mode === 'per_application'
+      // The lane check mirrors the monthly sweep exactly: explicit
+      // non-monthly modes AND NULL rows the resolver classifies non-monthly
+      // (GUARD 3c) — a tier-less/sentinel row the daily sweep now skips
+      // must not have its FAILED monthly rows retried into a dues charge
+      // through this side door (Codex r10 P1). annual_prepay keeps its own
+      // coverage-absorb guard above.
+      const retryLaneNotMonthly = ['per_application', 'per_visit', 'one_time'].includes(customer.billing_mode)
+        || (!customer.billing_mode && resolveBillingLane(customer).mode !== 'monthly_membership');
+      if (isMonthlyObligation && retryLaneNotMonthly
         && !(await db('payments')
           .where({ customer_id: payment.customer_id, status: 'paid' })
           .where('description', 'like', '%WaveGuard Monthly%')
@@ -704,14 +736,20 @@ const BillingCron = {
           .update({
             next_retry_at: null,
             failure_reason: db.raw(
-              "COALESCE(failure_reason, '') || ' — retry ladder stopped: customer bills per application (review manually — likely mis-created monthly obligation)'",
+              "COALESCE(failure_reason, '') || ' — retry ladder stopped: customer's billing lane is not monthly (review manually — likely mis-created monthly obligation)'",
             ),
           }).catch((updErr) => logger.error(`[billing-cron] retry disarm (billing mode) failed for payment ${payment.id}: ${updErr.message}`));
         await logAutopay(payment.customer_id, 'skipped_billing_mode', {
           paymentId: payment.id,
-          details: { source: 'autopay_retry', billing_mode: customer.billing_mode, ladder_stopped: true, superseded: false },
+          details: {
+            source: 'autopay_retry',
+            billing_mode: customer.billing_mode || null,
+            resolved_mode: resolveBillingLane(customer).mode,
+            ladder_stopped: true,
+            superseded: false,
+          },
         }).catch(() => {});
-        logger.info(`[billing-cron] Retry ladder stopped for payment ${payment.id} — billing_mode ${customer.billing_mode}; row left visible for manual review`);
+        logger.info(`[billing-cron] Retry ladder stopped for payment ${payment.id} — lane not monthly (mode ${customer.billing_mode || 'NULL/inferred'}); row left visible for manual review`);
         continue;
       }
 

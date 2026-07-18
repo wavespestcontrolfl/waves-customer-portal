@@ -10,7 +10,8 @@
 //   GET   /admin/invoices/stats
 //   POST  /admin/invoices/create
 //   GET   /admin/invoices/:id
-//   PUT   /admin/invoices/:id           (refund / void / mark paid)
+//   PUT   /admin/invoices/:id           (edit unpaid invoices — draft/
+//                                         scheduled/sent/viewed/overdue)
 //   POST  /admin/invoices/:id/send      (SMS + email pay link)
 //   POST  /admin/invoices/:id/refund    (manual refund)
 //   GET   /admin/customers/search       (autocomplete in create modal)
@@ -80,6 +81,7 @@ import { invoiceDateOnly, formatInvoiceDate } from "../../lib/invoiceDates";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
+import { getAdminUser } from "../../lib/adminAuth";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -440,6 +442,9 @@ export default function AdminInvoicesPage() {
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
   const [editInvoice, setEditInvoice] = useState(null);
+  // Set when an already-delivered invoice was just edited: the list view
+  // opens the resend modal for this id so the customer gets the new version.
+  const [promptResendId, setPromptResendId] = useState(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   useEffect(() => {
@@ -498,16 +503,19 @@ export default function AdminInvoicesPage() {
           }}
           isMobile={isMobile}
           stats={stats}
+          promptResendId={promptResendId}
+          onPromptResendHandled={() => setPromptResendId(null)}
         />
       )}
       {tab === "create" && (
         <CreateInvoice
           showToast={showToast}
           editInvoice={editInvoice}
-          onCreated={() => {
+          onCreated={(opts) => {
             loadStats();
             setEditInvoice(null);
             setTab("list");
+            setPromptResendId(opts?.promptResendId || null);
           }}
           isMobile={isMobile}
         />
@@ -627,10 +635,23 @@ function FilterPill({ label, value, options, onChange, isMobile }) {
 }
 
 // ── Invoice List (mirrors attached UI) ──
-function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
+function InvoiceList({
+  showToast,
+  onRefresh,
+  onEdit,
+  isMobile,
+  stats,
+  promptResendId,
+  onPromptResendHandled,
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const customerFilterId =
     searchParams.get("customer") || searchParams.get("customerId") || "";
+  // POST /admin/invoices/:id/charge-card is requireAdmin on the server
+  // (off-session saved-card charges are admin-only); the charge action only
+  // renders for admin-role users, failing closed on missing/unknown role.
+  // The "card on file" info badge stays visible to all staff.
+  const isAdminUser = getAdminUser()?.role === "admin";
   const PAGE_SIZE = 100;
   const [invoices, setInvoices] = useState([]);
   const [total, setTotal] = useState(0);
@@ -722,6 +743,44 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
   const handleSend = (invoice) => {
     setSendModalInvoice(invoice);
   };
+
+  // After an already-delivered invoice was edited, open the resend modal for
+  // it so the customer gets the updated version. Fetched by id (not from the
+  // list rows) so the modal shows the fresh totals even when the invoice is
+  // outside the current page/filter. If that refresh fails, fall back to the
+  // freshly reloaded list row so the promised modal still opens; only when
+  // neither is available does the prompt surface as a toast pointing at the
+  // row's own Resend button — never silently dropped.
+  useEffect(() => {
+    if (!promptResendId) return;
+    let alive = true;
+    (async () => {
+      const inv = await adminFetch(`/admin/invoices/${promptResendId}`).catch(
+        () => null,
+      );
+      if (!alive) return;
+      if (inv) {
+        onPromptResendHandled?.();
+        setSendModalInvoice(inv);
+        return;
+      }
+      const fromList = invoices.find(
+        (i) => String(i.id) === String(promptResendId),
+      );
+      if (fromList) {
+        onPromptResendHandled?.();
+        setSendModalInvoice(fromList);
+        return;
+      }
+      onPromptResendHandled?.();
+      showToast(
+        "Couldn't open the resend dialog — use Resend on the invoice so the customer gets the updated version",
+      );
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [promptResendId, onPromptResendHandled, invoices, showToast]);
 
   const handleVoid = async (id) => {
     if (!confirm("Void this invoice?")) return;
@@ -1320,14 +1379,22 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                             </button>
                           )}
                           {(inv.status === "draft" ||
-                            inv.status === "scheduled") &&
+                            inv.status === "scheduled" ||
+                            inv.status === "sent" ||
+                            inv.status === "viewed" ||
+                            inv.status === "overdue") &&
                             !inv.stripe_payment_intent_id &&
                             !inv.active_payment_plan &&
                             !inv.annual_prepay_term_id && (
                               <button
                                 onClick={() => onEdit?.(inv)}
                                 style={sBtn(D.card, D.text, isMobile)}
-                                title="Edit line items, notes, and due date before sending"
+                                title={
+                                  inv.status === "draft" ||
+                                  inv.status === "scheduled"
+                                    ? "Edit line items, notes, and due date before sending"
+                                    : "Edit line items, notes, and due date — resend after saving so the customer sees the new version"
+                                }
                               >
                                 Edit
                               </button>
@@ -1374,7 +1441,7 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                           {/* Payer-billed invoices collect from the payer's AP
                               inbox — the saved card belongs to the homeowner,
                               so the charge endpoint rejects them. */}
-                          {canCollect && cardOnFile && !inv.payer_id && (
+                          {isAdminUser && canCollect && cardOnFile && !inv.payer_id && (
                             <button
                               onClick={() => setCardOnFileInvoice(inv)}
                               style={sBtn(D.heading, D.white, isMobile)}
@@ -4219,6 +4286,11 @@ function PaymentPlanModal({
 // ── Create Invoice ──
 function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const editMode = !!editInvoice;
+  // Editing an invoice the customer already received: the copy in their inbox
+  // is stale until Adam resends, so the form shows a reminder and the save
+  // path prompts the resend modal.
+  const editingDelivered =
+    editMode && ["sent", "viewed", "overdue"].includes(editInvoice.status);
   // One-tap AI summary (pulls context from the linked visit + source toggles).
   // Off by default; the base "Write with AI" still works from typed input + lines.
   const aiSummaryEnabled = useFeatureFlag("ff_invoice_ai_summary");
@@ -4340,6 +4412,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     }
     const svc = invoiceDateOnly(editInvoice.service_date);
     if (svc) setServiceDate(svc);
+    // Deliberately keyed on the edited invoice only (react-hooks/
+    // exhaustive-deps isn't configured in the errors-only lint config — a
+    // disable directive for it is itself an unknown-rule error).
   }, [editMode, editInvoice]);
 
   // Customer search
@@ -4896,14 +4971,29 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             amount: lineAmount(i),
           }));
       }
-      await adminFetch(`/admin/invoices/${editInvoice.id}`, {
+      const saved = await adminFetch(`/admin/invoices/${editInvoice.id}`, {
         method: "PUT",
         body: JSON.stringify(body),
       });
-      showToast(
-        `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
+      // Delivered-ness comes from the SAVED row, not the list snapshot: a
+      // scheduled send can complete while the form is open (the server
+      // allows that edit now), and the resend prompt must still fire for it.
+      const savedStatus = String(
+        saved?.status || editInvoice.status || "",
+      ).toLowerCase();
+      const deliveredAfterSave = ["sent", "viewed", "overdue"].includes(
+        savedStatus,
       );
-      onCreated();
+      // The emailed copy is now stale — hand the parent the id so the list
+      // view opens the resend modal for it.
+      showToast(
+        deliveredAfterSave
+          ? `Invoice updated: ${editInvoice.invoice_number} — resend it so the customer sees the new version`
+          : `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
+      );
+      onCreated(
+        deliveredAfterSave ? { promptResendId: editInvoice.id } : undefined,
+      );
     } catch (e) {
       showToast(`Error: ${e.message}`);
     }
@@ -5042,6 +5132,12 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                   ? `Edit Invoice ${editInvoice.invoice_number || ""}`.trim()
                   : "Invoice Builder"}
               </div>{" "}
+              {editingDelivered && (
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
+                  Already sent to the customer — resend after saving so they
+                  see the updated version
+                </div>
+              )}{" "}
             </div>{" "}
           </div>{" "}
         </div>{" "}
