@@ -30,7 +30,7 @@ function makeDbMock() {
   return dbMock;
 }
 
-function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, dbMock = makeDbMock() }) {
+function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, uniquenessGate, qualityGate, dbMock = makeDbMock() }) {
   jest.resetModules();
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -42,6 +42,10 @@ function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, d
   jest.doMock('../services/content/ai-visibility-gate', () => ({ evaluateStatic: jest.fn().mockReturnValue({ passed: true, findings: [], summary: { p0: 0, p1: 0, p2: 0, p3: 0, needs_review: false } }) }));
   if (contentGuardrails) jest.doMock('../services/content/content-guardrails', () => contentGuardrails);
   else jest.dontMock('../services/content/content-guardrails');
+  if (uniquenessGate) jest.doMock('../services/content/uniqueness-gate', () => uniquenessGate);
+  else jest.dontMock('../services/content/uniqueness-gate');
+  if (qualityGate) jest.doMock('../services/content/content-quality-gate', () => qualityGate);
+  else jest.dontMock('../services/content/content-quality-gate');
   jest.dontMock('../services/content/comparison-table-gate');
   jest.dontMock('../services/content/claims-ledger-validator');
   const runner = require('../services/content/autonomous-runner');
@@ -64,6 +68,7 @@ function makeQueue(opp) {
 afterEach(() => {
   delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
   delete process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK;
+  delete process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
 });
 
 describe('publish-cap pre-check (step 1a.3)', () => {
@@ -150,6 +155,33 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
     expect(retryWrite).toBeTruthy();
     expect(String(retryWrite.patch.signal_metadata)).toContain('HARDCODED_PRICE');
+  });
+
+  test('aggregate quality-gate MISS (no infra error) also gets the redraft-then-skip disposition', async () => {
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    // Blog dedup needs the astro corpus, which is unavailable in unit tests
+    // and would surface as a gate INFRA error (which parks, by design).
+    // Disable it so the QUALITY miss is what drives the disposition.
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+    const queue = makeQueue({ id: 'opp_agg', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const { runner, dbMock } = loadRunner({
+      queue,
+      briefBuilder: makeBriefBuilder(),
+      dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      // A real quality MISS: ok:false with hard failures and NO `.error`
+      // (an `.error` shape is a gate infra fault and must still park).
+      qualityGate: { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['word_count'], soft_failures: [], total_score: 40, min_total_score: 80 }) },
+    });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('deferred_gate_retry');
+    expect(result.skip_reason).toBe('gate_fail');
+    expect(queue.defer).toHaveBeenCalledWith('opp_agg', expect.any(Date), { claimToken: claimedAt });
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+    const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
+    expect(String(retryWrite.patch.signal_metadata)).toContain('QUALITY_GATE');
   });
 
   test('second failure (gate_retry already recorded) skips silently — never pending_review', async () => {

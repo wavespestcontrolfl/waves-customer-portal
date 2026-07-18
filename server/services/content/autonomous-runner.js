@@ -888,19 +888,30 @@ class AutonomousRunner {
     }
 
     if (!gatesPass || !trustBuildSatisfied || brief.human_review_required) {
-      // Auto-publish lanes skip silently on a pure quality-gate failure rather
-      // than build a review backlog. Router-flagged human-review cases (loop /
-      // cannibalization / .gov SERP) still route to review even under
-      // auto-publish, since those are content-risk signals, not quality misses.
-      if (autoPublish && !gatesPass && !brief.human_review_required) {
-        const finalized = await finalize(run, t0, {
-          outcome: 'skipped_gate_fail',
-          skip_reason: 'auto_publish_gate_fail',
-          reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief),
+      // Pure quality-gate failure on ANY lane (owner directive 2026-07-18:
+      // exceptions-only review queue): one feedback-informed redraft, then
+      // silent skip — same disposition as the guardrails/comparison gates.
+      // Router-flagged human-review cases (loop / cannibalization / .gov
+      // SERP) still route to review — those are content-risk signals a
+      // redraft can't clear — as do the named-competitor and trust-build
+      // paths below. Gate INFRA failures (module/corpus unavailable, thrown
+      // evaluate — the shapes that carry `.error`) also still park: a
+      // redraft can't fix a broken gate, and silently skipping would hide
+      // an engine fault (same fail-closed posture as the *_unavailable
+      // paths above).
+      const gateInfraError = Boolean(uniquenessResult?.error || qualityResult?.error
+        || seoCompletionResult?.error || prePublishVisibilityResult?.error);
+      if (!gatesPass && !brief.human_review_required && !gateInfraError) {
+        const summary = this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief);
+        return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+          claimToken,
+          skipReason: autoPublish ? 'auto_publish_gate_fail' : 'gate_fail',
+          notes: summary,
+          blocking: aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }),
         });
-        await this._skipClaimOrThrow(queue, opp.id, 'auto_publish_gate_fail', { claimToken });
-        return finalized;
       }
+      // Remaining combinations are genuine human decisions (gate infra
+      // errors, router-flagged briefs, named-competitor, trust-build ramp).
       const reason = !gatesPass ? 'gate_fail'
         : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
@@ -3109,6 +3120,23 @@ function protectedBriefTargetUrl(opp = {}, brief = null) {
 const EDITING_ACTION_TYPES = new Set(['rewrite_title_meta', 'refresh_existing_page']);
 function actionEditsExistingPage(opp = {}, brief = null) {
   return EDITING_ACTION_TYPES.has(brief?.action_type || opp.action_type);
+}
+
+// Synthesize structured findings from the aggregate quality gates so the
+// gate-retry disposition can feed them back to the writer the same way the
+// guardrails/comparison gates do. The first finding carries the compact
+// reviewer summary — it names the specific failing checks and is the most
+// actionable feedback for the redraft.
+function aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }) {
+  const blocking = [];
+  if (!uniquenessResult?.ok) blocking.push({ severity: 'P1', code: 'UNIQUENESS_GATE', message: 'draft failed the uniqueness/dedup gate' });
+  if (!qualityResult?.ok) blocking.push({ severity: 'P1', code: 'QUALITY_GATE', message: 'draft failed the content quality gate' });
+  if (seoCompletionResult?.passed !== true) {
+    blocking.push({ severity: 'P1', code: 'SEO_COMPLETION_GATE', message: `SEO completion failed (${Number(seoCompletionResult?.summary?.p0 || 0)} P0 / ${Number(seoCompletionResult?.summary?.p1 || 0)} P1 findings)` });
+  }
+  if (prePublishVisibilityResult?.passed !== true) blocking.push({ severity: 'P1', code: 'AI_VISIBILITY_GATE', message: 'draft failed the AI-visibility static checks' });
+  if (blocking.length && summary) blocking[0].message = `${blocking[0].message}: ${String(summary)}`;
+  return blocking;
 }
 
 function protectedPagePatch(prot = {}) {
