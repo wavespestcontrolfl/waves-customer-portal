@@ -17,6 +17,7 @@ const SOURCE_LABELS = {
   estimator_engine: "Estimator engine",
   ai_agent: "IB quoting agent",
   quote_wizard: "Quote wizard",
+  email_inquiry: "Email inquiry",
   lead_webhook: "Lead form",
   sms_intake: "SMS intake",
   lead_agent: "Lead agent",

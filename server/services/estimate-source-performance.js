@@ -20,13 +20,15 @@ const RESOLVED_STATUSES = ['accepted', 'declined', 'expired'];
 // Display buckets. Every estimates.source value written by code today maps
 // here (manual/null from the admin builder, estimator_engine + ai_agent
 // from the AI composers, quote_wizard from the public self-serve wizard,
-// lead_webhook / sms_intake / lead_agent bare intake shells); unknown or
-// future values fold into 'other' instead of vanishing.
+// email_inquiry from the Gmail-sync draft lane, lead_webhook / sms_intake /
+// lead_agent bare intake shells); unknown or future values fold into
+// 'other' instead of vanishing.
 const KNOWN_SOURCES = [
   'manual',
   'estimator_engine',
   'ai_agent',
   'quote_wizard',
+  'email_inquiry',
   'lead_webhook',
   'sms_intake',
   'lead_agent',
