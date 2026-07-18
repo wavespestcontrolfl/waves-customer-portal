@@ -87,6 +87,19 @@ describe('buildTreeShrubVisualCategories — five categories + signal guardrails
     // A tracking row must NOT inherit the needs_attention copy via bandOf().
     expect(foliage.customerExplanation).toBe('');
   });
+
+  it('severe pest signals claim "treated today" ONLY when an insect application happened (audit 2026-07-18 P2)', () => {
+    const severeScores = { foliageFullness: 80, leafColorVigor: 80, pestActivity: 20, diseaseLeafSpot: 80, waterHeatStress: 80 };
+    const untreated = buildTreeShrubVisualCategories({ scores: severeScores });
+    const pestUntreated = untreated.find((c) => c.key === 'pest_activity');
+    expect(pestUntreated.status).toBe('needs_attention');
+    expect(pestUntreated.customerExplanation).toMatch(/documented today/);
+    expect(pestUntreated.customerExplanation).not.toMatch(/treated today/);
+
+    const treated = buildTreeShrubVisualCategories({ scores: severeScores, pestTreatedToday: true });
+    const pestTreated = treated.find((c) => c.key === 'pest_activity');
+    expect(pestTreated.customerExplanation).toMatch(/treated today/);
+  });
 });
 
 describe('buildTreeShrubInsightCards — action ownership + signal language', () => {
@@ -209,6 +222,18 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     }
     const sample = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ observations: 'The shrubs have a confirmed scale infestation.' }) });
     expect(JSON.stringify(sample).toLowerCase()).not.toMatch(/infestation/);
+  });
+
+  it('diagnosis pest row mirrors the insight treatment gate (audit 2026-07-18 P2)', () => {
+    const severe = { foliageFullness: 80, leafColorVigor: 80, pestActivity: 20, diseaseLeafSpot: 80, waterHeatStress: 80, overallScore: 68 };
+    const inspectionOnly = buildTreeShrubReportV2({ treeShrubAssessment: assessment({ scores: severe }) });
+    expect(inspectionOnly.diagnosis.find((d) => d.key === 'pest_activity').explanation).toMatch(/documented today/);
+
+    const treated = buildTreeShrubReportV2({
+      treeShrubAssessment: assessment({ scores: severe }),
+      applications: [{ product: { name: 'Merit 2F', active_ingredient: 'Imidacloprid', category: 'systemic insecticide' } }],
+    });
+    expect(treated.diagnosis.find((d) => d.key === 'pest_activity').explanation).toMatch(/treated today/);
   });
 
   it('does NOT downgrade water/stress on a negated "no dry" observation (false-positive guard)', () => {

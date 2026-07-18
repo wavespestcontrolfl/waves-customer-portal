@@ -133,6 +133,11 @@ describe('self-booking plan sync helpers', () => {
 
     expect(resolveTreeShrubRecurringPlan('tree_shrub_6week')).toBe(TREE_SHRUB_RECURRING_PLANS.every_6_weeks);
     expect(resolveTreeShrubRecurringPlan('Tree & Shrub')).toBe(TREE_SHRUB_RECURRING_PLANS.bimonthly);
+    // Light (4x) tier (audit 2026-07-18 P2): a quarterly T&S row used to
+    // resolve to the bimonthly plan, so WaveGuard alignment assumed 6 visits.
+    expect(resolveTreeShrubRecurringPlan('tree_shrub_quarterly')).toBe(TREE_SHRUB_RECURRING_PLANS.quarterly);
+    expect(resolveTreeShrubRecurringPlan('Quarterly Tree & Shrub Care Service')).toBe(TREE_SHRUB_RECURRING_PLANS.quarterly);
+    expect(resolveTreeShrubRecurringPlan('Tree & Shrub Light (4 visits)')).toBe(TREE_SHRUB_RECURRING_PLANS.quarterly);
 
     expect(resolveMosquitoRecurringPlan('mosquito_seasonal')).toBe(MOSQUITO_RECURRING_PLANS.seasonal);
     expect(resolveMosquitoRecurringPlan('Mosquito Control')).toBe(MOSQUITO_RECURRING_PLANS.monthly);

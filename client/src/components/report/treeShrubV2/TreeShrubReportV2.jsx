@@ -543,7 +543,11 @@ function TrendChart({ title, sub, points = [], accent = '#0A7EC2', compact = fal
     <Card style={compact ? { marginBottom: 0, padding: 16 } : undefined}>
       <CardTitle sub={compact ? undefined : sub}>{title}</CardTitle>
       {compact ? <div style={{ fontSize: 12, color: MUTED, marginTop: -8, marginBottom: 8 }}>{sub}</div> : null}
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label={`${title} trend`} onMouseLeave={() => setActive(null)}>
+      {/* role="group", NOT "img": an img role makes every descendant
+          presentational, which would strip the keyboard-focusable point
+          buttons back out of the accessibility tree — the same fix the lawn
+          TrendChart received in #2824 r2 (T&S audit 2026-07-18 P2). */}
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="group" aria-label={`${title} trend`} onMouseLeave={() => setActive(null)} style={{ touchAction: 'pan-y' }}>
         <path d={area} fill={accent} fillOpacity={0.1} opacity={mounted ? 1 : 0} style={{ transition: 'opacity 0.6s ease 0.25s' }} />
         <path d={line} fill="none" stroke={accent} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
           pathLength="1" strokeDasharray="1" strokeDashoffset={mounted ? 0 : 1}
@@ -552,8 +556,16 @@ function TrendChart({ title, sub, points = [], accent = '#0A7EC2', compact = fal
           <g key={i}>
             <circle cx={x(i)} cy={y(p.value)} r={active === i ? 6 : (i === pts.length - 1 ? 4.5 : 3)}
               fill={active === i || i === pts.length - 1 ? accent : CARD} stroke={accent} strokeWidth="2" style={{ transition: 'r 0.15s ease' }} />
+            {/* generous transparent hit target for hover/tap/keyboard */}
             <circle cx={x(i)} cy={y(p.value)} r="13" fill="transparent" style={{ cursor: 'pointer' }}
-              onMouseEnter={() => setActive(i)} onClick={() => setActive((a) => (a === i ? null : i))} />
+              role="button" tabIndex={0} aria-label={`${p.label}: ${Math.round(p.value)}`}
+              onMouseEnter={() => setActive(i)} onClick={() => setActive((a) => (a === i ? null : i))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setActive((a) => (a === i ? null : i));
+                }
+              }} />
           </g>
         ))}
         {activePt ? (

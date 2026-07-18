@@ -237,6 +237,11 @@ function isFungicideLikeProduct(productRef = {}) {
   return /\b(fungicide|fungus|disease|phytophthora|kphite|phosphite|phosphonate|copper|headway|artavia|propizol|frac)\b/.test(textValue);
 }
 
+function isHerbicideLikeProduct(productRef = {}) {
+  const textValue = productText(productRef);
+  return /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weed|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(textValue);
+}
+
 function productNeedsIracFracLog(productRef = {}) {
   const catalog = productRef.catalog || productRef;
   return !!catalog.irac_group || !!catalog.frac_group || isInsectLikeProduct(productRef) || isFungicideLikeProduct(productRef);
@@ -420,6 +425,13 @@ const TYPED_CHIP_PRODUCT_RULES = [
   // Horticultural oils are bee-sensitive contact products — the insect
   // classifier already recognizes them.
   { chip: 'Horticultural oil', matches: isInsectLikeProduct },
+  // Herbicide applications (audit 2026-07-18 P2): pre-emergent and weed
+  // spot treatments are pesticide applications — without a matching product
+  // the visit has no service_products / property_application_history row,
+  // so the FDACS inspector export shows no record of an application the
+  // report claims. Same product-actuals bar as the insect/fungicide chips.
+  { chip: 'Pre-emergent bed treatment', matches: isHerbicideLikeProduct },
+  { chip: 'Weed spot treatment', matches: isHerbicideLikeProduct },
 ];
 
 /**

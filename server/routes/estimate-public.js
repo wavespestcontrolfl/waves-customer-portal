@@ -8013,6 +8013,18 @@ router.put('/:token/accept', async (req, res, next) => {
         reason: 'retired_lawn_cadence_selection',
       });
     }
+    // Retired Tree & Shrub cadence backstop (v4.5 six-visit mandate; audit
+    // 2026-07-18 P2): the 9-visit Enhanced / 12-visit Premium tiers are
+    // retired — pricing normalizes them to Standard, but a stale sent
+    // estimate still renders its stored enhanced row and accepting it books
+    // a retired-cadence program at pre-reprice prices. Mirrors the lawn
+    // backstop above.
+    if (!treatAsOneTime && recurringTreeShrubRowAtRetiredCadence(acceptedEstDataForPricing)) {
+      return res.status(409).json({
+        error: 'This estimate’s tree & shrub plan uses a retired schedule — pick one of the current plan options, or call Waves and we’ll refresh your quote.',
+        reason: 'retired_tree_shrub_cadence_selection',
+      });
+    }
     if (acceptedEstDataForPricing !== estData) {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
       recurringSvcList = acceptedLists.recurringSvcList;
@@ -11008,6 +11020,24 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   });
 }
 
+// Retired T&S tiers = anything that isn't the 6x Standard mandate or the 4x
+// Light downsell (v4.5). Detection mirrors the accept restamp: a selected
+// Enhanced card restamps the row to the tree_shrub_6week key, older stored
+// rows carry a 9/12 visit count or 6-week wording.
+function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
+  if (!estDataLike || typeof estDataLike !== 'object') return false;
+  const { recurringSvcList } = acceptanceServiceLists(estDataLike);
+  return (recurringSvcList || []).some((svc) => {
+    if (recurringServiceKey(svc) !== 'tree_shrub') return false;
+    const key = String(svc?.serviceKey || svc?.service_key || '').trim();
+    if (key === 'tree_shrub_6week') return true;
+    const visits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.v);
+    if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6;
+    const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
+    return /\b(every\s*)?6\s*weeks?\b|\b(9|12)\s*(visits?|apps?|applications?)\b/.test(text);
+  });
+}
+
 function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const breakdown = pricingBundle?.oneTimeBreakdown
     || (estData ? normalizeOneTimeBreakdown(estData) : null);
@@ -13390,6 +13420,11 @@ function rewriteTreeShrubRecurringServices(services = [], frequency = {}) {
   const nextServices = services.map((svc) => {
     const name = svc?.name || svc?.label || svc?.displayName || svc?.service || svc?.serviceKey || svc?.service_key;
     if (!isTreeShrubServiceName(name)) return svc;
+    // isTreeShrubServiceName includes palm_injection (deliberate for the
+    // grouping helper), but a PALM recurring row is its own program — the
+    // tier rewrite must never replace it with the selected T&S tier row
+    // (audit 2026-07-18 P2).
+    if (/\bpalm\b/i.test(String(name || ''))) return svc;
     changed = true;
     return selectedTreeShrubServiceRow(svc, frequency);
   });
@@ -16365,6 +16400,7 @@ module.exports.lawnFrequenciesFromResultStats = lawnFrequenciesFromResultStats;
 module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult;
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.recurringLawnRowAtRetiredCadence = recurringLawnRowAtRetiredCadence;
+module.exports.recurringTreeShrubRowAtRetiredCadence = recurringTreeShrubRowAtRetiredCadence;
 module.exports.storedLawnRowBelowProgramFloor = storedLawnRowBelowProgramFloor;
 module.exports.applySelectedMosquitoTierToEstimateData = applySelectedMosquitoTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;

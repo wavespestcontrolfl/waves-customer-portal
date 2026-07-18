@@ -272,6 +272,13 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // content-key-insensitive snapshots, and a reschedule after render would
   // leave a stale appointment time fossilized in the downloadable document.
   if (mode !== 'live') delete data.nextAppointment;
+  // The V2 snapshot's nextVisit (lawn + tree & shrub) is the same class of
+  // live schedule data — the PDF cache key never varies on schedule changes,
+  // so a rendered "Next visit: Friday, July 24" outlives any reschedule
+  // (audit 2026-07-18 P2). Same rule, same strip.
+  if (mode !== 'live' && data.reportV2?.snapshot?.nextVisit) {
+    delete data.reportV2.snapshot.nextVisit;
+  }
 
   // The tech photo card is LIVE-VIEW ONLY for the same reason (Codex P2 on
   // #2614): the PDF cache key doesn't vary on GATE_REPORT_TECH_PHOTO, so a

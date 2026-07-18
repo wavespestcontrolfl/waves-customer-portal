@@ -1725,9 +1725,14 @@ export function calculateEstimate(inputs) {
     let eb = bedArea;
     if (eb <= 0) {
       let bp = shrubDensity === 'HEAVY' ? 0.25 : shrubDensity === 'MODERATE' ? 0.18 : 0.10;
-      if (landscapeComplexity === 'COMPLEX') bp += 0.05;
-      // v1.5: raised cap from 8,000 to 12,000 — 1-acre heavy-shrub properties can exceed 10k sf beds
-      eb = Math.min(12000, Math.round(lotSqFt * bp));
+      // Server parity (audit 2026-07-18 P2): the pricing engine adds the
+      // complexity bump for MODERATE too (property-calculator: 'complex' OR
+      // 'moderate' → +complexAdd) and caps derived bed area at BED_AREA_CAP
+      // 8,000 (constants.js:69 — the client's v1.5 12,000 cap never shipped
+      // server-side, so admin-built quotes overpriced big heavy-shrub lots
+      // by up to 4,000 sf of bed material vs. what the engine would charge).
+      if (landscapeComplexity === 'COMPLEX' || landscapeComplexity === 'MODERATE') bp += 0.05;
+      eb = Math.min(8000, Math.round(lotSqFt * bp));
       fieldVerify.push('bed area');
     }
     // Tree count mirrors server v4.6 semantics: an explicit count (including

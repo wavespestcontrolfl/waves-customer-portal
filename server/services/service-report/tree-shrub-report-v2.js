@@ -242,10 +242,19 @@ function buildTreeShrubReportV2({
   if (!treeShrubAssessment) return null;
   const scores = treeShrubAssessment.scores || {};
 
+  // Treatment is computed BEFORE the categories so the pest diagnosis row
+  // can gate its "treated today" claim on an actual insect-targeting
+  // application — the same insecticide/miticide gate the insight card uses.
+  const treatment = buildTreatment({ applications, actions });
+  const treatmentKinds = treatment ? treatment.kinds : [];
   const categories = buildTreeShrubVisualCategories({
     scores,
     techConfirmedPest: !!treeShrubAssessment.techConfirmedPest,
     techConfirmedDisease: !!treeShrubAssessment.techConfirmedDisease,
+    // 'systemic' is classifyProduct's insect-family systemics bucket
+    // (imidacloprid/dinotefuran/Merit/Safari) — an insect treatment for this
+    // gate's purposes.
+    pestTreatedToday: treatmentKinds.includes('insecticide') || treatmentKinds.includes('miticide') || treatmentKinds.includes('systemic'),
   });
   // Client cards read `explanation`; keep customerExplanation too.
   const diagnosis = categories.map((c) => ({ ...c, explanation: c.customerExplanation }));
@@ -271,7 +280,6 @@ function buildTreeShrubReportV2({
   }
   if (water) water.localizedDry = localizedDry;
 
-  const treatment = buildTreatment({ applications, actions });
   const plantGroups = buildPlantGroups(treeShrubAssessment.plantGroups);
 
   const insights = buildTreeShrubInsightCards({
@@ -279,7 +287,7 @@ function buildTreeShrubReportV2({
     water: water ? { ...water, localizedDry } : (localizedDry ? { localizedDry: true } : {}),
     plantGroups,
     customerConcern,
-    treatmentKinds: treatment ? treatment.kinds : [],
+    treatmentKinds,
   });
 
   // Photos for the strip (best first) + ONE consolidated summary (never the

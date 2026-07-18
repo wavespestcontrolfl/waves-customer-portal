@@ -1080,6 +1080,18 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
   return null;
 }
 
+// Restamped Tree & Shrub tier rows carry their real catalog service_key
+// (tree_shrub_program / tree_shrub_quarterly / tree_shrub_6week) — pass it
+// through so the scheduled row links service_id and typed-profile
+// resolution survives catalog renames (audit 2026-07-18 P2: converted T&S
+// rows had no service_id and rode an exact name-string match). Other lines
+// keep name-based resolution until their keys are verified against the
+// catalog — an absent key would only add lookup-warn noise.
+function remainingUnitCatalogKey(svc = {}) {
+  const key = String(svc.serviceKey || svc.service_key || '').trim();
+  return /^tree_shrub(_program|_quarterly|_6week)$/.test(key) ? key : null;
+}
+
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
   const rowKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: scheduledRow.service_type });
   return recurringServices.find((svc) => RecurringAppointmentSeeder.serviceKeyFor(svc) === rowKey)
@@ -1714,7 +1726,7 @@ const EstimateConverter = {
       const scheduleUnits = [
         ...combos.map((combo) => ({ svc: combo.service, combo, catalogServiceKey: combo.route.catalogServiceKey })),
         ...standalone.map((unit) => ({ svc: unit.service, catalogServiceKey: unit.catalogServiceKey })),
-        ...remaining.map((svc) => ({ svc })),
+        ...remaining.map((svc) => ({ svc, catalogServiceKey: remainingUnitCatalogKey(svc) })),
       ];
       for (const unit of scheduleUnits) {
         const svc = unit.svc;
@@ -2438,6 +2450,7 @@ module.exports.explicitServiceCadence = explicitServiceCadence;
 module.exports.supplementalCompanionLines = supplementalCompanionLines;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
+module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;
 module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeeding;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
