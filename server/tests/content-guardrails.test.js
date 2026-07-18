@@ -956,3 +956,75 @@ describe('guards — round-5 polish (Codex findings)', () => {
     expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
   });
 });
+
+// Round 8 (Codex P1): DIRECTLY negated claims are the honest disclaimers the
+// gate exists to encourage — they must be exempt, while every affirmative
+// shape from rounds 1-5 keeps flagging.
+describe('prevention-promise guard — round-8 hardening (directly negated claims)', () => {
+  test('"does not eliminate" disclaimers are exempt (the flagged case)', () => {
+    const r = guardrails.evaluate({ body: 'This treatment does not eliminate ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('"won\'t eliminate" disclaimers are exempt — curly AND straight apostrophes', () => {
+    for (const body of ['This treatment won’t eliminate ants.', "This treatment won't eliminate ants."]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('two-word auxiliary negation in the subject gap is exempt ("will not eliminate")', () => {
+    const r = guardrails.evaluate({ body: 'The treatment will not eliminate ants overnight.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('other negated auxiliaries in the subject gap are exempt (cannot / doesn\'t)', () => {
+    for (const body of [
+      'This treatment cannot eliminate the ants on its own.',
+      'Our service doesn’t eliminate the ants overnight.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('direct negation before a VERB-anchored pattern is exempt too', () => {
+    for (const body of [
+      // pattern: "prevents <pest> from returning" — negated
+      'A single visit will not prevent ants from returning.',
+      // pattern: "prevents all/every <pest>" — negated
+      'Even a professional treatment cannot prevent all ants.',
+      // pattern: "guaranteed elimination" — negated determiner
+      'There is no guaranteed elimination in Florida pest work.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('the bare affirmative promise still flags P1 (no round-1..5 regression)', () => {
+    for (const body of [
+      'This treatment prevents ants.',
+      'This quarterly treatment prevents infestations.',
+      'Our treatment eliminates ants in your home.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE' && f.severity === 'P1')).toBe(true);
+    }
+  });
+
+  test('"not only prevents" is an AFFIRMATIVE claim and still flags', () => {
+    const r = guardrails.evaluate({ body: 'This treatment not only prevents ants, it starves the colony.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('a disclaimer still cannot shield a coordinated promise (round-4 shape intact)', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant, but our service eliminates ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('"Nothing stops ants…" hype is NOT treated as negation and still flags', () => {
+    const r = guardrails.evaluate({ body: 'Nothing stops ants from coming back like our quarterly program.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+});

@@ -261,8 +261,10 @@ JSX component props like columns={[...]} are expected and render fine.
 - <BottomLineBox verdict="..." recommendation="..." /> — the one-paragraph
   bottom line for decision posts: verdict = the direct answer, recommendation
   = what the reader should do. Both props REQUIRED (plain strings); optional
-  confidence="high"|"moderate"|"situational". REQUIRED on every "decision"
-  post.
+  confidence="high"|"medium"|"low" — these are the ONLY values the component
+  contract accepts (packages/blog-schema confidenceEnum); any other value
+  fails prop validation, so omit the prop if unsure. REQUIRED on every
+  "decision" post.
 - <HonestRejection audience="..." reason="..." /> — honestly tells a segment
   of readers this service/plan is NOT for them and what to do instead. Both
   props REQUIRED (plain strings). REQUIRED on "decision" and "comparison"

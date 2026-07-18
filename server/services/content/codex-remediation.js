@@ -105,6 +105,53 @@ function parseCodexFindings(reviewComments = [], headSha = null) {
     .filter((f) => f.body);
 }
 
+// A body "matches" the head when it embeds the full SHA or an abbreviated
+// (>=7 hex char) prefix of it — Codex's completion summary prints a 10-char
+// "Reviewed commit" SHA (same posture as astro-publisher.bodyMatchesHead,
+// where demanding more chars stalled astro PR #357 at codex_review_pending).
+function bodyMatchesHead(body, headSha) {
+  const head = String(headSha || '').trim().toLowerCase();
+  if (!head) return false;
+  const text = String(body || '');
+  if (text.toLowerCase().includes(head)) return true;
+  const runs = text.match(/\b[0-9a-f]{7,40}\b/gi) || [];
+  return runs.some((run) => head.startsWith(run.toLowerCase()));
+}
+
+/**
+ * Evidence that the Codex review round for `headSha` COMPLETED — as opposed
+ * to inline findings still streaming in. Exactly two artifacts prove
+ * completion (mirroring astro-publisher.codexReviewStatus):
+ *   1. a SUBMITTED (non-PENDING) Codex review object pinned to the head, or
+ *   2. Codex's top-level summary issue comment embedding the head SHA.
+ * A usage-limit bounce is a FAILED round, never completion. When a review
+ * request timestamp exists the artifact must be STRICTLY after it — a
+ * same-second tie is ambiguous and fails closed, matching the finding
+ * filter in p2OnlyMergeEligible.
+ */
+function codexRoundCompleted({ reviews = [], issueComments = [], headSha = null, requestedAt = 0 } = {}) {
+  const head = shortSha(headSha);
+  if (!head) return false;
+  const afterRequest = (ts) => {
+    if (!(requestedAt > 0)) return true; // no request timestamp — head match is the only anchor
+    return (Date.parse(ts || 0) || 0) > requestedAt;
+  };
+  const submittedReview = (Array.isArray(reviews) ? reviews : []).some((r) => {
+    if (!isCodexAuthor(r && (r.user?.login || r.author?.login))) return false;
+    if (String(r?.state || '').toUpperCase() === 'PENDING') return false;
+    if (shortSha(r?.commit_id || r?.commit?.oid) !== head) return false;
+    return afterRequest(r?.submitted_at || r?.submittedAt);
+  });
+  if (submittedReview) return true;
+  return (Array.isArray(issueComments) ? issueComments : []).some((c) => {
+    if (!isCodexAuthor(c && (c.user?.login || c.author?.login))) return false;
+    const body = String(c?.body || '');
+    if (/usage limits|reached your Codex usage limits/i.test(body)) return false;
+    if (!bodyMatchesHead(body, headSha)) return false;
+    return afterRequest(c?.created_at || c?.createdAt);
+  });
+}
+
 // ── P2-only merge bar (autonomous blog lane) ───────────────────────────────
 // A fresh Codex review can ALWAYS surface new P2s on a long post (observed
 // on astro #383 and the 07-04 backlog: every re-review goes deeper), so a
@@ -170,6 +217,20 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   const severities = findings.map((f) => findingSeverity(f.body));
   if (severities.some((s) => s === 'P0' || s === 'P1')) {
     return { eligible: false, reason: `blocking findings present (${severities.join(', ')})` };
+  }
+  // Round-8 (Codex P1): inline comments can stream in INCREMENTALLY while a
+  // review round is in flight — a lone current-head P2 posted after the
+  // request is NOT proof the round finished, and merging on it races a
+  // P0/P1 that may still be generating. The P2 bar only arms on evidence of
+  // a COMPLETED round: a submitted Codex review pinned to this head, or
+  // Codex's top-level completion summary embedding this head's SHA, each
+  // strictly after the latest same-head request. No artifact = pending.
+  if (typeof gh.listPrReviews !== 'function') {
+    return { eligible: false, reason: 'cannot verify codex round completion (review lookup unavailable)' };
+  }
+  const reviews = await gh.listPrReviews(prNumber);
+  if (!codexRoundCompleted({ reviews, issueComments, headSha, requestedAt: latestRequestAt })) {
+    return { eligible: false, reason: 'codex review round not completed for current head (inline findings may be partial)' };
   }
   return { eligible: true, p2Count: findings.length, rounds: state.rounds };
 }

@@ -685,6 +685,17 @@ function productClaimFinding(text) {
 // never prevention. Patterns are pest-anchored to avoid the bare-'never'
 // false-positive class that got the old signal removed (PR #2776).
 const PEST_OBJ_SRC = "(?:ants?|pests?|bugs?|roaches|cockroaches|termites?|rodents?|mice|rats?|mosquito(?:es)?|spiders?|fleas?|ticks?|infestations?|colon(?:y|ies)|trails?|them|they)";
+// Round-8 (Codex P1): the filler words between a service subject and the
+// promise verb must never absorb a negation that governs the verb —
+// "This treatment does not eliminate ants" / "won't eliminate ants" are
+// exactly the honest disclaimers this gate exists to ENCOURAGE. Every
+// filler word is lookahead-guarded against these forms; two-word
+// negations resolve too ("does not" = allowed "does" + blocked "not", so
+// the verb position lands on "not" and the match dies). "not" heading a
+// "not only/just/merely" construction stays allowed because "This
+// treatment not only prevents ants…" is an AFFIRMATIVE claim.
+const NEGATION_WORD_SRC = "(?:not(?!\\s+(?:only|just|merely)\\b)|no|never|won['’]?t|cannot|can['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|couldn['’]?t|shouldn['’]?t|wouldn['’]?t|mustn['’]?t)";
+const NON_NEGATED_FILLER_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’]+\\s+){0,2}?`;
 // Every pattern is pest-anchored — the OBJECT (or the promised state) must be
 // a pest term, so "prevents next month's water bill" / "prevents moisture
 // buildup" stay legal. Source strings (not RegExp literals) so the finding
@@ -710,8 +721,10 @@ const PREVENTION_PROMISE_SRCS = [
   // "This quarterly treatment prevents infestations", "Our treatment
   // eliminates ants in your home", "A professional application eradicates
   // cockroaches". The subject anchor keeps question headings and homeowner
-  // how-to framing ("How do I get rid of ants?") legal.
-  `\\b(?:treatments?|applications?|services?|programs?|plans?|visits?|products?|this|it)\\s+(?:[\\w'’]+\\s+){0,2}?(?:prevents?|eliminates?|eradicates?|exterminates?|wipes?\\s+out)\\s+(?:all\\s+|any\\s+|future\\s+|the\\s+|your\\s+)?${PEST_OBJ_SRC}`,
+  // how-to framing ("How do I get rid of ants?") legal, and the
+  // negation-guarded filler (round 8) keeps directly negated disclaimers
+  // ("This treatment does not eliminate ants") legal.
+  `\\b(?:treatments?|applications?|services?|programs?|plans?|visits?|products?|this|it)\\s+${NON_NEGATED_FILLER_SRC}(?:prevents?|eliminates?|eradicates?|exterminates?|wipes?\\s+out)\\s+(?:all\\s+|any\\s+|future\\s+|the\\s+|your\\s+)?${PEST_OBJ_SRC}`,
   // Qualifier promises with no subject needed: "prevents future infestations",
   // "prevents all ants" — incl. comparison-table row labels.
   `\\bprevents?\\s+(?:all|any|every|future)\\s+${PEST_OBJ_SRC}`,
@@ -727,6 +740,17 @@ const PREVENTION_PROMISE_RES = PREVENTION_PROMISE_SRCS.map((src) => new RegExp(s
 // routinely ships curly quotes (the pest-practices matcher was burned by
 // exactly this).
 const NEGATED_PROMISE_CONTEXT_RE = /(?:no\s+(?:honest\s+)?(?:company|one|body|pro)|won['’]?t|will\s+not|cannot|can['’]?t|nobody\s+can|don['’]?t|do\s+not|doesn['’]?t|does\s+not|never)\s+(?:[\w'’]+\s+){0,3}?(?:promise|guarantee|tell\s+you)/i;
+
+// Round-8 (Codex P1): a negation IMMEDIATELY before the matched claim
+// directly negates its promise verb — "…doesn't stop ants from coming
+// back", "cannot prevent every ant", "no guaranteed elimination" are
+// disclaimers, not promises. The verb-anchored patterns start AT the verb,
+// so a governing negation sits just before the match start; the
+// subject-anchored pattern is covered by NON_NEGATED_FILLER_SRC instead
+// (there the negation sits INSIDE the match). Anchored to the match start
+// so "not only prevents ants…" (affirmative) and "Nothing stops ants like
+// us" (hype, "Nothing" deliberately absent) still flag.
+const DIRECT_NEGATION_BEFORE_RE = /(?:\bnot|\bnever|\bno|\bcannot|\bwon['’]?t|\bcan['’]?t|\bdon['’]?t|\bdoesn['’]?t|\bdidn['’]?t|\bisn['’]?t|\baren['’]?t|\bwasn['’]?t|\bweren['’]?t|\bcouldn['’]?t|\bwouldn['’]?t|\bshouldn['’]?t|\bmustn['’]?t)\s+$/i;
 
 function preventionPromiseFinding(text) {
   const s = String(text || '');
@@ -747,6 +771,12 @@ function preventionPromiseFinding(text) {
       const before = s.slice(Math.max(0, m.index - 80), m.index);
       const sentenceBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n'));
       const sameSentence = sentenceBreak >= 0 ? before.slice(sentenceBreak + 1) : before;
+      // Directly negated claim ("will not prevent ants from returning",
+      // "cannot prevent every ant") — a disclaimer, exempt (round 8).
+      if (DIRECT_NEGATION_BEFORE_RE.test(sameSentence)) {
+        if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
+        continue;
+      }
       const negation = NEGATED_PROMISE_CONTEXT_RE.exec(sameSentence);
       if (negation) {
         const between = sameSentence.slice(negation.index + negation[0].length);
