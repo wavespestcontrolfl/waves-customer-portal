@@ -445,7 +445,17 @@ function initScheduledJobs() {
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {
-      await runExclusive('knowledge-index-sync', () => require('./knowledge-index/ingest').syncKnowledgeIndex());
+      await runExclusive('knowledge-index-sync', async () => {
+        // Map fresh call/visit resolutions first so the same night's corpus
+        // sync chunks + embeds them. Isolated: a resolution-sweep failure
+        // must not cost the curated corpora their nightly sync/embeds.
+        try {
+          await require('./knowledge-index/resolution-sync').syncResolutionArtifacts();
+        } catch (err) {
+          logger.error(`[knowledge-index] resolution sweep failed (corpus sync continues): ${err.message}`);
+        }
+        await require('./knowledge-index/ingest').syncKnowledgeIndex();
+      });
     } catch (err) {
       logger.error(`[knowledge-index] nightly sync failed: ${err.message}`);
     }
@@ -1168,6 +1178,26 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`SMS suggestion recovery/expiry sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 3:05AM ET — Sealed-eval freezer top-up (brand-voice loop
+  // measurement). Pure selection, no LLM spend: freezes judged live drafts
+  // (inbound + day-of facts_block + human reply) into sms_sealed_eval_items
+  // until the pool reaches SEALED_EVAL_TARGET, so the locked exam keeps
+  // coverage as intents shift. Idempotent (anti-join + unique source draft);
+  // no-ops once full. Exam RUNS are never scheduled — manual endpoint only.
+  // =========================================================================
+  cron.schedule('5 3 * * 0', async () => {
+    if (!isEnabled('smsSealedEval')) return;
+    logger.info('Running: Sealed-eval freezer top-up');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sealEvalItems } = require('./sms-sealed-eval');
+      await runExclusive('sms-sealed-eval-seal', () => sealEvalItems());
+    } catch (err) {
+      logger.error(`Sealed-eval freezer failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

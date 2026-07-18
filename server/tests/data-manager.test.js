@@ -10,6 +10,19 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(),
 }));
 
+// Controllable consent snapshot for the conversion-lane suppression tests.
+// The consent module's own matching rules are pinned in
+// ad-audience-consent.test.js — here we only exercise the conversion seam.
+const mockLoadSuppression = jest.fn();
+jest.mock('../services/ads/ad-audience-consent', () => ({
+  loadMarketingSuppression: (...args) => mockLoadSuppression(...args),
+  normPhone: (p) => {
+    const digits = String(p || '').replace(/\D/g, '');
+    if (!digits) return null;
+    return digits.length > 10 ? digits.slice(-10) : digits;
+  },
+}));
+
 const crypto = require('crypto');
 const DataManager = require('../services/ads/data-manager');
 
@@ -27,6 +40,7 @@ const {
   normalizePhone,
   redactedEventSummary,
   sha256Hex,
+  applyMarketingConsent,
   skipReason,
   summarizeCandidates,
   uploadLogStatusForIngest,
@@ -175,10 +189,19 @@ describe('Google Data Manager upload helpers', () => {
       email: 'lead@example.com',
       phone: '9415550100',
       gclid: 'GCLID',
+      customer_email: 'current@example.com',
+      customer_phone: '9415550199',
       source_name: 'Google Ads',
       source_type: 'google_ads',
       channel: 'paid',
     });
+
+    // The linked customer's CURRENT identifiers ride along for person-level
+    // consent checks (same contract as mapCompletedJobCandidate).
+    expect(candidate.consentIdentifiers).toEqual([
+      { email: 'lead@example.com', phone: '9415550100' },
+      { email: 'current@example.com', phone: '9415550199' },
+    ]);
 
     expect(candidate).toEqual(expect.objectContaining({
       conversionType: 'qualified_lead',
@@ -333,5 +356,226 @@ describe('Google Data Manager upload helpers', () => {
       }],
     }));
     expect(request.events).toHaveLength(1);
+  });
+});
+
+describe('conversion-lane marketing-consent suppression', () => {
+  const snapshot = ({ phones = [], emails = [], invalid = [] } = {}) => ({
+    invalidPhones: new Set(invalid),
+    isSuppressed: (m) => {
+      const digits = String((m && m.phone) || '').replace(/\D/g, '');
+      const ph = digits.length > 10 ? digits.slice(-10) : digits;
+      const em = String((m && m.email) || '').trim().toLowerCase();
+      return Boolean((ph && phones.includes(ph)) || (em && emails.includes(em)));
+    },
+  });
+
+  beforeEach(() => {
+    mockLoadSuppression.mockReset();
+    mockLoadSuppression.mockResolvedValue(snapshot());
+  });
+
+  test('strips email AND phone from an opted-out contact and flags it', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 't-1', email: 'optout@example.com', phone: '+19415550100', gclid: 'g-1',
+    }]);
+    expect(cleaned).toMatchObject({ transactionId: 't-1', email: null, phone: null, consentSuppressed: true });
+  });
+
+  test('a suppressed contact WITH a click id still measures — click-id-only event, no hashed PII', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      conversionType: 'completed_job_revenue', transactionId: 't-1', eventTimestamp: '2026-07-01T12:00:00Z',
+      conversionValue: 100, email: 'optout@example.com', phone: '+19415550100', gclid: 'g-1',
+    }]);
+    expect(skipReason(cleaned)).toBeNull();
+    const event = buildEvent(cleaned);
+    expect(event.adIdentifiers).toEqual({ gclid: 'g-1' });
+    expect(event.userData).toBeUndefined();
+  });
+
+  test('a suppressed contact WITHOUT a click id is skipped as consent_suppressed, not missing_match_keys', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ phones: ['9415550100'] }));
+    const [cleaned] = await applyMarketingConsent('qualified_lead', [{
+      conversionType: 'qualified_lead', transactionId: 't-2', eventTimestamp: '2026-07-01T12:00:00Z',
+      email: null, phone: '(941) 555-0100',
+    }]);
+    expect(skipReason(cleaned)).toBe('consent_suppressed');
+    const { counts } = summarizeCandidates([cleaned]);
+    expect(counts.consentSuppressed).toBe(1);
+    expect(counts.missingMatchKeys).toBe(0);
+    expect(counts.skipped).toBe(1);
+  });
+
+  test('a never-had-keys row still reports missing_match_keys (no consent involved)', () => {
+    expect(skipReason({
+      conversionType: 'qualified_lead', transactionId: 't-3', eventTimestamp: '2026-07-01T12:00:00Z',
+    })).toBe('missing_match_keys');
+  });
+
+  test('wrong_number strips ONLY the (stranger\'s) phone; person is not opted out', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ invalid: ['9415550100'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 't-4', email: 'fine@example.com', phone: '+19415550100',
+    }]);
+    expect(cleaned).toMatchObject({ email: 'fine@example.com', phone: null });
+    expect(cleaned.consentSuppressed).toBeUndefined();
+  });
+
+  test('duplicate completed-job rows: consent strips BEFORE dedupe so a click-ID sibling wins', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    // Pre-consent, the opted-out row outscores the click-ID row (email+phone+
+    // value+leadId = 12 vs gclid+value = 11); post-consent it must LOSE, or the
+    // transaction is skipped while a measurable duplicate gets discarded.
+    const optedOutRow = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S1',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100, leadId: 'lead-1',
+      email: 'optout@example.com', phone: '+19415550100',
+    };
+    const clickIdRow = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S1',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
+      email: null, phone: null, gclid: 'g-1',
+    };
+    const cleaned = await applyMarketingConsent('completed_job_revenue', [optedOutRow, clickIdRow]);
+    const [winner] = dedupeCandidatesByTransaction(cleaned);
+    expect(winner.gclid).toBe('g-1');
+    expect(skipReason(winner)).toBeNull();
+    const event = buildEvent(winner);
+    expect(event.adIdentifiers).toEqual({ gclid: 'g-1' });
+    expect(event.userData).toBeUndefined();
+  });
+
+  test('opt-out on a LINKED identifier suppresses the person even when a stale lead email won the pick', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['current@example.com'] }));
+    // mapCompletedJobCandidate collapses to leadEmail || customerEmail — the
+    // stale lead email wins the pick, but the customer's CURRENT email is the
+    // one that opted out. The person is opted out; nothing of theirs uploads.
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:S9',
+      email: 'stale-lead@example.com', phone: '+19415550100',
+      consentIdentifiers: [
+        { email: 'stale-lead@example.com', phone: '+19415550100' },
+        { email: 'current@example.com', phone: null },
+      ],
+    }]);
+    expect(cleaned).toMatchObject({ email: null, phone: null, consentSuppressed: true });
+  });
+
+  test('no linked identifier opted out → candidate untouched', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['someoneelse@example.com'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:S10',
+      email: 'lead@example.com', phone: '+19415550100',
+      consentIdentifiers: [
+        { email: 'lead@example.com', phone: '+19415550100' },
+        { email: 'customer@example.com', phone: null },
+      ],
+    }]);
+    expect(cleaned).toMatchObject({ email: 'lead@example.com', phone: '+19415550100' });
+    expect(cleaned.consentSuppressed).toBeUndefined();
+  });
+
+  test('a Meta click key survives the dedupe onto a consent-stripped winner (click-key union)', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    const base = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S2',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
+    };
+    // Whichever duplicate wins the score, the winner must carry the sibling's
+    // Meta click key so CAPI keeps its click-ID-only measurement path — for
+    // both the fbc and the weaker fbp variants.
+    for (const metaKeys of [{ fbc: 'fb.1.1.click-1' }, { fbp: 'fb.1.1.99' }]) {
+      const cleaned = await applyMarketingConsent('completed_job_revenue', [
+        { ...base, leadId: 'lead-1', email: 'optout@example.com', phone: '+19415550100' },
+        { ...base, email: null, phone: null, ...metaKeys },
+      ]);
+      const [winner] = dedupeCandidatesByTransaction(cleaned);
+      expect(winner.fbc || winner.fbp).toBeTruthy();
+      expect(winner.email).toBeNull(); // stripped PII never resurfaces
+      expect(winner.phone).toBeNull();
+    }
+  });
+
+  test('dedupe unions click keys BOTH ways without letting Meta keys outrank gclid for Google', () => {
+    const base = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S3',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
+    };
+    // Google-keyed row must WIN (gclid dominance — the Google lane keeps its
+    // strongest attribution) while inheriting the Meta sibling's keys, so the
+    // same deduped candidate serves both lanes.
+    const [winner] = dedupeCandidatesByTransaction([
+      { ...base, email: null, phone: null, fbc: 'fb.1.1.click-1', fbp: 'fb.1.1.99' },
+      { ...base, email: null, phone: null, gclid: 'g-1' },
+    ]);
+    expect(winner.gclid).toBe('g-1');
+    expect(winner.fbc).toBe('fb.1.1.click-1');
+    expect(winner.fbp).toBe('fb.1.1.99');
+    expect(skipReason(winner)).toBeNull();
+  });
+
+  test('wrong_number on the collapsed phone promotes a clean linked phone instead of dropping it', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ invalid: ['9415550100'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:S4',
+      email: null, phone: '+19415550100', // stale lead phone — a stranger's
+      consentIdentifiers: [
+        { email: null, phone: '+19415550100' },
+        { email: null, phone: '+19415550199' }, // customer's clean phone
+      ],
+    }]);
+    expect(cleaned.phone).toBe('+19415550199');
+    expect(cleaned.consentSuppressed).toBeUndefined();
+  });
+
+  test('wrong_number with no clean alternative still strips to null', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ invalid: ['9415550100', '9415550199'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:S5',
+      email: null, phone: '+19415550100',
+      consentIdentifiers: [
+        { email: null, phone: '+19415550100' },
+        { email: null, phone: '+19415550199' }, // also a wrong number
+      ],
+    }]);
+    expect(cleaned.phone).toBeNull();
+  });
+
+  test('opt-out propagates to transaction SIBLINGS carrying different unsuppressed PII', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    // Two join rows, one transaction, same person: sibling A matches the
+    // opt-out; sibling B carries different stale contact data absent from the
+    // suppression lists. B must strip too — otherwise B wins the dedupe on
+    // its intact PII score and uploads the person's PII anyway.
+    const base = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S6',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
+    };
+    const cleaned = await applyMarketingConsent('completed_job_revenue', [
+      { ...base, email: 'optout@example.com', phone: null },
+      { ...base, email: 'old-address@example.com', phone: '+19415550177', gclid: 'g-1' },
+    ]);
+    for (const c of cleaned) {
+      expect(c.email).toBeNull();
+      expect(c.phone).toBeNull();
+      expect(c.consentSuppressed).toBe(true);
+    }
+    const [winner] = dedupeCandidatesByTransaction(cleaned);
+    expect(winner.gclid).toBe('g-1'); // click-only measurement survives
+    const event = buildEvent(winner);
+    expect(event.userData).toBeUndefined();
+  });
+
+  test('fails CLOSED — a suppression-load error propagates and aborts the run', async () => {
+    mockLoadSuppression.mockRejectedValue(new Error('db unavailable'));
+    await expect(applyMarketingConsent('completed_job_revenue', [{ transactionId: 't-5', email: 'a@b.com' }]))
+      .rejects.toThrow('db unavailable');
+  });
+
+  test('empty candidate list never loads the suppression set', async () => {
+    await expect(applyMarketingConsent('completed_job_revenue', [])).resolves.toEqual([]);
+    expect(mockLoadSuppression).not.toHaveBeenCalled();
   });
 });
