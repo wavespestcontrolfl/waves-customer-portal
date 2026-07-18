@@ -6,6 +6,9 @@
 // one-time history only) gets a 400 nothing_to_cancel instead of an
 // irreversible self-churn.
 
+// The per-customer create limiter (8/hr) is real express-rate-limit and its
+// counter is shared across this suite's requests — not under test here.
+jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => next(),
   authenticateAllowInactive: (req, _res, next) => {
@@ -165,10 +168,20 @@ describe('POST /api/requests cancellation guard', () => {
     expect((await res.json()).code).toBe('nothing_to_cancel');
   }));
 
-  test('an armed next_charge_date alone → allowed (what the cron actually charges from)', () => withServer(async (baseUrl) => {
-    state.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: null, next_charge_date: '2026-08-01' }];
+  test('an armed charge on a membership lane (unpriced member) → allowed', () => withServer(async (baseUrl) => {
+    state.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'monthly_membership', next_charge_date: '2026-08-01' }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(201);
+  }));
+
+  test('a stale next_charge_date on a one_time lane is NOT cancellable work', () => withServer(async (baseUrl) => {
+    // Auto Pay disables never clear the column — on a non-billing lane the
+    // date is decoration, and counting it re-opened the empty-account
+    // self-churn this guard exists to prevent.
+    state.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'one_time', next_charge_date: '2026-08-01' }];
+    const res = await postCancellation(baseUrl);
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('nothing_to_cancel');
   }));
 
   test('upcoming cancellable visit alone → allowed', () => withServer(async (baseUrl) => {

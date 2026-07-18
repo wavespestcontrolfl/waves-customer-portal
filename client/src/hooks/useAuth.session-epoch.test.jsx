@@ -158,6 +158,35 @@ describe('session epoch guards', () => {
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
   });
 
+  it('does NOT supersede on a legacy token\'s sessionId-upgrading refresh from another tab', async () => {
+    const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const legacyTok = `${b64u({ alg: 'none' })}.${b64u({ customerId: 'cust-a' })}.x`;
+    const upgradedTok = `${b64u({ alg: 'none' })}.${b64u({ customerId: 'cust-a', sessionId: 'sess-9' })}.x`;
+    const store = { waves_token: legacyTok, waves_refresh_token: 'ref-a' };
+    stubLocalStorage(store);
+    api.getMe.mockResolvedValueOnce({ id: 'cust-a' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+
+    const slowSwitch = deferred();
+    api.selectAuthProperty.mockReturnValueOnce(slowSwitch.promise);
+    api.getMe.mockResolvedValue({ id: 'cust-b' });
+
+    let switchResult;
+    await act(async () => {
+      const pending = authApi.switchProperty('cust-b');
+      // Another tab's routine refresh upgrades the legacy token into a
+      // durable session family — same session, not a new login.
+      store.waves_token = upgradedTok;
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token', newValue: upgradedTok }));
+      slowSwitch.resolve({ token: 'tok-b', refreshToken: 'ref-b', properties: [] });
+      switchResult = await pending;
+    });
+
+    expect(switchResult).toBe(true);
+    expect(api.setTokens).toHaveBeenCalledWith('tok-b', 'ref-b');
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
+  });
+
   it('DOES supersede on a same-customer NEW-session login from another tab (family change)', async () => {
     const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     const tokenFor = (customerId, sessionId) => `${b64u({ alg: 'none' })}.${b64u({ customerId, sessionId })}.x`;

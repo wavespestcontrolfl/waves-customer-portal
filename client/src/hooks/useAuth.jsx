@@ -24,21 +24,34 @@ export function tokenCustomerId(token) {
   }
 }
 
-// Session-family key: a fresh code login mints a NEW sessionId even for the
-// same customer (server generateToken), and responses in flight under the
-// OLD family must not act on the new one — in particular a stale /auth/me
-// 401 must not clear freshly adopted credentials. A same-family access-token
-// rotation keeps the same key. Legacy tokens without a sessionId collapse to
-// the customer id alone (same tolerance as api.js sameRequestSession).
-function tokenSessionKey(token) {
+// Session-family identity: a fresh code login mints a NEW sessionId even for
+// the same customer (server generateToken), and responses in flight under
+// the OLD family must not act on the new one — in particular a stale
+// /auth/me 401 must not clear freshly adopted credentials. A same-family
+// access-token rotation keeps the family.
+function tokenSessionIdentity(token) {
   try {
     const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
     const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
     if (payload.customerId == null) return null;
-    return `${payload.customerId}:${payload.sessionId ?? ''}`;
+    return {
+      customerId: String(payload.customerId),
+      sessionId: payload.sessionId == null ? null : String(payload.sessionId),
+    };
   } catch {
     return null;
   }
+}
+
+// Same asymmetric semantics as api.js sameRequestSession: a legacy token
+// with no sessionId matches ANY session of the same customer — its first
+// routine refresh upgrades it into a durable family, and that upgrade (from
+// this or another tab) is NOT a new login, so it must not supersede
+// in-flight work.
+function sameSessionFamily(a, b) {
+  return !!a && !!b
+    && a.customerId === b.customerId
+    && (a.sessionId === null || b.sessionId === null || a.sessionId === b.sessionId);
 }
 
 function authErrorCopy(err) {
@@ -190,11 +203,11 @@ export function AuthProvider({ children }) {
       // OR a fresh login's new sessionId for the same customer — so
       // in-flight responses from the old family are discarded (a stale
       // /auth/me 401 must not clear the newly adopted credentials). A
-      // same-family access-token rotation keeps the epoch, so it cannot
-      // supersede this tab's in-flight flows (e.g. a property switch
-      // mid-await) — that identity is still current (Codex #2859 r1+r2).
-      const nextKey = tokenSessionKey(token);
-      const familyChanged = nextKey === null || nextKey !== tokenSessionKey(api.token);
+      // same-family rotation, including a legacy token's first
+      // sessionId-upgrading refresh, keeps the epoch so it cannot supersede
+      // this tab's in-flight flows (e.g. a property switch mid-await) —
+      // that identity is still current (Codex #2859 r1+r2+r3).
+      const familyChanged = !sameSessionFamily(tokenSessionIdentity(api.token), tokenSessionIdentity(token));
       if (familyChanged) sessionEpochRef.current += 1;
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (identityChanged) {
