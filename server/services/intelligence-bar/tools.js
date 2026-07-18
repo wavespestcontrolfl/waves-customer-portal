@@ -1476,7 +1476,7 @@ async function searchFieldIntelligence(input) {
     ...(hybrid ? { searchMode: hybrid.usedVector ? 'hybrid' : 'hybrid_fts_only' } : {}),
     bridgedPairs: (bridged || []).length,
     openContradictions,
-    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge; operationalKnowledge (when present) = services/protocols/product-label/county-rule/prep-guide matches — cite source + ref. Cite slugs, state confidence, and surface open contradictions.',
+    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge; operationalKnowledge (when present) = services/protocols/product-label/county-rule/prep-guide/past-resolution matches — cite source + ref; "resolution" entries are how similar past calls/visits were actually handled (PII-redacted, recency-decayed). Cite slugs, state confidence, and surface open contradictions.',
   };
 }
 

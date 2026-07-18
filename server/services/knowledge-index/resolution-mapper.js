@@ -1,0 +1,151 @@
+/**
+ * Resolution-artifact mappers — NO LLM. Everything here reshapes structure
+ * the pipelines already produced (call extraction schema 1.x, triage/route
+ * rows, service findings, report AI summaries) into a searchable artifact:
+ * { question, situation, resolution, outcome, systems, occurredAt }.
+ *
+ * Redaction: the same double-pass as the voice-corpus miner —
+ * agent-decision-training redactText (context names + structured PII) then
+ * the content engine's pii-redactor (heuristic self-introductions, spouses,
+ * tenants). Staff names stay, per house rule.
+ */
+
+const { redactText } = require('../agent-decision-training');
+const { redact: redactPii } = require('../content/pii-redactor');
+
+const DISPOSITION_TEXT = {
+  booked: 'Booked the service on the call',
+  callback_task_created: 'Created a callback task',
+  lead_response_flow_triggered: 'Routed to the lead-response flow',
+  existing_customer_routed: 'Routed to the existing-customer flow',
+  estimate_send: 'Sent an estimate',
+  cancellation_processed: 'Processed the cancellation',
+  complaint_escalated: 'Escalated the complaint',
+  vendor_logged: 'Logged as a vendor/partner contact',
+  voicemail_processed: 'Processed the voicemail',
+  no_action_needed: 'No action needed',
+};
+
+// Dispositions that carry no reusable knowledge.
+const SKIP_DISPOSITIONS = new Set(['spam_discarded', 'wrong_number_closed']);
+const SKIP_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'silent_or_noise']);
+
+const clean = (v) => String(v || '').trim();
+
+function redact(text, context = {}) {
+  const value = clean(text);
+  if (!value) return '';
+  return redactPii(redactText(value, context)).text;
+}
+
+function parseEnriched(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function renderQuestion(extraction) {
+  const nature = clean(extraction.call_nature).replace(/_/g, ' ');
+  const sr = extraction.service_request || {};
+  const parts = [];
+  if (sr.primary_service_category) parts.push(clean(sr.primary_service_category).replace(/_/g, ' '));
+  const pests = Array.isArray(sr.pests_observed) ? sr.pests_observed.filter(Boolean) : [];
+  if (pests.length) parts.push(`pests: ${pests.join(', ')}`);
+  if (sr.service_intent) parts.push(`intent: ${clean(sr.service_intent).replace(/_/g, ' ')}`);
+  if (sr.urgency) parts.push(`urgency: ${clean(sr.urgency)}`);
+  const detail = parts.length ? ` — ${parts.join('; ')}` : '';
+  return `${nature || 'customer call'}${detail}`;
+}
+
+/**
+ * mapCall({ call, extraction, triageNotes, finalAction, context }) → artifact | null
+ *  call: call_log row (id, customer_id, created_at, call_summary)
+ *  extraction: parsed ai_extraction_enriched (persisted schema)
+ *  triageNotes: [{ reason_code, resolution_note }] for the call
+ *  finalAction: route_decisions.final_action_taken (latest), optional
+ *  context: { first_name, last_name, phone } for name redaction
+ */
+function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalAction = null, context = {} }) {
+  const extraction = parseEnriched(rawExtraction);
+  if (!extraction) return null;
+  if (extraction.meta?.is_spam) return null;
+  if (SKIP_NATURES.has(clean(extraction.call_nature))) return null;
+
+  const disposition = clean(extraction.recommended_disposition);
+  if (SKIP_DISPOSITIONS.has(disposition)) return null;
+
+  const summary = clean(extraction.meta?.call_summary || call.call_summary);
+  if (!summary) return null;
+
+  const resolutionParts = [];
+  if (DISPOSITION_TEXT[disposition]) resolutionParts.push(DISPOSITION_TEXT[disposition]);
+  if (finalAction && finalAction !== disposition) resolutionParts.push(`Action taken: ${clean(finalAction).replace(/_/g, ' ')}`);
+  for (const note of triageNotes) {
+    if (clean(note.resolution_note)) resolutionParts.push(`Triage (${note.reason_code}): ${redact(note.resolution_note, context)}`);
+  }
+  if (!resolutionParts.length) return null; // nothing resolved — no knowledge to keep
+
+  const sr = extraction.service_request || {};
+  const systems = [
+    clean(extraction.call_nature),
+    clean(sr.primary_service_category),
+    ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : []),
+    ...(Array.isArray(sr.pests_observed) ? sr.pests_observed : []),
+  ].map(clean).filter(Boolean);
+
+  return {
+    source: 'call',
+    sourceId: call.id,
+    customerId: call.customer_id || null,
+    question: redact(renderQuestion(extraction), context),
+    situation: redact(summary, context),
+    resolution: resolutionParts.join('. '),
+    outcome: {
+      disposition: disposition || null,
+      finalAction: finalAction || null,
+      triageReasonCodes: triageNotes.map((n) => n.reason_code).filter(Boolean),
+    },
+    systems: [...new Set(systems)],
+    occurredAt: call.created_at,
+  };
+}
+
+/**
+ * mapVisit({ record, findings, aiSummary, context }) → artifact | null
+ *  record: service_records row (id, customer_id, service_date, service_type,
+ *          technician_notes)
+ *  findings: [{ category, severity, title, detail, recommendation }]
+ *  aiSummary: service_report_ai_summaries.summary_json (optional)
+ */
+function mapVisit({ record, findings = [], aiSummary = null, context = {} }) {
+  const recommendations = findings
+    .filter((f) => clean(f.recommendation))
+    .map((f) => `${clean(f.title) || clean(f.category)}: ${redact(f.recommendation, context)}`);
+  if (!recommendations.length) return null; // no reusable recommendation — skip
+
+  const situationParts = [];
+  for (const f of findings) {
+    if (clean(f.detail)) situationParts.push(`${clean(f.category)}${f.severity ? ` (${f.severity})` : ''}: ${redact(f.detail, context)}`);
+  }
+  if (clean(record.technician_notes)) situationParts.push(redact(record.technician_notes, context));
+  const summaryText = clean(aiSummary && typeof aiSummary === 'object' ? aiSummary.summary || aiSummary.narrative : '');
+  if (summaryText) situationParts.push(redact(summaryText, context));
+
+  const serviceType = clean(record.service_type).replace(/_/g, ' ') || 'service';
+  return {
+    source: 'visit',
+    sourceId: record.id,
+    customerId: record.customer_id || null,
+    question: `${serviceType} visit — findings and recommendations`,
+    situation: situationParts.join('\n') || null,
+    resolution: recommendations.join('\n'),
+    outcome: {
+      findingCategories: [...new Set(findings.map((f) => clean(f.category)).filter(Boolean))],
+      maxSeverity: findings.map((f) => clean(f.severity)).filter(Boolean).sort().pop() || null,
+    },
+    systems: [...new Set([serviceType, ...findings.map((f) => clean(f.category))].filter(Boolean))],
+    occurredAt: record.service_date || record.created_at,
+  };
+}
+
+module.exports = { mapCall, mapVisit, renderQuestion, DISPOSITION_TEXT };

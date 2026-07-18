@@ -445,7 +445,12 @@ function initScheduledJobs() {
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {
-      await runExclusive('knowledge-index-sync', () => require('./knowledge-index/ingest').syncKnowledgeIndex());
+      await runExclusive('knowledge-index-sync', async () => {
+        // Map fresh call/visit resolutions first so the same night's
+        // corpus sync chunks + embeds them.
+        await require('./knowledge-index/resolution-sync').syncResolutionArtifacts();
+        await require('./knowledge-index/ingest').syncKnowledgeIndex();
+      });
     } catch (err) {
       logger.error(`[knowledge-index] nightly sync failed: ${err.message}`);
     }
