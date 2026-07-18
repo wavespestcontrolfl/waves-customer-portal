@@ -14,6 +14,7 @@ const {
   normalizeContactEmail,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
+const { recordPreSendRevision } = require('./estimate-learning');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
 const pricingEngine = require('./pricing-engine');
@@ -714,6 +715,13 @@ async function createOrReuseAdminEstimate({
           if (!updated) {
             throw errorWithStatus('Estimate draft changed; refresh and try again.', 409);
           }
+          // The builder just wholesale-replaced whatever composition this
+          // linked draft held, and `source` is not part of the write payload
+          // so an AI draft stays an AI draft. Capture the locked pre-edit
+          // row: an operator discarding the AI composition entirely is a
+          // maximal edit, not a sent-unedited (same contract as
+          // reviseAdminEstimate — see estimate-learning.js).
+          await recordPreSendRevision({ priorEstimate: existingEstimate, trx });
           clearEstimatePricingCache(existingEstimate.id);
           return {
             estimate: updated,
@@ -989,22 +997,43 @@ async function reviseAdminEstimate({
   // snapshot and any customer-picked preferences, which is intended: they
   // described the PREVIOUS quote (the public view falls back to live pricing
   // until the next send re-stamps a snapshot).
-  const [updated] = await database('estimates')
-    .where({ id: estimate.id })
-    .whereNull('price_locked_at')
-    .whereNull('archived_at')
-    .whereNotIn('status', REVISE_BLOCKED_STATUSES)
-    .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
-    // Mirrors the pre-read's date-expiry verdict: the payload resolution
-    // above (pricing recompute, DB lookups) leaves a window in which the
-    // row can pass its expires_at, and a commit after that would report
-    // saved while the public link already serves the expired page.
-    .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now()))
-    .update({
-      ...writeFields,
-      updated_at: now(),
-    })
-    .returning('*');
+  const updated = await database.transaction(async (trx) => {
+    // Re-read the row under its lock before rewriting: the pre-read
+    // `estimate` above goes stale during payload resolution, and an Agent
+    // Estimate recomposition landing in that gap replaces the composition
+    // and resets its baseline. The baseline must snapshot the composition
+    // this UPDATE actually replaces, so the locked row — not the pre-read —
+    // feeds the capture below.
+    const lockedPrior = await trx('estimates')
+      .where({ id: estimate.id })
+      .forUpdate()
+      .first();
+    if (!lockedPrior) return null;
+    const [row] = await trx('estimates')
+      .where({ id: estimate.id })
+      .whereNull('price_locked_at')
+      .whereNull('archived_at')
+      .whereNotIn('status', REVISE_BLOCKED_STATUSES)
+      .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
+      // Mirrors the pre-read's date-expiry verdict: the payload resolution
+      // above (pricing recompute, DB lookups) leaves a window in which the
+      // row can pass its expires_at, and a commit after that would report
+      // saved while the public link already serves the expired page.
+      .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now()))
+      .update({
+        ...writeFields,
+        updated_at: now(),
+      })
+      .returning('*');
+    if (!row) return null;
+    // Learning-loop capture rides the same transaction as the rewrite: the
+    // locked pre-edit row is the AI composition this wholesale rewrite
+    // replaces, and committing the new composition before its baseline
+    // exists would let a concurrent send read the draft as "unedited" (see
+    // estimate-learning.js for the concurrency contract).
+    await recordPreSendRevision({ priorEstimate: lockedPrior, trx });
+    return row;
+  });
   if (!updated) {
     throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);
   }

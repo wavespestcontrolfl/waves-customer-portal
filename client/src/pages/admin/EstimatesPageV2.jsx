@@ -30,6 +30,7 @@ import EstimateToolViewV2 from "./EstimateToolViewV2";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
 import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineComposerModal";
 import WinLossSlicesCard from "./WinLossSlicesCard";
+import SourcePerformanceCard from "./SourcePerformanceCard";
 import PipelineAnalytics, {
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
@@ -2058,6 +2059,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
             onDateRangeChange={setDateRange}
           />
           <WinLossSlicesCard />
+          <SourcePerformanceCard />
           {/* Search — name / address / phone / email / reference. Sits
               under the Needs Attention strip so the operator can drill
               from "Going cold > 48h" into a specific customer fast. */}

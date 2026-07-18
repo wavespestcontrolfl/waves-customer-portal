@@ -961,6 +961,16 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     .update(updatePayload);
   if (!sentCount) {
     logger.warn(`[admin-estimates] estimate ${estimate.id} left the 'sending' claim during send (likely accepted/declined concurrently); preserving its current state.`);
+    // The channels DID deliver — a customer accepting mid-flight is exactly
+    // the outcome the learning loop must not lose, so the first-send event
+    // still stamps on this path (idempotent via the ledger's unique
+    // constraint). Fail-soft: never turns a delivered send into an error.
+    try {
+      const { recordSentLearningEvent } = require('../services/estimate-learning');
+      await recordSentLearningEvent({ estimateId: estimate.id, sentRow: estimate });
+    } catch (e) {
+      logger.warn(`[admin-estimates] learning event failed for estimate ${estimate.id}: ${e.message}`);
+    }
     return {
       sent: true,
       superseded: true,
@@ -985,6 +995,18 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     });
   } catch (e) {
     logger.warn(`[admin-estimates] pricing audit snapshot failed for estimate ${estimate.id}: ${e.message}`);
+  }
+
+  // Learning loop: stamp the draft→sent edit-distance event for AI-composed
+  // drafts (first send only; the ledger's unique constraint makes resends
+  // no-ops). The claimed snapshot — not a re-read — feeds the diff so a
+  // customer accepting right after delivery can't have their own choices
+  // counted as operator edits. Fail-soft — never blocks the send result.
+  try {
+    const { recordSentLearningEvent } = require('../services/estimate-learning');
+    await recordSentLearningEvent({ estimateId: estimate.id, sentRow: estimate });
+  } catch (e) {
+    logger.warn(`[admin-estimates] learning event failed for estimate ${estimate.id}: ${e.message}`);
   }
 
   // Fire-and-forget: enroll the customer in the estimate_sent follow-up
@@ -1072,6 +1094,21 @@ router.get('/win-loss-slices', async (req, res, next) => {
     const { winLossSlices } = require('../services/estimate-winloss');
     const slices = await winLossSlices({ days });
     res.json({ success: true, ...slices });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/estimates/source-performance — drafted→sent funnel, close
+// rate, send latency, and AI-draft edit stats per estimate source (learning
+// loop). Won/lost mirror win-loss-slices semantics; edit stats read the
+// estimate_learning_events ledger. Read-only analytics.
+router.get('/source-performance', async (req, res, next) => {
+  try {
+    const days = Math.min(365, Math.max(7, parseInt(req.query.days, 10) || 90));
+    const { sourcePerformance } = require('../services/estimate-source-performance');
+    const report = await sourcePerformance({ days });
+    res.json({ success: true, ...report });
   } catch (err) {
     next(err);
   }

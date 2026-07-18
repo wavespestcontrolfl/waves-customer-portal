@@ -23,6 +23,7 @@ const { firstExternalPhone } = require('../external-phone');
 const { normalizeGrassType, grassTypeLabel } = require('../lawn-grass-context');
 const { shortenOrPassthrough } = require('../short-url');
 const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
+const { resetDraftBaseline } = require('../estimate-learning');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -2558,6 +2559,12 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
       .returning(['id', 'token']);
     if (!updated) return { error: 'Draft changed while revising; refresh and try again' };
     await trx('leads').where({ id: input.leadId }).update({ estimate_id: updated.id });
+    // The agent just re-composed this draft wholesale, so any captured
+    // draft baseline describes the replaced composition. The reset rides
+    // this same transaction: atomic with the composition swap (no window
+    // where a send could diff against the obsolete baseline) and a
+    // rollback preserves a still-valid baseline automatically.
+    await resetDraftBaseline({ estimateId: estimate.id, trx });
     return { estimate: updated, revised: true };
   };
 
