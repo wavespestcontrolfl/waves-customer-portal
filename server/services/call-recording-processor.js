@@ -3746,10 +3746,13 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // Every-leg-schema-invalid keeps the schema_failed classification the
     // finalize tail would have produced; transport/config failures keep the
     // parse_failed retry path (extraction_attempts + sweeper).
+    // Persist the PER-LEG failure list on both paths — downstream health
+    // accounting (v2-promotion-readiness) derives failed fallback attempts
+    // from these rows, since a both-legs-failed row stamps the primary model.
     const allSchema = failures.length > 0 && failures.every((f) => f.reason === 'extraction_schema_invalid');
     return allSchema
       ? { status: 'schema_failed', extraction: null, errors: failures }
-      : { status: 'parse_failed', extraction: null, errors: [{ message: res.reason || 'dispatch_failed' }] };
+      : { status: 'parse_failed', extraction: null, errors: failures.length ? failures : [{ message: res.reason || 'dispatch_failed' }] };
   }
 
   // Serialize the object the dispatcher VALIDATED, not the raw text: the

@@ -98,7 +98,7 @@ async function main() {
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
-    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model');
+    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model');
 
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
@@ -261,10 +261,20 @@ async function main() {
   // fallback rows only accrue when the primary fails, so demanding a large
   // sample would deadlock a healthy primary; the pre-swap bake-off plus a
   // handful of live rescues is the assessment bar.
+  // A fallback-stamped row is inherently a fallback SUCCESS (both-legs-failed
+  // rows stamp the primary), so the denominator must add failed fallback
+  // attempts — derived from the per-leg failure lists the extractor persists
+  // in ai_extraction_validation_errors on failed rows.
+  const failedFallbackAttempts = allRouteRows.filter((r) => {
+    if (r.v2_extraction_status === 'valid' || r.ai_extraction_model !== CURRENT_PRIMARY) return false;
+    const errs = parseJson(r.ai_extraction_validation_errors);
+    return Array.isArray(errs) && errs.some((e) => e && e.model === fallbackModel);
+  }).length;
   const fbValidCount = fallbackRows.filter((r) => r.v2_extraction_status === 'valid').length;
-  const fallbackAssessed = fallbackRows.length >= MIN_FALLBACK_ROWS
-    && fbValidCount / fallbackRows.length >= SCHEMA_PASS_THRESHOLD;
-  console.log(`6. Fallback leg assessed (≥ ${MIN_FALLBACK_ROWS} rows @ ≥ ${SCHEMA_PASS_THRESHOLD * 100}% valid): ${pass(fallbackAssessed)}  (${fbValidCount}/${fallbackRows.length})`);
+  const fbAttempts = fallbackRows.length + failedFallbackAttempts;
+  const fallbackAssessed = fbAttempts >= MIN_FALLBACK_ROWS
+    && fbValidCount / fbAttempts >= SCHEMA_PASS_THRESHOLD;
+  console.log(`6. Fallback leg assessed (≥ ${MIN_FALLBACK_ROWS} attempts @ ≥ ${SCHEMA_PASS_THRESHOLD * 100}% valid): ${pass(fallbackAssessed)}  (${fbValidCount}/${fbAttempts}${failedFallbackAttempts ? ` incl. ${failedFallbackAttempts} failed attempt(s)` : ''})`);
 
   const allPass = rows.length >= MIN_CALLS && schemaPassRate >= SCHEMA_PASS_THRESHOLD &&
     agreementRate >= AGREEMENT_THRESHOLD && smsWithoutConsent === 0 && phantomRisks.length === 0 &&
