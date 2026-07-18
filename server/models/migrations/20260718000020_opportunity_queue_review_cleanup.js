@@ -41,10 +41,24 @@ exports.up = async function up(knex) {
   // Rows whose run history shows a gate INFRA failure (thrown evaluator,
   // unavailable module/corpus, PII scanner down, missing previous version) or
   // the gated named-competitor state are genuine exceptions the operator
-  // should still see — exclude them from the skip (Codex PR r1). ANY matching
-  // run keeps the row parked (conservative).
+  // should still see — exclude them from the skip (Codex PR r1). The
+  // STRUCTURED gate-result jsonb columns are authoritative (reviewer_notes
+  // are lossy — _summarizeForReviewer records "uniqueness: failed" without
+  // the error text); the notes checks stay as a conservative extra OR. ANY
+  // matching run keeps the row parked. jsonb_exists() instead of the `?`
+  // operator — knex would eat `?` as a binding placeholder.
   const INFRA_MARKERS_SQL = `(
-        ar.reviewer_notes ILIKE '%gate_error%'
+        jsonb_exists(ar.uniqueness_gate_result, 'error')
+        OR jsonb_exists(ar.quality_gate_result, 'error')
+        OR jsonb_exists(ar.seo_completion_gate_result, 'error')
+        OR jsonb_exists(COALESCE(ar.quality_gate_result->'pre_publish_visibility', '{}'::jsonb), 'error')
+        OR ar.quality_gate_result::text ILIKE '%evaluator_threw%'
+        OR ar.quality_gate_result::text ILIKE '%pii_scan_unavailable%'
+        OR ar.quality_gate_result::text ILIKE '%no_previous_version_to_compare%'
+        OR ar.comparison_table_result::text ILIKE '%comparison_table_gate_error%'
+        OR ar.comparison_table_result::text ILIKE '%named_competitor_disabled%'
+        OR ar.content_guardrails_result::text ILIKE '%unavailable%'
+        OR ar.reviewer_notes ILIKE '%gate_error%'
         OR ar.reviewer_notes ILIKE '%unavailable%'
         OR ar.reviewer_notes ILIKE '%evaluator_threw%'
         OR ar.reviewer_notes ILIKE '%no_previous_version_to_compare%'
