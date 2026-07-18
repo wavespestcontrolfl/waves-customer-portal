@@ -80,6 +80,17 @@ const INFRA_MARKERS = [
   'get_recent_merged_prs',
   'get_app_store_status',
   'get_growthbook_features',
+  'get_google_ads_serving_status',
+  'get_integration_token_health',
+  'get_email_suppressions',
+  'get_dataforseo_balance',
+  'get_gbp_status',
+  'get_ga4_snapshot',
+  'get_meta_ads_delivery_status',
+  'get_truck_status',
+  'get_apify_status',
+  'get_social_channel_status',
+  'get_managed_agent_runs',
 ];
 
 // Every context an admin page can send. 'customers' exercises the base
