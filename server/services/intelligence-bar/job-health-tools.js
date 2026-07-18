@@ -21,6 +21,12 @@ const logger = require('../logger');
 // certainly died mid-run (deploy restart, crash) — the recorder never got
 // to write the end state.
 const STUCK_RUNNING_MINUTES = 60;
+// Cadences here range from every-minute sweeps to weekly digests, and the
+// ledger carries no per-job cadence — 8 days is the staleness floor that is
+// wrong for NO job: even a weekly job that stopped firing (unregistered,
+// renamed, disabled) crosses it. Finer cadence reasoning is the model's job
+// via last_success_age_minutes.
+const STALE_SUCCESS_DAYS = 8;
 
 const JOB_HEALTH_TOOLS = [
   {
@@ -41,6 +47,11 @@ function classify(row, now) {
     if (now - startedMs > STUCK_RUNNING_MINUTES * 60 * 1000) return 'stuck';
     return 'running';
   }
+  // A "success" whose last win is ancient means the job stopped FIRING
+  // (unregistered, renamed, disabled) — the failure mode that would
+  // otherwise read as healthy forever.
+  const successMs = row.last_success_at ? new Date(row.last_success_at).getTime() : 0;
+  if (!successMs || now - successMs > STALE_SUCCESS_DAYS * 24 * 60 * 60 * 1000) return 'stale';
   return 'healthy';
 }
 
@@ -53,22 +64,25 @@ async function getScheduledJobHealth() {
     last_status: row.last_status,
     last_started_at: row.last_started_at ? new Date(row.last_started_at).toISOString() : null,
     last_success_at: row.last_success_at ? new Date(row.last_success_at).toISOString() : null,
+    last_success_age_minutes: row.last_success_at
+      ? Math.round((now - new Date(row.last_success_at).getTime()) / 60000)
+      : null,
     consecutive_failures: row.consecutive_failures || 0,
     last_duration_ms: row.last_duration_ms ?? null,
     last_error: row.last_error || null,
   }));
-  const stateRank = { failing: 0, stuck: 0, running: 2, healthy: 3 };
+  const stateRank = { failing: 0, stuck: 0, stale: 1, running: 3, healthy: 4 };
   jobs.sort((a, b) => {
-    const rank = (stateRank[a.state] ?? 3) - (stateRank[b.state] ?? 3);
+    const rank = (stateRank[a.state] ?? 4) - (stateRank[b.state] ?? 4);
     if (rank !== 0) return rank;
     return (b.consecutive_failures || 0) - (a.consecutive_failures || 0);
   });
-  const unhealthy = jobs.filter(j => j.state === 'failing' || j.state === 'stuck').length;
+  const unhealthy = jobs.filter(j => j.state === 'failing' || j.state === 'stuck' || j.state === 'stale').length;
   return {
     jobs,
     total: jobs.length,
     unhealthy,
-    note: `One row per advisory-locked sweep job, recorded on every run. state=stuck means marked running for over ${STUCK_RUNNING_MINUTES} minutes — the process likely died mid-run (deploy restart); the next tick will overwrite it. Queue-claim jobs do not report here. Compare last_success_at to the job's cadence for staleness. Fixing a failing job means reading its error and the code — nothing is restartable from here.`,
+    note: `One row per advisory-locked sweep job, recorded on every run. state=stuck means marked running for over ${STUCK_RUNNING_MINUTES} minutes — the process likely died mid-run (deploy restart); the next tick will overwrite it. state=stale means the last success is over ${STALE_SUCCESS_DAYS} days old — the job likely stopped firing entirely; also compare last_success_age_minutes to each job's own cadence (an hourly job that last succeeded yesterday is a problem this floor won't flag). Queue-claim jobs do not report here. Fixing a failing job means reading its error and the code — nothing is restartable from here.`,
   };
 }
 

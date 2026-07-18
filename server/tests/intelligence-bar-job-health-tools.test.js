@@ -50,21 +50,31 @@ describe('intelligence bar scheduled job health tool', () => {
         last_started_at: new Date(now - 2 * 60 * 1000), last_success_at: new Date(now - 10 * 60 * 1000),
         consecutive_failures: 0, last_duration_ms: 400, last_error: null,
       },
+      {
+        // Last "success" is 3 weeks old — the job stopped FIRING; must not
+        // read as healthy forever
+        job_name: 'wiki-yellow-digest', last_status: 'success',
+        last_started_at: new Date(now - 21 * 24 * 60 * 60 * 1000),
+        last_success_at: new Date(now - 21 * 24 * 60 * 60 * 1000),
+        consecutive_failures: 0, last_duration_ms: 5000, last_error: null,
+      },
     ]);
 
     const result = await executeJobHealthTool('get_scheduled_job_health');
     expect(result.error).toBeUndefined();
-    // failing/stuck first (failing has the higher streak), then running, then healthy
+    // failing/stuck first (failing has the higher streak), then stale, then running, then healthy
     expect(result.jobs.map(j => j.job)).toEqual([
-      'ga4-sync', 'lawn-pricing-sweep', 'scheduled-sms', 'appointment-reminders',
+      'ga4-sync', 'lawn-pricing-sweep', 'wiki-yellow-digest', 'scheduled-sms', 'appointment-reminders',
     ]);
     expect(result.jobs[0].state).toBe('failing');
     expect(result.jobs[0].last_error).toBe('quota exceeded');
     expect(result.jobs[1].state).toBe('stuck');
-    expect(result.jobs[2].state).toBe('running');
-    expect(result.jobs[3].state).toBe('healthy');
-    expect(result.unhealthy).toBe(2);
-    expect(result.total).toBe(4);
+    expect(result.jobs[2].state).toBe('stale');
+    expect(result.jobs[2].last_success_age_minutes).toBeGreaterThan(20 * 24 * 60);
+    expect(result.jobs[3].state).toBe('running');
+    expect(result.jobs[4].state).toBe('healthy');
+    expect(result.unhealthy).toBe(3);
+    expect(result.total).toBe(5);
   });
 
   test('empty table returns a benign shape', async () => {

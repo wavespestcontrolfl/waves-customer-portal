@@ -31,6 +31,15 @@ const logger = require('../services/logger');
  */
 const MAX_RECORDED_ERROR_LENGTH = 500;
 
+// Provider errors can echo request payloads — Twilio errors are known to
+// embed phone numbers (see review-request.js's deliberate refusal to log
+// err.message). Mask digit runs before the message is persisted anywhere.
+function sanitizeJobError(message) {
+  return String(message || 'unknown error')
+    .replace(/\+?\d[\d\s().-]{5,}\d/g, '[redacted-number]')
+    .slice(0, MAX_RECORDED_ERROR_LENGTH);
+}
+
 // Best-effort job-health recorder (job_health table, one row per job) —
 // feeds the Intelligence Bar's get_scheduled_job_health. Every write is
 // wrapped so ledger problems (missing table pre-migration, transient DB
@@ -58,7 +67,7 @@ async function recordJobEnd(jobName, startedAtMs, error) {
     };
     if (error) {
       patch.last_status = 'failed';
-      patch.last_error = String(error.message || error).slice(0, MAX_RECORDED_ERROR_LENGTH);
+      patch.last_error = sanitizeJobError(error.message || error);
       await db('job_health').where({ job_name: jobName })
         .update({ ...patch, consecutive_failures: db.raw('consecutive_failures + 1') });
     } else {
@@ -73,7 +82,13 @@ async function recordJobEnd(jobName, startedAtMs, error) {
   }
 }
 
-async function runExclusive(jobName, fn) {
+// options.recordHealth (default true): set false for DYNAMIC per-entity
+// locks (review-send:${customerId}, per-run approval locks) — those are
+// mutual-exclusion uses, not scheduled jobs, and recording them would grow
+// job_health by one row per customer/run and leave one-off failures listed
+// as "failing" forever. Bounded-enum names (per-conversion-type upload
+// syncs) stay recorded — they ARE the scheduled jobs.
+async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
   const lockKey = `cron:${jobName}`;
   let conn;
   try {
@@ -95,15 +110,15 @@ async function runExclusive(jobName, fn) {
       return { skipped: true, reason: 'lease_held' };
     }
     const startedAtMs = Date.now();
-    await recordJobStart(jobName);
+    if (recordHealth) await recordJobStart(jobName);
     try {
       const result = await fn();
-      await recordJobEnd(jobName, startedAtMs, null);
+      if (recordHealth) await recordJobEnd(jobName, startedAtMs, null);
       return result;
     } catch (err) {
       // Record the failure, then preserve the existing contract: the
       // error still propagates to the job's own handler.
-      await recordJobEnd(jobName, startedAtMs, err);
+      if (recordHealth) await recordJobEnd(jobName, startedAtMs, err);
       throw err;
     }
   } finally {

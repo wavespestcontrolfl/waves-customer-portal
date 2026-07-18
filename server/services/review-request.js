@@ -944,7 +944,9 @@ const ReviewService = {
       // batched and sendSMS reading its status — delivering BOTH. The lock is
       // non-blocking: if a manual/cadence send for this customer holds it, we
       // skip the row this tick (it's picked up next tick, or was superseded).
-      await runExclusive(`review-send:${request.customer_id}`, () => this.sendSMS(request.id));
+      // recordHealth: false — per-customer mutual-exclusion lock, not a
+      // scheduled job; recording it would grow job_health per customer.
+      await runExclusive(`review-send:${request.customer_id}`, () => this.sendSMS(request.id), { recordHealth: false });
       sent++;
     }
     if (sent > 0)

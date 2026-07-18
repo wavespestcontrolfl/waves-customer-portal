@@ -153,6 +153,30 @@ describe('cron-lock job-health recorder', () => {
     }));
   });
 
+  test('recorded errors mask phone-number-shaped digit runs (Twilio payload echo)', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    await expect(
+      runExclusive('review-followups', async () => {
+        throw new Error("Twilio: The 'To' number +1 (941) 555-0134 is not a valid phone number");
+      }),
+    ).rejects.toThrow();
+
+    const patch = db.__builder.update.mock.calls.find(([arg]) => arg.last_status === 'failed')[0];
+    expect(patch.last_error).not.toContain('941');
+    expect(patch.last_error).toContain('[redacted-number]');
+  });
+
+  test('recordHealth: false records nothing for dynamic per-entity locks', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    const result = await runExclusive('review-send:cust-123', async () => 'sent', { recordHealth: false });
+    expect(result).toBe('sent');
+    expect(db).not.toHaveBeenCalledWith('job_health');
+  });
+
   test('skipped ticks record nothing', async () => {
     const conn = mockConnection(false);
     db.client.acquireConnection.mockResolvedValue(conn);

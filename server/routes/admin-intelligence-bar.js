@@ -229,6 +229,10 @@ const PII_TOOL_NAMES = new Set([
   // session titles are app-authored and can reference leads/customers.
   'get_truck_trips',
   'get_managed_agent_runs',
+  // Recorded job errors are provider messages that can echo request
+  // payloads (Twilio errors embed phone numbers) — the ledger masks digit
+  // runs at record time, and telemetry redacts as defense in depth.
+  'get_scheduled_job_health',
   // PaymentIntent descriptions are app-written and can embed customer names
   // or invoice references — redact like the other billing-adjacent tools.
   'get_stripe_payment_intents',
