@@ -1181,6 +1181,7 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+
   // =========================================================================
   // WEEKLY SUN 3:05AM ET — Sealed-eval freezer top-up (brand-voice loop
   // measurement). Pure selection, no LLM spend: freezes judged live drafts
@@ -1218,6 +1219,44 @@ function initScheduledJobs() {
       await runExclusive('shadow-backfill', () => runShadowBackfill());
     } catch (err) {
       logger.error(`Shadow backfill failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:20AM ET — Pathology classifier (brand-voice loop diagnostics).
+  // Runs after the 3:55am judge: every new draft_unsafe judgment is
+  // classified into a fixed (harness surface × failure mode) cell so the
+  // top failure cause is standing data, not a hand-run readout. Batch-capped
+  // FAST calls; idempotent anti-join.
+  // =========================================================================
+  cron.schedule('20 4 * * *', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS pathology classifier');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { classifyPathologies } = require('./sms-pathology-ledger');
+      await runExclusive('sms-pathology-classify', () => classifyPathologies());
+    } catch (err) {
+      logger.error(`SMS pathology classifier failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 4:40AM ET — Pathology patch proposer. Cells with enough fresh
+  // evidence get ONE parked harness-patch proposal card + bell (Agents →
+  // Shadow Drafts). Recommendation only — a human ships any actual prompt
+  // change as a PROMPT_VERSION bump. ≤PATHOLOGY_PROPOSAL_MAX_CELLS DEEP
+  // calls per week.
+  // =========================================================================
+  cron.schedule('40 4 * * 0', async () => {
+    if (!isEnabled('smsPathologyLedger')) return;
+    logger.info('Running: SMS pathology patch proposer');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { proposePatches } = require('./sms-pathology-ledger');
+      await runExclusive('sms-pathology-propose', () => proposePatches());
+    } catch (err) {
+      logger.error(`SMS pathology proposer failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
