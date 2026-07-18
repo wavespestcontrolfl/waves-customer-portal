@@ -209,6 +209,22 @@ async function handleIntakeReply(customer, body) {
     await db('customers').where({ id: customer.id }).update({
       lead_intake_status: 'awaiting_address',
     });
+    // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): the machine now
+    // WAITS for an address but nothing asks for one — the auto-reply's menu
+    // prompt was deliberately removed. Park an approval-gated clarifying
+    // SMS so the question goes out only on the owner's click. Fail-soft.
+    try {
+      const { parkClarifyAsk } = require('./estimate-clarify-asks');
+      await parkClarifyAsk({
+        missing: ['street_address'],
+        phone: customer.phone,
+        firstName: customer.first_name,
+        customerId: customer.id,
+        source: 'lead_intake_awaiting_address',
+      });
+    } catch (e) {
+      logger.error(`[lead-intake] clarify ask failed: ${e.message}`);
+    }
     logger.info(`[lead-intake] Awaiting address from ${customer.first_name} after selecting ${cls.interest}`);
     return { handled: false };
   }

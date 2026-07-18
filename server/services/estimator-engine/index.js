@@ -535,6 +535,30 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           title: S.redTitle,
           body: S.redBody(callerLabel(intent, context), reasons.join('; ')),
         });
+        // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): the two
+        // machine-readable red causes are askable — park an approval-gated
+        // clarifying SMS ALONGSIDE the operator bell, never instead of it.
+        // Fail-soft: a clarify hiccup must not change the red-lane result.
+        if (!dryRun) {
+          try {
+            const missing = [];
+            if (!intent.address) missing.push('street_address');
+            if (!Object.keys(intent.services || {}).length) missing.push('specific_service');
+            if (missing.length && context.phone) {
+              const { parkClarifyAsk } = require('../estimate-clarify-asks');
+              await parkClarifyAsk({
+                missing,
+                phone: context.phone,
+                firstName: context.lead?.first_name || context.customer?.first_name || null,
+                customerId: (!context.customerPhoneAmbiguous && context.customer?.id) || null,
+                leadId: (context.leadIsForThisCall && context.lead?.id) || null,
+                source: origin.channel === 'sms_thread' ? 'estimator_engine_sms_red' : 'estimator_engine_red',
+              });
+            }
+          } catch (askErr) {
+            logger.warn(`[estimator-engine] clarify ask failed: ${askErr.message}`);
+          }
+        }
       }
       return result;
     }

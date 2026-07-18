@@ -818,6 +818,28 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       logger.error(`Lead record creation failed: ${leadErr.message}`);
     }
 
+    // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): a blocked
+    // readiness verdict carries the machine-readable missing items — park
+    // an approval-gated clarifying SMS so the question goes out only on the
+    // owner's click. 'disabled' (global automation gate off) never asks.
+    if (estimateAutomationReadiness?.status === 'blocked'
+      && (estimateAutomationReadiness.missing || []).length) {
+      try {
+        const { parkClarifyAsk } = require('../services/estimate-clarify-asks');
+        await parkClarifyAsk({
+          missing: estimateAutomationReadiness.missing,
+          phone: phoneFormatted,
+          firstName,
+          customerId: customer?.id || null,
+          leadId: leadRecord?.id || null,
+          estimateId: createdEstimateId,
+          source: 'lead_webhook_blocked',
+        });
+      } catch (askErr) {
+        logger.error(`Lead clarify ask failed: ${askErr.message}`);
+      }
+    }
+
     // Push + bell notification for admins. Deep-links the LEAD row; if lead
     // creation failed the customer id keeps a (degraded) bell rather than none.
     try {

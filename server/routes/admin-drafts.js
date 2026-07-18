@@ -115,6 +115,24 @@ function sendPolicyForDraft(draft, recipient) {
       },
     };
   }
+  if (draft.intent === 'estimate_clarify') {
+    // Clarify asks answer the contact's OWN quote request, so they ride the
+    // transactional estimate rails, never the conversational fallthrough —
+    // that shape's anonymous-lead allowance exists for people texting IN,
+    // and a clarify recipient may have arrived by email or web form. The
+    // lead-only consentBasis records that provenance (flags.source).
+    const flags = parseFlags(draft.flags);
+    return {
+      audience: recipient.customerId ? 'customer' : 'lead',
+      purpose: 'estimate_followup',
+      estimateId: flags.estimate_id || undefined,
+      consentBasis: recipient.customerId ? undefined : {
+        status: 'transactional_allowed',
+        source: `estimate_clarify_${flags.source || 'unknown'}`,
+        capturedAt: draft.created_at || new Date().toISOString(),
+      },
+    };
+  }
   return draftSendPolicyFields(draft, recipient);
 }
 
@@ -310,6 +328,70 @@ function draftMessageType(draft, legacyValue) {
  *   { blocked: false, customer }         — proceed; customer carries
  *                                          nearest_location_id for the send
  */
+// Clarify-ask drafts (services/estimate-clarify-asks.js): the writer's gate
+// must hold at APPROVAL time too — GATE_ESTIMATE_CLARIFY_ASKS turned off
+// while a draft sits pending means the owner shut the lane; the click must
+// not send. And the QUESTION must still be needed: the answer can arrive,
+// the linked estimate can move past draft, or the lead can close while the
+// draft sits pending — approving then would text a stale question. Stale →
+// draft retired (rejected) + 409; transient lookup failure → fail closed,
+// claim released, 503. Suppression/consent are re-checked by
+// sendCustomerMessage regardless. Narrowly scoped to
+// intent='estimate_clarify'.
+const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate']);
+async function guardClarifySend(draft, res, releaseFields = {}) {
+  if (draft.intent !== 'estimate_clarify') return { blocked: false };
+  if (!isEnabled('estimateClarifyAsks')) {
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(409).json({
+      error: 'Clarify asks are disabled (GATE_ESTIMATE_CLARIFY_ASKS is off) — draft left pending',
+      code: 'CLARIFY_GATE_OFF',
+    });
+    return { blocked: true };
+  }
+
+  const flags = parseFlags(draft.flags);
+  const missing = Array.isArray(flags.missing) ? flags.missing : [];
+  const retire = async (message) => {
+    await db('message_drafts').where({ id: draft.id }).update({ status: 'rejected' });
+    res.status(409).json({ error: message, code: 'CLARIFY_STALE' });
+    return { blocked: true };
+  };
+  try {
+    const [lead, customer, estimate] = await Promise.all([
+      flags.lead_id ? db('leads').where({ id: flags.lead_id }).first() : null,
+      draft.customer_id ? db('customers').where({ id: draft.customer_id }).first() : null,
+      flags.estimate_id ? db('estimates').where({ id: flags.estimate_id }).first() : null,
+    ]);
+    if (flags.lead_id && !lead) {
+      return retire('Clarify draft retired — the linked lead no longer exists.');
+    }
+    if (lead && CLOSED_LEAD_STATUSES.has(String(lead.status || ''))) {
+      return retire('Clarify draft retired — the linked lead is closed.');
+    }
+    if (estimate && (estimate.sent_at || estimate.status !== 'draft')) {
+      return retire('Clarify draft retired — the linked estimate already moved past draft.');
+    }
+    // Answer-arrived recheck: retire only when EVERY asked item is now
+    // known — a partially answered ask is still actionable.
+    const hasAddressNow = [lead?.address, customer?.address_line1]
+      .some((value) => value && /\d/.test(String(value)));
+    const { hasConcreteServiceInterest } = require('../services/lead-estimate-automation');
+    const hasServiceNow = [lead?.service_interest, customer?.lead_service_interest]
+      .some((value) => hasConcreteServiceInterest(value));
+    const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
+      || (item === 'specific_service' && !hasServiceNow));
+    if (missing.length && !stillMissing.length) {
+      return retire('Clarify draft retired — the customer already provided the missing details.');
+    }
+  } catch (err) {
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(503).json({ error: 'Clarify staleness check unavailable — draft left pending, try again' });
+    return { blocked: true };
+  }
+  return { blocked: false };
+}
+
 async function guardCampaignSend(draft, req, res, releaseFields = {}) {
   if (!draft.campaign_type) return { blocked: false, customer: null };
 
@@ -526,6 +608,10 @@ router.put('/:id/approve', async (req, res, next) => {
     const campaignGuard = await guardCampaignSend(draft, req, res);
     if (campaignGuard.blocked) return;
 
+    // Gate recheck for clarify-ask drafts only.
+    const clarifyGuard = await guardClarifySend(draft, res);
+    if (clarifyGuard.blocked) return;
+
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
@@ -646,6 +732,10 @@ router.put('/:id/revise', async (req, res, next) => {
     // Shared pre-send gate recheck (campaign drafts only).
     const campaignGuard = await guardCampaignSend(draft, req, res, { revised_response: null, final_response: null });
     if (campaignGuard.blocked) return;
+
+    // Gate recheck for clarify-ask drafts only.
+    const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null });
+    if (clarifyGuard.blocked) return;
 
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
