@@ -4,7 +4,7 @@
  */
 
 const {
-  GEMINI_CALL_RESEARCH_MODEL,
+  CALL_RESEARCH_ROUTE,
   _test: { normalizeForMatch, isVerbatim, normalizeChunks, redactChunkText, buildRedactionContexts, mapSegmentRefs },
 } = require('../services/call-research-miner');
 const { RESEARCH_TAGS } = require('../services/call-research-taxonomy');
@@ -50,8 +50,99 @@ describe('call-research prompt contract', () => {
     expect(validateResearchOutput({}).valid).toBe(false);
   });
 
-  test('extraction model default is env-overridable Gemini, never hardcoded Claude', () => {
-    expect(GEMINI_CALL_RESEARCH_MODEL).toMatch(/^gemini-/);
+  test('extraction route crosses providers and defaults to the bake-off winner', () => {
+    expect(CALL_RESEARCH_ROUTE.primary).toEqual({ provider: 'openai', model: expect.stringMatching(/^gpt-/) });
+    expect(CALL_RESEARCH_ROUTE.fallback.provider).toBe('anthropic');
+    // dispatchWithFallback rejects same-provider policies — the route must
+    // never collapse to one provider, whatever the env overrides say.
+    expect(CALL_RESEARCH_ROUTE.fallback.provider).not.toBe(CALL_RESEARCH_ROUTE.primary.provider);
+  });
+
+  test('provider-only override never inherits a foreign default model', () => {
+    jest.resetModules();
+    const prevProvider = process.env.CALL_RESEARCH_PROVIDER;
+    const prevModel = process.env.CALL_RESEARCH_MODEL;
+    process.env.CALL_RESEARCH_PROVIDER = 'anthropic';
+    delete process.env.CALL_RESEARCH_MODEL;
+    try {
+      const { CALL_RESEARCH_ROUTE: route } = require('../services/call-research-miner');
+      expect(route.primary.model).not.toMatch(/^gpt-/);
+      expect(route.primary.model).not.toMatch(/^gemini-/);
+      expect(route.fallback.provider).toBe('openai');
+    } finally {
+      if (prevProvider === undefined) delete process.env.CALL_RESEARCH_PROVIDER;
+      else process.env.CALL_RESEARCH_PROVIDER = prevProvider;
+      if (prevModel === undefined) delete process.env.CALL_RESEARCH_MODEL;
+      else process.env.CALL_RESEARCH_MODEL = prevModel;
+      jest.resetModules();
+    }
+  });
+
+  test('call-research default is pinned — report-writer env overrides must not move it', () => {
+    jest.resetModules();
+    const prev = process.env.MODEL_OPENAI_REPORT_WRITER;
+    process.env.MODEL_OPENAI_REPORT_WRITER = 'gpt-hypothetical-new-writer';
+    try {
+      const { CALL_RESEARCH_ROUTE: route } = require('../services/call-research-miner');
+      expect(route.primary.model).toBe('gpt-5.6-sol');
+    } finally {
+      if (prev === undefined) delete process.env.MODEL_OPENAI_REPORT_WRITER;
+      else process.env.MODEL_OPENAI_REPORT_WRITER = prev;
+      jest.resetModules();
+    }
+  });
+
+  test('mixed leg failures classify as request_failed so the outage abort engages', async () => {
+    jest.resetModules();
+    const outcomes = [
+      { failures: [{ reason: 'research_schema_invalid' }, { reason: 'anthropic_429' }], expected: 'request_failed' },
+      { failures: [{ reason: 'research_schema_invalid' }, { reason: 'research_schema_invalid' }], expected: 'schema_failed' },
+      { failures: [], expected: 'request_failed' },
+    ];
+    for (const { failures, expected } of outcomes) {
+      jest.resetModules();
+      jest.doMock('../services/llm/call', () => ({
+        dispatchWithFallback: jest.fn(async () => ({ ok: false, reason: 'all_providers_failed', failures })),
+      }));
+      try {
+        const miner = require('../services/call-research-miner');
+        const res = await miner.extractResearchChunks(
+          { transcription: 'Agent: Waves.\nCaller: I have ants everywhere.' },
+          null,
+        );
+        expect(res.status).toBe(expected);
+      } finally {
+        jest.dontMock('../services/llm/call');
+      }
+    }
+    jest.resetModules();
+  });
+
+  test('schema validation runs inside the dispatcher so bad primary output triggers fallback', async () => {
+    jest.resetModules();
+    let capturedValidate = null;
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: jest.fn(async (route, payload, opts = {}) => {
+        capturedValidate = opts.validate;
+        return { ok: true, json: { chunks: [] }, model: 'stub-model' };
+      }),
+    }));
+    try {
+      const miner = require('../services/call-research-miner');
+      const res = await miner.extractResearchChunks(
+        { transcription: 'Agent: Waves, how can I help?\nCaller: I have ants everywhere.' },
+        null,
+      );
+      expect(res.status).toBe('ok');
+      expect(typeof capturedValidate).toBe('function');
+      // contract-invalid output = rejection reason → dispatcher tries Claude
+      expect(capturedValidate({ json: { chunks: [{ speaker: 'caller', quote: 'ants everywhere', tag: 'not-a-tag' }] } })).toBe('research_schema_invalid');
+      expect(capturedValidate({ json: null })).toBe('research_schema_invalid');
+      expect(capturedValidate({ json: { chunks: [] } })).toBeNull();
+    } finally {
+      jest.dontMock('../services/llm/call');
+      jest.resetModules();
+    }
   });
 });
 

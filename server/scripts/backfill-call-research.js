@@ -6,15 +6,17 @@
  * spending Gemini calls). --execute runs the real miner in batches until
  * the backlog drains — the sweep is incremental + idempotent (claims via
  * call_log.research_mined_at), so it is safe to re-run and resumes where
- * it left off. Requires GEMINI_API_KEY; ~625 historical transcripts is a
- * few dollars one-time.
+ * it left off. Requires the configured route's API key (OPENAI_API_KEY for
+ * the locked Sol primary); ~700 historical transcripts is a few dollars
+ * one-time.
  *
  *   node server/scripts/backfill-call-research.js              # dry-run
  *   node server/scripts/backfill-call-research.js --execute
  *   node server/scripts/backfill-call-research.js --execute --limit 25
  *
  * Run the pre-backfill model bake-off (bakeoff-call-research.js) FIRST and
- * lock the winning model via GEMINI_CALL_RESEARCH_MODEL before executing.
+ * lock the winner via CALL_RESEARCH_PROVIDER / CALL_RESEARCH_MODEL before
+ * executing.
  * Embedding of the new chunks happens via the nightly knowledge-index sync.
  */
 
@@ -32,11 +34,11 @@ if (limitFlag >= 0 && (!Number.isInteger(BATCH) || BATCH <= 0)) {
 
 (async () => {
   const db = require('../models/db');
-  const { eligibleCallsQuery, mineCallResearch, GEMINI_CALL_RESEARCH_MODEL } = require('../services/call-research-miner');
+  const { eligibleCallsQuery, mineCallResearch, CALL_RESEARCH_ROUTE } = require('../services/call-research-miner');
 
   if (!EXECUTE) {
     const [{ count }] = await eligibleCallsQuery().count('call_log.id as count');
-    console.log(`DRY RUN (pass --execute to write).\n  unmined eligible transcripts: ${count}\n  extraction model: ${GEMINI_CALL_RESEARCH_MODEL}`);
+    console.log(`DRY RUN (pass --execute to write).\n  unmined eligible transcripts: ${count}\n  extraction route: ${CALL_RESEARCH_ROUTE.primary.provider}:${CALL_RESEARCH_ROUTE.primary.model} → ${CALL_RESEARCH_ROUTE.fallback.provider}:${CALL_RESEARCH_ROUTE.fallback.model}`);
     await db.destroy();
     return;
   }

@@ -9,14 +9,13 @@
  * quote fidelity and tag accuracy. Writes NOTHING to the database; all
  * printed quotes are redacted.
  *
- *   node server/scripts/bakeoff-call-research.js                         # 20 calls, 3.5-flash vs 2.5-pro
+ *   node server/scripts/bakeoff-call-research.js                    # 20 calls, locked route vs gemini-2.5-pro
  *   node server/scripts/bakeoff-call-research.js --sample 30
- *   node server/scripts/bakeoff-call-research.js --models gemini-3.5-flash,gemini-2.5-pro
+ *   node server/scripts/bakeoff-call-research.js --models openai:gpt-5.6-sol,gemini:gemini-2.5-pro,anthropic:claude-opus-4-8
  *
- * Lock the winner via GEMINI_CALL_RESEARCH_MODEL before the backfill. At
- * gemini-3.5-pro GA, re-run and bump only if Pro wins. If both Gemini arms
- * disappoint, wire an Anthropic third arm through llm/call.js before
- * deciding — do not backfill on a losing model.
+ * Arms are provider:model pairs. Lock the winner via CALL_RESEARCH_PROVIDER
+ * / CALL_RESEARCH_MODEL before the backfill; re-run at major model GAs and
+ * bump only on a win — do not backfill on a losing model.
  */
 
 const path = require('path');
@@ -26,21 +25,38 @@ const args = process.argv.slice(2);
 const sampleFlag = args.indexOf('--sample');
 const SAMPLE = sampleFlag >= 0 ? parseInt(args[sampleFlag + 1], 10) : 20;
 const modelsFlag = args.indexOf('--models');
-const MODELS = modelsFlag >= 0
+const ARM_SPECS = modelsFlag >= 0
   ? String(args[modelsFlag + 1] || '').split(',').map((m) => m.trim()).filter(Boolean)
-  : ['gemini-3.5-flash', 'gemini-2.5-pro'];
-if (!Number.isInteger(SAMPLE) || SAMPLE <= 0 || MODELS.length < 2) {
-  console.error('Usage: bakeoff-call-research.js [--sample N] [--models a,b]');
+  : null; // null = default arms resolved after requires (locked route vs runner-up)
+if (!Number.isInteger(SAMPLE) || SAMPLE <= 0 || (ARM_SPECS && ARM_SPECS.length < 2)) {
+  console.error('Usage: bakeoff-call-research.js [--sample N] [--models provider:model,provider:model]');
   process.exit(1);
 }
 const DETAIL_CALLS = 5; // full chunk detail printed for the first N calls
 
 (async () => {
   const db = require('../models/db');
-  const { eligibleCallsQuery, extractResearchChunks } = require('../services/call-research-miner');
+  const { eligibleCallsQuery, extractResearchChunks, CALL_RESEARCH_ROUTE } = require('../services/call-research-miner');
 
-  if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
-    console.error('GEMINI_API_KEY not configured.');
+  const specs = ARM_SPECS || [
+    `${CALL_RESEARCH_ROUTE.primary.provider}:${CALL_RESEARCH_ROUTE.primary.model}`,
+    'gemini:gemini-2.5-pro', // bake-off runner-up — the standing challenger
+  ];
+  const ARMS = specs.map((spec) => {
+    const idx = spec.indexOf(':');
+    const provider = idx > 0 ? spec.slice(0, idx) : null;
+    const model = idx > 0 ? spec.slice(idx + 1) : null;
+    if (!['openai', 'anthropic', 'gemini'].includes(provider) || !model) {
+      console.error(`Bad arm "${spec}" — use provider:model (openai|anthropic|gemini).`);
+      process.exit(1);
+    }
+    return { label: spec, route: { primary: { provider, model } } };
+  });
+  const KEY_FOR = { openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', gemini: 'GEMINI_API_KEY' };
+  const missing = [...new Set(ARMS.map((a) => KEY_FOR[a.route.primary.provider]))]
+    .filter((k) => !process.env[k] && !(k === 'GEMINI_API_KEY' && process.env.GOOGLE_API_KEY));
+  if (missing.length) {
+    console.error(`Missing keys for requested arms: ${missing.join(', ')}`);
     process.exit(1);
   }
 
@@ -64,28 +80,28 @@ const DETAIL_CALLS = 5; // full chunk detail printed for the first N calls
   }
 
   const stats = {};
-  MODELS.forEach((m) => {
-    stats[m] = { ok: 0, request_failed: 0, schema_failed: 0, unlabeled: 0, chunks: 0, dropped_not_verbatim: 0, tags: {} };
+  ARMS.forEach((a) => {
+    stats[a.label] = { ok: 0, request_failed: 0, schema_failed: 0, unlabeled: 0, chunks: 0, dropped_not_verbatim: 0, tags: {} };
   });
 
-  console.log(`Bake-off: ${calls.length} sampled calls × ${MODELS.join(' vs ')}\n`);
+  console.log(`Bake-off: ${calls.length} sampled calls × ${ARMS.map((a) => a.label).join(' vs ')}\n`);
 
   for (let i = 0; i < calls.length; i += 1) {
     const call = calls[i];
     const customer = customerById.get(call.customer_id) || null;
     const line = [`call ${i + 1}/${calls.length} (${new Date(call.created_at).toISOString().slice(0, 10)}, ${call.duration_seconds || '?'}s)`];
 
-    for (const model of MODELS) {
-      const result = await extractResearchChunks(call, customer, { model });
-      const s = stats[model];
+    for (const arm of ARMS) {
+      const result = await extractResearchChunks(call, customer, { route: arm.route });
+      const s = stats[arm.label];
       s[result.status] = (s[result.status] || 0) + 1;
       s.chunks += result.chunks.length;
       s.dropped_not_verbatim += (result.dropped && result.dropped.quote_not_verbatim) || 0;
       result.chunks.forEach((c) => { s.tags[c.tag] = (s.tags[c.tag] || 0) + 1; });
-      line.push(`${model}: ${result.status === 'ok' ? `${result.chunks.length} chunks [${result.chunks.map((c) => c.tag).join(', ')}]` : result.status}`);
+      line.push(`${arm.label}: ${result.status === 'ok' ? `${result.chunks.length} chunks [${result.chunks.map((c) => c.tag).join(', ')}]` : result.status}`);
 
       if (i < DETAIL_CALLS && result.chunks.length) {
-        console.log(`  ── ${model} ──`);
+        console.log(`  ── ${arm.label} ──`);
         result.chunks.forEach((c) => {
           console.log(`    [${c.tag}|${c.speaker}] "${c.quote}"${c.topics.length ? ` (${c.topics.join(', ')})` : ''}`);
         });
@@ -95,18 +111,18 @@ const DETAIL_CALLS = 5; // full chunk detail printed for the first N calls
   }
 
   console.log('═══ AGGREGATES ═══');
-  for (const model of MODELS) {
-    const s = stats[model];
+  for (const arm of ARMS) {
+    const s = stats[arm.label];
     const attempted = calls.length;
     const kept = s.chunks;
     const extractedRaw = kept + s.dropped_not_verbatim;
     const verbatimRate = extractedRaw ? Math.round((kept / extractedRaw) * 100) : 100;
-    console.log(`\n${model}`);
+    console.log(`\n${arm.label}`);
     console.log(`  ok ${s.ok}/${attempted} · request_failed ${s.request_failed} · schema_failed ${s.schema_failed} · unlabeled ${s.unlabeled}`);
     console.log(`  chunks kept ${kept} (avg ${(kept / Math.max(1, s.ok)).toFixed(1)}/ok-call) · verbatim pass ${verbatimRate}% (${s.dropped_not_verbatim} dropped)`);
     console.log(`  tags: ${JSON.stringify(s.tags)}`);
   }
-  console.log('\nSpot-check the detailed chunks above for quote fidelity + tag accuracy, then lock the winner via GEMINI_CALL_RESEARCH_MODEL.');
+  console.log('\nSpot-check the detailed chunks above for quote fidelity + tag accuracy, then lock the winner via CALL_RESEARCH_PROVIDER / CALL_RESEARCH_MODEL.');
   await db.destroy();
 })().catch((err) => {
   console.error('FAILED:', err.message);
