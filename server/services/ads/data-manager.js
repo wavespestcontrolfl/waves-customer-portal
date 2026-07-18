@@ -570,12 +570,18 @@ async function applyMarketingConsent(conversionType, candidates) {
   return cleaned;
 }
 
+// ORDER MATTERS: consent runs BEFORE the transaction dedupe. The dedupe picks
+// the duplicate with the richest match keys — scored on PRE-consent keys, an
+// opted-out email/phone row can beat a sibling that carries a click ID, then
+// get stripped to nothing and skipped, discarding the click-ID-only fallback
+// that sibling could still have measured with. Stripping first makes the
+// scorer choose among post-consent keys, so that fallback actually survives.
 async function collectCandidates(conversionType, options = {}) {
   if (conversionType === 'qualified_lead') {
-    return applyMarketingConsent(conversionType, dedupeCandidatesByTransaction(await collectQualifiedLeadCandidates(options)));
+    return dedupeCandidatesByTransaction(await applyMarketingConsent(conversionType, await collectQualifiedLeadCandidates(options)));
   }
   if (conversionType === 'completed_job_revenue') {
-    return applyMarketingConsent(conversionType, dedupeCandidatesByTransaction(await collectCompletedJobCandidates(options)));
+    return dedupeCandidatesByTransaction(await applyMarketingConsent(conversionType, await collectCompletedJobCandidates(options)));
   }
   throw new Error(`Unsupported conversion type: ${conversionType}`);
 }

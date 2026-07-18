@@ -414,6 +414,30 @@ describe('conversion-lane marketing-consent suppression', () => {
     expect(cleaned.consentSuppressed).toBeUndefined();
   });
 
+  test('duplicate completed-job rows: consent strips BEFORE dedupe so a click-ID sibling wins', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    // Pre-consent, the opted-out row outscores the click-ID row (email+phone+
+    // value+leadId = 12 vs gclid+value = 11); post-consent it must LOSE, or the
+    // transaction is skipped while a measurable duplicate gets discarded.
+    const optedOutRow = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S1',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100, leadId: 'lead-1',
+      email: 'optout@example.com', phone: '+19415550100',
+    };
+    const clickIdRow = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S1',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
+      email: null, phone: null, gclid: 'g-1',
+    };
+    const cleaned = await applyMarketingConsent('completed_job_revenue', [optedOutRow, clickIdRow]);
+    const [winner] = dedupeCandidatesByTransaction(cleaned);
+    expect(winner.gclid).toBe('g-1');
+    expect(skipReason(winner)).toBeNull();
+    const event = buildEvent(winner);
+    expect(event.adIdentifiers).toEqual({ gclid: 'g-1' });
+    expect(event.userData).toBeUndefined();
+  });
+
   test('fails CLOSED — a suppression-load error propagates and aborts the run', async () => {
     mockLoadSuppression.mockRejectedValue(new Error('db unavailable'));
     await expect(applyMarketingConsent('completed_job_revenue', [{ transactionId: 't-5', email: 'a@b.com' }]))
