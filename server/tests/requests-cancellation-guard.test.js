@@ -149,11 +149,26 @@ describe('POST /api/requests cancellation guard', () => {
     expect(processCancellationRequest).toHaveBeenCalledTimes(1);
   }));
 
-  test('live monthly billing alone → allowed', () => withServer(async (baseUrl) => {
-    state.customers = [{ id: 'cust-1', monthly_rate: '89.00', next_charge_date: null }];
+  test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {
+    state.customers = [{ id: 'cust-1', monthly_rate: '89.00', waveguard_tier: 'Gold', billing_mode: null, next_charge_date: null }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(201);
     expect(processCancellationRequest).toHaveBeenCalledTimes(1);
+  }));
+
+  test('a lingering rate on an explicit non-monthly lane is NOT live dues', () => withServer(async (baseUrl) => {
+    // billing-lane rule: per_visit/one_time customers retain old tier/rate
+    // fields that must never count as membership dues.
+    state.customers = [{ id: 'cust-1', monthly_rate: '89.00', waveguard_tier: 'Gold', billing_mode: 'per_visit', next_charge_date: null }];
+    const res = await postCancellation(baseUrl);
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('nothing_to_cancel');
+  }));
+
+  test('an armed next_charge_date alone → allowed (what the cron actually charges from)', () => withServer(async (baseUrl) => {
+    state.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: null, next_charge_date: '2026-08-01' }];
+    const res = await postCancellation(baseUrl);
+    expect(res.status).toBe(201);
   }));
 
   test('upcoming cancellable visit alone → allowed', () => withServer(async (baseUrl) => {

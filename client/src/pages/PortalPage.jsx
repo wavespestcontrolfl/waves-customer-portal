@@ -16,7 +16,6 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import { etDateString } from '../lib/timezone';
-import { getConsentText } from '../lib/paymentMethodConsentText';
 import { getStripe } from '../lib/stripeLoader';
 import {
   buildSetupIntentReturnUrl,
@@ -4008,6 +4007,16 @@ function BillingTab({ customer }) {
   const [achOffered, setAchOffered] = useState(false);
   const [bankPendingNotice, setBankPendingNotice] = useState(false);
   const [bankPendingVerifyUrl, setBankPendingVerifyUrl] = useState('');
+  // Set-default consent retry: the default role carries Auto Pay, and a
+  // method with no enrollment-scoped consent row 409s. The retry must
+  // present the REAL SaveCardConsent checkbox — the recorded snapshot's
+  // copy is checkbox-phrased ("By checking this box…"), so a generic
+  // Agree dialog would record consent for a box never checked.
+  const [defaultConsentPrompt, setDefaultConsentPrompt] = useState(null); // { cardId, methodType } | null
+  const [defaultConsentChecked, setDefaultConsentChecked] = useState(false);
+  const [defaultConsentSaving, setDefaultConsentSaving] = useState(false);
+  useLockBodyScroll(!!defaultConsentPrompt);
+  const defaultConsentDialogRef = useModalFocus(!!defaultConsentPrompt, () => setDefaultConsentPrompt(null));
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
@@ -4243,25 +4252,29 @@ function BillingTab({ customer }) {
       if (err.status === 409 && err.code === 'consent_required') {
         // The default role carries Auto Pay, and this method has no
         // recurring-charge authorization on record (e.g. it was saved for
-        // an estimate card hold). Show the verbatim authorization copy;
-        // agreeing re-submits with consent_accepted and the server records
-        // the consent row before any flag moves.
-        const agreed = await showCustomerConfirm(getConsentText(err.methodType || 'card'), {
-          title: 'Authorize Auto Pay on this method',
-          confirmLabel: 'Agree & Set Default',
-        });
-        if (!agreed) return;
-        try {
-          await api.setDefaultCard(cardId, { consent_accepted: true });
-          await refreshCards();
-          setAutopayRefreshKey((k) => k + 1);
-        } catch (retryErr) {
-          showCustomerAlert(retryErr.message || 'Failed to set default card');
-        }
+        // an estimate card hold). Open the checkbox modal — the retry with
+        // consent_accepted only fires after the box is actually ticked.
+        setDefaultConsentChecked(false);
+        setDefaultConsentPrompt({ cardId, methodType: err.methodType || 'card' });
         return;
       }
       showCustomerAlert(err.message || 'Failed to set default card');
     }
+  };
+
+  const confirmDefaultConsent = async () => {
+    if (!defaultConsentPrompt) return;
+    setDefaultConsentSaving(true);
+    try {
+      await api.setDefaultCard(defaultConsentPrompt.cardId, { consent_accepted: true });
+      setDefaultConsentPrompt(null);
+      await refreshCards();
+      setAutopayRefreshKey((k) => k + 1);
+    } catch (retryErr) {
+      setDefaultConsentPrompt(null);
+      showCustomerAlert(retryErr.message || 'Failed to set default card');
+    }
+    setDefaultConsentSaving(false);
   };
 
   const card = {
@@ -4935,6 +4948,51 @@ function BillingTab({ customer }) {
           </div>
         )}
       </div>
+
+      {/* ── Set-default Auto Pay consent modal (checkbox required) ── */}
+      {defaultConsentPrompt && (
+        <div data-glass-scrim="" style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 9999, padding: 20,
+        }} onClick={(e) => { if (e.target === e.currentTarget) setDefaultConsentPrompt(null); }}>
+          <div ref={defaultConsentDialogRef} role="dialog" aria-modal="true" aria-label="Authorize Auto Pay" data-glass="modal" style={{
+            background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
+            maxHeight: '100%', boxSizing: 'border-box', overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+            border: '1px solid #E7E2D7',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>Authorize Auto Pay</div>
+              <button type="button" aria-label="Close" onClick={() => setDefaultConsentPrompt(null)} style={{
+                background: 'transparent', border: 'none', cursor: 'pointer', color: muted, lineHeight: 1,
+                width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}><Icon name="close" size={20} strokeWidth={2} /></button>
+            </div>
+            <div style={{ fontSize: 14, color: muted, lineHeight: 1.5, marginBottom: 14 }}>
+              Your default payment method is used for Auto Pay, and this method was saved
+              without an Auto Pay authorization. Check the box below to authorize it.
+            </div>
+            <SaveCardConsent
+              checked={defaultConsentChecked}
+              onChange={setDefaultConsentChecked}
+              methodType={defaultConsentPrompt.methodType}
+              headline="Use this payment method for Auto Pay"
+            />
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 16 }}>
+              <button type="button" onClick={() => setDefaultConsentPrompt(null)} style={secondaryButton}>Cancel</button>
+              <button
+                type="button"
+                disabled={!defaultConsentChecked || defaultConsentSaving}
+                onClick={confirmDefaultConsent}
+                style={{ ...primaryButton, opacity: (!defaultConsentChecked || defaultConsentSaving) ? 0.55 : 1, cursor: (!defaultConsentChecked || defaultConsentSaving) ? 'default' : 'pointer' }}
+              >
+                {defaultConsentSaving ? 'Saving...' : 'Agree & Set Default'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Stripe Add Card Modal ── */}
       {showAddCard && (

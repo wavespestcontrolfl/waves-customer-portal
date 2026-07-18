@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
+const { resolveBillingLane } = require('./billing-lane');
 
 // The same "still cancellable" allowlist the admin series-cancel path and the
 // customer portal's upcoming-visits query use. Deliberately excludes terminal
@@ -48,11 +49,21 @@ async function hasCancellableWork(customerId) {
       .first('id'),
     db('customers')
       .where({ id: customerId })
-      .first('monthly_rate', 'next_charge_date'),
+      .first('monthly_rate', 'next_charge_date', 'billing_mode', 'waveguard_tier'),
   ]);
+  // monthly_rate is the MEMBERSHIP dues number: explicit non-monthly lanes
+  // (per_visit / one_time / per_application / annual_prepay) retain
+  // lingering tier/rate fields that are NOT live dues (billing-lane.js), so
+  // resolve the lane with the same classifier billing uses before counting
+  // the rate. An armed next_charge_date always counts — it is what the
+  // monthly cron actually charges from, and it also covers legacy dues-billed
+  // rows the lane resolver can't classify as members (tier never backfilled).
+  const lane = billingRow ? resolveBillingLane(billingRow) : null;
+  const liveDues = lane?.mode === 'monthly_membership'
+    && Number(billingRow?.monthly_rate) > 0;
   return !!recurringRow
     || !!upcomingRow
-    || Number(billingRow?.monthly_rate) > 0
+    || liveDues
     || billingRow?.next_charge_date != null;
 }
 
