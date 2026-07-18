@@ -68,6 +68,29 @@ describe('Google Ads campaign sync', () => {
   });
 
   test('writes Google budgets into the existing ad_campaigns budget columns', async () => {
+    // TEMPORARY CI DIAGNOSTIC (remove before merge): this suite fails only in
+    // the CI no-DB job, with every configured-path test behaving as if
+    // isConfigured() were false despite the beforeEach env swap. Dump the
+    // actual process.env state into the failure output to identify why.
+    if (!GoogleAds.isConfigured()) {
+      const d = Object.getOwnPropertyDescriptor(process, 'env');
+      let assign;
+      try {
+        const prev = process.env;
+        process.env = { ...prev, __CI_DIAG: '1' };
+        assign = process.env.__CI_DIAG === '1' ? 'sticks' : 'silently-ignored';
+        process.env = prev;
+      } catch (e) { assign = `throws: ${e.message}`; }
+      // Never print env VALUES (a real credential could land in CI logs) —
+      // report only whether the var matches the literal beforeEach just set.
+      const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
+      const devTokenState = devToken === 'developer-token' ? 'test-literal' : (devToken ? 'other-present' : String(devToken));
+      throw new Error(`CI-DIAG unconfigured. devToken=${devTokenState} `
+        + `envTag=${Object.prototype.toString.call(process.env)} `
+        + `descriptor=${d ? `get:${!!d.get},set:${!!d.set},writable:${d.writable},configurable:${d.configurable}` : 'MISSING'} `
+        + `assign=${assign} `
+        + `adsKeys=${Object.keys(process.env).filter((k) => k.startsWith('GOOGLE_ADS')).join(',') || 'NONE'}`);
+    }
     mockQueryFirst.mockResolvedValue(null);
     mockInsertReturning.mockResolvedValue([{
       id: 'uuid-1',
