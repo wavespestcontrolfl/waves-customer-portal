@@ -4,9 +4,13 @@
  * The original table CHECK only admits Thursdays. Runtime planning now uses
  * Tuesday as week_of, so the constraint and existing anchors must move in the
  * same transaction. Existing Thursday rows represent the same issue week and
- * move back two days. Future planned/drafted targets move to 06:00 local time
- * on that Tuesday using PostgreSQL's named time zone (DST-safe). Sent history
- * and already-scheduled sends are deliberately left untouched.
+ * move back two days. Future planned/drafted/SCHEDULED targets move to 06:00
+ * local time on that Tuesday using PostgreSQL's named time zone (DST-safe),
+ * and a scheduled campaign's linked newsletter_sends.scheduled_for moves with
+ * its calendar row — the runtime scheduler only delivers a flagship whose
+ * scheduled_for is the current issue Tuesday 6:00 AM ET, so a stale Thursday
+ * time would strand a proof-approved send until it aged out and reverted.
+ * Sent history is left untouched.
  */
 
 exports.up = async function up(knex) {
@@ -27,8 +31,18 @@ exports.up = async function up(knex) {
       UPDATE newsletter_calendar
       SET target_send_at = ((week_of + TIME '06:00') AT TIME ZONE 'America/New_York'),
           updated_at = NOW()
-      WHERE status IN ('planned', 'drafted')
+      WHERE status IN ('planned', 'drafted', 'scheduled')
         AND target_send_at > NOW()
+    `);
+
+    await trx.raw(`
+      UPDATE newsletter_sends s
+      SET scheduled_for = ((c.week_of + TIME '06:00') AT TIME ZONE 'America/New_York'),
+          updated_at = NOW()
+      FROM newsletter_calendar c
+      WHERE c.send_id = s.id
+        AND s.status = 'scheduled'
+        AND s.scheduled_for > NOW()
     `);
 
     // Fail loudly instead of silently re-anchoring an unexpected/corrupt row.

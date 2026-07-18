@@ -24,8 +24,14 @@ describe('newsletter calendar Tuesday-anchor migration', () => {
     expect(sql).toContain("week_of - INTERVAL '2 days'");
     expect(sql).toContain("TIME '06:00'");
     expect(sql).toContain("AT TIME ZONE 'America/New_York'");
-    expect(sql).toContain("status IN ('planned', 'drafted')");
+    expect(sql).toContain("status IN ('planned', 'drafted', 'scheduled')");
     expect(sql).toContain('target_send_at > NOW()');
+    // Already-scheduled campaigns migrate WITH their calendar row — the
+    // runtime scheduler only delivers a flagship whose scheduled_for is the
+    // current issue Tuesday 6:00 AM ET.
+    expect(sql).toContain('UPDATE newsletter_sends s');
+    expect(sql).toContain("s.status = 'scheduled'");
+    expect(sql).toContain('s.scheduled_for > NOW()');
     expect(sql).toContain('ADD CONSTRAINT chk_calendar_week_of_tuesday');
     expect(sql).toContain('EXTRACT(ISODOW FROM week_of) = 2');
     expect(query.whereRaw).toHaveBeenCalledWith('EXTRACT(ISODOW FROM week_of) <> 2');

@@ -594,7 +594,14 @@ export function ComposeView({
           : Number(filter.min_line_count) === 1 ? "members"
             : "any",
     );
-    const tplForType = TEMPLATES.find((t) => t.newsletterType === saved.newsletter_type);
+    // Legacy pre-registry drafts carry newsletter_type NULL but ARE the
+    // flagship weekly (the type registry postdates them). Hydrating them as
+    // Blank/free-form would let the next save PATCH away the flagship type
+    // and silently drop the cadence/lineup/claim-validation gates — map
+    // NULL to the flagship template instead (server guard mirrors this).
+    const tplForType = saved.newsletter_type == null
+      ? TEMPLATES.find((t) => t.newsletterType === "local-weekly-fresh-events")
+      : TEMPLATES.find((t) => t.newsletterType === saved.newsletter_type);
     setSelectedTemplate(tplForType?.key || null);
     setAutopilotBanner(autopilot);
   };

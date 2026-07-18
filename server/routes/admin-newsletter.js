@@ -43,6 +43,7 @@ const {
   validateFlagshipEventSelection,
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  isFlagshipSend,
 } = require('../services/newsletter-event-selection');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
@@ -592,10 +593,14 @@ router.patch('/sends/:id', async (req, res, next) => {
     // /send gate and the scheduler tick only run findHallucinatedClaims for the
     // flagship type, so flipping a flagship send's type away from flagship would
     // silently disable the hard-block ($-amount / efficacy claims would ship).
-    // Refuse the change — delete + recreate to genuinely retype.
+    // Refuse the change — delete + recreate to genuinely retype. Legacy
+    // pre-registry rows (newsletter_type NULL, promoted to flagship via the
+    // calendar link) get the same protection: PATCHing them to a non-flagship
+    // type would silently drop the cadence/lineup/claim-validation gates.
     if (newsletterType !== undefined
-        && isFlagshipType(send.newsletter_type)
-        && !isFlagshipType(newsletterType)) {
+        && !isFlagshipType(newsletterType)
+        && (isFlagshipType(send.newsletter_type)
+          || (send.newsletter_type === null && await isFlagshipSend(send)))) {
       return res.status(400).json({
         error: 'Cannot change a fresh-events (flagship) newsletter to another type — it would bypass the factual-locking send gate. Delete and recreate instead.',
       });

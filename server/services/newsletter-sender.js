@@ -361,14 +361,17 @@ async function sendCampaign(sendId, opts = {}) {
   if (!send.html_body && !send.text_body) throw new Error('body required');
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
-  // A preclaimed resume re-mails a campaign that already passed these gates:
+  // A TRUE PARTIAL resume — preclaimed AND constrained to the existing
+  // delivery ledger — re-mails a campaign that already passed these gates:
   // re-validating the lineup would reject it against itself (a partial
   // first pass finalizes 'sent' and markEventsFeatured advances
   // times_featured, so the same locked ids read as "no longer new"), and
   // the 6:00–6:14 delivery window would block stalled-send recovery at
-  // 6:30. Resume changes nothing editorially — identical body, identical
-  // lineup, only the outstanding delivery rows.
-  if (!opts.preclaimed) {
+  // 6:30. A ZERO-LEDGER resume (failed before any delivery rows were
+  // seeded) reseeds the whole audience — that IS a first send, so it faces
+  // the full gates: no resuming an entire issue outside the Tuesday window
+  // or on a stale lineup.
+  if (!(opts.preclaimed && opts.existingDeliveriesOnly)) {
     const eventSelection = await validateFlagshipEventSelection(send);
     if (eventSelection.flagship) {
       if (!eventSelection.valid) {
