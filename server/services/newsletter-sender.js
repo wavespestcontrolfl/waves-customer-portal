@@ -410,8 +410,15 @@ async function sendCampaign(sendId, opts = {}) {
   // token; the per-chunk heartbeat doubles as an ownership check so a worker
   // whose stale claim was reclaimed by recovery stops before mailing another
   // chunk — instead of waking from a slow SendGrid call and racing the new
-  // owner into duplicate emails.
-  const claimToken = opts.claimToken || crypto.randomUUID();
+  // owner into duplicate emails. A preclaimed caller that didn't thread the
+  // prepared token falls back to the token stored ON the row by its own
+  // claim (the row can't have been reclaimed in between — it was claimed
+  // moments ago, so it is neither stale nor claimable); minting a fresh one
+  // there would fail our own first heartbeat and strand the campaign in
+  // 'sending' until the lease expires.
+  const claimToken = opts.claimToken
+    || (opts.preclaimed ? send.sending_claim_token : null)
+    || crypto.randomUUID();
 
   if (opts.preclaimed) {
     if (send.status !== 'sending') {

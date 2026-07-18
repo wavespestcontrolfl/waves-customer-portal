@@ -594,13 +594,16 @@ export function ComposeView({
           : Number(filter.min_line_count) === 1 ? "members"
             : "any",
     );
-    // Legacy pre-registry drafts carry newsletter_type NULL but ARE the
-    // flagship weekly (the type registry postdates them). Hydrating them as
-    // Blank/free-form would let the next save PATCH away the flagship type
-    // and silently drop the cadence/lineup/claim-validation gates — map
-    // NULL to the flagship template instead (server guard mirrors this).
+    // Legacy pre-registry drafts carry newsletter_type NULL. Only the
+    // calendar-LINKED ones are promoted flagships (the detail payload's
+    // `flagship` flag is the server's isFlagshipSend verdict) — those must
+    // hydrate as the flagship template or the next save would PATCH away
+    // the type and silently drop the cadence/lineup/claim-validation gates
+    // (the server retype guard mirrors this). An UNLINKED null draft stays
+    // untyped: forcing it to flagship would wrongly impose the event-id and
+    // Tuesday-cadence gates on a non-flagship row.
     const tplForType = saved.newsletter_type == null
-      ? TEMPLATES.find((t) => t.newsletterType === "local-weekly-fresh-events")
+      ? (saved.flagship ? TEMPLATES.find((t) => t.newsletterType === "local-weekly-fresh-events") : null)
       : TEMPLATES.find((t) => t.newsletterType === saved.newsletter_type);
     setSelectedTemplate(tplForType?.key || null);
     setAutopilotBanner(autopilot);

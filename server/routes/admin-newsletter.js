@@ -520,7 +520,12 @@ router.get('/sends/:id', async (req, res, next) => {
       }
     }
 
-    res.json({ send, deliveries, variantStats, feedback });
+    // Explicit flagship flag so the composer can hydrate legacy NULL-typed
+    // rows correctly: only calendar-LINKED null rows are promoted flagships;
+    // an unlinked null draft stays untyped (forcing it to flagship would
+    // wrongly apply the event-id/Tuesday gates on its next save).
+    const flagship = await isFlagshipSend(send);
+    res.json({ send: { ...send, flagship }, deliveries, variantStats, feedback });
   } catch (err) { next(err); }
 });
 
@@ -887,6 +892,10 @@ router.post('/sends/:id/resume', async (req, res) => {
       preserveSentAt: true,
       existingDeliveriesOnly: prepared.existingDeliveriesOnly,
       preclaimed: prepared.preclaimed,
+      // The prepared claim's owner token — without it sendCampaign would
+      // mint a different token, fail its own first heartbeat, and strand
+      // the campaign in 'sending' until the stale lease.
+      claimToken: prepared.claimToken,
     }).catch(async (err) => {
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter] background resume ${req.params.id} already claimed by another worker — no-op`);
@@ -969,6 +978,13 @@ router.post('/sends/:id/cancel-schedule', async (req, res, next) => {
     const cancelled = await db('newsletter_sends').where({ id: send.id, status: 'scheduled' }).update({
       status: 'draft',
       scheduled_for: null,
+      // Cancelling an approved schedule invalidates the approval (same as
+      // the PATCH and scheduler reverts): the draft must be re-proofed —
+      // stale fields would both block a fresh proof (the claim requires
+      // NULL proof_sent_at) and let a re-schedule ride the old approval.
+      proof_token: null,
+      proof_sent_at: null,
+      proof_approved_at: null,
       updated_at: new Date(),
     });
     if (!cancelled) return res.status(409).json({ error: 'scheduled send was already claimed; it was not cancelled' });

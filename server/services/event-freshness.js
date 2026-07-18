@@ -207,7 +207,17 @@ function excludeRepeatedDateIdentities(events) {
   const repeatedTitles = new Set(
     [...datesByTitle.entries()].filter(([, dates]) => dates.size > 1).map(([title]) => title),
   );
-  return rows.filter((event) => !repeatedTitles.has(normalizeDigestTitle(event?.title)));
+  return rows.filter((event) => {
+    if (!repeatedTitles.has(normalizeDigestTitle(event?.title))) return true;
+    // A repeated title is ROUTINE-recurrence evidence (a weekly class listed
+    // per-date) — but a genuine multi-day festival, annual event, or limited
+    // run also emits one row per date under one name. Those types carry
+    // their own gates (annual cooldown, opening/closing windows), so they
+    // survive here; dedupeDigestEvents collapses the identity to a single
+    // row in any final lineup.
+    const type = String(event?.event_type || '').toLowerCase();
+    return type === 'annual' || type === 'limited_run';
+  });
 }
 
 /** Preserve input order (normally score order) while removing duplicate rows. */

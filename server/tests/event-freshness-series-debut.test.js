@@ -11,6 +11,7 @@ const {
   isEligibleForFreshDigest,
   isSeriesDebutEvent,
   isRoutineRecurringEvent,
+  excludeRepeatedDateIdentities,
 } = require('../services/event-freshness');
 
 const REFERENCE = new Date('2026-07-14T10:00:00-04:00'); // Tuesday ET
@@ -125,6 +126,29 @@ describe('isEligibleForFreshDigest series debut', () => {
     expect(isEligibleForFreshDigest(recurringEvent({
       freshness_status: 'fresh_series_launch', // even a mis-set status is not enough
     }), REFERENCE)).toBe(false);
+  });
+});
+
+describe('repeated-date identities: multi-day events vs routine evidence', () => {
+  test('annual/limited-run multi-day rows survive; repeated one_time titles drop', () => {
+    const rows = [
+      { title: 'Sun Coast Festival', start_at: '2026-08-01T22:00:00Z', event_type: 'annual' },
+      { title: 'Sun Coast Festival', start_at: '2026-08-02T22:00:00Z', event_type: 'annual' },
+      { title: 'Summer Circus', start_at: '2026-08-01T22:00:00Z', event_type: 'limited_run' },
+      { title: 'Summer Circus', start_at: '2026-08-05T22:00:00Z', event_type: 'limited_run' },
+      // Repeated one_time title = routine-recurrence evidence (mislabeled
+      // weekly class) — still excluded entirely.
+      { title: 'Yoga in the Park', start_at: '2026-08-01T22:00:00Z', event_type: 'one_time' },
+      { title: 'Yoga in the Park', start_at: '2026-08-08T22:00:00Z', event_type: 'one_time' },
+      // Single-date one_time untouched.
+      { title: 'Harbor Art Walk', start_at: '2026-08-03T22:00:00Z', event_type: 'one_time' },
+    ];
+    const out = excludeRepeatedDateIdentities(rows);
+    expect(out.map((r) => r.title)).toEqual([
+      'Sun Coast Festival', 'Sun Coast Festival',
+      'Summer Circus', 'Summer Circus',
+      'Harbor Art Walk',
+    ]);
   });
 });
 
