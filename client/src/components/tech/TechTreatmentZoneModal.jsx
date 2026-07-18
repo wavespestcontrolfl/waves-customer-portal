@@ -83,6 +83,18 @@ export default function TechTreatmentZoneModal({
         });
         if (res.ok) {
           const data = await res.json();
+          // Gate probe: the read route answers enabled:false when
+          // GATE_TREATMENT_ZONE_MAP is off, so the tech finds out here —
+          // before tracing — instead of at save time.
+          if (data.enabled === false) {
+            if (!cancelled) {
+              setMapState({
+                status: 'error',
+                message: 'Treatment-zone mapping is not enabled yet. Ask Adam to flip GATE_TREATMENT_ZONE_MAP.',
+              });
+            }
+            return;
+          }
           if (!cancelled && data.treatmentZone) setExisting(data.treatmentZone);
         }
       } catch {

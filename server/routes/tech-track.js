@@ -617,6 +617,7 @@ const {
   saveTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
 } = require('../services/treatment-zone-maps');
+const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
 
 router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, next) => {
   try {
@@ -660,6 +661,16 @@ router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, n
       `points=${Array.isArray(payload.pathPoints) ? payload.pathPoints.length : 0} ` +
       `linearFt=${row.linear_ft ?? 'n/a'}`
     );
+
+    // The traced map renders on the report, so a completed visit's cached
+    // PDF is stale the moment a trace is saved or replaced (the cache key is
+    // content-insensitive — see pdf-storage.js). Best-effort by contract.
+    const completedRecord = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first('id');
+    if (completedRecord) await invalidateServiceReportPdfCache(completedRecord.id);
+
     return res.json({ treatmentZone: row });
   } catch (err) {
     logger.error(`[tech-track] treatment zone save failed: ${err.message}`);
@@ -669,19 +680,21 @@ router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, n
 
 router.get('/:id/treatment-zone', async (req, res, next) => {
   try {
+    // Read stays 200 with enabled:false when the gate is off so the modal
+    // can tell the tech BEFORE they trace (the write route 404s regardless).
     if (!featureGates.isEnabled('treatmentZoneMap')) {
-      return res.status(404).json({ error: 'Not enabled' });
+      return res.json({ treatmentZone: null, enabled: false });
     }
     if (!(await loadOwnedServiceOr403(req, res))) return undefined;
     const row = await getTreatmentZoneMapForScheduledService(req.params.id);
-    if (!row) return res.json({ treatmentZone: null });
+    if (!row) return res.json({ treatmentZone: null, enabled: true });
     let snapshotUrl = null;
     if (row.snapshot_s3_key && config.s3?.bucket) {
       snapshotUrl = await getSignedUrl(s3, new GetObjectCommand({
         Bucket: config.s3.bucket, Key: row.snapshot_s3_key,
       }), { expiresIn: 3600 });
     }
-    return res.json({ treatmentZone: { ...row, snapshotUrl } });
+    return res.json({ treatmentZone: { ...row, snapshotUrl }, enabled: true });
   } catch (err) {
     logger.error(`[tech-track] treatment zone fetch failed: ${err.message}`);
     return next(err);

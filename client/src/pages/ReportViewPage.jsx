@@ -3667,11 +3667,12 @@ function TracedTreatmentZoneMap({ traced }) {
   return (
     <div className="service-coverage-map-panel">
       <div className="service-coverage-map traced-zone-map">
+        {/* Eager on purpose: the PDF renderer prints without scrolling, so a
+            native-lazy image below the fold could render blank in PDFs. */}
         <img
           className="traced-zone-image"
           src={traced.snapshotUrl}
           alt="Satellite photo of the property with the treated perimeter highlighted"
-          loading="lazy"
         />
       </div>
       <p className="traced-zone-caption">{caption}</p>
@@ -4786,11 +4787,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // Lawn and tree & shrub reports don't show the per-area Coverage map — the
   // lawn-intelligence/assessment surfaces tell that story instead. Pest V2
   // hides it too (the "Where we protected" diagram replaces the lettered map).
-  const hideCoverageCard = data.serviceLine === 'lawn'
+  // A technician-traced satellite map overrides every hide: it is the real
+  // photo of THIS property's treated perimeter, which beats any generic
+  // diagram (that replacement is the Treatment Zone Mapper's whole point).
+  const hideCoverageCard = (data.serviceLine === 'lawn'
     || /tree|shrub/.test(String(data.serviceLine || ''))
     || Boolean(data.pestReportV2)
     // Mosquito V2's habitat diagram replaces the lettered map the same way.
-    || Boolean(data.mosquitoReportV2);
+    || Boolean(data.mosquitoReportV2))
+    && !data.treatmentMap?.traced?.snapshotUrl;
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and

@@ -1491,6 +1491,14 @@ router.get('/', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+        // Visit coordinates for map-centered tools (treatment-zone mapper):
+        // stamped visit coords win; the customer mirror only backfills a
+        // NON-divergent stamp — a divergent stamp with no coords must degrade
+        // to geocoding, never center on the wrong house (same rule as the
+        // dispatch map query below). Aliased visit_* because
+        // scheduled_services.* already exposes raw lat/lng.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.property_sqft', 'customers.lot_sqft', 'customers.lead_score',
         'customers.service_preferences',
@@ -1704,6 +1712,8 @@ router.get('/', async (req, res, next) => {
         windowStart: s.window_start, windowEnd: s.window_end,
         windowDisplay: s.window_display || (s.window_start ? `${fmtTime(s.window_start)}–${fmtTime(s.window_end)}` : 'Flexible'),
         status: s.status, technicianId: s.technician_id, technicianName: s.tech_name,
+        lat: s.visit_lat != null ? Number(s.visit_lat) : null,
+        lng: s.visit_lng != null ? Number(s.visit_lng) : null,
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier, monthlyRate: parseFloat(s.monthly_rate || 0),
         isCallback: !!s.is_callback,
