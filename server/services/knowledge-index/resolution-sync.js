@@ -47,8 +47,11 @@ async function upsertArtifact(artifact) {
 // (enforce over shadow, newer decision versions, then newest) instead of a
 // bare created_at sort that could crown a shadow/replay row.
 async function loadCallSideData(callIds) {
+  // Only RESOLVED cards carry a real corrective resolution — dismissed
+  // means no action was needed, open/in_progress aren't outcomes yet.
   const triageRows = await db('triage_items')
     .whereIn('call_log_id', callIds)
+    .where({ status: 'resolved' })
     .select('call_log_id', 'reason_code', 'resolution_note');
   const triageByCall = new Map();
   for (const t of triageRows) {
@@ -66,7 +69,11 @@ async function loadCallSideData(callIds) {
   const actionByCall = new Map();
   for (const [callId, rows] of routesByCall) {
     const preferred = preferredRouteDecisionForFeedback(rows);
-    if (preferred?.final_action_taken) actionByCall.set(callId, preferred.final_action_taken);
+    // Shadow-mode rows record hypothetical candidates (shadow_*_candidate),
+    // not actions taken — only enforce-mode decisions are real outcomes.
+    if (preferred?.mode === 'enforce' && preferred?.final_action_taken) {
+      actionByCall.set(callId, preferred.final_action_taken);
+    }
   }
   return { triageByCall, actionByCall };
 }
@@ -341,6 +348,13 @@ async function refreshVisitArtifacts() {
         this.select(db.raw('1')).from('service_findings as sf')
           .whereRaw('sf.service_record_id = ra.source_id')
           .whereRaw('sf.created_at > ra.updated_at');
+      }).orWhereNotExists(function () {
+        // Record deleted, demoted out of completed, or made customer-hidden
+        // — enters the stale set so the fetch-miss branch retires it.
+        this.select(db.raw('1')).from('service_records as sr')
+          .whereRaw('sr.id = ra.source_id')
+          .where('sr.status', 'completed')
+          .whereRaw("COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'");
       });
     })
     .limit(REFRESH_BATCH)
