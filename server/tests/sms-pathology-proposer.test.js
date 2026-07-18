@@ -16,6 +16,7 @@ function makeProposerDb({ cells = [], entries = [], priorPending = null } = {}) 
   const inserts = [];
   const updates = [];
   const kvWheres = [];
+  const rawWheres = [];
   const order = []; // interleaving record: proposal insert vs supersede update
   const dbi = (table) => {
     const tableKey = typeof table === 'object' ? Object.values(table)[0] : table;
@@ -26,6 +27,7 @@ function makeProposerDb({ cells = [], entries = [], priorPending = null } = {}) 
       if (name === 'first') b._first = true;
       if (name === 'where' && typeof args[0] === 'object') b._wheres.push(args[0]);
       if (name === 'where' && typeof args[0] === 'string' && args.length === 3) kvWheres.push(args);
+      if (name === 'whereRaw' && typeof args[0] === 'string') rawWheres.push(args[0]);
       if (name === 'modify' && typeof args[0] === 'function') args[0](b); // run the group so inner filters record
       return b;
     };
@@ -67,6 +69,7 @@ function makeProposerDb({ cells = [], entries = [], priorPending = null } = {}) 
   dbi.inserts = inserts;
   dbi.updates = updates;
   dbi.kvWheres = kvWheres;
+  dbi.rawWheres = rawWheres;
   dbi.order = order;
   dbi.transactionCount = () => transactions;
   return dbi;
@@ -89,6 +92,17 @@ describe('proposePatches — threshold + cap + ordering', () => {
     const out = await proposePatches({ dbi, anthropicClient: {} });
     expect(out.proposed).toBe(0);
     expect(createDeepMessage).not.toHaveBeenCalled();
+  });
+
+  test('cells rollup groups the OR clause so the evidence cutoff always binds', async () => {
+    const dbi = makeProposerDb({ cells: [] });
+    await proposePatches({ dbi, anthropicClient: {} });
+    const clause = dbi.rawWheres.find((sql) => sql.includes('last_proposed_at IS NULL'));
+    expect(clause).toBeDefined();
+    // AND binds tighter than OR: unparenthesized, the cutoff is skipped for
+    // never-proposed cells and mid-run entries double-count next week.
+    expect(clause.trim().startsWith('(')).toBe(true);
+    expect(clause.trim().endsWith(')')).toBe(true);
   });
 
   test('an eligible cell parks ONE pending proposal + bell; evidence ids recorded', async () => {

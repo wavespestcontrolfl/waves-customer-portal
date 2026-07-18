@@ -304,7 +304,9 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
         this.on('pp.surface', 'pe.surface').andOn('pp.failure_mode', 'pe.failure_mode');
       }
     )
-    .whereRaw('pp.last_proposed_at IS NULL OR pe.classified_at > pp.last_proposed_at')
+    // Parens are load-bearing: without them AND binds tighter than OR and the
+    // evidence cutoff below is skipped for cells with no prior proposal.
+    .whereRaw('(pp.last_proposed_at IS NULL OR pe.classified_at > pp.last_proposed_at)')
     .where('pe.classified_at', '<=', evidenceCutoff)
     .groupBy('pe.surface', 'pe.failure_mode')
     .select('pe.surface', 'pe.failure_mode')
