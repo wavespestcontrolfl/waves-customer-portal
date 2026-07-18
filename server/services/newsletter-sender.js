@@ -392,6 +392,14 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
 
+  // Owner token for this worker's 'sending' claim. Every claim path (first
+  // send here, resume/stale-reclaim in prepareResumeCampaign) stamps its own
+  // token; the per-chunk heartbeat doubles as an ownership check so a worker
+  // whose stale claim was reclaimed by recovery stops before mailing another
+  // chunk — instead of waking from a slow SendGrid call and racing the new
+  // owner into duplicate emails.
+  const claimToken = opts.claimToken || crypto.randomUUID();
+
   if (opts.preclaimed) {
     if (send.status !== 'sending') {
       const err = new Error('already sent or in progress');
@@ -408,7 +416,7 @@ async function sendCampaign(sendId, opts = {}) {
     const claimed = await db('newsletter_sends')
       .where({ id: send.id })
       .whereIn('status', ['draft', 'scheduled'])
-      .update({ status: 'sending', updated_at: new Date() })
+      .update({ status: 'sending', sending_claim_token: claimToken, updated_at: new Date() })
       .returning('id');
     if (!claimed.length) {
       const err = new Error('already sent or in progress');
@@ -498,6 +506,7 @@ async function sendCampaign(sendId, opts = {}) {
   });
 
   let accepted = 0, failed = 0;
+  let claimLost = false;
 
   // O(1) variant lookup per subscriber. The previous .filter().find() was
   // O(n²) — at 5k subscribers that's 25M comparisons before the first
@@ -673,15 +682,30 @@ async function sendCampaign(sendId, opts = {}) {
         failed += updated;
       }
 
-      // Heartbeat: History's stale-claim recovery frees a 'sending' row once
-      // updated_at exceeds the lease. Touch the claim after every chunk —
-      // success or failure, both are progress — so a long-running send never
-      // looks abandoned while it's working; recovery only unlocks when no
-      // chunk has completed for a full lease window.
-      await db('newsletter_sends')
-        .where({ id: send.id, status: 'sending' })
+      // Heartbeat + ownership check: History's stale-claim recovery frees a
+      // 'sending' row once updated_at exceeds the lease; touching it after
+      // every chunk keeps a progressing send alive. The token guard makes
+      // this a lease renewal — 0 rows means recovery reclaimed the campaign
+      // under a NEW token while we were stuck, so we stop before mailing
+      // another chunk and leave the rest to the new owner.
+      const heartbeat = await db('newsletter_sends')
+        .where({ id: send.id, status: 'sending', sending_claim_token: claimToken })
         .update({ updated_at: new Date() });
+      if (!heartbeat) {
+        claimLost = true;
+        logger.error(`[newsletter] send ${send.id} claim lost mid-send (stale reclaim by another worker) — stopping after ${accepted} accepted; new owner resumes the rest`);
+        break;
+      }
     }
+    if (claimLost) break;
+  }
+
+  // A worker that lost its claim must not finalize, advance the calendar,
+  // mark events featured, or fire the social share — the reclaiming owner
+  // runs that lifecycle. Deliveries already updated stay updated (the new
+  // owner's retryable filter skips them).
+  if (claimLost) {
+    return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, lostClaim: true };
   }
 
   // Final state. If every recipient bounced into 'failed', the whole send
@@ -705,9 +729,11 @@ async function sendCampaign(sendId, opts = {}) {
   if (!opts.preserveSentAt || !send.sent_at) {
     finalSendUpdate.sent_at = new Date();
   }
-  // Only a worker that still owns the parent 'sending' state may finalize.
+  // Only the worker that still owns the parent 'sending' claim may finalize.
   // A late completion must not overwrite a newer recovery lifecycle.
-  await db('newsletter_sends').where({ id: send.id, status: 'sending' }).update(finalSendUpdate);
+  await db('newsletter_sends')
+    .where({ id: send.id, status: 'sending', sending_claim_token: claimToken })
+    .update(finalSendUpdate);
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
     // Advance the calendar lifecycle (idempotent) so a sent newsletter's
@@ -820,8 +846,12 @@ async function prepareResumeCampaign(sendId) {
   if (reclaimingStaleSend) {
     claimQuery.where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000));
   }
+  // A fresh owner token every (re)claim: a stale-reclaim rotates the token,
+  // which is exactly what tells the stuck original worker (via its next
+  // heartbeat ownership check) that it no longer owns the campaign.
+  const claimToken = crypto.randomUUID();
   const claimed = await claimQuery
-    .update({ status: 'sending', scheduled_for: null, updated_at: new Date() })
+    .update({ status: 'sending', scheduled_for: null, sending_claim_token: claimToken, updated_at: new Date() })
     .returning('id');
   if (!claimed.length) {
     const err = new Error('campaign was claimed by another worker');
@@ -829,7 +859,7 @@ async function prepareResumeCampaign(sendId) {
     throw err;
   }
 
-  return { sendId: send.id, existingDeliveriesOnly: totalDeliveries > 0, preclaimed: true };
+  return { sendId: send.id, existingDeliveriesOnly: totalDeliveries > 0, preclaimed: true, claimToken };
 }
 
 async function resumeCampaign(sendId) {
@@ -839,6 +869,7 @@ async function resumeCampaign(sendId) {
     preserveSentAt: true,
     existingDeliveriesOnly: prepared.existingDeliveriesOnly,
     preclaimed: prepared.preclaimed,
+    claimToken: prepared.claimToken,
   });
 }
 

@@ -16,7 +16,9 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
+const crypto = require('crypto');
 const { linkToCustomer, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
+const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 const { isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
@@ -77,7 +79,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // Every :id route in this router addresses a UUID-backed newsletter row.
 // Reject malformed input before Knex/Postgres tries to cast it, yielding a
-// stable client error instead of an avoidable database 500.
+// stable client error instead of an avoidable database 500. Integer-keyed
+// rows use their own param (see /subscribers/:subscriberId) — adding an
+// integer route under :id would 400 before its handler runs.
 router.param('id', (req, res, next, id) => {
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'invalid id' });
   next();
@@ -252,6 +256,10 @@ router.post('/subscribers/import', async (req, res, next) => {
         last_name: s.lastName || s.last_name || null,
         source,
         status: importStatus,
+        // Pending imports must be double-opt-in-ABLE: without a confirmation
+        // token the row can never leave 'pending' (and the DOI email below
+        // would have no link to send).
+        ...(importStatus === 'pending' ? { confirmation_token: crypto.randomUUID() } : {}),
       });
     }
 
@@ -279,14 +287,56 @@ router.post('/subscribers/import', async (req, res, next) => {
     }
     const skipped = subscribers.length - inserted;
 
-    res.json({ success: true, inserted, skipped, total: subscribers.length });
+    // Default (non-preConsented) imports land 'pending' — meaningless unless
+    // each address gets its double-opt-in email. Send them here (the import
+    // IS the signup event for this list), fire-and-forget and sequential so
+    // a big CSV can't stampede SendGrid; each success stamps
+    // confirmation_sent_at so the DOI TTL and stale-pending lifecycle apply.
+    // Also covers rows stranded pending by older imports (token backfilled).
+    let confirmationsQueued = 0;
+    if (importStatus === 'pending' && rows.length) {
+      const pendingUnconfirmed = await db('newsletter_subscribers')
+        .whereIn('email', rows.map((r) => r.email))
+        .where({ status: 'pending' })
+        .whereNull('confirmation_sent_at')
+        .select('id', 'email', 'first_name', 'confirmation_token');
+      confirmationsQueued = pendingUnconfirmed.length;
+      if (pendingUnconfirmed.length) {
+        (async () => {
+          let sent = 0;
+          for (const sub of pendingUnconfirmed) {
+            try {
+              if (!sub.confirmation_token) {
+                sub.confirmation_token = crypto.randomUUID();
+                await db('newsletter_subscribers').where({ id: sub.id }).update({ confirmation_token: sub.confirmation_token, updated_at: new Date() });
+              }
+              await sendConfirmationEmail(sub);
+              await db('newsletter_subscribers').where({ id: sub.id }).update({ confirmation_sent_at: new Date(), updated_at: new Date() });
+              sent++;
+            } catch (e) {
+              logger.error(`[newsletter] import confirmation failed for subscriber id=${sub.id}: ${e.message}`);
+            }
+          }
+          logger.info(`[newsletter] import confirmation drip done: ${sent}/${pendingUnconfirmed.length} sent`);
+        })().catch(() => {});
+      }
+    }
+
+    res.json({ success: true, inserted, skipped, total: subscribers.length, confirmationsQueued });
   } catch (err) { next(err); }
 });
 
-// DELETE /api/admin/newsletter/subscribers/:id — admin unsubscribe
-router.delete('/subscribers/:id', async (req, res, next) => {
+// DELETE /api/admin/newsletter/subscribers/:subscriberId — admin unsubscribe.
+// Deliberately NOT the shared :id param — newsletter_subscribers.id is an
+// INTEGER, and the router-level :id validator rejects non-UUIDs (correct for
+// every other row in this router). Same URL shape; integer-validated here.
+router.delete('/subscribers/:subscriberId', async (req, res, next) => {
   try {
-    await db('newsletter_subscribers').where({ id: req.params.id }).update({
+    const subscriberId = Number(req.params.subscriberId);
+    if (!Number.isInteger(subscriberId) || subscriberId <= 0) {
+      return res.status(400).json({ error: 'invalid subscriber id' });
+    }
+    await db('newsletter_subscribers').where({ id: subscriberId }).update({
       status: 'unsubscribed',
       unsubscribed_at: new Date(),
       updated_at: new Date(),
@@ -1406,7 +1456,7 @@ router.patch('/events/:id', async (req, res, next) => {
     const VALID_ADMIN_STATUSES = ['pending', 'approved', 'rejected', 'featured'];
     const VALID_EVENT_TYPES = ['one_time', 'annual', 'limited_run', 'recurring_series', 'special_edition', 'ongoing', 'unknown'];
     const VALID_RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'seasonal', 'annual', 'custom', 'unknown'];
-    const VALID_FRESHNESS = ['fresh_one_time', 'fresh_annual', 'fresh_limited_run_opening', 'fresh_limited_run_closing', 'fresh_special_edition', 'stale_recurring', 'expired', 'needs_review'];
+    const VALID_FRESHNESS = ['fresh_one_time', 'fresh_annual', 'fresh_limited_run_opening', 'fresh_limited_run_closing', 'fresh_special_edition', 'fresh_series_launch', 'stale_recurring', 'expired', 'needs_review'];
     const VALID_ZONES = ['south_sarasota', 'sarasota', 'manatee', 'pinellas', 'tampa'];
 
     if (adminStatus !== undefined && !VALID_ADMIN_STATUSES.includes(adminStatus)) return res.status(400).json({ error: `invalid adminStatus: ${adminStatus}` });
@@ -1454,6 +1504,9 @@ router.patch('/events/:id', async (req, res, next) => {
             fresh_one_time: 'one_time', fresh_annual: 'annual',
             fresh_limited_run_opening: 'limited_run', fresh_limited_run_closing: 'limited_run',
             fresh_special_edition: 'special_edition',
+            // Manually curated series debut (single-use carve-out) — the
+            // digest gate expects the recurring metadata to be honest.
+            fresh_series_launch: 'recurring_series',
           };
           if (STATUS_TO_TYPE[freshnessStatus]) {
             updates.event_type = STATUS_TO_TYPE[freshnessStatus];

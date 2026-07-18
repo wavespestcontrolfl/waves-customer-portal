@@ -66,14 +66,17 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
   return q;
 }
 
-function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate } = {}) {
+function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate, heartbeatUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
       chain({ updated: 1, returning: [{ id: send?.id }] }),// atomic claim
-      chain({ updated: 1 }),                               // per-chunk heartbeat (stale-lease keepalive)
-      chain({ updated: 1 }),                               // final status update
-      chain({ first: null }),                              // social-share re-fetch (null → share skipped)
+      chain({ updated: heartbeatUpdated }),                // per-chunk heartbeat (0 = claim lost to a reclaim)
+      // A lost claim must consume nothing further from this queue.
+      ...(truncateSendsQueueAfterHeartbeat ? [] : [
+        chain({ updated: 1 }),                             // final status update
+        chain({ first: null }),                            // social-share re-fetch (null → share skipped)
+      ]),
     ],
     newsletter_subscribers: [
       chain({ count: subscribers.length }),                 // 0-recipient guard
@@ -238,6 +241,35 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     expect(result.skipped_already_sent).toBe(1);
   });
 
+  test('a worker whose claim was reclaimed stops after the chunk and never finalizes', async () => {
+    // Heartbeat returns 0 rows (stale-reclaim rotated sending_claim_token
+    // under a new owner) → the loser must stop: no final status update, no
+    // social-share re-fetch. The strict queue mock proves it — neither entry
+    // is provided, so consuming one would throw.
+    buildDb({
+      send: {
+        id: 'send-1',
+        status: 'draft',
+        html_body: '<p>Body</p>',
+        text_body: 'Body',
+        subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com',
+        from_name: 'Waves',
+        reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: null,
+        subject_b: null,
+      },
+      subscribers: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }],
+      deliveries: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }],
+      heartbeatUpdated: 0,
+      truncateSendsQueueAfterHeartbeat: true,
+    });
+
+    const result = await sendCampaign('send-1');
+    expect(result.lostClaim).toBe(true);
+    expect(result.accepted).toBe(1); // the in-flight chunk completed before the ownership check
+  });
+
   test('does not overwrite deliveries recovered by processed webhooks when SendGrid rejects', async () => {
     mockSendBroadcast.mockRejectedValueOnce(new Error('lost response'));
     let finalUpdate = null;
@@ -346,6 +378,7 @@ describe('resumeCampaign — preconditions', () => {
       sendId: 's',
       existingDeliveriesOnly: false,
       preclaimed: true,
+      claimToken: expect.any(String),
     });
   });
 
