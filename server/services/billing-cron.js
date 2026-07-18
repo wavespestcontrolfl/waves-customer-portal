@@ -717,7 +717,15 @@ const BillingCron = {
       // discriminate either). Disarmed rows stay visible for manual triage;
       // the owner-run staged backfill supersedes the KNOWN mis-created July
       // cohort explicitly, with human eyes on each row.
-      if (isMonthlyObligation && ['per_application', 'per_visit', 'one_time'].includes(customer.billing_mode)
+      // The lane check mirrors the monthly sweep exactly: explicit
+      // non-monthly modes AND NULL rows the resolver classifies non-monthly
+      // (GUARD 3c) — a tier-less/sentinel row the daily sweep now skips
+      // must not have its FAILED monthly rows retried into a dues charge
+      // through this side door (Codex r10 P1). annual_prepay keeps its own
+      // coverage-absorb guard above.
+      const retryLaneNotMonthly = ['per_application', 'per_visit', 'one_time'].includes(customer.billing_mode)
+        || (!customer.billing_mode && resolveBillingLane(customer).mode !== 'monthly_membership');
+      if (isMonthlyObligation && retryLaneNotMonthly
         && !(await db('payments')
           .where({ customer_id: payment.customer_id, status: 'paid' })
           .where('description', 'like', '%WaveGuard Monthly%')
@@ -733,9 +741,15 @@ const BillingCron = {
           }).catch((updErr) => logger.error(`[billing-cron] retry disarm (billing mode) failed for payment ${payment.id}: ${updErr.message}`));
         await logAutopay(payment.customer_id, 'skipped_billing_mode', {
           paymentId: payment.id,
-          details: { source: 'autopay_retry', billing_mode: customer.billing_mode, ladder_stopped: true, superseded: false },
+          details: {
+            source: 'autopay_retry',
+            billing_mode: customer.billing_mode || null,
+            resolved_mode: resolveBillingLane(customer).mode,
+            ladder_stopped: true,
+            superseded: false,
+          },
         }).catch(() => {});
-        logger.info(`[billing-cron] Retry ladder stopped for payment ${payment.id} — billing_mode ${customer.billing_mode}; row left visible for manual review`);
+        logger.info(`[billing-cron] Retry ladder stopped for payment ${payment.id} — lane not monthly (mode ${customer.billing_mode || 'NULL/inferred'}); row left visible for manual review`);
         continue;
       }
 

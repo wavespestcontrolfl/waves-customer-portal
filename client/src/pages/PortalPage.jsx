@@ -1477,8 +1477,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   // supplies monthlyRate for per-application customers, and labeling that
   // "Monthly rate" contradicts both My Plan and the billing contract.
   const [billingMode, setBillingMode] = useState(null);
+  // Server-resolved lane verdict for NULL modes (non_monthly_billing) — the
+  // cron skips resolver-non-monthly rows, so the summary must not advertise
+  // a monthly plan charge for them (Codex r10).
+  const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
   useEffect(() => {
-    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
+    api.getAutopay().then(d => {
+      setBillingMode(d?.billing_mode || null);
+      setResolvedNonMonthly(d?.non_monthly_billing === true);
+    }).catch(() => {});
   }, []);
   const [satRating, setSatRating] = useState(0);
   const [satHover, setSatHover] = useState(0);
@@ -2000,7 +2007,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   }
                 : billingMode === 'per_application'
                   ? { label: 'Billing', value: 'Per application', sub: tierDiscountSub }
-                  : billingMode === 'per_visit' || billingMode === 'one_time'
+                  : billingMode === 'per_visit' || billingMode === 'one_time' || (billingMode === null && resolvedNonMonthly)
                     ? { label: 'Billing', value: 'Per visit', sub: tierDiscountSub }
                     : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
               {
@@ -7951,6 +7958,9 @@ function MyPlanTab({ customer, focusService }) {
   // must not present a "$X per month" plan rate — same source of truth as
   // the Billing tab's AutopayCard.
   const [billingMode, setBillingMode] = useState(null);
+  // Server-resolved lane verdict for NULL modes — see the dashboard summary
+  // (Codex r10).
+  const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
@@ -7980,7 +7990,10 @@ function MyPlanTab({ customer, focusService }) {
 
   useEffect(() => {
     loadPlan();
-    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
+    api.getAutopay().then(d => {
+      setBillingMode(d?.billing_mode || null);
+      setResolvedNonMonthly(d?.non_monthly_billing === true);
+    }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
   }, [loadPlan]);
 
@@ -8089,8 +8102,10 @@ function MyPlanTab({ customer, focusService }) {
     : (annualPrepayLabel || 'Active plan');
   const perApplicationBilled = billingMode === 'per_application';
   // Explicit per-visit lanes never show the monthly rate as their plan
-  // billing — the cron does not charge it (Codex r6).
-  const perVisitBilled = billingMode === 'per_visit' || billingMode === 'one_time';
+  // billing — the cron does not charge it (Codex r6). NULL modes the server
+  // resolved non-monthly read the same way (Codex r10).
+  const perVisitBilled = billingMode === 'per_visit' || billingMode === 'one_time'
+    || (billingMode === null && resolvedNonMonthly);
   const planBillingValue = !activeTierName
     ? '—'
     : (annualPrepay

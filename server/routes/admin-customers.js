@@ -2346,6 +2346,33 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
       return res.status(400).json({ error: 'Invalid pipeline stage' });
     }
+    // Shared by the explicit per-visit prerequisite AND the clear-to-NULL
+    // path below: future pending/confirmed visits with no positive price,
+    // which complete unbilled in a per-visit lane (completionInvoiceAmount
+    // refuses the monthly-rate fallback there). Callbacks, always-free
+    // service types, and prepaid-stamped visits are exempt — they complete
+    // without an invoice by design in every lane. Errors return [] — fail
+    // OPEN (completion logging backstops) rather than hard-locking saves.
+    const unpricedFutureBillableVisits = async () => {
+      try {
+        const { etDateString } = require('../utils/datetime-et');
+        const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+        const rows = await db('scheduled_services')
+          .where({ customer_id: req.params.id })
+          .whereIn('status', ['pending', 'confirmed'])
+          .where('scheduled_date', '>=', etDateString())
+          .where(function unpriced() {
+            this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
+          })
+          .where(function notPrepaid() {
+            this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
+          })
+          .select('id', 'service_type', 'is_callback', 'scheduled_date')
+          .orderBy('scheduled_date', 'asc')
+          .limit(100);
+        return rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
+      } catch { return []; }
+    };
     if (req.body.billingMode !== undefined && req.body.billingMode !== null && req.body.billingMode !== '') {
       const { BILLING_MODES } = require('../services/billing-lane');
       const mode = req.body.billingMode;
@@ -2390,40 +2417,42 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         }
       }
       if (mode === 'per_visit' || mode === 'one_time') {
-        // These lanes bill each visit's OWN price — completionInvoiceAmount
-        // deliberately never falls back to monthly_rate for them — so a
-        // future visit without a positive price completes uninvoiced with
-        // only a log line. Same "would complete unbilled" prerequisite as
-        // the other lanes (Codex r6): price or cancel those rows first.
-        // Callbacks, always-free service types, and prepaid-stamped visits
-        // are exempt — they complete without an invoice by design in every
-        // lane. An exotic read error fails OPEN (the completion log warning
-        // still backstops) rather than hard-locking the profile save.
-        try {
-          const { etDateString } = require('../utils/datetime-et');
-          const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
-          const rows = await db('scheduled_services')
-            .where({ customer_id: req.params.id })
-            .whereIn('status', ['pending', 'confirmed'])
-            .where('scheduled_date', '>=', etDateString())
-            .where(function unpriced() {
-              this.whereNull('estimated_price').orWhere('estimated_price', '<=', 0);
-            })
-            .where(function notPrepaid() {
-              this.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0);
-            })
-            .select('id', 'service_type', 'is_callback', 'scheduled_date')
-            .orderBy('scheduled_date', 'asc')
-            .limit(100);
-          const billable = rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
-          if (billable.length > 0) {
-            const laneLabel = mode === 'one_time' ? 'One-time' : 'Per visit';
-            const plural = billable.length !== 1;
-            return res.status(400).json({
-              error: `${laneLabel} bills each visit's own price — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`,
-            });
-          }
-        } catch { /* read failure — allow the save; completion logging backstops */ }
+        // These lanes bill each visit's OWN price, so a future visit
+        // without a positive price completes uninvoiced with only a log
+        // line. Same "would complete unbilled" prerequisite as the other
+        // lanes (Codex r6) — see unpricedFutureBillableVisits above.
+        const billable = await unpricedFutureBillableVisits();
+        if (billable.length > 0) {
+          const laneLabel = mode === 'one_time' ? 'One-time' : 'Per visit';
+          const plural = billable.length !== 1;
+          return res.status(400).json({
+            error: `${laneLabel} bills each visit's own price — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'} before switching.`,
+          });
+        }
+      }
+    } else if (req.body.billingMode !== undefined) {
+      // Clearing the selector to "Not set" re-enters legacy inference — a
+      // tier-less or sentinel-tier customer with a lingering rate RESOLVES
+      // per_visit, and completion refuses the monthly-rate fallback for
+      // that lane, so the same unpriced-visit guard applies to the clear
+      // (Codex r10). Resolve against the EFFECTIVE tier/rate this same
+      // save produces (tier and monthlyRate may change in the same PUT).
+      const { resolveBillingLane } = require('../services/billing-lane');
+      const effectiveTier = req.body.tier !== undefined ? req.body.tier : before.waveguard_tier;
+      const effectiveRateForClear = req.body.monthlyRate !== undefined
+        ? (req.body.monthlyRate === '' ? 0 : parseFloat(req.body.monthlyRate) || 0)
+        : (parseFloat(before.monthly_rate) || 0);
+      const resolvedOnClear = resolveBillingLane({
+        billing_mode: null, waveguard_tier: effectiveTier, monthly_rate: effectiveRateForClear,
+      });
+      if (resolvedOnClear.mode !== 'monthly_membership') {
+        const billable = await unpricedFutureBillableVisits();
+        if (billable.length > 0) {
+          const plural = billable.length !== 1;
+          return res.status(400).json({
+            error: `Not set resolves this customer to per-visit billing — ${billable.length} upcoming visit${plural ? 's' : ''} (first ${billable[0].scheduled_date}) ${plural ? 'have' : 'has'} no price and would complete unbilled. Price or cancel ${plural ? 'them' : 'it'}, or pick an explicit lane.`,
+          });
+        }
       }
     }
     const updates = {};

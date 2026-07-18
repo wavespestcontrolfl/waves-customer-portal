@@ -293,6 +293,17 @@ async function runSweep({ now = new Date() } = {}) {
         .update({ balance_reminder_sent_at: new Date() });
       if (!claimed) { skipped++; continue; }
 
+      // The email sidecar routes through billing prefs + the billing
+      // recipient (Codex r10 P1). Declare the email leg to the SMS channel
+      // gate ONLY when it can actually send — otherwise an email-preferring
+      // customer's SMS is suppressed in favor of an email that never
+      // leaves, and the released claim retries daily forever.
+      let emailLegAvailable = false;
+      try {
+        const AccountMembershipEmail = require('./account-membership-email');
+        emailLegAvailable = !!(await AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient(visit.customer_id)).recipient;
+      } catch { emailLegAvailable = false; }
+
       let smsDelivered = false;
       try {
         const body = await renderSmsTemplate(TEMPLATE_KEY, {
@@ -313,8 +324,9 @@ async function runSweep({ now = new Date() } = {}) {
           entryPoint: 'previsit_balance_reminder',
           // This flow HAS an email sidecar (below), so the billing-channel
           // preference gate applies: an email-preferring customer gets the
-          // email only, never both (Codex r4).
-          hasEmailLeg: true,
+          // email only, never both (Codex r4) — but only when the email leg
+          // is genuinely available under the billing prefs (Codex r10).
+          hasEmailLeg: emailLegAvailable,
           metadata: { scheduled_service_id: visit.id, amount },
         });
         smsDelivered = !result.blocked && result.sent !== false;
@@ -324,9 +336,10 @@ async function runSweep({ now = new Date() } = {}) {
 
       // Email rides the same eligibility. For an email-preferring customer
       // the SMS above is suppressed by the channel gate and THIS is the
-      // reminder.
+      // reminder. Skipped silently when the billing prefs/recipient
+      // resolution said no (the sender re-checks internally too).
       let emailDelivered = false;
-      try {
+      if (emailLegAvailable) try {
         const AccountMembershipEmail = require('./account-membership-email');
         const emailResult = await AccountMembershipEmail.sendPrevisitBalanceReminder({
           customerId: visit.customer_id,

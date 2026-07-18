@@ -4662,8 +4662,14 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // non-callback recurring/WaveGuard visit falls back to the monthly rate; a
 // callback (re-service) is free by definition. Mirrors the Charge-now amount
 // rule so a mark-time receipt invoices the same figure completion would.
-function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate }) {
+function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode }) {
   if (estimatedPrice != null && Number(estimatedPrice) > 0) return Number(estimatedPrice);
+  // Explicit non-monthly lanes never fall back to the customer-level
+  // monthly_rate — that is the membership dues number, and completion's
+  // completionInvoiceAmount refuses the same fallback (Codex r10): an
+  // unpriced visit in these lanes bills manually, never at the old dues
+  // amount through Charge Now / prepaid-receipt minting.
+  if (billingMode && billingMode !== 'monthly_membership') return 0;
   if (!isCallback && monthlyRate && Number(monthlyRate) > 0) return Number(monthlyRate);
   return 0;
 }
@@ -4782,6 +4788,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     estimatedPrice: svc.estimated_price,
     isCallback: svc.is_callback,
     monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
   });
   if (!(amount > 0)) return { invoice: null, reason: 'no_chargeable_amount' };
   const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
@@ -4880,6 +4887,7 @@ async function generatePrepaidReceiptForService(serviceId) {
       'customers.monthly_rate as cust_monthly_rate',
       'customers.property_type as cust_property_type',
       'customers.waveguard_tier as cust_waveguard_tier',
+      'customers.billing_mode as cust_billing_mode',
     )
     .first();
   if (!svc) return { sent: false, reason: 'service_not_found' };
@@ -5130,7 +5138,8 @@ router.post('/:id/invoice', async (req, res, next) => {
       .select('scheduled_services.*',
         'customers.monthly_rate as cust_monthly_rate',
         'customers.property_type as cust_property_type',
-        'customers.waveguard_tier as cust_waveguard_tier')
+        'customers.waveguard_tier as cust_waveguard_tier',
+        'customers.billing_mode as cust_billing_mode')
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
 
@@ -5311,9 +5320,12 @@ router.post('/:id/invoice', async (req, res, next) => {
     // no-charge re-service. Mirrors the completion-path suppression in
     // admin-dispatch.js. Honour an explicit positive price if one was set;
     // otherwise the visit is $0.
-    const amount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
-      ? Number(svc.estimated_price)
-      : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    const amount = resolveScheduledServiceCharge({
+      estimatedPrice: svc.estimated_price,
+      isCallback: svc.is_callback,
+      monthlyRate: svc.cust_monthly_rate,
+      billingMode: svc.cust_billing_mode || null,
+    });
 
     // Mobile checkout sheet can append extra services + discount lines before
     // minting. Each extra is { description, quantity, unit_price, amount,
