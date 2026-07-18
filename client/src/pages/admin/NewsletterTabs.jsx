@@ -485,6 +485,20 @@ export function ComposeView({
     segmentLineCount,
   ]);
 
+  // Dirty flag for the segment controls: true once ANY segment input changes
+  // after mount. saveDraft omits segmentFilter on PATCH while clean, so
+  // editing a loaded draft (e.g. the sunset win-back, whose stored
+  // { tags: ['reengagement_due'] } the compose controls don't hydrate) can't
+  // overwrite the stored segment with the UI's default null — which would
+  // retarget the win-back at every active subscriber. The mount run is
+  // skipped; only operator interaction flips it.
+  const segmentDirtyRef = useRef(false);
+  const segmentDirtySkipMountRef = useRef(true);
+  useEffect(() => {
+    if (segmentDirtySkipMountRef.current) { segmentDirtySkipMountRef.current = false; return; }
+    segmentDirtyRef.current = true;
+  }, [segmentFilter]);
+
   // Apply a one-click cross-sell preset (sets the service-line controls and
   // forces customers-only, since service-line membership implies a customer).
   const applyCampaignPreset = (p) => {
@@ -631,10 +645,14 @@ export function ComposeView({
         textBody,
         fromName,
         fromEmail,
-        segmentFilter,
         newsletterType: activeNewsletterType,
         autoShareSocial,
       };
+      // Send segmentFilter on create always; on edit only when the operator
+      // touched the segment controls. The PATCH route preserves the stored
+      // segment when the field is omitted, so an untouched edit of a loaded
+      // draft keeps its saved audience (see segmentDirtyRef above).
+      if (!draftId || segmentDirtyRef.current) body.segmentFilter = segmentFilter;
       // Send eventIds only when the event association changed this session
       // (dirty). Omitting them lets the server preserve the stored ids on an
       // ordinary edit or when editing a loaded draft; including them on a fresh
@@ -789,6 +807,10 @@ export function ComposeView({
     setEventIdsDirty(false);
     setScheduleAt("");
     setSelectedTemplate(null);
+    // A fresh compose is no longer the loaded off-template draft — without
+    // this, the next save would mislabel new content with its type (e.g.
+    // 'reengagement'), skipping claim validation and the public archive.
+    setLoadedNewsletterType(null);
   };
 
   const handleAiDraft = async ({
@@ -820,6 +842,9 @@ export function ComposeView({
     // the modal, and we want that to clear the prior selection so the
     // next modal opens defaulting to no template.
     setSelectedTemplate(template || null);
+    // An AI redraft replaces the loaded draft's content wholesale — the
+    // off-template type (e.g. 'reengagement') no longer describes it.
+    setLoadedNewsletterType(null);
     setAiOpen(false);
     // Clear the event-seeded prompt on success too (mirror of the
     // onClose handler). Otherwise the next "Draft with AI" toolbar

@@ -121,14 +121,15 @@ async function subscribeOrResubscribe({
         unsubscribed_at: null,
         updated_at: new Date(),
       };
-      // 'inactive' = suppressed by the sunset job (newsletter-sunset.js), not
-      // an opt-out. A comeback re-enters through the same DOI path; clear the
-      // hygiene markers so the new subscription starts a clean episode.
-      if (existing.status === 'inactive') {
-        updates.deactivated_at = null;
-        updates.deactivated_reason = null;
-        updates.reengagement_flagged_at = null;
-      }
+      // Sunset hygiene markers (newsletter-sunset.js) are cleared on EVERY
+      // comeback, not just when status is exactly 'inactive' — a sunset row
+      // can move inactive → unsubscribed (old footer/List-Unsubscribe link)
+      // before resubscribing, and stale markers would let the next sunset run
+      // pair an old delivered win-back with the fresh subscription and
+      // suppress it immediately instead of starting a clean episode.
+      updates.deactivated_at = null;
+      updates.deactivated_reason = null;
+      updates.reengagement_flagged_at = null;
       if (requireConfirmation) {
         updates.status = 'pending';
         updates.confirmation_sent_at = new Date();

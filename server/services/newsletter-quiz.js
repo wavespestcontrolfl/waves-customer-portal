@@ -104,6 +104,26 @@ const QUIZZES = {
       { key: 'were-good', label: "We're good", tags: [] },
     ],
   },
+
+  // Win-back CTA for the newsletter-sunset lane. The quiz flow's GET-renders /
+  // POST-mutates split is the scanner-safe consent the sunset job requires:
+  // Safe-Links-style prefetchers can fire raw SendGrid click events, but only
+  // a deliberate confirm-form submit stamps quiz_answered_at — the ONE signal
+  // reactivateSunsetComebacks() accepts. No interest tags: staying subscribed
+  // is not a sales lead, and landingCtaSuppressed keeps the thank-you page
+  // from pitching a booking.
+  'stay-subscribed-v1': {
+    label: 'Stay subscribed',
+    question: 'Want to keep getting these emails?',
+    emailCta: "Two taps — the button, then a confirm — and you're set.",
+    landingLine: "You're staying on the list — see you in the next issue.",
+    landingCtaSuppressed: true,
+    bookLabel: 'Book a visit',
+    bookService: 'pest_control',
+    answers: [
+      { key: 'stay', label: 'Yes — keep me on the list', tags: [] },
+    ],
+  },
 };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

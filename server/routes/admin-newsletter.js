@@ -291,9 +291,11 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
 
     let windowStart;
     if (type === 'reengagement') {
-      // As-needed lane (newsletter-sunset.js stages it and re-stages weekly
-      // when missing) — a parked win-back stays loadable until sent.
-      windowStart = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      // As-needed lane: no freshness window. newsletter-sunset.js refuses to
+      // stage a replacement while ANY reengagement draft is open, so an age
+      // filter here would strand a stale-but-open draft — the bell would land
+      // on a blank Compose while the job kept pointing at the parked row.
+      windowStart = null;
     } else if (type === 'pest-insider-monthly') {
       // Current ET month.
       const mm = String(nowET.month).padStart(2, '0');
@@ -304,12 +306,12 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
       windowStart = parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T00:00:00`);
     }
 
-    const draft = await db('newsletter_sends')
+    let draftQuery = db('newsletter_sends')
       .where({ newsletter_type: type, status: 'draft' })
       .whereNull('created_by')
-      .where('created_at', '>=', windowStart)
-      .orderBy('created_at', 'desc')
-      .first();
+      .orderBy('created_at', 'desc');
+    if (windowStart) draftQuery = draftQuery.where('created_at', '>=', windowStart);
+    const draft = await draftQuery.first();
     res.json({ draft: draft || null });
   } catch (err) { next(err); }
 });

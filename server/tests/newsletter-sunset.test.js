@@ -79,11 +79,15 @@ describe('win-back draft row', () => {
     expect(row.segment_filter).toEqual({ tags: [REENGAGEMENT_TAG] });
   });
 
-  test('copy: greeting token, sign-off, CTA in both parts', () => {
+  test('copy: greeting token, sign-off, scanner-safe quiz CTA in both parts', () => {
+    expect(row.html_body).toContain('{{quiz:stay-subscribed-v1}}');
+    expect(row.text_body).toContain('{{quiz-text:stay-subscribed-v1}}');
     for (const body of [row.html_body, row.text_body]) {
       expect(body).toContain('{{greeting-name}}');
       expect(body).toContain('— The Waves Pest Control Team');
-      expect(body).toContain('https://wavespestcontrol.com/');
+      // No raw CTA URLs — consent must ride the quiz confirm flow, never a
+      // bare link whose provider click event a mail scanner can prefetch.
+      expect(body).not.toContain('https://wavespestcontrol.com/');
     }
   });
 
@@ -94,6 +98,17 @@ describe('win-back draft row', () => {
     expect(all.toLowerCase()).not.toMatch(/\bsafe\b/);
     expect(row.from_name).toBe('Waves Pest Control');
     expect(all).not.toContain('Waves Lawn & Pest');
+  });
+});
+
+describe('stay-subscribed quiz', () => {
+  test('registered, single no-tag answer, thank-you booking pitch suppressed', () => {
+    const { getQuiz } = require('../services/newsletter-quiz');
+    const quiz = getQuiz('stay-subscribed-v1');
+    expect(quiz).not.toBeNull();
+    expect(quiz.answers).toHaveLength(1);
+    expect(quiz.answers[0].tags).toEqual([]);
+    expect(quiz.landingCtaSuppressed).toBe(true);
   });
 });
 

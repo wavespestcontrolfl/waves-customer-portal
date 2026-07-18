@@ -10,9 +10,9 @@
  *
  *   A. RECOVER — flagged subscribers who engaged since flagging lose the
  *      'reengagement_due' tag (any open / click / quiz answer). Sunset
- *      ('inactive') subscribers with engagement AFTER deactivation — e.g. a
- *      late click on the win-back CTA — reactivate, honoring the copy's
- *      "one click keeps you on the list" promise.
+ *      ('inactive') subscribers who CONFIRM after deactivation reactivate —
+ *      quiz_answered_at only, since raw opens/clicks can be scanner
+ *      prefetches and must not resurrect a suppressed address.
  *   B. FLAG — active subscribers with ≥MIN_DELIVERED_SENDS delivered
  *      campaigns, the earliest ≥INACTIVITY_DAYS old, and zero engagement
  *      inside INACTIVITY_DAYS get tagged + stamped. A safety valve pauses
@@ -72,25 +72,25 @@ function safetyValveTripped(candidateCount, activeCount) {
 // `after`. Pass a Date to compare against a fixed instant, or one of the
 // literal strings 'flagged_at' / 'deactivated_at' to compare against the
 // subscriber's OWN reengagement_flagged_at / deactivated_at column.
+// opts.signals: 'all' (default — opens/clicks/quiz, the inactivity clock) or
+// 'quiz' (quiz_answered_at only — deliberate consent, scanner-proof).
 const AFTER_COLUMNS = {
   flagged_at: 'newsletter_subscribers.reengagement_flagged_at',
   deactivated_at: 'newsletter_subscribers.deactivated_at',
 };
-function engagementSubquery(after) {
+function engagementSubquery(after, { signals = 'all' } = {}) {
+  const cols = signals === 'quiz'
+    ? ['quiz_answered_at']
+    : ['opened_at', 'clicked_at', 'quiz_answered_at'];
   return function () {
     this.select(db.raw('1'))
       .from('newsletter_send_deliveries as eng')
       .whereRaw('eng.subscriber_id = newsletter_subscribers.id')
       .where(function () {
         const col = AFTER_COLUMNS[after];
-        if (col) {
-          this.whereRaw(`eng.opened_at > ${col}`)
-            .orWhereRaw(`eng.clicked_at > ${col}`)
-            .orWhereRaw(`eng.quiz_answered_at > ${col}`);
-        } else {
-          this.where('eng.opened_at', '>', after)
-            .orWhere('eng.clicked_at', '>', after)
-            .orWhere('eng.quiz_answered_at', '>', after);
+        for (const c of cols) {
+          if (col) this.orWhereRaw(`eng.${c} > ${col}`);
+          else this.orWhere(`eng.${c}`, '>', after);
         }
       });
   };
@@ -114,18 +114,21 @@ async function recoverEngagedFlagged(now) {
   return ids.length;
 }
 
-// Phase A (comeback half) — sunset subscribers with engagement AFTER their
-// deactivation (a late win-back open/click, a quiz answer) come back to
-// 'active' with the hygiene markers cleared. The copy promises "one click
-// keeps you on the list"; a click on day 35 must honor it even though the
-// grace job already ran. Safe to run unconditionally: reactivation requires a
-// PRESENT signal, so a tracking outage (missing signals) can't mass-fire it.
+// Phase A (comeback half) — sunset subscribers who CONFIRM after their
+// deactivation (a late stay-subscribed quiz submit) come back to 'active'
+// with the hygiene markers cleared, honoring the win-back CTA's promise even
+// when the confirm lands after the grace job ran. Consent here is
+// quiz_answered_at ONLY: raw opened_at/clicked_at can be produced by
+// Safe-Links-style scanners prefetching an old email, and a scanner must not
+// resurrect a suppressed address. Safe to run unconditionally: reactivation
+// requires a PRESENT deliberate signal, so a tracking outage (missing
+// signals) can't mass-fire it.
 async function reactivateSunsetComebacks(now) {
   const ids = (
     await db('newsletter_subscribers')
       .where({ status: 'inactive', deactivated_reason: SUNSET_REASON })
       .whereNotNull('deactivated_at')
-      .whereExists(engagementSubquery('deactivated_at'))
+      .whereExists(engagementSubquery('deactivated_at', { signals: 'quiz' }))
       .select('id')
   ).map((r) => r.id);
   if (!ids.length) return 0;
@@ -184,16 +187,19 @@ async function applyFlags(ids, now) {
 
 // Owner-editable draft the STAGE phase parks. Chrome (header/footer/
 // unsubscribe link) is added by wrapNewsletter at send time; this is the
-// operator body only. The CTA click is itself the recovery signal — SendGrid
-// click tracking stamps clicked_at, which Phase A reads. Copy rules: sign-off
-// per newsletter voice, no prices, no safety/efficacy claims.
-const WINBACK_CTA_URL = 'https://wavespestcontrol.com/';
+// operator body only. The CTA is the stay-subscribed QUIZ block — the quiz
+// flow's GET-renders / POST-mutates confirm page is scanner-safe (Safe
+// Links/Mimecast prefetchers fire raw click events, but only a deliberate
+// confirm submit stamps quiz_answered_at, the signal reactivation trusts).
+// Copy rules: sign-off per newsletter voice, no prices, no safety/efficacy
+// claims.
+const WINBACK_QUIZ_ID = 'stay-subscribed-v1';
 const WINBACK_SUBJECT = 'Should we keep sending you these?';
 const WINBACK_HTML = [
   '<p>Hi{{greeting-name}},</p>',
   "<p>It's been a while since you've opened one of these, so we're checking in before we keep filling your inbox.</p>",
-  '<p>If you\'d like to keep getting our local events guide and lawn &amp; pest tips, one click below keeps you on the list:</p>',
-  `<p><a href="${WINBACK_CTA_URL}" style="display:inline-block;padding:12px 20px;background:#04395E;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold">Keep me on the list</a></p>`,
+  "<p>If you'd like to keep getting our local events guide and lawn &amp; pest tips, tap below and confirm — that's it:</p>",
+  `{{quiz:${WINBACK_QUIZ_ID}}}`,
   "<p>If not, no hard feelings — use the unsubscribe link below, or simply do nothing and we'll stop sending after this note.</p>",
   '<p>— The Waves Pest Control Team</p>',
 ].join('\n');
@@ -202,7 +208,8 @@ const WINBACK_TEXT = [
   '',
   "It's been a while since you've opened one of these, so we're checking in before we keep filling your inbox.",
   '',
-  `Want to keep getting our local events guide and lawn & pest tips? Visit this link and you'll stay on the list: ${WINBACK_CTA_URL}`,
+  "Want to keep getting our local events guide and lawn & pest tips? Open the link below and confirm — that's it:",
+  `{{quiz-text:${WINBACK_QUIZ_ID}}}`,
   '',
   "If not, no hard feelings — use the unsubscribe link below, or simply do nothing and we'll stop sending after this note.",
   '',
