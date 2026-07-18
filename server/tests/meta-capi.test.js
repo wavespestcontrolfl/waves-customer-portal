@@ -105,6 +105,21 @@ describe('buildEvent / skipReason', () => {
     expect(skipReason(lead({ eventTimestamp: new Date(Date.now() - 10 * 86400000).toISOString() }))).toBe('event_too_old');
     expect(skipReason(lead())).toBeNull();
   });
+
+  test('consent-suppressed candidate with no remaining keys is labeled consent_suppressed', () => {
+    // collectCandidates nulls email/phone on marketing opt-outs and stamps the flag.
+    expect(skipReason(lead({ email: null, phone: null, fbp: null, fbc: null, fbclid: null, consentSuppressed: true })))
+      .toBe('consent_suppressed');
+  });
+
+  test('consent-suppressed candidate keeps measuring through its click id, without hashed PII', () => {
+    const c = lead({ email: null, phone: null, fbp: null, fbc: null, fbclid: 'click-1', consentSuppressed: true });
+    expect(skipReason(c)).toBeNull();
+    const e = buildEvent(c);
+    expect(e.user_data.fbc).toMatch(/click-1$/);
+    expect(e.user_data.em).toBeUndefined();
+    expect(e.user_data.ph).toBeUndefined();
+  });
 });
 
 describe('resolveMode', () => {
@@ -146,6 +161,23 @@ describe('uploadConversions', () => {
     expect(body.test_event_code).toBeUndefined();
     expect(r).toMatchObject({ sent: 1, eventsReceived: 1, testMode: false });
     expect(insertCalls[0]).toMatchObject({ status: 'sent', event_id: 'waves_qualified_lead:L1' });
+  });
+
+  test('live: a consent-suppressed no-key candidate is skipped, the rest still send', async () => {
+    process.env.META_CAPI_ALLOW_UPLOADS = 'true';
+    mockCollect.mockResolvedValue([
+      lead({ transactionId: 'waves_qualified_lead:OPTOUT', email: null, phone: null, fbp: null, fbc: null, fbclid: null, consentSuppressed: true }),
+      lead(),
+    ]);
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ events_received: 1, fbtrace_id: 'x' }) });
+
+    const r = await MetaCapi.uploadConversions({ conversionType: 'qualified_lead', validateOnly: false });
+
+    expect(r).toMatchObject({ sent: 1, candidates: 2 });
+    expect(r.skipped).toEqual([{ event_id: 'waves_qualified_lead:OPTOUT', reason: 'consent_suppressed' }]);
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].event_id).toBe('waves_qualified_lead:L1');
   });
 
   test('dry run: sends to Test Events and logs validated', async () => {
