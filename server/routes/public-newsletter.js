@@ -321,7 +321,7 @@ router.post('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
           <p>${labels.length
             ? `Noted: <strong>${escapeHtml(labels.join(', '))}</strong>. Next issues will lean that way.`
             : 'Noted. Next issues will aim closer to home.'}</p>
-          <p style="margin-bottom:0;">— The Waves Pest Control Team 🌊</p>`;
+          <p style="margin-bottom:0;">— The Waves Team 🌊</p>`;
     } else {
       heading = 'Thanks — that helps! 🌊';
       bodyHtml = `

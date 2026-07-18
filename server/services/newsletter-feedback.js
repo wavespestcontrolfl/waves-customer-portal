@@ -107,8 +107,12 @@ function esc(s) {
 function renderFeedbackHtml({ token } = {}) {
   if (!token || !UUID_RE.test(String(token))) return renderFeedbackNeutralHtml();
 
+  // Gold action-bar treatment (owner call 2026-07-17: reactions use the
+  // "yellow button template") — mirrors GLASS_THEME's cta tokens, the same
+  // bars the report action bar and glass landing pages use. Label stays on
+  // the legacy navy like [data-glass-accent] pins.
   const buttons = REACTIONS.map((r) => `<td style="padding:5px;">
-<a href="${esc(feedbackReactionUrl(token, r.key))}" style="display:block;background:${C.navy};color:#ffffff;text-decoration:none;border-radius:8px;padding:12px 8px;font-weight:700;font-size:15px;text-align:center;font-family:Inter,Arial,sans-serif;white-space:nowrap;">${esc(`${r.emoji} ${r.label}`)}</a>
+<a href="${esc(feedbackReactionUrl(token, r.key))}" style="display:block;background:#F5B520;background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%);border:1px solid #FFEEB4;color:#1B2C5B;text-decoration:none;border-radius:10px;padding:12px 8px;font-weight:800;font-size:15px;text-align:center;font-family:Inter,Arial,sans-serif;white-space:nowrap;">${esc(`${r.emoji} ${r.label}`)}</a>
 </td>`).join('');
 
   return `<div style="margin:24px 0 0 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;">

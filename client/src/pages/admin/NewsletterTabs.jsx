@@ -256,7 +256,7 @@ const TEMPLATES = [
 <p>🔹 <strong>[Capability]</strong> – [Honest benefit.]</p>
 <h2>[Voice-y close heading]</h2>
 <p>[Close + call CTA. The AI draft attaches the phone number automatically.]</p>
-<p>— The Waves Pest Control Team 🌊</p>`,
+<p>— The Waves Team 🌊</p>`,
   },
 ];
 

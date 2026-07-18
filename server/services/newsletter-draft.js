@@ -1232,7 +1232,7 @@ async function assembleBeehiivNewsletter(draft) {
 
   // ── Sign-off ──
   parts.push(`<p style="margin:20px 0 4px 0;font-size:15px;line-height:1.6;"><strong>Catch you out there this week.</strong></p>`);
-  const signoffText = draft.signoff || '— The Waves Pest Control Team';
+  const signoffText = draft.signoff || '— The Waves Team';
   parts.push(`<p style="margin:0 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(signoffText)} 🌊</p>`);
 
   // ── P.S. ──

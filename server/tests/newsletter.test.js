@@ -1593,7 +1593,7 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     });
     expect(html).toContain('✔️ Pack a chair');
     expect(html).toContain('✔️ Hydrate like it&#39;s your job');
-    expect(html).toContain('— The Waves Pest Control Team');
+    expect(html).toContain('— The Waves Team');
   });
 
   test('P.S. label never doubles when the model writes the prefix itself; label-only ps renders nothing', async () => {
