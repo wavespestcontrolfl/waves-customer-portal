@@ -69,7 +69,11 @@ function extractAddressCandidate(body) {
     // Cut the tail at the first clause boundary so trailing prose ("… 123
     // Main St for ants, they're everywhere") doesn't ride into
     // address_line1 — commas stay (city/zip live after them).
-    const candidate = text.slice(match.index).split(/[.;!?\n]/)[0].trim();
+    // Clause boundary first, then service-introducing prose ("123 Main St
+    // for ants") — connector words end the address ("Fort Myers" survives:
+    // \bfor\b never matches inside Fort).
+    const clause = text.slice(match.index).split(/[.;!?\n]/)[0];
+    const candidate = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
     if (candidate.length >= 6 && candidate.length <= 160 && STREET_SUFFIX_RE.test(candidate)) {
       best = candidate;
     }
@@ -78,8 +82,19 @@ function extractAddressCandidate(body) {
 }
 
 async function createOrUpdateDraftEstimate(customer, interest) {
+  // Update ONLY the intake's own shell (unpriced sms_intake/lead_webhook
+  // row) — a newer priced or quote-wizard draft on the same customer must
+  // never have its service/address overwritten by an intake reply. With no
+  // shell, the create path's phone duplicate guard decides.
   const existingDraft = await db('estimates')
     .where({ customer_id: customer.id, status: 'draft' })
+    .whereIn('source', ['sms_intake', 'lead_webhook'])
+    .where(function unpriced() {
+      this.whereNull('monthly_total').orWhere('monthly_total', 0);
+    })
+    .where(function noOnetime() {
+      this.whereNull('onetime_total').orWhere('onetime_total', 0);
+    })
     .orderBy('created_at', 'desc')
     .first();
 

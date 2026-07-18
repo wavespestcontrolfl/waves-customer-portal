@@ -364,6 +364,36 @@ describe('recordClarifyAnswer', () => {
     expect(flags.answered_at).toBeUndefined();
   });
 
+  test('a PENDING ask fully answered through another flow is retired, never sent', async () => {
+    mockState.existingDraft = {
+      id: 'pending-1',
+      status: 'pending',
+      sent_at: null,
+      flags: JSON.stringify({ missing: ['specific_service'] }),
+    };
+    const result = await recordClarifyAnswer({ phone: '9415550142', items: ['specific_service'] });
+    expect(result.recorded).toBe(true);
+    const update = mockState.updates[0].payload;
+    expect(update.status).toBe('rejected');
+    expect(JSON.parse(update.flags).answered_at).toBeTruthy();
+  });
+
+  test('a PENDING both-items ask partially answered rewrites down to the remainder', async () => {
+    mockState.existingDraft = {
+      id: 'pending-1',
+      status: 'pending',
+      sent_at: null,
+      flags: JSON.stringify({ missing: ['street_address', 'specific_service'] }),
+    };
+    const result = await recordClarifyAnswer({ phone: '9415550142', items: ['specific_service'] });
+    expect(result.recorded).toBe(true);
+    const update = mockState.updates[0].payload;
+    expect(update.status).toBeUndefined();
+    expect(update.draft_response).toContain('service address');
+    expect(update.draft_response).not.toContain('which service');
+    expect(JSON.parse(update.flags).missing).toEqual(['street_address']);
+  });
+
   test('irrelevant items or no awaiting ask record nothing', async () => {
     expect((await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] })).recorded).toBe(false);
     mockState.existingDraft = {

@@ -296,13 +296,17 @@ function extractAddressReply(body) {
   if (!text) return null;
   // Whole-body address reply ("123 Main St, Sarasota 34239").
   if (/^\s*\d{1,6}\s+[A-Za-z]/.test(text) && text.length <= 160) {
-    const cut = text.split(/[.;!?\n]/)[0].trim();
+    const clause = text.split(/[.;!?\n]/)[0];
+    const cut = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
     if (cut.length >= 6) return cut;
   }
   // Embedded ("it's 123 Main St, Sarasota") — suffix required, latest wins.
   let best = null;
   for (const match of text.matchAll(/\d{1,6}\s+[A-Za-z]/g)) {
-    const candidate = text.slice(match.index).split(/[.;!?\n]/)[0].trim();
+    // Clause boundary first, then service-introducing prose ("123 Main St
+    // for pest control") — connector words end the address.
+    const clause = text.slice(match.index).split(/[.;!?\n]/)[0];
+    const candidate = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
     if (candidate.length >= 6 && candidate.length <= 160 && CLARIFY_STREET_SUFFIX_RE.test(candidate)) {
       best = candidate;
     }
@@ -480,14 +484,22 @@ async function recordClarifyAnswer({ phone, items = [] }) {
       : (allDigits.length === 11 && allDigits.startsWith('1') ? allDigits.slice(1) : null);
     if (!digits) return { recorded: false };
     // Read + stamp under the clarify lock — same lost-update protection as
-    // every other flags writer.
+    // every other flags writer. PENDING asks resolve too: a customer who
+    // volunteers the answer before the owner approves must not later be
+    // texted the question they already answered.
     return await withClarifyLock(digits, async (trx) => {
       const awaiting = await trx('message_drafts')
         .where({ intent: 'estimate_clarify', source_ref: `clarify:${digits}` })
-        .whereNotNull('sent_at')
-        .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS))
         .whereRaw("(flags->>'answered_at') is null")
-        .orderBy('sent_at', 'desc')
+        .where(function pendingOrRecentlySent() {
+          this.where(function pendingOpen() {
+            this.where('status', 'pending').whereNull('sent_at');
+          }).orWhere(function sentRecent() {
+            this.whereNotNull('sent_at')
+              .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
+          });
+        })
+        .orderByRaw('(sent_at is not null) asc, sent_at desc')
         .first();
       if (!awaiting) return { recorded: false };
       let flags = {};
@@ -498,14 +510,24 @@ async function recordClarifyAnswer({ phone, items = [] }) {
       const recorded = missing.filter((item) => items.includes(item));
       if (!recorded.length) return { recorded: false };
       const remaining = missing.filter((item) => !recorded.includes(item));
-      await trx('message_drafts').where({ id: awaiting.id }).update({
-        flags: JSON.stringify({
-          ...flags,
-          missing: remaining,
-          answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
-          ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
-        }),
+      const answeredFlags = JSON.stringify({
+        ...flags,
+        missing: remaining,
+        answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
+        ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
       });
+      if (!awaiting.sent_at && awaiting.status === 'pending') {
+        // Answered before approval: rewrite the pending copy down to the
+        // remainder, or retire it outright when nothing remains. Guarded on
+        // status — a claim landing before the lock wins.
+        await trx('message_drafts')
+          .where({ id: awaiting.id, status: 'pending' })
+          .update(remaining.length
+            ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null }), flags: answeredFlags }
+            : { status: 'rejected', flags: answeredFlags });
+      } else {
+        await trx('message_drafts').where({ id: awaiting.id }).update({ flags: answeredFlags });
+      }
       return { recorded: true, items: recorded };
     });
   } catch (err) {
