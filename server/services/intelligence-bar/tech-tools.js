@@ -410,26 +410,31 @@ async function checkCustomerStatus(input) {
 
 
 async function searchKnowledgeBase(query) {
-  // Full-text search on the wiki/knowledge base tables
+  // Trusted knowledge only — same gate the admin field-intelligence tool
+  // uses, so red wiki pages awaiting review never reach a tech answer.
   try {
-    const results = await db('wiki_articles')
-      .whereRaw("to_tsvector('english', title || ' ' || COALESCE(content, '')) @@ plainto_tsquery('english', ?)", [query])
-      .select('id', 'title', 'category', db.raw("LEFT(content, 300) as snippet"))
-      .limit(5);
+    const KnowledgeBridge = require('../knowledge-bridge');
+    const { claudeopedia, wiki } = await KnowledgeBridge.unifiedSearch(query, { limit: 5, trustedOnly: true });
 
-    if (results.length > 0) {
-      return { results: results.map(r => ({ title: r.title, category: r.category, snippet: r.snippet })) };
-    }
+    // unifiedSearch returns metadata only — attach snippets.
+    const kbIds = (claudeopedia || []).map((r) => r.id).filter(Boolean);
+    const kbSnippets = kbIds.length
+      ? await db('knowledge_base').whereIn('id', kbIds).select('id', db.raw('LEFT(content, 300) as snippet'))
+      : [];
+    const kbSnippetById = Object.fromEntries(kbSnippets.map((r) => [r.id, r.snippet]));
 
-    // Fallback to ILIKE search
-    const fallback = await db('wiki_articles')
-      .where(function () {
-        this.whereILike('title', `%${query}%`).orWhereILike('content', `%${query}%`);
-      })
-      .select('id', 'title', 'category', db.raw("LEFT(content, 300) as snippet"))
-      .limit(5);
+    const wikiIds = (wiki || []).map((r) => r.id).filter(Boolean);
+    const wikiRows = wikiIds.length
+      ? await db('knowledge_entries').whereIn('id', wikiIds).select('id', 'summary', db.raw('LEFT(content, 300) as snippet'))
+      : [];
+    const wikiById = Object.fromEntries(wikiRows.map((r) => [r.id, r]));
 
-    return { results: fallback.map(r => ({ title: r.title, category: r.category, snippet: r.snippet })), search_method: 'fallback' };
+    const results = [
+      ...(claudeopedia || []).map((r) => ({ title: r.title, category: r.category, snippet: kbSnippetById[r.id] || null })),
+      ...(wiki || []).map((r) => ({ title: r.title, category: r.category, snippet: wikiById[r.id]?.summary || wikiById[r.id]?.snippet || null })),
+    ].slice(0, 5);
+
+    return { results };
   } catch {
     return { results: [], note: 'Knowledge base search unavailable' };
   }
