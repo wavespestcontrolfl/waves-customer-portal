@@ -44,6 +44,11 @@ const { SENDGRID_OPS_TOOLS, executeSendgridOpsTool } = require('../services/inte
 const { DATAFORSEO_OPS_TOOLS, executeDataforseoOpsTool } = require('../services/intelligence-bar/dataforseo-ops-tools');
 const { GBP_OPS_TOOLS, executeGbpOpsTool } = require('../services/intelligence-bar/gbp-ops-tools');
 const { GA4_OPS_TOOLS, executeGa4OpsTool } = require('../services/intelligence-bar/ga4-ops-tools');
+const { META_ADS_OPS_TOOLS, executeMetaAdsOpsTool } = require('../services/intelligence-bar/meta-ads-ops-tools');
+const { BOUNCIE_OPS_TOOLS, executeBouncieOpsTool } = require('../services/intelligence-bar/bouncie-ops-tools');
+const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligence-bar/apify-ops-tools');
+const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
+const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
@@ -107,6 +112,11 @@ const SENDGRID_OPS_TOOL_NAMES = new Set(SENDGRID_OPS_TOOLS.map(t => t.name));
 const DATAFORSEO_OPS_TOOL_NAMES = new Set(DATAFORSEO_OPS_TOOLS.map(t => t.name));
 const GBP_OPS_TOOL_NAMES = new Set(GBP_OPS_TOOLS.map(t => t.name));
 const GA4_OPS_TOOL_NAMES = new Set(GA4_OPS_TOOLS.map(t => t.name));
+const META_ADS_OPS_TOOL_NAMES = new Set(META_ADS_OPS_TOOLS.map(t => t.name));
+const BOUNCIE_OPS_TOOL_NAMES = new Set(BOUNCIE_OPS_TOOLS.map(t => t.name));
+const APIFY_OPS_TOOL_NAMES = new Set(APIFY_OPS_TOOLS.map(t => t.name));
+const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
+const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
 // about deploys, errors, or webhook health) and shares the admin-only guard
 // that OPS_TOOLS established — technician tokens never see or execute them.
@@ -116,6 +126,8 @@ const INFRA_TOOLS = [
   ...STORE_OPS_TOOLS, ...GROWTHBOOK_TOOLS,
   ...GOOGLE_ADS_OPS_TOOLS, ...TOKEN_HEALTH_TOOLS, ...SENDGRID_OPS_TOOLS,
   ...DATAFORSEO_OPS_TOOLS, ...GBP_OPS_TOOLS, ...GA4_OPS_TOOLS,
+  ...META_ADS_OPS_TOOLS, ...BOUNCIE_OPS_TOOLS, ...APIFY_OPS_TOOLS,
+  ...SOCIAL_OPS_TOOLS, ...MANAGED_AGENTS_OPS_TOOLS,
 ];
 const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
@@ -211,6 +223,10 @@ const PII_TOOL_NAMES = new Set([
   // redact like the comms tools.
   'get_email_suppressions',
   'check_email_suppression',
+  // Trip start/end points trace customer service stops, and managed-agent
+  // session titles are app-authored and can reference leads/customers.
+  'get_truck_trips',
+  'get_managed_agent_runs',
   // PaymentIntent descriptions are app-written and can embed customer names
   // or invoice references — redact like the other billing-adjacent tools.
   'get_stripe_payment_intents',
@@ -964,6 +980,11 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
 - GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
 - Google Ads: get_google_ads_serving_status (LIVE serving state + why a campaign is limited/not serving + daily budget), get_google_ads_disapprovals (policy-disapproved ads). Budget CHANGES go through /admin/ads only; spend/ROAS analysis uses the revenue tools.
+- Meta Ads: get_meta_ads_delivery_status (effective_status = what is ACTUALLY delivering), get_meta_ads_issues (WITH_ISSUES/disapproved ads). Same rules as Google Ads.
+- Truck (Bouncie): get_truck_status (live location/running/fuel/tracker freshness), get_truck_trips (a day's trips + mileage — the live view of the tax mileage ledger's source).
+- Apify: get_apify_status (monthly usage vs limit + recent scrape runs — the price-scan scraper dies silently at the cap).
+- Social: get_social_channel_status (per-channel flags + credential presence + dry-run/pause switches + recent posts). Token VALIDITY is token health; posting happens in the social studio.
+- Managed agents: get_managed_agent_runs (recent autonomous agent sessions — BI briefing, blog engine, backlink, lead response — with status and token usage). The "did last night's runs succeed?" check.
 - SendGrid: get_email_suppressions (recent bounces/blocks/spam reports), check_email_suppression (is ONE address suppressed). A suppressed address silently swallows every send.
 - Google Business Profiles: get_gbp_status (connection + verification/suspension + latest posts per location). Reviews use the review tools.
 - GA4: get_ga4_snapshot (live traffic + conversion events, lags ~1 day). Deeper trends live on the dashboard.
@@ -1112,6 +1133,21 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (GA4_OPS_TOOL_NAMES.has(toolName)) {
     return executeGa4OpsTool(toolName, input);
+  }
+  if (META_ADS_OPS_TOOL_NAMES.has(toolName)) {
+    return executeMetaAdsOpsTool(toolName, input);
+  }
+  if (BOUNCIE_OPS_TOOL_NAMES.has(toolName)) {
+    return executeBouncieOpsTool(toolName, input);
+  }
+  if (APIFY_OPS_TOOL_NAMES.has(toolName)) {
+    return executeApifyOpsTool(toolName, input);
+  }
+  if (SOCIAL_OPS_TOOL_NAMES.has(toolName)) {
+    return executeSocialOpsTool(toolName, input);
+  }
+  if (MANAGED_AGENTS_OPS_TOOL_NAMES.has(toolName)) {
+    return executeManagedAgentsOpsTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);

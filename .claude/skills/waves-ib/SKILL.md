@@ -56,7 +56,8 @@ writes stay UI-confirm gated) so message history and the inbox are visible
 from any page. Admin-role requests additionally get ALL infra ops modules
 (`INFRA_TOOLS`: ops/Railway, sentry-ops, cloudflare-ops, twilio-ops,
 stripe-ops, github-ops, store-ops, growthbook, google-ads-ops, token-health,
-sendgrid-ops, dataforseo-ops, gbp-ops, ga4-ops) on EVERY admin context —
+sendgrid-ops, dataforseo-ops, gbp-ops, ga4-ops, meta-ads-ops, bouncie-ops,
+apify-ops, social-ops, managed-agents-ops) on EVERY admin context —
 infra reads are context-independent, and the shared `INFRA_PROMPT` guidance
 is appended for admin requests; technician tokens never see or execute them.
 Tech portal is isolated — no base tools, strictly read-only, lower
