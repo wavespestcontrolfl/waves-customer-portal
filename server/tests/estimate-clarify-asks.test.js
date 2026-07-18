@@ -73,6 +73,7 @@ jest.mock('../services/sms-service-intent', () => ({
 const {
   parkClarifyAsk,
   handleClarifyReply,
+  recordClarifyAnswer,
   clarifyAsksEnabled,
   _private,
 } = require('../services/estimate-clarify-asks');
@@ -348,6 +349,33 @@ describe('handleClarifyReply', () => {
     mockState.existingDraft = AWAITING(['street_address']);
     const result = await handleClarifyReply({ phone: '9415550142', body: '123 Main St' });
     expect(result.handled).toBe(false);
+  });
+});
+
+describe('recordClarifyAnswer', () => {
+  test('stamps a sent ask when another flow captured the item', async () => {
+    mockState.existingDraft = {
+      id: 'sent-1',
+      sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['street_address', 'specific_service'] }),
+    };
+    const result = await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] });
+    expect(result.recorded).toBe(true);
+    const flags = JSON.parse(mockState.updates[0].payload.flags);
+    expect(flags.missing).toEqual(['specific_service']);
+    expect(flags.answer_recorded).toEqual(['street_address']);
+    expect(flags.answered_at).toBeUndefined();
+  });
+
+  test('irrelevant items or no awaiting ask record nothing', async () => {
+    expect((await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] })).recorded).toBe(false);
+    mockState.existingDraft = {
+      id: 'sent-1',
+      sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['specific_service'] }),
+    };
+    expect((await recordClarifyAnswer({ phone: '9415550142', items: ['street_address'] })).recorded).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
   });
 });
 

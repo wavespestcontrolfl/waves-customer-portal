@@ -375,18 +375,18 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
       flags.estimate_id ? db('estimates').where({ id: flags.estimate_id }).first() : null,
     ]);
     if (flags.lead_id && !lead) {
-      return retire('Clarify draft retired — the linked lead no longer exists.');
+      return await retire('Clarify draft retired — the linked lead no longer exists.');
     }
     if (lead && CLOSED_LEAD_STATUSES.has(String(lead.status || ''))) {
-      return retire('Clarify draft retired — the linked lead is closed.');
+      return await retire('Clarify draft retired — the linked lead is closed.');
     }
     if (flags.estimate_id && !estimate) {
       // Parity with the linked-lead check: deleting the shell estimate is a
       // deliberate operator action — the clarification is obsolete.
-      return retire('Clarify draft retired — the linked estimate no longer exists.');
+      return await retire('Clarify draft retired — the linked estimate no longer exists.');
     }
     if (estimate && (estimate.sent_at || estimate.status !== 'draft')) {
-      return retire('Clarify draft retired — the linked estimate already moved past draft.');
+      return await retire('Clarify draft retired — the linked estimate already moved past draft.');
     }
     // Answer-arrived recheck: retire only when EVERY asked item is now
     // known — a partially answered ask is still actionable.
@@ -398,7 +398,7 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
     const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
       || (item === 'specific_service' && !hasServiceNow));
     if (missing.length && !stillMissing.length) {
-      return retire('Clarify draft retired — the customer already provided the missing details.');
+      return await retire('Clarify draft retired — the customer already provided the missing details.');
     }
     if (stillMissing.length && stillMissing.length < missing.length) {
       // Partial answer: never re-ask what the contact already supplied —

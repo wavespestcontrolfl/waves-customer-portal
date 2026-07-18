@@ -380,7 +380,16 @@ async function handleClarifyReply({ phone, body }) {
       serviceText = serviceText.replace(/\s+/g, ' ').replace(/^[\s,\-–—:]+|[\s,\-–—:]+$/g, '').trim();
       if (serviceText.length >= 3 && serviceText.length <= 80) {
         const { classifyServiceIntent } = require('./sms-service-intent');
-        const cls = await classifyServiceIntent(serviceText);
+        // Webhook-safe bound: the classifier's LLM fallback carries no
+        // timeout of its own, and this path runs before TwiML returns.
+        // Timeout ⇒ fail closed (not a service answer).
+        const cls = await Promise.race([
+          classifyServiceIntent(serviceText),
+          new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(null), 3500);
+            if (typeof timer.unref === 'function') timer.unref();
+          }),
+        ]);
         if (cls?.interest) {
           if (flags.lead_id) {
             await db('leads').where({ id: flags.lead_id }).whereNull('deleted_at')
@@ -431,9 +440,57 @@ async function handleClarifyReply({ phone, body }) {
   }
 }
 
+/**
+ * Bookkeeping-only stamp for flows that consume replies THEMSELVES (the
+ * lead-intake state machine): when such a flow captures an item a sent
+ * clarify asked for, the draft's lifecycle must reflect it — otherwise the
+ * seven-day cooldown suppresses a later independent ask even though the
+ * customer answered. Records nothing new on leads/customers and never
+ * resumes anything; fail-soft.
+ */
+async function recordClarifyAnswer({ phone, items = [] }) {
+  try {
+    if (!clarifyAsksEnabled() || !items.length) return { recorded: false };
+    const allDigits = String(phone || '').replace(/\D/g, '');
+    const digits = allDigits.length === 10
+      ? allDigits
+      : (allDigits.length === 11 && allDigits.startsWith('1') ? allDigits.slice(1) : null);
+    if (!digits) return { recorded: false };
+    const awaiting = await db('message_drafts')
+      .where({ intent: 'estimate_clarify', source_ref: `clarify:${digits}` })
+      .whereNotNull('sent_at')
+      .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS))
+      .whereRaw("(flags->>'answered_at') is null")
+      .orderBy('sent_at', 'desc')
+      .first();
+    if (!awaiting) return { recorded: false };
+    let flags = {};
+    try {
+      flags = typeof awaiting.flags === 'string' ? JSON.parse(awaiting.flags) : (awaiting.flags || {});
+    } catch { flags = {}; }
+    const missing = Array.isArray(flags.missing) ? flags.missing : [];
+    const recorded = missing.filter((item) => items.includes(item));
+    if (!recorded.length) return { recorded: false };
+    const remaining = missing.filter((item) => !recorded.includes(item));
+    await db('message_drafts').where({ id: awaiting.id }).update({
+      flags: JSON.stringify({
+        ...flags,
+        missing: remaining,
+        answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
+        ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
+      }),
+    });
+    return { recorded: true, items: recorded };
+  } catch (err) {
+    logger.warn(`[estimate-clarify] answer bookkeeping failed: ${err.message}`);
+    return { recorded: false };
+  }
+}
+
 module.exports = {
   clarifyAsksEnabled,
   parkClarifyAsk,
   handleClarifyReply,
+  recordClarifyAnswer,
   _private: { composeClarifyBody, extractAddressReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };

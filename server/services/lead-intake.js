@@ -208,6 +208,17 @@ async function handleIntakeReply(customer, body) {
     });
     customer.lead_service_interest = cls.interest;
 
+    // Clarify lifecycle bookkeeping: this state machine consumes replies
+    // itself, so a sent clarify that asked for these items must be stamped
+    // answered here — otherwise its cooldown suppresses a later
+    // independent ask. Fail-soft, bookkeeping only.
+    try {
+      const { recordClarifyAnswer } = require('./estimate-clarify-asks');
+      await recordClarifyAnswer({ phone: customer.phone, items: ['specific_service'] });
+    } catch (e) {
+      logger.warn(`[lead-intake] clarify bookkeeping failed: ${e.message}`);
+    }
+
     let hasAddress = !!(customer.address_line1 && String(customer.address_line1).trim());
     if (!hasAddress) {
       // Combined-reply capture: without it the machine advances to
@@ -218,6 +229,12 @@ async function handleIntakeReply(customer, body) {
         await db('customers').where({ id: customer.id }).update({ address_line1: combinedAddress });
         customer.address_line1 = combinedAddress;
         hasAddress = true;
+        try {
+          const { recordClarifyAnswer } = require('./estimate-clarify-asks');
+          await recordClarifyAnswer({ phone: customer.phone, items: ['street_address'] });
+        } catch (e) {
+          logger.warn(`[lead-intake] clarify bookkeeping failed: ${e.message}`);
+        }
       }
     }
     if (hasAddress) {
@@ -283,6 +300,13 @@ async function handleIntakeReply(customer, body) {
       address_line1: address,
     });
     customer.address_line1 = address;
+    // Clarify lifecycle bookkeeping — see the awaiting_service branch.
+    try {
+      const { recordClarifyAnswer } = require('./estimate-clarify-asks');
+      await recordClarifyAnswer({ phone: customer.phone, items: ['street_address'] });
+    } catch (e) {
+      logger.warn(`[lead-intake] clarify bookkeeping failed: ${e.message}`);
+    }
 
     const interest = customer.lead_service_interest;
     if (!interest) {
