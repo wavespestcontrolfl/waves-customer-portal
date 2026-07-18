@@ -246,6 +246,16 @@ async function handleIntakeReply(customer, body) {
       // lane is for shell-less SMS-origin leads only.
       const existingShell = await db('estimates')
         .where({ customer_id: customer.id, status: 'draft' })
+        // Only true SHELLS bypass the engine: unpriced intake/webhook rows.
+        // An unrelated priced draft (existing customer) must not disable
+        // the lane — the engine's address-aware duplicate guard owns that.
+        .whereIn('source', ['sms_intake', 'lead_webhook'])
+        .where(function unpriced() {
+          this.whereNull('monthly_total').orWhere('monthly_total', 0);
+        })
+        .where(function noOnetime() {
+          this.whereNull('onetime_total').orWhere('onetime_total', 0);
+        })
         .orderBy('created_at', 'desc')
         .first();
       if (!existingShell && await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
@@ -318,6 +328,13 @@ async function handleIntakeReply(customer, body) {
     // engine only runs when no open shell would block its priced draft.
     const existingShell = await db('estimates')
       .where({ customer_id: customer.id, status: 'draft' })
+      .whereIn('source', ['sms_intake', 'lead_webhook'])
+      .where(function unpriced() {
+        this.whereNull('monthly_total').orWhere('monthly_total', 0);
+      })
+      .where(function noOnetime() {
+        this.whereNull('onetime_total').orWhere('onetime_total', 0);
+      })
       .orderBy('created_at', 'desc')
       .first();
     if (!existingShell && await engineDraftHandoff(customer, body, `address captured (${interest})`)) {

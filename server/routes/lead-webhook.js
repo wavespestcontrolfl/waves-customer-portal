@@ -866,7 +866,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             .where({ id: customer.id, lead_intake_status: 'awaiting_service' })
             .update({
               lead_intake_status: 'awaiting_address',
-              lead_service_interest: serviceInterest,
+              // varchar(32) column — an oversized label would throw AFTER
+              // the ask parked and strand the customer in awaiting_service.
+              lead_service_interest: String(serviceInterest || '').slice(0, 32),
             });
         }
       } catch (askErr) {

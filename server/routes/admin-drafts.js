@@ -371,11 +371,16 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
       // whereNull(deleted_at): a soft-deleted lead reads as gone, retiring
       // the draft — matching how every other lead query treats deletion.
       flags.lead_id ? db('leads').where({ id: flags.lead_id }).whereNull('deleted_at').first() : null,
-      draft.customer_id ? db('customers').where({ id: draft.customer_id }).first() : null,
+      draft.customer_id ? db('customers').where({ id: draft.customer_id }).whereNull('deleted_at').first() : null,
       flags.estimate_id ? db('estimates').where({ id: flags.estimate_id }).first() : null,
     ]);
     if (flags.lead_id && !lead) {
       return await retire('Clarify draft retired — the linked lead no longer exists.');
+    }
+    if (draft.customer_id && !customer) {
+      // Parity with the lead check — an archived/deleted customer must not
+      // receive a stale clarification.
+      return await retire('Clarify draft retired — the linked customer no longer exists.');
     }
     if (lead && CLOSED_LEAD_STATUSES.has(String(lead.status || ''))) {
       return await retire('Clarify draft retired — the linked lead is closed.');
@@ -393,8 +398,10 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
     const hasAddressNow = [lead?.address, customer?.address_line1]
       .some((value) => value && /\d/.test(String(value)));
     const { hasConcreteServiceInterest } = require('../services/lead-estimate-automation');
-    const hasServiceNow = [lead?.service_interest, customer?.lead_service_interest]
-      .some((value) => hasConcreteServiceInterest(value));
+    // ONLY the lead row answers a service ask: customers.lead_service_interest
+    // is persistent leftover state from prior intake flows and would retire
+    // brand-new "which service?" questions as already answered.
+    const hasServiceNow = hasConcreteServiceInterest(lead?.service_interest);
     const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
       || (item === 'specific_service' && !hasServiceNow));
     if (missing.length && !stillMissing.length) {
