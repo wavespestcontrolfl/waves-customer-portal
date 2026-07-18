@@ -339,11 +339,15 @@ async function finalizeRun({ runId, dbi = db } = {}) {
   }
   const avg = (arr) => (arr.length ? Number((arr.reduce((a, x) => a + x, 0) / arr.length).toFixed(2)) : null);
 
+  // Same frozen membership rule as the runner: only items sealed at-or-before
+  // run creation count toward completion, so a mid-run seal pass can never
+  // hold a run open (or grow it) after the fact.
   const [{ count: pendingCount }] = await dbi({ si: 'sms_sealed_eval_items' })
     .leftJoin({ r: 'sms_sealed_eval_results' }, function pendingJoin() {
       this.on('r.item_id', 'si.id').andOnVal('r.run_id', runId);
     })
     .where('si.active', true)
+    .where('si.sealed_at', '<=', run.started_at || new Date())
     .whereNull('r.id')
     .count('* as count');
   const done = Number(pendingCount) === 0;
@@ -408,17 +412,29 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
       .first('id');
     baseline = prior?.id || null;
   }
-  const [run] = await dbi('sms_sealed_eval_runs')
-    .insert({
-      prompt_version: drafter.PROMPT_VERSION,
-      provider_leg: providerLeg,
-      status: 'running',
-      items_total: Number(activeCount),
-      baseline_run_id: baseline,
-      triggered_by: String(triggeredBy || 'manual').slice(0, 100),
-    })
-    .returning('*');
-  return run;
+  try {
+    const [run] = await dbi('sms_sealed_eval_runs')
+      .insert({
+        prompt_version: drafter.PROMPT_VERSION,
+        provider_leg: providerLeg,
+        status: 'running',
+        items_total: Number(activeCount),
+        baseline_run_id: baseline,
+        triggered_by: String(triggeredBy || 'manual').slice(0, 100),
+      })
+      .returning('*');
+    return run;
+  } catch (err) {
+    // The one-running partial unique index closes the check-then-insert race:
+    // a concurrent create that slipped past the pre-check lands here instead
+    // of leaving a second 'running' row wedged behind the advisory lock.
+    if (err && err.code === '23505') {
+      const raced = new Error('a sealed-eval run is already in progress — wait for it or resume it');
+      raced.code = 'RUN_IN_PROGRESS';
+      throw raced;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -435,7 +451,34 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
   if (runId) {
     run = await dbi('sms_sealed_eval_runs').where({ id: runId }).first();
     if (!run) throw new Error(`sealed-eval run ${runId} not found`);
-    if (run.status !== 'running') throw new Error(`sealed-eval run ${runId} is ${run.status}, not resumable`);
+    if (run.status !== 'running' && run.status !== 'failed') {
+      throw new Error(`sealed-eval run ${runId} is ${run.status}, not resumable`);
+    }
+    // A run only ever contains ONE drafter version. Resuming after a prompt
+    // bump would draft the remaining items under the NEW code and record
+    // them beneath the old label — refuse and start a fresh run instead.
+    const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+    if (run.prompt_version !== currentVersion) {
+      throw new Error(`sealed-eval run ${runId} examined ${run.prompt_version} but the drafter is now ${currentVersion} — start a new run`);
+    }
+    if (run.status === 'failed') {
+      // Failed runs keep every result already paid for — reopen them instead
+      // of forcing a fresh, fully billed run. Guarded UPDATE: the one-running
+      // index rejects the flip (23505) while another run is processing.
+      let reopened = 0;
+      try {
+        reopened = await dbi('sms_sealed_eval_runs')
+          .where({ id: runId, status: 'failed' })
+          .update({ status: 'running', error: null, finished_at: null });
+      } catch (err) {
+        if (err && err.code === '23505') {
+          throw new Error('another sealed-eval run is in progress — wait for it before resuming this one');
+        }
+        throw err;
+      }
+      if (!reopened) throw new Error(`sealed-eval run ${runId} is no longer resumable`);
+      run = { ...run, status: 'running', error: null, finished_at: null };
+    }
   } else {
     run = await createExamRun({ providerLeg, baselineRunId, triggeredBy, dbi });
   }
@@ -444,6 +487,14 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
 
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  // Run membership is FROZEN at creation: only items sealed at-or-before the
+  // run row was created belong to it. Without this, a weekly/manual seal
+  // pass landing mid-run would grow the exam under one leg but not the
+  // other — different legs (and the baseline) would examine different sets,
+  // and judged could exceed items_total. Items are never edited after
+  // insert, so sealed_at is a stable membership key.
+  const cohortCutoff = run.started_at || new Date();
 
   let consecutiveFailures = 0;
   let processed = 0;
@@ -457,6 +508,7 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
           this.on('r.item_id', 'si.id').andOnVal('r.run_id', run.id);
         })
         .where('si.active', true)
+        .where('si.sealed_at', '<=', cohortCutoff)
         .whereNull('r.id')
         .orderBy('si.sealed_at', 'asc')
         .limit(25)

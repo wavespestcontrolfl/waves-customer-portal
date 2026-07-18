@@ -18,12 +18,13 @@ const drafter = require('../services/sms-shadow-drafter');
 const judge = require('../services/sms-shadow-judge');
 const sealedEval = require('../services/sms-sealed-eval');
 
-function makeRunnerDb({ runs = [], items = [], results = [] } = {}) {
+function makeRunnerDb({ runs = [], items = [], results = [], insertErrorCode = null } = {}) {
   const state = {
     runsById: new Map(runs.map((r) => [r.id, { ...r }])),
     items: items.map((i) => ({ ...i })),
     results: results.map((r) => ({ ...r })),
     runPatches: [],
+    calls: [],
     lastLoadedRunId: null,
     nextRunSeq: 1,
   };
@@ -34,6 +35,7 @@ function makeRunnerDb({ runs = [], items = [], results = [] } = {}) {
       _count: false, _first: false, _insert: null, _update: null, _joined: false,
     };
     const rec = (name) => (...args) => {
+      state.calls.push([name, args, tableKey]);
       if ((name === 'where' || name === 'whereNull') && typeof args[0] === 'function') {
         args[0].call(b);
         return b;
@@ -59,11 +61,16 @@ function makeRunnerDb({ runs = [], items = [], results = [] } = {}) {
       for (const [k, v] of b._whereNots) if (row[k] === v) return false;
       return true;
     };
-    b.then = (resolve, reject) => {
+    b.then = (resolve, reject) => Promise.resolve().then(() => {
       let out;
       if (tableKey === 'sms_sealed_eval_runs') {
         if (b._insert) {
-          const row = { id: `run-new-${state.nextRunSeq += 1}`, ...b._insert };
+          if (insertErrorCode) {
+            const e = new Error('duplicate key value violates unique constraint');
+            e.code = insertErrorCode;
+            throw e;
+          }
+          const row = { id: `run-new-${state.nextRunSeq += 1}`, started_at: new Date('2026-07-18T00:00:00Z'), ...b._insert };
           state.runsById.set(row.id, row);
           out = [row];
         } else if (b._update) {
@@ -103,8 +110,8 @@ function makeRunnerDb({ runs = [], items = [], results = [] } = {}) {
       } else {
         out = [];
       }
-      return Promise.resolve(out).then(resolve, reject);
-    };
+      return out;
+    }).then(resolve, reject);
     return b;
   };
   dbi.raw = (sql) => sql;
@@ -267,5 +274,56 @@ describe('runSealedExam — replay loop', () => {
       runs: [{ id: 'r1', status: 'complete', provider_leg: 'openai', prompt_version: 'x' }],
     });
     await expect(sealedEval.runSealedExam({ runId: 'r1', dbi })).rejects.toThrow(/not resumable/);
+  });
+
+  test('the pending-item queries freeze run membership to items sealed at-or-before run creation', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', baseline_run_id: null, started_at: new Date('2026-07-18T00:00:00Z') }],
+      items: [item('i1')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+    await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    const freezeWheres = dbi.state.calls.filter(
+      ([m, args, t]) => t === 'sms_sealed_eval_items' && m === 'where' && args[0] === 'si.sealed_at' && args[1] === '<='
+    );
+    // Both the runner sweep and the finalizer pending-count apply the freeze.
+    expect(freezeWheres.length).toBeGreaterThanOrEqual(2);
+    for (const [, args] of freezeWheres) expect(args[2]).toBeInstanceOf(Date);
+  });
+
+  test('a FAILED run reopens on resume, keeps its paid results, and completes', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{
+        id: 'r1', status: 'failed', provider_leg: 'openai', prompt_version: 'house_voice_v9_test',
+        baseline_run_id: null, error: 'provider blip', started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i1'), item('i2')],
+      results: [{ run_id: 'r1', item_id: 'i1', verdict: 'equivalent', scores: null }],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('complete');
+    expect(out.processed).toBe(1); // only i2 — i1's result was kept, not re-billed
+    const reopen = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'running');
+    expect(reopen).toBeTruthy();
+    expect(reopen.patch.error).toBeNull();
+    expect(dbi.state.runPatches.some((p) => p.id === 'r1' && p.patch.status === 'complete')).toBe(true);
+  });
+
+  test('resume refuses a run from a superseded drafter version (one run = one version)', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v8_old' }],
+    });
+    await expect(sealedEval.runSealedExam({ runId: 'r1', dbi }))
+      .rejects.toThrow(/start a new run/);
+  });
+
+  test('a create that loses the insert race surfaces RUN_IN_PROGRESS (one-running unique index)', async () => {
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1')], insertErrorCode: '23505' });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
+      .rejects.toMatchObject({ code: 'RUN_IN_PROGRESS' });
   });
 });

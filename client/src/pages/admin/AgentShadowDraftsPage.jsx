@@ -444,6 +444,12 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
   const runs = exam.runs || [];
   const runsById = new Map(runs.map((r) => [r.id, r]));
   const inFlight = runs.find((r) => r.status === "running") || null;
+  // A failed run keeps every result already paid for — offer to resume it
+  // instead of re-billing a fresh run. Only current-version failures: the
+  // server refuses stale-version resumes (one run = one drafter version).
+  const resumableFailure = !inFlight
+    ? runs.find((r) => r.status === "failed" && r.promptVersion === exam.currentVersion) || null
+    : null;
   const items = exam.items || { active: 0, total: 0 };
   return (
     <div style={{ display: "grid", gap: 8 }}>
@@ -484,17 +490,29 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
                 Resume stalled run
               </button>
             ) : (
-              Object.entries(LEG_LABELS).map(([leg, label]) => (
-                <button
-                  key={leg}
-                  type="button"
-                  disabled={busy || exam.gateEnabled === false || !items.active}
-                  onClick={() => onRun(leg)}
-                  style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.blue}`, background: D.card, color: D.blue, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
-                >
-                  Run exam — {label}
-                </button>
-              ))
+              <>
+                {resumableFailure && (
+                  <button
+                    type="button"
+                    disabled={busy || exam.gateEnabled === false}
+                    onClick={() => onResume(resumableFailure)}
+                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                  >
+                    Resume failed run ({LEG_LABELS[resumableFailure.providerLeg] || resumableFailure.providerLeg})
+                  </button>
+                )}
+                {Object.entries(LEG_LABELS).map(([leg, label]) => (
+                  <button
+                    key={leg}
+                    type="button"
+                    disabled={busy || exam.gateEnabled === false || !items.active}
+                    onClick={() => onRun(leg)}
+                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.blue}`, background: D.card, color: D.blue, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                  >
+                    Run exam — {label}
+                  </button>
+                ))}
+              </>
             )}
           </div>
         </div>

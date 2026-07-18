@@ -73,6 +73,15 @@ exports.up = async function up(knex) {
         ADD CONSTRAINT sms_sealed_eval_runs_leg_check
         CHECK (provider_leg IN ('anthropic', 'openai'))
     `);
+    // At most ONE run may be processing at a time — processing is serialized
+    // behind a single advisory lock, so a second 'running' row would sit
+    // unprocessed and read as wedged. The app checks first for a friendly
+    // 409; this index makes the invariant hold under concurrent creates.
+    await knex.raw(`
+      CREATE UNIQUE INDEX sms_sealed_eval_runs_one_running
+        ON sms_sealed_eval_runs ((TRUE))
+        WHERE status = 'running'
+    `);
   }
 
   if (!(await knex.schema.hasTable('sms_sealed_eval_results'))) {
