@@ -91,6 +91,7 @@ const INFRA_MARKERS = [
   'get_apify_status',
   'get_social_channel_status',
   'get_managed_agent_runs',
+  'get_scheduled_job_health',
 ];
 
 // Every context an admin page can send. 'customers' exercises the base

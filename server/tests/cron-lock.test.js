@@ -1,9 +1,22 @@
-jest.mock('../models/db', () => ({
-  client: {
+jest.mock('../models/db', () => {
+  // Callable knex mock: db('job_health') feeds the job-health recorder,
+  // db.client feeds the advisory-lock plumbing.
+  const builder = {
+    insert: jest.fn(() => builder),
+    onConflict: jest.fn(() => builder),
+    merge: jest.fn(async () => undefined),
+    where: jest.fn(() => builder),
+    update: jest.fn(async () => 1),
+  };
+  const fn = jest.fn(() => builder);
+  fn.client = {
     acquireConnection: jest.fn(),
     releaseConnection: jest.fn(),
-  },
-}));
+  };
+  fn.raw = jest.fn((sql) => ({ __raw: sql }));
+  fn.__builder = builder;
+  return fn;
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -97,5 +110,67 @@ describe('cron-lock runExclusive', () => {
 
     expect(body).not.toHaveBeenCalled();
     expect(result).toEqual({ skipped: true, reason: 'no_connection' });
+  });
+});
+
+describe('cron-lock job-health recorder', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a successful run records start (upsert) and success end', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    await runExclusive('lawn-pricing-sweep', async () => 'ok');
+
+    expect(db).toHaveBeenCalledWith('job_health');
+    // Start: upsert with running status
+    expect(db.__builder.insert).toHaveBeenCalledWith(expect.objectContaining({
+      job_name: 'lawn-pricing-sweep', last_status: 'running',
+    }));
+    expect(db.__builder.onConflict).toHaveBeenCalledWith('job_name');
+    // End: success clears the failure streak and stamps last_success_at
+    expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
+      last_status: 'success',
+      consecutive_failures: 0,
+      last_error: null,
+      last_success_at: expect.any(Date),
+      last_duration_ms: expect.any(Number),
+    }));
+  });
+
+  test('a failing run records the error, increments the streak, and still throws', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    await expect(
+      runExclusive('ga4-sync', async () => { throw new Error('quota exceeded'); }),
+    ).rejects.toThrow('quota exceeded');
+
+    expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({
+      last_status: 'failed',
+      last_error: 'quota exceeded',
+      consecutive_failures: expect.objectContaining({ __raw: 'consecutive_failures + 1' }),
+    }));
+  });
+
+  test('skipped ticks record nothing', async () => {
+    const conn = mockConnection(false);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    await runExclusive('test-job', jest.fn());
+    expect(db).not.toHaveBeenCalledWith('job_health');
+  });
+
+  test('recorder failure never breaks the job (pre-migration safety)', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+    db.__builder.merge.mockRejectedValueOnce(new Error('relation "job_health" does not exist'));
+    db.__builder.update.mockRejectedValueOnce(new Error('relation "job_health" does not exist'));
+
+    const body = jest.fn().mockResolvedValue({ sent: 2 });
+    const result = await runExclusive('test-job', body);
+
+    expect(body).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ sent: 2 });
   });
 });

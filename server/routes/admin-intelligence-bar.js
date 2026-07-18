@@ -49,6 +49,7 @@ const { BOUNCIE_OPS_TOOLS, executeBouncieOpsTool } = require('../services/intell
 const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligence-bar/apify-ops-tools');
 const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
+const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
@@ -117,6 +118,7 @@ const BOUNCIE_OPS_TOOL_NAMES = new Set(BOUNCIE_OPS_TOOLS.map(t => t.name));
 const APIFY_OPS_TOOL_NAMES = new Set(APIFY_OPS_TOOLS.map(t => t.name));
 const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
 const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
+const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
 // about deploys, errors, or webhook health) and shares the admin-only guard
 // that OPS_TOOLS established — technician tokens never see or execute them.
@@ -127,7 +129,7 @@ const INFRA_TOOLS = [
   ...GOOGLE_ADS_OPS_TOOLS, ...TOKEN_HEALTH_TOOLS, ...SENDGRID_OPS_TOOLS,
   ...DATAFORSEO_OPS_TOOLS, ...GBP_OPS_TOOLS, ...GA4_OPS_TOOLS,
   ...META_ADS_OPS_TOOLS, ...BOUNCIE_OPS_TOOLS, ...APIFY_OPS_TOOLS,
-  ...SOCIAL_OPS_TOOLS, ...MANAGED_AGENTS_OPS_TOOLS,
+  ...SOCIAL_OPS_TOOLS, ...MANAGED_AGENTS_OPS_TOOLS, ...JOB_HEALTH_TOOLS,
 ];
 const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
@@ -985,6 +987,7 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - Apify: get_apify_status (monthly usage vs limit + recent scrape runs — the price-scan scraper dies silently at the cap).
 - Social: get_social_channel_status (per-channel flags + credential presence + dry-run/pause switches + recent posts). Token VALIDITY is token health; posting happens in the social studio.
 - Managed agents: get_managed_agent_runs (recent autonomous agent sessions — BI briefing, blog engine, backlink, lead response — with status and token usage). The "did last night's runs succeed?" check.
+- Internal crons: get_scheduled_job_health (the portal's OWN scheduled jobs — pricing sweeps, syncs, reminder crons — last run/success, failure streaks, stuck-mid-run). The internal counterpart to the external checks above.
 - SendGrid: get_email_suppressions (recent bounces/blocks/spam reports), check_email_suppression (is ONE address suppressed). A suppressed address silently swallows every send.
 - Google Business Profiles: get_gbp_status (connection + verification/suspension + latest posts per location). Reviews use the review tools.
 - GA4: get_ga4_snapshot (live traffic + conversion events, lags ~1 day). Deeper trends live on the dashboard.
@@ -1148,6 +1151,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (MANAGED_AGENTS_OPS_TOOL_NAMES.has(toolName)) {
     return executeManagedAgentsOpsTool(toolName, input);
+  }
+  if (JOB_HEALTH_TOOL_NAMES.has(toolName)) {
+    return executeJobHealthTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);
@@ -1728,6 +1734,7 @@ router.get('/quick-actions', async (req, res, next) => {
 
   const scheduleActions = [
     { id: 'day_briefing', group: 'Plan', label: 'Day Briefing', prompt: 'Give me a full briefing for today' },
+    { id: 'truck', group: 'Plan', label: "Where's the Truck", prompt: "Where's the truck right now, and what has it driven today?" },
     { id: 'find_time', group: 'Plan', label: 'Find a Time', prompt: 'Find the best time slot for a new customer — ask me for the address and service type' },
     { id: 'gaps_this_week', group: 'Plan', label: 'Gaps This Week', prompt: 'Where do we have open capacity this week?' },
     { id: 'optimize', group: 'Optimize', label: 'Optimize Routes', prompt: 'Optimize all routes for today' },
@@ -1750,6 +1757,9 @@ router.get('/quick-actions', async (req, res, next) => {
     { id: 'infra_check', group: 'Ops', label: 'Infra Check', prompt: 'Full infrastructure health check: Railway deploy status for each service, Sentry top and new issues in the last 24 hours, Cloudflare Pages build failures, and any Stripe or Twilio webhook/delivery failures.' },
     { id: 'error_check', group: 'Ops', label: 'Error Check', prompt: 'Check Sentry: top unresolved errors and any issues that first appeared in the last 24 hours.' },
     { id: 'shipped_today', group: 'Ops', label: 'What Shipped', prompt: 'What shipped recently? List merged PRs from the last 48 hours and confirm the latest Railway deploy is green.' },
+    { id: 'integrations_check', group: 'Ops', label: 'Integrations Check', prompt: 'Are all integrations healthy? Check token health across every platform and flag anything disconnected, expired, or never authorized.' },
+    { id: 'agent_runs', group: 'Ops', label: 'Agent Runs', prompt: 'Did the autonomous agent runs succeed? List recent managed agent sessions and flag any terminated or stuck ones.' },
+    { id: 'cron_health', group: 'Ops', label: 'Cron Health', prompt: 'Are the scheduled jobs healthy? Show any cron that is failing repeatedly, stuck mid-run, or has not succeeded recently.' },
   ];
 
   const seoActions = [
@@ -1802,6 +1812,7 @@ router.get('/quick-actions', async (req, res, next) => {
       { id: 'top_customers', group: 'Analyze', label: 'Top 10 Customers', prompt: 'Who are our top 10 customers by revenue this month?' },
       { id: 'ad_roi', group: 'Analyze', label: 'Ad ROI', prompt: "What's our ad attribution? ROAS and CAC by channel?" },
       { id: 'low_margin', group: 'Watch', label: 'Low Margin Alert', prompt: 'Which service lines are below our active margin floor?' },
+      { id: 'stripe_drafts', group: 'Watch', label: 'Stripe Drafts', prompt: 'Any incomplete Stripe payment attempts? List recent drafts and failed attempts with amounts and failure reasons.' },
     ] });
   } else if (context === 'tech') {
     res.json({ actions: [
@@ -1831,6 +1842,7 @@ router.get('/quick-actions', async (req, res, next) => {
       { id: 'stats', group: 'Analyze', label: 'SMS Stats', prompt: 'SMS volume breakdown this month by type' },
       { id: 'csr', group: 'Analyze', label: 'CSR Coach', prompt: "How's the CSR performance? Any follow-up tasks pending?" },
       { id: 'search', group: 'Search', label: 'Search Messages', prompt: 'Search messages about...' },
+      { id: 'deliverability', group: 'Triage', label: 'Email Deliverability', prompt: 'Any email deliverability problems this week? Check SendGrid bounces, blocks, spam reports, and unsubscribes.' },
     ] });
   } else if (context === 'tax') {
     res.json({ actions: [
