@@ -696,7 +696,7 @@ const BillingCron = {
       // discriminate either). Disarmed rows stay visible for manual triage;
       // the owner-run staged backfill supersedes the KNOWN mis-created July
       // cohort explicitly, with human eyes on each row.
-      if (isMonthlyObligation && customer.billing_mode === 'per_application'
+      if (isMonthlyObligation && ['per_application', 'per_visit', 'one_time'].includes(customer.billing_mode)
         && !(await db('payments')
           .where({ customer_id: payment.customer_id, status: 'paid' })
           .where('description', 'like', '%WaveGuard Monthly%')
@@ -707,7 +707,7 @@ const BillingCron = {
           .update({
             next_retry_at: null,
             failure_reason: db.raw(
-              "COALESCE(failure_reason, '') || ' — retry ladder stopped: customer bills per application (review manually — likely mis-created monthly obligation)'",
+              "COALESCE(failure_reason, '') || ' — retry ladder stopped: customer's billing lane is not monthly (review manually — likely mis-created monthly obligation)'",
             ),
           }).catch((updErr) => logger.error(`[billing-cron] retry disarm (billing mode) failed for payment ${payment.id}: ${updErr.message}`));
         await logAutopay(payment.customer_id, 'skipped_billing_mode', {

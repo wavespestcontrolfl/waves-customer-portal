@@ -2369,13 +2369,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       if (mode === 'annual_prepay') {
         let liveTerm = null;
         try {
+          // payment_pending deliberately does NOT qualify: the annual-prepay
+          // service only stamps this lane once the prepay invoice is PAID —
+          // pending-window visits must keep billing per application
+          // (Codex r2).
           liveTerm = await db('annual_prepay_terms')
             .where({ customer_id: req.params.id })
-            .whereIn('status', ['payment_pending', 'active', 'renewal_pending'])
+            .whereIn('status', ['active', 'renewal_pending'])
             .first('id');
         } catch { /* table absent — treat as no live term */ }
         if (!liveTerm) {
-          return res.status(400).json({ error: 'No live annual-prepay term on file — create/accept the annual prepay first' });
+          return res.status(400).json({ error: 'Annual prepay requires a PAID active term — the lane stamps automatically when the annual invoice is paid' });
         }
       }
     }

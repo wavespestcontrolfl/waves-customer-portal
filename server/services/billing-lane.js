@@ -13,6 +13,11 @@
 
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 
+// Mirror of AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD — duplicated
+// as a literal so this module stays db-free for pure unit tests; the
+// annual-prepay service is the source of truth.
+const ANNUAL_PREPAY_PREPAID_METHOD = 'annual_prepay_invoice';
+
 const BILLING_MODES = [
   'monthly_membership', // dues on the 1st cover recurring plan visits
   'per_visit', // invoice-on-complete for each visit
@@ -122,16 +127,28 @@ function predictCompletionBilling({
   serviceType,
   payerBilled,
   prepaidAmount,
+  prepaidMethod,
   billingMode,
 }) {
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
   const none = { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
   if (payerBilled) return { kind: 'payer', amount: hasVisitPrice ? Number(estimatedPrice) : null, conflictStampedPrice: false };
-  // Annual-prepay coverage is validated by the term link, not the per-visit
-  // amount (discounted plans stamp visits LESS than list) — so the lane
-  // reads covered before any prepaid-amount math (Codex r1).
-  if (lane === 'annual_prepay') return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
   const prepaid = prepaidAmount != null ? Number(prepaidAmount) : 0;
+  if (lane === 'annual_prepay') {
+    // Coverage is the TERM-VALIDATED per-visit stamp (prepaid_method
+    // 'annual_prepay_invoice'), never the amount — discounted plans stamp
+    // visits below list. Without the stamp, completion mirrors: an
+    // explicitly priced uncovered visit (separately scheduled add-on)
+    // bills normally; an unpriced uncovered visit is owned by the renewal
+    // flow and bills nothing here (Codex r1+r2).
+    if (prepaidMethod === ANNUAL_PREPAY_PREPAID_METHOD) {
+      return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
+    }
+    if (!hasVisitPrice) return none;
+    const amount = Number(estimatedPrice);
+    if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+    return { kind: 'invoice', amount: Math.max(0, amount - prepaid), conflictStampedPrice: false };
+  }
   if (lane === 'per_application') {
     // Mirrors the completion gate: per-application bills performed
     // applications only — never a callback or an always-free type

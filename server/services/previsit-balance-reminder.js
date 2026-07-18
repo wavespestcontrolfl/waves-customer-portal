@@ -51,8 +51,37 @@ function gateEnabled() {
 }
 
 /**
+ * The most recent dues due-date on or before todayEt (ET 'YYYY-MM-DD'), the
+ * grace date after which unpaid dues count as LATE, and the obligation month
+ * key those dues belong to. Real DATE math, not day-of-month integers, so a
+ * billing day near month end rolls over correctly (a Feb-28 obligation's
+ * grace lands in March and February's dues are still the ones checked —
+ * Codex r2). Billing days beyond a month's length clamp to its last day,
+ * matching isBillingDayMatch's clamping contract.
+ */
+function duesObligation(todayEt, billingDay) {
+  const [y, m, d] = String(todayEt).split('-').map(Number);
+  const clampDue = (yy, mm) => Math.min(Number(billingDay) || 1, new Date(Date.UTC(yy, mm, 0)).getUTCDate());
+  let yy = y;
+  let mm = m;
+  let due = clampDue(yy, mm);
+  if (d < due) {
+    mm -= 1;
+    if (mm === 0) { mm = 12; yy -= 1; }
+    due = clampDue(yy, mm);
+  }
+  const dueDate = new Date(Date.UTC(yy, mm - 1, due));
+  const grace = new Date(dueDate);
+  grace.setUTCDate(grace.getUTCDate() + DUES_GRACE_DAYS);
+  const iso = (dt) => dt.toISOString().slice(0, 10);
+  return { dueDateEt: iso(dueDate), graceDateEt: iso(grace), monthKey: `${yy}-${String(mm).padStart(2, '0')}` };
+}
+
+/**
  * Pure eligibility predicate (exported for tests). Answers: given this
  * upcoming visit + customer money state, should the reminder send?
+ * duesCollected refers to the OBLIGATION month (duesObligation), not the
+ * calendar month the sweep runs in.
  */
 function previsitBalanceReminderEligible({
   isRecurringVisit,
@@ -60,8 +89,8 @@ function previsitBalanceReminderEligible({
   alreadySent,
   laneMode,
   duesCollected,
-  todayEtDay,
-  billingDay,
+  todayEt,
+  graceDateEt,
   overdueRecurringDue,
 }) {
   if (!isRecurringVisit) return { send: false, reason: 'one_time_visit' };
@@ -69,7 +98,8 @@ function previsitBalanceReminderEligible({
   if (alreadySent) return { send: false, reason: 'already_sent' };
   const duesLate = laneMode === 'monthly_membership'
     && duesCollected === false
-    && Number(todayEtDay) >= (Number(billingDay) || 1) + DUES_GRACE_DAYS;
+    && !!graceDateEt
+    && String(todayEt) >= String(graceDateEt);
   const overdueDue = Number(overdueRecurringDue) || 0;
   if (!duesLate && !(overdueDue > 0)) return { send: false, reason: 'no_recurring_late_balance' };
   return { send: true, duesLate, overdueDue };
@@ -105,7 +135,6 @@ async function runSweep({ now = new Date() } = {}) {
   const target = new Date(`${todayEt}T12:00:00Z`);
   target.setUTCDate(target.getUTCDate() + LEAD_DAYS);
   const targetDate = target.toISOString().slice(0, 10);
-  const todayEtDay = Number(todayEt.slice(8, 10));
 
   const visits = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -133,9 +162,30 @@ async function runSweep({ now = new Date() } = {}) {
   for (const visit of visits) {
     try {
       const lane = resolveBillingLane(visit);
+      const obligation = duesObligation(todayEt, visit.billing_day);
       let duesCollected = null;
       if (lane.mode === 'monthly_membership') {
-        duesCollected = await monthlyDuesCollected(db, visit.customer_id, now);
+        // Check the OBLIGATION month's dues (noon-Z anchor keeps the ET
+        // month stable), so a Feb-28 biller checked in early March is
+        // judged on February's dues, not March's (Codex r2).
+        duesCollected = await monthlyDuesCollected(db, visit.customer_id, new Date(`${obligation.dueDateEt}T12:00:00Z`));
+      }
+      // Payer-billed resolution must include the customer's DEFAULT payer,
+      // not just the per-job column — resolveForInvoice is the same
+      // authority completion uses. A resolve outage fails toward SKIP: a
+      // billing dun must never reach a homeowner whose visits a third
+      // party pays for (Codex r2; same fail-direction as card-on-file).
+      let payerBilled = !!visit.payer_id;
+      try {
+        const PayerService = require('./payer');
+        const resolved = await PayerService.resolveForInvoice({
+          customerId: visit.customer_id,
+          scheduledServiceId: visit.id,
+        });
+        payerBilled = !!resolved?.payerId;
+      } catch (payerErr) {
+        logger.warn(`[previsit-balance] payer resolve failed for visit ${visit.id} — skipping to be safe: ${payerErr.message}`);
+        payerBilled = true;
       }
       const overdue = await overdueRecurringInvoices(visit.customer_id);
       // Recently-touched overdue invoices stay with the follow-up engine.
@@ -145,12 +195,12 @@ async function runSweep({ now = new Date() } = {}) {
 
       const verdict = previsitBalanceReminderEligible({
         isRecurringVisit: true,
-        payerBilled: !!visit.payer_id,
+        payerBilled,
         alreadySent: false,
         laneMode: lane.mode,
         duesCollected,
-        todayEtDay,
-        billingDay: visit.billing_day,
+        todayEt,
+        graceDateEt: obligation.graceDateEt,
         overdueRecurringDue,
       });
       if (!verdict.send) { skipped++; continue; }
@@ -230,6 +280,7 @@ async function runSweep({ now = new Date() } = {}) {
 module.exports = {
   runSweep,
   previsitBalanceReminderEligible,
+  duesObligation,
   overdueRecurringInvoices,
   TEMPLATE_KEY,
   EMAIL_TEMPLATE_KEY,

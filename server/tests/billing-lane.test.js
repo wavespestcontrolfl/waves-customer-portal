@@ -130,9 +130,19 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'invoice', amount: 50, conflictStampedPrice: false });
   });
 
-  test('annual prepay lane reads as covered', () => {
-    expect(predictCompletionBilling({ ...memberBase, lane: 'annual_prepay', billingMode: 'annual_prepay' }).kind)
+  test('annual prepay: covered ONLY by the term-validated stamp; uncovered priced visits invoice (Codex r2)', () => {
+    const annual = { ...memberBase, lane: 'annual_prepay', billingMode: 'annual_prepay' };
+    expect(predictCompletionBilling({ ...annual, prepaidMethod: 'annual_prepay_invoice' }).kind)
       .toBe('covered_annual');
+    // Stamped below list price still reads covered — the term, not the amount.
+    expect(predictCompletionBilling({ ...annual, prepaidMethod: 'annual_prepay_invoice', estimatedPrice: 100, prepaidAmount: 80 }).kind)
+      .toBe('covered_annual');
+    // Uncovered + unpriced = renewal flow's problem, nothing bills here.
+    expect(predictCompletionBilling(annual))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+    // Uncovered + priced add-on bills normally.
+    expect(predictCompletionBilling({ ...annual, estimatedPrice: 150 }))
+      .toEqual({ kind: 'invoice', amount: 150, conflictStampedPrice: false });
   });
 
   test('per-visit lane invoices the stamped price, callback bills nothing', () => {

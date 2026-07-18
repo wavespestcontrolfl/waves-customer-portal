@@ -135,7 +135,7 @@ router.get('/', async (req, res, next) => {
     // term-covered (renewal collects via its own flow) — projecting
     // monthly_rate for either advertises a charge that will not run
     // (Codex round-2 + round-5).
-    const nonMonthlyBilling = perApplicationBilling || billingMode === 'annual_prepay';
+    const nonMonthlyBilling = billingMode !== null && billingMode !== 'monthly_membership';
     // Per-application collection takes ANY saved tender (owner ruling
     // 2026-07-09): chargeInvoiceWithSavedCard locks the PI to the saved
     // method's family (card settles inline, ACH rides processing→paid), so

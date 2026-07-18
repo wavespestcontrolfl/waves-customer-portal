@@ -1557,6 +1557,7 @@ router.get('/', async (req, res, next) => {
           serviceType: s.service_type,
           payerBilled: !!s.billed_to_payer_id,
           prepaidAmount: s.prepaid_amount,
+          prepaidMethod: s.prepaid_method || null,
         }),
       };
 
@@ -1857,6 +1858,7 @@ router.get('/week', async (req, res, next) => {
             serviceType: s.service_type,
             payerBilled: !!s.billed_to_payer_id,
             prepaidAmount: s.prepaid_amount,
+            prepaidMethod: s.prepaid_method || null,
           }),
         };
         return {
@@ -2411,6 +2413,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const memberSeriesCovered = bookingBillingTermEffective !== 'prepay_annual'
       && resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
     const createInvoiceStamp = memberSeriesCovered ? false : createInvoiceEffective;
+    // A priced ADD-ON riding a covered member visit must keep the row's
+    // price stamp: completion still suppresses the invoice (dues coverage),
+    // but the stamped price is what fires the one-per-series review alert
+    // so the office bills the add-on manually instead of it vanishing
+    // (Codex r2). Base-only rows stay stamp-free.
+    const hasPricedAddons = (lines) => (lines || []).some((a) => Number(a?.price) > 0);
 
     const zone = getZone(customer?.city, customer?.zip);
     // Owner directive (2026-07-03): every service call defaults to 60 minutes;
@@ -2529,7 +2537,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
       if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
-      if (cols.estimated_price && finalPrice != null && !memberSeriesCovered) insertData.estimated_price = finalPrice;
+      if (cols.estimated_price && finalPrice != null && (!memberSeriesCovered || hasPricedAddons(pricing.addonLines))) insertData.estimated_price = finalPrice;
       if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
@@ -2622,7 +2630,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // operator turns a re-service into a repeating cadence, every future
         // visit must stay free and report as a callback (not bill monthly dues).
         if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
-        if (cols.estimated_price && !memberSeriesCovered) {
+        if (cols.estimated_price && (!memberSeriesCovered || hasPricedAddons(childAddonLines))) {
           if (zeroCallbackPrice) childData.estimated_price = 0;
           else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
         }
@@ -2684,7 +2692,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
-          if (cols.estimated_price && !memberSeriesCovered) {
+          if (cols.estimated_price && (!memberSeriesCovered || hasPricedAddons(boosterAddonLines))) {
             if (zeroCallbackPrice) boosterData.estimated_price = 0;
             else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
           }
