@@ -123,6 +123,12 @@ export function AuthProvider({ children }) {
         setProperties(propertyData.properties || []);
         setPropertiesError(null);
       } catch (propertyErr) {
+        // Same staleness rule as the success path: if the session changed
+        // while this secondary fetch was in flight, this failure describes a
+        // DEAD session — falling through would drop the loading screen
+        // (setLoading(false) below) while the previous customer's state is
+        // still rendered under the new token.
+        if (sessionEpochRef.current !== epoch) return;
         // The active customer is still valid. Preserve any property list we
         // already have instead of collapsing a multi-property account to a
         // single property, and surface a retry in the account menu.

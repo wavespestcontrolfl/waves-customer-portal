@@ -51,6 +51,7 @@ function Probe() {
     <>
       <div data-testid="customer-id">{authApi.customer?.id || ''}</div>
       <div data-testid="authed">{String(authApi.isAuthenticated)}</div>
+      <div data-testid="properties-error">{authApi.propertiesError || ''}</div>
     </>
   );
 }
@@ -215,6 +216,27 @@ describe('session epoch guards', () => {
 
     expect(api.clearTokens).not.toHaveBeenCalled();
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-a');
+  });
+
+  it('discards a stale properties-fetch FAILURE from before a property switch', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    const slowProps = deferred();
+    api.getMe.mockResolvedValueOnce({ id: 'cust-a' });
+    // Mount-time secondary properties fetch stalls...
+    api.getAuthProperties.mockReturnValueOnce(slowProps.promise);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+
+    // ...the customer switches property (new epoch, fresh load succeeds)...
+    api.selectAuthProperty.mockResolvedValueOnce({ token: 'tok-b', refreshToken: 'ref-b', properties: [] });
+    api.getMe.mockResolvedValue({ id: 'cust-b' });
+    await act(async () => { await authApi.switchProperty('cust-b'); });
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
+
+    // ...and the DEAD session's properties fetch finally rejects. It must
+    // not surface an error (or drop the checking state) for the new session.
+    await act(async () => { slowProps.reject(new Error('network down')); });
+    expect(screen.getByTestId('properties-error').textContent).toBe('');
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
   });
 
   it('ignores a stale 401 from a replaced token instead of clearing the new session', async () => {
