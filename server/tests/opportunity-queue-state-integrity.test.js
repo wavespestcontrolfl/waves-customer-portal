@@ -319,7 +319,11 @@ describe('defer() — cap/gate-retry deferral back to pending (exceptions-only r
     expect(patch.available_at).toBe(when);
     // expires_at must be pushed past the defer horizon or expireStale()
     // expires the row before it ever becomes claimable again.
-    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('GREATEST'), expect.any(Array));
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('GREATEST(COALESCE(expires_at'), expect.any(Array));
+    // A deferral is not a failure: the attempt claimNext consumed must be
+    // refunded, or repeated cap-window deferrals exhaust the lifetime
+    // attempt budget and land in attempts_exhausted review.
+    expect(db.raw).toHaveBeenCalledWith('GREATEST(attempt_count - 1, 0)');
   });
 
   test('requires a claimToken and a real Date', async () => {

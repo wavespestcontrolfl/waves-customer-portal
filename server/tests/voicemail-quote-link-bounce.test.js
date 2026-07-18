@@ -74,9 +74,20 @@ describe('handleUndeliveredQuoteLink', () => {
       ['status', 'new'],
       ['null', 'deleted_at'],
     ]));
-    // Follow-up pulled to now.
+    // Follow-up pulled to now — via a single GUARDED update (only when the
+    // existing follow-up is missing or later; a concurrent operator edit to
+    // an earlier date must never be pushed back).
     const patch = leadUpdate.update.mock.calls[0][0];
     expect(patch.next_follow_up_at).toBeInstanceOf(Date);
+    const guardFn = leadUpdate._wheres.map((a) => a[0]).find((a) => typeof a === 'function');
+    expect(guardFn).toBeDefined();
+    const guard = {
+      whereNull: jest.fn(function whereNull() { return this; }),
+      orWhere: jest.fn(function orWhere() { return this; }),
+    };
+    guardFn.call(guard);
+    expect(guard.whereNull).toHaveBeenCalledWith('next_follow_up_at');
+    expect(guard.orWhere).toHaveBeenCalledWith('next_follow_up_at', '>', expect.any(Date));
     // Call-instead breadcrumb on the timeline.
     const activity = activityChain.insert.mock.calls[0][0];
     expect(activity.lead_id).toBe('lead1');
@@ -93,25 +104,26 @@ describe('handleUndeliveredQuoteLink', () => {
     expect(result).toMatchObject({ handled: false, reason: 'not_quote_link' });
   });
 
-  test('an existing EARLIER follow-up is never pushed out', async () => {
-    const earlier = new Date(Date.now() - 60 * 60 * 1000);
+  test('no claim row falls back to the newest still-new recent lead on the phone', async () => {
     const smsChain = chainFor({ id: 'sms1', to_phone: '+19412268022' });
-    const leadLookup = chainFor({ id: 'lead1', next_follow_up_at: earlier });
+    const claimChain = chainFor(undefined); // pre-claims-table send
+    const leadLookup = chainFor({ id: 'lead9', next_follow_up_at: null });
     const leadUpdate = chainFor(null);
     const stampChain = chainFor(null);
     const leadChains = [leadLookup, leadUpdate, stampChain];
     db.mockImplementation((table) => {
       if (table === 'sms_log') return smsChain;
+      if (table === 'voicemail_sms_claims') return claimChain;
       if (table === 'leads') return leadChains.shift() || chainFor(null);
       return chainFor(null);
     });
 
     const result = await handleUndeliveredQuoteLink({ sid: 'SMabc', status: 'undelivered', errorCode: '30006', to: '+19412268022' });
 
-    expect(result).toMatchObject({ handled: true });
-    // The first leads chain after the lookup is the extracted_data stamp,
-    // NOT a next_follow_up_at write — the overdue follow-up stays put.
-    const wroteFollowUp = leadUpdate.update.mock.calls.some((c) => c[0] && c[0].next_follow_up_at);
-    expect(wroteFollowUp).toBe(false);
+    expect(result).toMatchObject({ handled: true, leadId: 'lead9' });
+    expect(leadLookup._wheres).toEqual(expect.arrayContaining([
+      ['phone', '+19412268022'],
+      ['status', 'new'],
+    ]));
   });
 });

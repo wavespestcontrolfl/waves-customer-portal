@@ -437,10 +437,16 @@ async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
     if (!lead) return { handled: false, reason: 'no_open_lead' };
 
     const now = new Date();
-    const existing = lead.next_follow_up_at ? new Date(lead.next_follow_up_at) : null;
-    if (!existing || Number.isNaN(existing.getTime()) || existing > now) {
-      await db('leads').where({ id: lead.id }).update({ next_follow_up_at: now, updated_at: now });
-    }
+    // Single guarded UPDATE, not read-then-write: only pull the follow-up in
+    // when none exists or the existing one is LATER — a concurrent operator
+    // edit to an earlier date must never be pushed back to now. Zero updated
+    // rows just means it's already earlier.
+    await db('leads')
+      .where({ id: lead.id })
+      .where(function followUpMissingOrLater() {
+        this.whereNull('next_follow_up_at').orWhere('next_follow_up_at', '>', now);
+      })
+      .update({ next_follow_up_at: now, updated_at: now });
     await stampStatus(lead.id, 'undelivered');
     const codeText = String(errorCode || '') === '30006'
       ? 'error 30006 — landline, this number cannot receive SMS'

@@ -291,6 +291,11 @@ class OpportunityQueue {
         skip_reason: null,
         available_at: availableAt,
         expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [expiresFloor, expiresFloor]),
+        // A deferral is not a failure — refund the attempt claimNext just
+        // consumed, or repeated cap-window deferrals would exhaust the
+        // lifetime attempt budget and land the row in the
+        // attempts_exhausted review path this method exists to avoid.
+        attempt_count: db.raw('GREATEST(attempt_count - 1, 0)'),
         updated_at: new Date(),
       });
     return updated > 0;
