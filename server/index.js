@@ -381,6 +381,11 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
 app.use('/api/admin/auth', ...staffAuthBodyParsers);
 
+// MCP knowledge endpoint: authenticate (403/503/401 fail-closed) BEFORE any
+// body parsing, then parse with its own 256kb cap — same reason as staff
+// auth above; unauthenticated callers must not force 50 MB JSON parse work.
+app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 

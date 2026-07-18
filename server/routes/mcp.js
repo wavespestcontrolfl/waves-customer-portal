@@ -32,6 +32,14 @@ const router = express.Router();
 
 const PROTOCOL_VERSION = '2025-03-26';
 const MAX_BATCH = 20;
+// A single batch may fan out to at most this many tools/call executions —
+// each search can spend an embedding call, so the batch must not multiply
+// the per-request budget the /api limiter assumes.
+const MAX_BATCH_TOOL_CALLS = 5;
+// Query-embedding budget: well inside the stdio bridge's 30s request
+// timeout, so a slow embeddings API degrades to FTS-only instead of the
+// bridge aborting the whole search.
+const EMBED_TIMEOUT_MS = 8000;
 const CHUNK_FETCH_LIMIT = 100;
 const MIN_VECTOR_SIMILARITY = 0.30;
 const KNOWN_SOURCES = ['wiki', 'kb', 'service', 'protocol', 'lawn_module', 'jurisdiction', 'product_label', 'prep_guide', 'ops_rule', 'resolution'];
@@ -71,7 +79,7 @@ async function searchIndex(query, { sources = null, limit = 10 } = {}) {
 
   let vectorList = [];
   let usedVector = false;
-  const embedded = await embedQuery(q);
+  const embedded = await embedQuery(q, { timeoutMs: EMBED_TIMEOUT_MS });
   if (embedded.ok) {
     usedVector = true;
     const literal = toVectorLiteral(embedded.vector);
@@ -104,9 +112,11 @@ async function searchIndex(query, { sources = null, limit = 10 } = {}) {
 }
 
 async function getService(serviceKey) {
+  // Active catalog only — mirrors the knowledge-index service connector, so
+  // a known key can't resurface retired/archived service guidance here.
   const row = await db('services')
-    .where({ service_key: String(serviceKey || '') })
-    .first('service_key', 'name', 'short_name', 'description', 'category', 'subcategory', 'billing_type', 'frequency', 'visits_per_year', 'is_active', 'is_archived');
+    .where({ service_key: String(serviceKey || ''), is_active: true, is_archived: false })
+    .first('service_key', 'name', 'short_name', 'description', 'category', 'subcategory', 'billing_type', 'frequency', 'visits_per_year');
   return row || { error: 'service not found' };
 }
 
@@ -235,8 +245,11 @@ async function handleRpc(message) {
   }
 }
 
-// Body parsing: the app-level express.json (server/index.js) has already
-// parsed req.body by the time this router runs — do not add a second parser.
+// Body parsing: server/index.js mounts mcpPreParsers (below) on /api/mcp
+// BEFORE the legacy 50 MB global parsers — auth runs first, then a small
+// capped parse, so unauthenticated callers can't force large JSON parse
+// work (same pattern as staff auth). mcpAuth also runs here so the router
+// stays fail-closed even if mounted without the pre-chain.
 router.post('/', mcpAuth, async (req, res) => {
   const body = req.body;
   try {
@@ -247,7 +260,17 @@ router.post('/', mcpAuth, async (req, res) => {
       if (body.length > MAX_BATCH) {
         return res.status(200).json(rpcError(null, -32600, `batch too large (max ${MAX_BATCH})`));
       }
-      const responses = (await Promise.all(body.map(handleRpc))).filter(Boolean);
+      const toolCalls = body.filter((m) => m && m.method === 'tools/call').length;
+      if (toolCalls > MAX_BATCH_TOOL_CALLS) {
+        return res.status(200).json(rpcError(null, -32600, `too many tools/call in batch (max ${MAX_BATCH_TOOL_CALLS})`));
+      }
+      // Sequential on purpose: one request must not run tools in parallel
+      // and multiply DB/embedding load past what a single call costs.
+      const responses = [];
+      for (const message of body) {
+        const response = await handleRpc(message);  
+        if (response) responses.push(response);
+      }
       return responses.length ? res.json(responses) : res.status(202).end();
     }
     const response = await handleRpc(body);
@@ -261,7 +284,23 @@ router.post('/', mcpAuth, async (req, res) => {
 // Stateless server: no SSE stream to offer.
 router.get('/', mcpAuth, (req, res) => res.status(405).json({ error: 'streaming not supported; POST JSON-RPC' }));
 
+// Mounted by server/index.js on /api/mcp AHEAD of the 50 MB global body
+// parsers: authenticate first, then parse with a small cap. The trailing
+// error handler turns parser failures into JSON-RPC shapes (auth has
+// already passed by the time they can fire).
+const mcpBodyErrorHandler = (err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json(rpcError(null, -32600, 'payload too large (max 256kb)'));
+  }
+  if (err && err.status === 400) {
+    return res.status(200).json(rpcError(null, -32700, 'parse error'));
+  }
+  return next(err);
+};
+const mcpPreParsers = [mcpAuth, express.json({ limit: '256kb' }), mcpBodyErrorHandler];
+
 module.exports = router;
 module.exports.executeMcpTool = executeMcpTool;
 module.exports.handleRpc = handleRpc;
 module.exports.MCP_TOOLS = MCP_TOOLS;
+module.exports.mcpPreParsers = mcpPreParsers;

@@ -59,8 +59,11 @@ const TOKEN = 'test-mcp-service-token';
 let server;
 let baseUrl;
 beforeAll((done) => {
+  // Mirror the prod mount order (server/index.js): auth + capped parser
+  // BEFORE the 50 MB global parser, router after it.
   const app = express();
-  app.use(express.json());
+  app.use('/api/mcp', ...mcpRouter.mcpPreParsers);
+  app.use(express.json({ limit: '50mb' }));
   app.use('/api/mcp', mcpRouter);
   server = app.listen(0, () => {
     baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -130,6 +133,27 @@ describe('auth — fail-closed order', () => {
     const gateOff = await fetch(`${baseUrl}/api/mcp`, { headers: { authorization: `Bearer ${TOKEN}` } });
     expect(gateOff.status).toBe(403);
   });
+
+  test('auth runs BEFORE body parsing — unauthenticated bodies are never parsed', async () => {
+    const rawPost = (token, bodyText) => fetch(`${baseUrl}/api/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: bodyText,
+    });
+
+    mockGateOn = false;
+    expect((await rawPost(TOKEN, '{not json')).status).toBe(403);
+    expect((await rawPost(TOKEN, `{"pad":"${'x'.repeat(300 * 1024)}"}`)).status).toBe(403);
+    mockGateOn = true;
+    expect((await rawPost('wrong', '{not json')).status).toBe(401);
+
+    // Authenticated: malformed → JSON-RPC parse error; oversize → 413.
+    const malformed = await rawPost(TOKEN, '{not json');
+    expect(malformed.status).toBe(200);
+    expect((await malformed.json()).error.code).toBe(-32700);
+    const oversize = await rawPost(TOKEN, `{"pad":"${'x'.repeat(300 * 1024)}"}`);
+    expect(oversize.status).toBe(413);
+  });
 });
 
 describe('JSON-RPC plumbing', () => {
@@ -194,6 +218,14 @@ describe('JSON-RPC plumbing', () => {
     expect(empty.status).toBe(200);
     expect(empty.body.error.code).toBe(-32600); // spec: empty batch is Invalid Request, not a notification
   });
+
+  test('a batch cannot fan out more than 5 tools/call executions', async () => {
+    const calls = Array.from({ length: 6 }, (_, i) => ({ jsonrpc: '2.0', id: i, method: 'tools/call', params: { name: 'get_protocol', arguments: { protocol_key: 'pest' } } }));
+    const { body } = await rpc(calls);
+    expect(body.error.code).toBe(-32600);
+    expect(body.error.message).toMatch(/too many tools\/call/);
+    expect(builders).toHaveLength(0); // rejected before ANY tool ran
+  });
 });
 
 describe('tools', () => {
@@ -216,10 +248,12 @@ describe('tools', () => {
     expect(toolResult(bogus.body).error).toMatch(/not found/);
   });
 
-  test('get_service returns the row or a not-found error', async () => {
+  test('get_service returns only active-catalog rows', async () => {
     mockFirstRow = { service_key: 'pest_general_quarterly', name: 'General Pest Control (Quarterly)' };
     const found = await callTool('get_service', { service_key: 'pest_general_quarterly' });
     expect(toolResult(found.body).name).toBe('General Pest Control (Quarterly)');
+    // Retired/archived rows must be excluded — mirrors the service connector.
+    expect(builders[0].where).toHaveBeenCalledWith({ service_key: 'pest_general_quarterly', is_active: true, is_archived: false });
 
     mockFirstRow = null;
     const missing = await callTool('get_service', { service_key: 'nope' });
@@ -249,6 +283,9 @@ describe('tools', () => {
     const result = toolResult(body);
     expect(result.usedVector).toBe(true);
     expect(result.results).toHaveLength(1); // same doc in both lists fuses to one
+    // Embedding must be bounded well below the stdio bridge's 30s request
+    // timeout so a slow embeddings API degrades to FTS-only, not a bridge abort.
+    expect(mockEmbedQuery).toHaveBeenCalledWith('anything', { timeoutMs: 8000 });
   });
 
   test('a non-numeric limit falls back to the default instead of silently emptying results', async () => {
