@@ -6,7 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 
 router.use(authenticate);
@@ -23,8 +23,9 @@ router.get('/', async (req, res, next) => {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
     const { days } = value;
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() + days);
+    // ET calendar day, matching the etDateString() lower bound below — a UTC
+    // cutoff rolls the window an ET-evening early (scheduled_date is a DATE).
+    const cutoffDate = etDateString(addETDays(new Date(), days));
 
     const upcoming = await db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId })
@@ -40,7 +41,7 @@ router.get('/', async (req, res, next) => {
         .orWhereNot('scheduled_services.status', 'pending')
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
-      .where('scheduled_services.scheduled_date', '<=', cutoff.toISOString().split('T')[0])
+      .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(
         'scheduled_services.*',
@@ -136,14 +137,14 @@ router.post('/:id/confirm', async (req, res, next) => {
 // =========================================================================
 router.post('/:id/reschedule', async (req, res, next) => {
   try {
-    // Floor "now" to start of current UTC day so a customer submitting today's
-    // date from an earlier-UTC timezone isn't incorrectly rejected as "past",
-    // but yesterday's date still fails validation.
-    const todayStartUtc = new Date();
-    todayStartUtc.setUTCHours(0, 0, 0, 0);
+    // Floor "now" to the start of the current EASTERN day. A date-only ISO
+    // preferredDate parses as UTC midnight, so a UTC floor rejected "today"
+    // from 7/8 p.m. ET onward (UTC had already rolled to tomorrow); the ET
+    // floor accepts today all evening while yesterday still fails.
+    const todayStartEt = new Date(`${etDateString()}T00:00:00Z`);
 
     const schema = Joi.object({
-      preferredDate: Joi.date().iso().min(todayStartUtc).optional(),
+      preferredDate: Joi.date().iso().min(todayStartEt).optional(),
       notes: Joi.string().trim().max(500).optional(),
     });
 

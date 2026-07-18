@@ -1,7 +1,13 @@
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { noStore } = require('../middleware/no-store');
+
+// Token-keyed review pages carry the customer's name and service history —
+// keep them out of caches and search indexes.
+router.use(noStore);
 const { WAVES_LOCATIONS, nearestLocation } = require('../config/locations');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
@@ -179,22 +185,36 @@ router.post('/:token/submit', async (req, res, next) => {
       return res.status(410).json({ error: 'This review link has expired' });
     }
 
-    if (request.status === 'submitted' || request.rated_at) {
+    if (request.rated_at || ['submitted', 'reviewed', 'rated'].includes(request.status)) {
       return res.status(409).json({ error: 'Feedback already submitted' });
     }
 
     // Categorize by NPS score
     const category = categorizeScore(score);
 
-    // Update the review request record
-    await db('review_requests').where({ id: request.id }).update({
-      score,
-      feedback: feedback || null,
-      highlights: highlights ? JSON.stringify(highlights) : null,
-      category,
-      status: 'submitted',
-      submitted_at: db.fn.now(),
-    });
+    // Update the review request record. Atomic claim (NULL-safe status
+    // check): a concurrent double-submit must not double-fire the
+    // referral/activity side effects below. rated_at is stamped too — it is
+    // the LEGACY endpoint's finality marker, and without it a request
+    // submitted here stayed replayable through /api/review/:token.
+    const claimed = await db('review_requests')
+      .where({ id: request.id })
+      .whereNull('rated_at')
+      .where(function notFinal() {
+        this.whereNull('status').orWhereNotIn('status', ['submitted', 'reviewed', 'rated']);
+      })
+      .update({
+        score,
+        feedback: feedback || null,
+        highlights: highlights ? JSON.stringify(highlights) : null,
+        category,
+        status: 'submitted',
+        submitted_at: db.fn.now(),
+        rated_at: db.fn.now(),
+      });
+    if (!claimed) {
+      return res.status(409).json({ error: 'Feedback already submitted' });
+    }
 
     // If this came from a multi-touch cadence, stop it now — the customer has
     // engaged, so no further Day-3/7 review asks should go out. (The cadence
@@ -342,7 +362,24 @@ const sanitizeList = (arr) => {
     .filter(Boolean);
 };
 
-router.post('/:token/generate-review', async (req, res, next) => {
+// Review generation is a paid model call with no other spend control — a
+// promoter legitimately regenerates a handful of times, not dozens.
+const generateReviewLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many drafts — give it a minute and try again.' },
+});
+const generateReviewDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many drafts today — please try again tomorrow.' },
+});
+
+router.post('/:token/generate-review', generateReviewLimiter, generateReviewDailyLimiter, async (req, res, next) => {
   try {
     const { services, highlights, personalNote } = req.body;
 

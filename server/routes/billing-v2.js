@@ -723,6 +723,24 @@ router.put('/cards/:id/default', async (req, res, next) => {
       }
     }
 
+    // An expired card can't take the default role either: this route CARRIES
+    // Auto Pay onto the new default, and pointing collection at an expired
+    // card guarantees the next charge declines while the UI shows Active.
+    if (card.exp_month && card.exp_year) {
+      const expMonth = parseInt(card.exp_month, 10);
+      let expYear = parseInt(card.exp_year, 10);
+      if (Number.isFinite(expYear) && expYear < 100) expYear += 2000;
+      if (Number.isFinite(expMonth) && Number.isFinite(expYear)) {
+        // A card is valid through the END of its expiry month.
+        const now = new Date();
+        const expired = expYear < now.getUTCFullYear()
+          || (expYear === now.getUTCFullYear() && expMonth < now.getUTCMonth() + 1);
+        if (expired) {
+          return res.status(400).json({ error: 'That card has expired — update it or choose a current card before making it your default.' });
+        }
+      }
+    }
+
     // Auto Pay eligibility requires the DEFAULT method to carry
     // autopay_enabled, so a bare default swap silently stopped charging
     // while the AutopayCard still showed Active. Carry the flag to the new

@@ -824,6 +824,11 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
     const metadata = req.body?.metadata && typeof req.body.metadata === 'object' && !Array.isArray(req.body.metadata)
       ? req.body.metadata
       : {};
+    // Metadata persists per event at 120/min — bound it, or a token holder
+    // can stream arbitrary JSON into durable storage under the event cap.
+    if (JSON.stringify(metadata).length > 8192) {
+      return res.status(400).json({ error: 'Event metadata too large' });
+    }
 
     await recordServiceReportEvent(service, eventName, channel, req, metadata);
 

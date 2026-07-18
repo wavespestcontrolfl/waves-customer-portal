@@ -38,73 +38,104 @@ const BANK_ALIASES = ['ach', 'us_bank_account'];
  * @param {string} [opts.stripePaymentMethodId]  alternative lookup key
  * @param {string} opts.source                   autopay_log source tag
  * @param {object} [opts.details]                extra autopay_log details
+ * @param {Date}   [opts.authorizedAt]           when the customer actually
+ *   authorized this save (SetupIntent/PaymentIntent `created`). Passed by the
+ *   DELAYED completion paths (ACH micro-deposits verify days later): an
+ *   explicit Auto Pay disable recorded AFTER that moment wins — the stale
+ *   authorization must not silently re-enroll the customer.
  * @returns {{ enrolled: boolean, reason?: string, methodId?: string, inChargeMethodId?: string }}
  */
-async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {} }) {
+async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null }) {
   if (!customerId || (!paymentMethodId && !stripePaymentMethodId)) {
     return { enrolled: false, reason: 'missing_args' };
   }
-  const targetQuery = db('payment_methods').where({ customer_id: customerId, processor: 'stripe' });
-  if (paymentMethodId) targetQuery.where({ id: paymentMethodId });
-  else targetQuery.where({ stripe_payment_method_id: stripePaymentMethodId });
-  const target = await targetQuery.whereNotNull('stripe_payment_method_id').first();
-  if (!target) return { enrolled: false, reason: 'method_not_found' };
 
-  // The customer-level ACH block applies to the TARGET too, not just the
-  // incumbent (Codex #2507 round-5 P2): while ach_status is
-  // needs_verification/suspended, customerOnAutopay refuses every non-card
-  // method, so enrolling a fresh bank account would flip the flags onto a
-  // method collection keeps rejecting. The method stays saved
-  // card-on-file; enrollment happens through the normal surfaces once the
-  // bank state clears.
-  const achUnhealthy = async () => {
-    const achRow = await db('customers').where({ id: customerId }).first('ach_status');
-    return !!(achRow?.ach_status && achRow.ach_status !== 'active');
-  };
-  if (BANK_ALIASES.includes(target.method_type) && (await achUnhealthy())) {
-    return { enrolled: false, reason: 'ach_blocked', methodId: target.id };
-  }
+  let target;
+  let inChargeMethodId;
+  const outcome = await db.transaction(async (trx) => {
+    // Serialize per customer: FOR UPDATE on the customer row makes the
+    // read → unset-defaults → set-target → customer-pointer sequence below
+    // atomic against a concurrent enrollment. Without it, two completions
+    // racing (e.g. /consent and the webhook) could interleave and leave
+    // multiple is_default rows — and collection picks its method with an
+    // unordered .first(), i.e. charges whichever the planner returns.
+    const custRow = await trx('customers')
+      .where({ id: customerId })
+      .forUpdate()
+      .first('id', 'ach_status', 'autopay_enabled', 'autopay_payment_method_id');
+    if (!custRow) return { enrolled: false, reason: 'customer_not_found' };
 
-  let incumbent = await db('payment_methods')
-    .where({
-      customer_id: customerId,
-      processor: 'stripe',
-      is_default: true,
-      autopay_enabled: true,
-    })
-    .whereNotNull('stripe_payment_method_id')
-    .first('id', 'method_type');
-  if (BANK_ALIASES.includes(incumbent?.method_type) && (await achUnhealthy())) {
-    incumbent = null;
-  }
+    if (authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())) {
+      const laterOptOut = await trx('autopay_log')
+        .where({ customer_id: customerId, event_type: 'autopay_disabled' })
+        .where('created_at', '>', authorizedAt)
+        .first('id');
+      if (laterOptOut) {
+        return { enrolled: false, reason: 'opted_out_after_authorization' };
+      }
+    }
 
-  const alreadyInCharge = incumbent && incumbent.id === target.id;
-  const custRow = await db('customers').where({ id: customerId }).first('autopay_enabled', 'autopay_payment_method_id');
-  if (alreadyInCharge && custRow?.autopay_enabled && custRow?.autopay_payment_method_id === target.id) {
-    return { enrolled: false, reason: 'already_enrolled', methodId: target.id, inChargeMethodId: target.id };
-  }
+    const targetQuery = trx('payment_methods').where({ customer_id: customerId, processor: 'stripe' });
+    if (paymentMethodId) targetQuery.where({ id: paymentMethodId });
+    else targetQuery.where({ stripe_payment_method_id: stripePaymentMethodId });
+    target = await targetQuery.whereNotNull('stripe_payment_method_id').first();
+    if (!target) return { enrolled: false, reason: 'method_not_found' };
 
-  if (!incumbent) {
-    // No healthy method in charge — the target takes the default slot.
-    await db('payment_methods')
-      .where({ customer_id: customerId })
-      .whereNot({ id: target.id })
-      .update({ is_default: false });
-    await db('payment_methods')
-      .where({ id: target.id })
-      .update({ autopay_enabled: true, is_default: true });
-  } else if (!alreadyInCharge) {
-    // A healthy incumbent keeps the default role; the target is enrolled
-    // but does not displace it.
-    await db('payment_methods')
-      .where({ id: target.id })
-      .update({ autopay_enabled: true });
-  }
+    // The customer-level ACH block applies to the TARGET too, not just the
+    // incumbent (Codex #2507 round-5 P2): while ach_status is
+    // needs_verification/suspended, customerOnAutopay refuses every non-card
+    // method, so enrolling a fresh bank account would flip the flags onto a
+    // method collection keeps rejecting. The method stays saved
+    // card-on-file; enrollment happens through the normal surfaces once the
+    // bank state clears.
+    const achUnhealthy = !!(custRow.ach_status && custRow.ach_status !== 'active');
+    if (BANK_ALIASES.includes(target.method_type) && achUnhealthy) {
+      return { enrolled: false, reason: 'ach_blocked', methodId: target.id };
+    }
 
-  const inChargeMethodId = incumbent ? incumbent.id : target.id;
-  await db('customers')
-    .where({ id: customerId })
-    .update({ autopay_enabled: true, autopay_payment_method_id: inChargeMethodId });
+    let incumbent = await trx('payment_methods')
+      .where({
+        customer_id: customerId,
+        processor: 'stripe',
+        is_default: true,
+        autopay_enabled: true,
+      })
+      .whereNotNull('stripe_payment_method_id')
+      .orderBy('updated_at', 'desc')
+      .first('id', 'method_type');
+    if (BANK_ALIASES.includes(incumbent?.method_type) && achUnhealthy) {
+      incumbent = null;
+    }
+
+    const alreadyInCharge = incumbent && incumbent.id === target.id;
+    if (alreadyInCharge && custRow.autopay_enabled && custRow.autopay_payment_method_id === target.id) {
+      return { enrolled: false, reason: 'already_enrolled', methodId: target.id, inChargeMethodId: target.id };
+    }
+
+    if (!incumbent) {
+      // No healthy method in charge — the target takes the default slot.
+      await trx('payment_methods')
+        .where({ customer_id: customerId })
+        .whereNot({ id: target.id })
+        .update({ is_default: false });
+      await trx('payment_methods')
+        .where({ id: target.id })
+        .update({ autopay_enabled: true, is_default: true });
+    } else if (!alreadyInCharge) {
+      // A healthy incumbent keeps the default role; the target is enrolled
+      // but does not displace it.
+      await trx('payment_methods')
+        .where({ id: target.id })
+        .update({ autopay_enabled: true });
+    }
+
+    inChargeMethodId = incumbent ? incumbent.id : target.id;
+    await trx('customers')
+      .where({ id: customerId })
+      .update({ autopay_enabled: true, autopay_payment_method_id: inChargeMethodId });
+    return null; // enrolled — post-commit side effects run below
+  });
+  if (outcome) return outcome;
   try {
     await require('./autopay-log').logAutopay(customerId, 'autopay_enabled', {
       paymentMethodId: inChargeMethodId,

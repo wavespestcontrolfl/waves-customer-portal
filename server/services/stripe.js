@@ -1687,9 +1687,26 @@ const StripeService = {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
 
-    const card = await db('payment_methods')
-      .where({ customer_id: customerId, processor: 'stripe', is_default: true, autopay_enabled: true })
-      .first();
+    // customers.autopay_payment_method_id is the enrollment pointer — "the
+    // method actually in charge" (autopay-enrollment.js) — so collection
+    // honors it first. The default+enabled lookup is the fallback, with a
+    // deterministic order: legacy data (or a pre-fix race) can hold several
+    // is_default rows, and an unordered .first() charged whichever row the
+    // planner happened to return.
+    let card = null;
+    if (customer.autopay_payment_method_id) {
+      card = await db('payment_methods')
+        .where({ id: customer.autopay_payment_method_id, customer_id: customerId, processor: 'stripe', autopay_enabled: true })
+        .whereNotNull('stripe_payment_method_id')
+        .first();
+    }
+    if (!card) {
+      card = await db('payment_methods')
+        .where({ customer_id: customerId, processor: 'stripe', is_default: true, autopay_enabled: true })
+        .orderBy('updated_at', 'desc')
+        .orderBy('id', 'asc')
+        .first();
+    }
 
     if (!card || !card.stripe_payment_method_id) {
       throw new Error('No Stripe autopay payment method on file');

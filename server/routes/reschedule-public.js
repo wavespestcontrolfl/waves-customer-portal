@@ -48,6 +48,10 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const SmartRebooker = require('../services/rebooker');
+const { noStore } = require('../middleware/no-store');
+
+// Token-keyed appointment data (address, visit window) — never cacheable.
+router.use(noStore);
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const { stampedDivergesSql } = require('../services/stamped-address');
 

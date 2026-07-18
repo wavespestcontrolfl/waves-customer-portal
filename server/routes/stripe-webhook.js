@@ -1568,11 +1568,15 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           });
         }
         const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        // authorizedAt: for the ACH micro-deposit signup this event arrives
+        // days after the customer authorized — an Auto Pay disable recorded
+        // since then must win over the stale authorization.
         await enrollConsentedMethod({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,
           source: 'save_card_consent',
           details: { billing_mode: signupBillingMode },
+          authorizedAt: paymentIntent.created ? new Date(paymentIntent.created * 1000) : null,
         });
       }
       if (!existing) {
@@ -2671,12 +2675,44 @@ async function handlePaymentMethodDetached(paymentMethod) {
   const pmId = paymentMethod.id;
   logger.info(`[stripe-webhook] Payment method detached: ${pmId}`);
 
+  // Read the rows BEFORE deleting: an out-of-band detach (Stripe dashboard,
+  // support tooling) previously left customers.autopay_enabled pointing at a
+  // method row that no longer exists — the admin UI showed Auto Pay Active
+  // while collection threw "No Stripe autopay payment method on file".
+  const rows = await db('payment_methods')
+    .where({ stripe_payment_method_id: pmId })
+    .select('id', 'customer_id', 'is_default', 'autopay_enabled');
+
   const deleted = await db('payment_methods')
     .where({ stripe_payment_method_id: pmId })
     .del();
 
   if (deleted > 0) {
     logger.info(`[stripe-webhook] Removed ${deleted} payment method(s) from DB: ${pmId}`);
+  }
+
+  for (const row of rows) {
+    try {
+      const cust = await db('customers')
+        .where({ id: row.customer_id })
+        .first('autopay_enabled', 'autopay_payment_method_id');
+      const wasInCharge = cust?.autopay_enabled
+        && (cust.autopay_payment_method_id === row.id
+          || (!cust.autopay_payment_method_id && row.is_default && row.autopay_enabled));
+      if (!wasInCharge) continue;
+      // Mirror removeCard's cleanup (_disableAutopayIfMethodRemoved):
+      // disable honestly rather than silently promoting another method —
+      // enrollment is consent-gated and never auto-picks a replacement.
+      await db('customers')
+        .where({ id: row.customer_id })
+        .update({ autopay_enabled: false, autopay_payment_method_id: null });
+      await require('../services/autopay-log').logAutopay(row.customer_id, 'autopay_disabled', {
+        details: { source: 'payment_method_detached', payment_method_id: row.id, stripe_payment_method_id: pmId },
+      });
+      logger.info(`[stripe-webhook] Auto Pay disabled for customer ${row.customer_id} — in-charge method ${row.id} detached out-of-band`);
+    } catch (err) {
+      logger.warn(`[stripe-webhook] autopay cleanup after detach failed for customer ${row.customer_id}: ${err.message}`);
+    }
   }
 }
 
@@ -2871,11 +2907,15 @@ async function handleSetupIntentSucceeded(setupIntent) {
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+      // authorizedAt: this webhook can complete DAYS after the customer
+      // authorized (browser died / micro-deposits) — an Auto Pay disable
+      // recorded since then must win over the stale authorization.
       const enrollment = await enrollConsentedMethod({
         customerId: wavesCustomerId,
         paymentMethodId: saved.id,
         source: 'save_card_consent',
         details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
+        authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
       });
       // Capture done → apply the HELD credit coverage (Codex #2507
       // round-7 P1): under the hold flow the invoice stayed collectible
@@ -3015,11 +3055,15 @@ async function handleSetupIntentSucceeded(setupIntent) {
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+      // authorizedAt: for the micro-deposit deferred save this webhook fires
+      // days after the portal add — a customer who disabled Auto Pay in the
+      // meantime must not be re-enrolled by the old authorization.
       const enrollment = await enrollConsentedMethod({
         customerId: wavesCustomerId,
         paymentMethodId: saved.id,
         source: isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card',
         details: { via: 'portal_add_method_webhook', setup_intent_id: setupIntent.id },
+        authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
       });
       if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
         // No rethrow: a webhook retry can't change a refused bank state

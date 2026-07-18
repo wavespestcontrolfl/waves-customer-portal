@@ -381,8 +381,24 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
 app.use('/api/admin/auth', ...staffAuthBodyParsers);
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Base64 media payloads (service/job photos, call-recording snippets, the
+// photo lead magnets' customer uploads) only travel on the staff surfaces and
+// the two public photo-analyze funnels — mount the big parser there ONLY.
+// Everything else gets a tight default: the old global 50 MB ceiling let any
+// anonymous endpoint force 50 MB of JSON parsing work per request.
+// (/api/admin/auth keeps its stricter cap — mounted above, first parser wins.)
+const LARGE_BODY_LIMIT = '50mb';
+for (const largeBodyPrefix of ['/api/admin', '/api/tech', '/api/public/lawn-assessment', '/api/public/pest-identifier']) {
+  app.use(largeBodyPrefix, express.json({ limit: LARGE_BODY_LIMIT }));
+}
+// Customer service requests carry up to 3 base64 photos (validate caps each at
+// 8 MB of encoded chars — see utils/request-photo-validation.js), so a valid
+// authenticated body can approach ~25 MB. Give the route its own bounded
+// parser so those uploads don't 413 under the 1 MB default, without widening
+// the ceiling for everything else. Authenticated + per-customer throttled.
+app.use('/api/requests', express.json({ limit: '30mb' }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // Public assets used by server-rendered customer pages. In production Vite
 // copies these into client/dist; in local API-only dev they still need to be
@@ -654,9 +670,11 @@ app.use('/api/tech/services', require('./routes/tech-track'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
 app.use('/api/admin', require('./routes/admin-billing-health'));
 
-// Health check
+// Health check. Public and unauthenticated (Railway probes it), so it must
+// not enumerate internal state: the full feature-gate map told anyone which
+// dark lanes exist and which kill switches are live. Staff surfaces read
+// gates through their authenticated APIs, not from here.
 app.get('/api/health', (req, res) => {
-  const { gates } = require('./config/feature-gates');
   res.set('Cache-Control', 'no-store');
   res.json({
     status: 'ok',
@@ -664,7 +682,6 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: config.nodeEnv,
     staffMaintenance: { enabled: isStaffMaintenanceEnabled() },
-    gates,
   });
 });
 
@@ -788,10 +805,13 @@ if (config.nodeEnv === 'production') {
 // ERROR HANDLING
 // =========================================================================
 
-// Sentry debug/test route
-app.get("/debug-sentry", function mainHandler(req, res) {
-  throw new Error("My first Sentry error!");
-});
+// Sentry debug/test route — dev-only. In production this was a public,
+// unauthenticated error generator (Sentry-quota noise on demand).
+if (config.nodeEnv !== 'production') {
+  app.get("/debug-sentry", function mainHandler(req, res) {
+    throw new Error("My first Sentry error!");
+  });
+}
 
 // Sentry error handler — must be before other error middleware
 Sentry.setupExpressErrorHandler(app);
