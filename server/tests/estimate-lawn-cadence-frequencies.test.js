@@ -598,6 +598,48 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     expect(disarmedByKey.standard.monthly).toBeCloseTo(49.5, 2);
   });
 
+  test('an explicit per-estimate disarm beats a global re-arm (save == accept both directions)', () => {
+    // generateEstimate resolves the flag with ?? — an estimate deliberately
+    // saved with useLawnCostFloor: false was priced WITHOUT the floor, so a
+    // later global re-arm must not re-clamp it above its saved price
+    // (codex P2, round 7 on #2827).
+    const priorUseFloor = LAWN_PRICING_V2.useLawnCostFloor;
+    LAWN_PRICING_V2.useLawnCostFloor = true;
+    try {
+      const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+        engineRequest: {
+          profile: { measuredTurfSf: 5012 },
+          selectedServices: ['LAWN'],
+          options: { useLawnCostFloor: false, lawnFreq: 9 },
+        },
+      });
+      const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
+      expect(byKey.standard.monthly).toBeCloseTo(49.5, 2);
+    } finally {
+      LAWN_PRICING_V2.useLawnCostFloor = priorUseFloor;
+    }
+  });
+
+  test('a legacy pre-disarm estimate keeps its floor re-clamp via stored enforcement stamps', () => {
+    // Pre-disarm saves never persisted the flag (the engine armed by
+    // default) — the evidence is the enforcement stamps on the stored rows.
+    // With no flag anywhere and the global switch off, a COST_FLOOR-stamped
+    // row arms the whole estimate's ladder so the sent snapshot cannot be
+    // discounted below the floor it was priced on (codex P2, round 7).
+    const line = marginFlooredLine();
+    line.tiers = line.tiers.map((t) => (
+      t.tier === 'enhanced' ? { ...t, pricingSource: 'COST_FLOOR', costFloorApplied: true } : t
+    ));
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [line] }, {});
+    const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
+    expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
+    expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
+
+    // Reporting fields alone (minimumCollectedAnnualPrice on every row of
+    // the base fixture) remain NON-evidence — the disarmed pin above stays
+    // unclamped.
+  });
+
   test('re-armed: a margin-floor-capped selected line keeps the requested discount per cadence and re-clamps each at ITS floor', () => {
     const priorUseFloor = LAWN_PRICING_V2.useLawnCostFloor;
     LAWN_PRICING_V2.useLawnCostFloor = true;

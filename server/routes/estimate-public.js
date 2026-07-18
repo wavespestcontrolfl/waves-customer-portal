@@ -12629,24 +12629,47 @@ function isRetiredLawnTierKey(tierKey) {
   return LAWN_TIERS?.[String(tierKey || '').trim().toLowerCase()]?.hidden === true;
 }
 
-// Per-estimate cost-floor re-arm: an estimate generated with an explicit
+// Per-estimate cost-floor arm state: an estimate generated with an explicit
 // useLawnCostFloor input (the adapter forwards options.useLawnCostFloor into
-// the lawn service) was floor-priced/floor-capped by the engine even while
-// the global switch is off. View/accept must clamp the same rows the same
-// way (save == accept), so the ladder arms its margin-floor leg for that
-// estimate from its stored engine inputs (codex P2 on the #2827 main-merge).
+// the lawn service) was floor-priced/floor-capped — or deliberately NOT — by
+// the engine regardless of the global switch. View/accept must clamp the
+// same rows the same way (save == accept), so the ladder reads the estimate's
+// own signal first. TRI-STATE: true / false when the estimate carries an
+// explicit signal (either one BEATS the global switch — generateEstimate
+// resolves the flag with ??, so an explicit false disarmed the save and a
+// later global re-arm must not re-clamp it); null when the estimate is
+// silent and the caller falls back to the global switch / legacy evidence
+// (codex P2s, rounds 5-7 on the #2827 main-merge).
 function estimateLawnFloorArmed(estData = {}) {
   // Admin V2 saves persist the exact /calculate-estimate payload under
   // engineRequest ({ profile, selectedServices, options }); the adapter maps
   // options.useLawnCostFloor into services.lawn.useLawnCostFloor at replay,
-  // so the raw option is that shape's arm signal. An explicit false is a
-  // deliberate disarm — honored, no fallthrough.
+  // so the raw option is that shape's arm signal.
   const reqOptions = estData?.engineRequest?.options;
   if (reqOptions && typeof reqOptions === 'object' && reqOptions.useLawnCostFloor != null) {
     return !!reqOptions.useLawnCostFloor;
   }
   const engineInputs = extractEngineInputs(estData) || {};
-  return !!(engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor);
+  const stored = engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor;
+  return stored == null ? null : !!stored;
+}
+
+// Legacy pre-disarm estimates (engine armed the cost floor by default, so
+// builder payloads never needed to persist the flag): the floor evidence
+// lives on the stored rows as ENFORCEMENT stamps. Only stamps the armed
+// machinery writes count — costFloorApplied, marginFloorGuardApplied, a
+// COST_FLOOR pricing source. The reporting fields
+// (minimumCollectedAnnualPrice / costFloorAnnual) ride every post-disarm
+// quote too and are deliberately NOT evidence, or every new estimate would
+// silently re-arm (the exact trap this branch closes).
+function lawnRowsShowFloorEnforcement(rows) {
+  return (Array.isArray(rows) ? rows : []).some((row) => (
+    row?.costFloorApplied === true
+    || row?.marginFloorGuardApplied === true
+    || row?.pricingSource === 'COST_FLOOR'
+    || row?.prov?.costFloorApplied === true
+    || row?.prov?.pricingSource === 'COST_FLOOR'
+  ));
 }
 
 // Clamp a customer-facing lawn ladder entry to the program minimum AFTER
@@ -12884,10 +12907,15 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
   const rawManualDiscount = manualDiscountOverride !== undefined
     ? manualDiscountOverride
     : normalizeManualDiscountSummary(estData);
-  // Global live re-arm OR this estimate's stored per-input re-arm — resolved
-  // once so every cadence row clamps under the same arm state.
-  const marginFloorArmed = LAWN_PRICING_V2?.useLawnCostFloor === true
-    || estimateLawnFloorArmed(estData);
+  // Arm resolution, once per estimate so every cadence row clamps under the
+  // same state: the estimate's own explicit signal wins in BOTH directions;
+  // a silent estimate falls back to the global live switch, or to legacy
+  // enforcement stamps on the stored rows (pre-disarm snapshots keep their
+  // floor re-clamp even though they never persisted the flag).
+  const perEstimateFloorArmed = estimateLawnFloorArmed(estData);
+  const marginFloorArmed = perEstimateFloorArmed != null
+    ? perEstimateFloorArmed
+    : (LAWN_PRICING_V2?.useLawnCostFloor === true || lawnRowsShowFloorEnforcement(rows));
   const shaped = (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);

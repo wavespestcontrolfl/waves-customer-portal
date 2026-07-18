@@ -1505,6 +1505,11 @@ function generateEstimate(input) {
   // downstream card-processing-fee display.
   const paymentMethod = input.paymentMethod || 'card';
 
+  // Report-only "looks low" entries from the automatic (WaveGuard) discount
+  // pass — merged into marginWarnings alongside the manual-discount audit's
+  // entries so the estimator's Pricing Review Notes surface them.
+  const waveGuardMarginWarnings = [];
+
   for (const item of lineItems) {
     const serviceKey = resolveDiscountKey(item);
     const isOneTime = !item.annual; // One-time services have .price, not .annual
@@ -1620,6 +1625,33 @@ function generateEstimate(input) {
             : 0;
         } else {
           item.annualAfterDiscount = discountedAnnual;
+        }
+        // Report-only "looks low" signal (owner ruling 2026-07-17: margins
+        // surfaced, never enforced): armed or not, a WaveGuard-discounted
+        // lawn line that lands under the 35% collected-margin target emits
+        // the same belowMarginFloor / finalMargin signals pest and
+        // tree/shrub carry, plus a Pricing Review Note via marginWarnings.
+        // Cent-rounded floor prices sit within ~1e-5 of target, so an
+        // at-floor armed cap must not read as a breach (same 1e-4 tolerance
+        // as the floor pins and the manual-discount audit).
+        const lawnCostTotal = Number(item.costs?.total);
+        const finalLawnAnnual = Number(item.annualAfterDiscount);
+        if (Number.isFinite(lawnCostTotal) && lawnCostTotal >= 0 && finalLawnAnnual > 0) {
+          const lawnMargin = (finalLawnAnnual - lawnCostTotal) / finalLawnAnnual;
+          const lawnTarget = Number(LAWN_PRICING_V2.targetCollectedMarginFloor ?? 0.35);
+          item.finalMargin = Math.round(lawnMargin * 1000) / 1000;
+          item.belowMarginFloor = lawnMargin < lawnTarget - 1e-4;
+          if (item.belowMarginFloor && (discount.effectiveDiscount || 0) > 0) {
+            waveGuardMarginWarnings.push({
+              service: 'lawn_care',
+              type: 'waveguard_discount_below_margin_floor',
+              margin: item.finalMargin,
+              marginFloor: lawnTarget,
+              finalAnnual: finalLawnAnnual,
+              annualCost: Math.round(lawnCostTotal * 100) / 100,
+              message: `lawn_care WaveGuard discount drops collected margin to ${(lawnMargin * 100).toFixed(1)}% (below the ${(lawnTarget * 100).toFixed(0)}% review floor) — price stands as discounted`,
+            });
+          }
         }
       } else {
         item.annualAfterDiscount = discountedAnnual;
@@ -1934,6 +1966,7 @@ function generateEstimate(input) {
   // ── 7. Validate margins ────────────────────────────────────
   const marginWarnings = [
     ...validateEstimateDiscounts(lineItems, waveGuardTier),
+    ...waveGuardMarginWarnings,
     ...manualMarginWarnings,
   ];
   const notes = [];

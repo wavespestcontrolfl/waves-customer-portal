@@ -918,6 +918,39 @@ describe('lawn pricing production follow-up', () => {
     const collectedMargin = (lawn.annualAfterDiscount - lawn.costs.total)
       / lawn.annualAfterDiscount;
     expect(collectedMargin).toBeGreaterThanOrEqual(0.35 - 0.0001);
+    // An at-floor cap is NOT a breach — the report signal stays quiet.
+    expect(lawn.belowMarginFloor).toBe(false);
+    expect(estimate.marginWarnings.find((w) => w.type === 'waveguard_discount_below_margin_floor'))
+      .toBeUndefined();
+  });
+
+  test('a WaveGuard-discounted lawn line below 35% surfaces the report-only signal while disarmed', () => {
+    // Same bundle, floors disarmed: Silver discounts the 5,012 sqft lawn
+    // line below its collected-margin floor. Nothing caps it — but the
+    // estimator gets the same belowMarginFloor / finalMargin signals pest
+    // and tree/shrub emit, plus a Pricing Review Note via marginWarnings
+    // (codex P2, round 7 on #2827).
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 5012,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(lawn.marginFloorGuardApplied).toBeUndefined();
+    expect(lawn.discountCapped).toBeFalsy();
+    const collectedMargin = (lawn.annualAfterDiscount - lawn.costs.total)
+      / lawn.annualAfterDiscount;
+    expect(collectedMargin).toBeLessThan(0.35);
+    expect(lawn.belowMarginFloor).toBe(true);
+    expect(lawn.finalMargin).toBeCloseTo(Math.round(collectedMargin * 1000) / 1000, 3);
+    const warning = estimate.marginWarnings.find((w) => (
+      w.service === 'lawn_care' && w.type === 'waveguard_discount_below_margin_floor'
+    ));
+    expect(warning).toBeTruthy();
+    expect(warning.message).toContain('price stands as discounted');
   });
 
   test('manual recurring discounts include WaveGuard-discounted Lawn V2 pricing', () => {
