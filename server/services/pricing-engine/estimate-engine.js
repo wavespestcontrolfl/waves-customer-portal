@@ -25,6 +25,18 @@ function guardedLineCost(item) {
       ? { cost: direct + admin, floor: Number(TREE_SHRUB.marginFloor || GLOBAL.MARGIN_FLOOR) }
       : null;
   }
+  if (item.service === 'lawn_care') {
+    // Report-only lawn margin visibility for the manual-discount audit
+    // (owner ruling 2026-07-17: margins surfaced, never enforced). With the
+    // cost floor disarmed the allocation may spend lawn's full annual, so
+    // the warn path must still price-check it — otherwise a below-margin
+    // lawn manual discount gets neither a cap nor the promised "looks low"
+    // warning while pest/tree lines do.
+    const cost = Number(item.costs?.total);
+    return Number.isFinite(cost)
+      ? { cost, floor: Number(LAWN_PRICING_V2.targetCollectedMarginFloor ?? GLOBAL.MARGIN_FLOOR) }
+      : null;
+  }
   return null;
 }
 
@@ -1838,7 +1850,12 @@ function generateEstimate(input) {
       const { cost: allInCost, floor: marginFloor } = guard;
       const lineMargin = lineFinalAnnual > 0 ? (lineFinalAnnual - allInCost) / lineFinalAnnual : -1;
       item.manualFinalMargin = Math.round(lineMargin * 1000) / 1000;
-      if (lineMargin < marginFloor) {
+      // Lawn floor prices are cent-rounded off the margin target, so a
+      // re-armed cap can leave the line within ~1e-5 of 35% — the same
+      // tolerance the floor pins use (0.35 - 0.0001). An at-floor cap must
+      // not read as a breach; a real breach clears this epsilon easily.
+      const marginEpsilon = item.service === 'lawn_care' ? 1e-4 : 0;
+      if (lineMargin < marginFloor - marginEpsilon) {
         item.manualMarginWarning = true;
         manualMarginWarnings.push({
           service: item.service,

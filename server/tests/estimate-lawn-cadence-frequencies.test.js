@@ -550,6 +550,26 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
   });
 
+  test('a per-estimate cost-floor re-arm (stored engine inputs) clamps the ladder while the global switch is off', () => {
+    // The adapter forwards options.useLawnCostFloor into the lawn service,
+    // so an individual estimate can be floor-priced/capped by the engine
+    // while lawn_pricing_v2.useLawnCostFloor stays false. View/accept must
+    // clamp that estimate's cadences the same way (save == accept) — the
+    // arm state is read off the stored engine inputs (codex P2 on the
+    // #2827 main-merge).
+    const estData = {
+      engineInputs: {
+        services: { lawn: { track: 'st_augustine', lawnFreq: 9, useLawnCostFloor: true } },
+      },
+    };
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, estData);
+    const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
+    // Standard clamps at its own 640 floor (CEIL to cents) exactly as under
+    // a global re-arm; premium keeps its headroom.
+    expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
+    expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
+  });
+
   test('re-armed: a margin-floor-capped selected line keeps the requested discount per cadence and re-clamps each at ITS floor', () => {
     const priorUseFloor = LAWN_PRICING_V2.useLawnCostFloor;
     LAWN_PRICING_V2.useLawnCostFloor = true;

@@ -345,6 +345,12 @@ const LAWN_PRICING_V2 = {
   // designed disable value; every reader below guards on > 0. Server is
   // authoritative on save.
   programMinimumMonthly: 0,
+  // Mirrors server constants.LAWN_PRICING_V2.useLawnCostFloor (cost-floor
+  // enforcement arm switch, in-code false). A live DB re-arm reaches this
+  // fallback engine via applyServerLawnPricingConfig, so the preview's
+  // floor SELECTION matches the server-recomputed save (codex P2 on the
+  // #2827 main-merge).
+  useLawnCostFloor: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
@@ -369,6 +375,9 @@ const LAWN_PRICING_V2 = {
 export function applyServerLawnPricingConfig(config) {
   const n = Number(config?.programMinimumMonthly);
   LAWN_PRICING_V2.programMinimumMonthly = Number.isFinite(n) && n > 0 ? n : 0;
+  // Cost-floor enforcement arm switch rides the same row — absent/non-true
+  // resolves to the disarmed default, exactly like db-bridge on the server.
+  LAWN_PRICING_V2.useLawnCostFloor = config?.useLawnCostFloor === true;
   return LAWN_PRICING_V2.programMinimumMonthly;
 }
 
@@ -1712,12 +1721,16 @@ export function calculateEstimate(inputs) {
       const marketPrice = lawnLookup(lp, lsf, freqIdx);
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
       const marketAnnual = marketPrice.monthly * 12;
-      // Cost-floor SELECTION disarmed (owner ruling 2026-07-17: "forget all
-      // floors") — mirrors the server's useLawnCostFloor=false default so the
-      // preview matches the server-recomputed save. costFloorAnnual is still
-      // computed and emitted below for margin visibility.
-      const floorApplied = false;
-      let ann = marketAnnual;
+      // Cost-floor SELECTION disarmed by default (owner ruling 2026-07-17:
+      // "forget all floors") — mirrors the server's useLawnCostFloor default
+      // so the preview matches the server-recomputed save. A live DB re-arm
+      // (lawn_pricing_v2.useLawnCostFloor, applied on mount via
+      // applyServerLawnPricingConfig) restores the pre-ruling floor
+      // selection here too. costFloorAnnual is still computed and emitted
+      // below for margin visibility either way.
+      const floorApplied = LAWN_PRICING_V2.useLawnCostFloor === true
+        && floorPrice.costFloorAnnual > marketAnnual;
+      let ann = floorApplied ? floorPrice.ann : marketAnnual;
       const programMinimumApplied = lawnProgramMinAnnual > 0 && ann < lawnProgramMinAnnual;
       if (programMinimumApplied) ann = Math.ceil(lawnProgramMinAnnual / f.v) * f.v;
       const mo = Math.round(ann / 12 * 100) / 100;

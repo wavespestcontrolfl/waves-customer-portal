@@ -105,16 +105,25 @@ exports.up = async function up(knex) {
   const lawn = await readConfigData(knex, 'lawn_pricing_v2');
   if (lawn.exists) {
     const oldValue = lawn.data.programMinimumMonthly ?? null;
+    const oldUseFloor = typeof lawn.data.useLawnCostFloor === 'boolean'
+      ? lawn.data.useLawnCostFloor
+      : null;
     await writeConfigData(knex, 'lawn_pricing_v2', {
       ...lawn.data,
       programMinimumMonthly: 0,
+      // Cost-floor enforcement arm switch (selection + post-discount caps +
+      // public-ladder re-clamp). Written explicitly so an environment where
+      // the key was hand-set true (re-arm cycle / hotfix) is actually
+      // disarmed by this migration — db-bridge deep-merges a persisted true
+      // straight over the in-code false default.
+      useLawnCostFloor: false,
     });
     await insertAudit(
       knex,
       'lawn_pricing_v2',
-      { programMinimumMonthly: oldValue },
-      { programMinimumMonthly: 0 },
-      'Owner ruling 2026-07-17 (forget all floors): lawn program minimum disarmed; owner adjusts prices in the estimator.',
+      { programMinimumMonthly: oldValue, useLawnCostFloor: oldUseFloor },
+      { programMinimumMonthly: 0, useLawnCostFloor: false },
+      'Owner ruling 2026-07-17 (forget all floors): lawn program minimum + cost-floor enforcement disarmed; owner adjusts prices in the estimator.',
     );
   }
 
@@ -154,13 +163,22 @@ exports.down = async function down(knex) {
     await writeConfigData(knex, 'lawn_pricing_v2', {
       ...lawn.data,
       programMinimumMonthly: 50,
+      // Pre-ruling state: cost-floor machinery armed (it was the in-code
+      // default before the 2026-07-17 disarm) — restore explicitly for the
+      // same reason as programMinimumMonthly above.
+      useLawnCostFloor: true,
     });
     await insertAudit(
       knex,
       'lawn_pricing_v2',
-      { programMinimumMonthly: lawn.data.programMinimumMonthly ?? null },
-      { programMinimumMonthly: 50 },
-      'Rollback: re-arm the $50/mo lawn program minimum (owner directive 2026-07-09 value).',
+      {
+        programMinimumMonthly: lawn.data.programMinimumMonthly ?? null,
+        useLawnCostFloor: typeof lawn.data.useLawnCostFloor === 'boolean'
+          ? lawn.data.useLawnCostFloor
+          : null,
+      },
+      { programMinimumMonthly: 50, useLawnCostFloor: true },
+      'Rollback: re-arm the $50/mo lawn program minimum (owner directive 2026-07-09 value) and the lawn cost-floor enforcement.',
     );
   }
 

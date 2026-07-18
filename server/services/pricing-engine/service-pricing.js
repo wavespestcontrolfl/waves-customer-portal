@@ -1866,7 +1866,12 @@ function priceLawnCare(property, options = {}) {
     // "forget all floors" — the market table prices every quote; the floor
     // math still runs for margin REPORTING: minimumCollectedAnnualPrice and
     // margin stay on every quote for the owner/estimator to judge).
-    useLawnCostFloor = false,
+    // The default reads the live re-arm switch (lawn_pricing_v2.
+    // useLawnCostFloor via db-bridge, in-code false) so direct callers —
+    // weekly invariant sweep, public lawn assessment, pricing snapshots —
+    // track the same arm state as generateEstimate; an explicit option
+    // still overrides either way (codex P2 on the #2827 main-merge).
+    useLawnCostFloor = LAWN_PRICING_V2.useLawnCostFloor === true,
     includeHiddenTiers = false,
     // Internal-only escape hatch for callers that need the raw market
     // baseline (one-time lawn derives its base from recurring perApp and

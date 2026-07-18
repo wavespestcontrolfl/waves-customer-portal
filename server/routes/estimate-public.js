@@ -12629,26 +12629,42 @@ function isRetiredLawnTierKey(tierKey) {
   return LAWN_TIERS?.[String(tierKey || '').trim().toLowerCase()]?.hidden === true;
 }
 
+// Per-estimate cost-floor re-arm: an estimate generated with an explicit
+// useLawnCostFloor input (the adapter forwards options.useLawnCostFloor into
+// the lawn service) was floor-priced/floor-capped by the engine even while
+// the global switch is off. View/accept must clamp the same rows the same
+// way (save == accept), so the ladder arms its margin-floor leg for that
+// estimate from its stored engine inputs (codex P2 on the #2827 main-merge).
+function estimateLawnFloorArmed(estData = {}) {
+  const engineInputs = extractEngineInputs(estData) || {};
+  return !!(engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor);
+}
+
 // Clamp a customer-facing lawn ladder entry to the program minimum AFTER
 // discounts. Annual re-derives from the clamped monthly so monthly/annual/
 // per-app never disagree, the pre-discount anchor never drops below the net
 // price, and the reported manual discount shrinks to what the floor actually
 // let through (never display savings the price doesn't reflect).
-function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount, marginFloorAnnual }) {
+function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount, marginFloorAnnual, marginFloorArmed }) {
   const programMinMonthly = lawnProgramMinimumMonthly();
   // Margin-floor leg armed only with the cost-floor machinery (owner ruling
   // 2026-07-17: floors report, never enforce). Stored and engine rows carry
   // minimumCollectedAnnualPrice/costFloorAnnual on EVERY quote for margin
   // REPORTING, so the field's presence alone must never clamp the ladder.
-  // When re-armed (lawn_pricing_v2.useLawnCostFloor — live db-bridge
-  // reference, same as the program minimum), each cadence re-clamps at its
+  // Armed by the live global switch (lawn_pricing_v2.useLawnCostFloor —
+  // live db-bridge reference, same as the program minimum) or an explicit
+  // caller override (per-estimate re-arm via stored engine inputs — see
+  // estimateLawnFloorArmed). When armed, each cadence re-clamps at its
   // OWN 35% collected-margin floor: the program minimum alone would let a
   // discounted alternate cadence render/bill below the margin its own cost
   // basis requires.
   // CEIL to cents: nearest-cent rounding of floor/12 can reconstruct an
   // annual a cent BELOW the floor (630.85 → 52.57/mo → 630.84/yr), quietly
   // defeating the 35% post-discount guard.
-  const armedMarginFloorAnnual = LAWN_PRICING_V2?.useLawnCostFloor === true
+  const armed = marginFloorArmed === undefined
+    ? LAWN_PRICING_V2?.useLawnCostFloor === true
+    : marginFloorArmed === true;
+  const armedMarginFloorAnnual = armed
     ? Number(marginFloorAnnual)
     : NaN;
   const marginFloorMonthly = Number.isFinite(armedMarginFloorAnnual) && armedMarginFloorAnnual > 0
@@ -12859,6 +12875,10 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
   const rawManualDiscount = manualDiscountOverride !== undefined
     ? manualDiscountOverride
     : normalizeManualDiscountSummary(estData);
+  // Global live re-arm OR this estimate's stored per-input re-arm — resolved
+  // once so every cadence row clamps under the same arm state.
+  const marginFloorArmed = LAWN_PRICING_V2?.useLawnCostFloor === true
+    || estimateLawnFloorArmed(estData);
   const shaped = (Array.isArray(rows) ? rows : [])
     .map((row) => {
       const tierKey = lawnTierKey(row);
@@ -12897,13 +12917,14 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         manualDiscount: rawManualDiscountForTier,
         // Engine-invocation rows carry marginFloorAnnual directly; v1-backed
         // stored rows persist the same cadence floor under prov.costFloorAnnual
-        // (v1-legacy-mapper) — both paths must clamp at it.
+        // (v1-legacy-mapper) — both paths must clamp at it when armed.
         marginFloorAnnual: finiteNumberOrNull(
           row.marginFloorAnnual
           ?? row.prov?.minimumCollectedAnnualPrice
           ?? row.prov?.costFloorAnnual
           ?? row.costFloorAnnual,
         ),
+        marginFloorArmed,
       });
       // The engine itself may have already lifted the tier to the program
       // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that

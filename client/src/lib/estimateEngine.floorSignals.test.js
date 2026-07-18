@@ -66,6 +66,30 @@ describe("applyServerLawnPricingConfig — live lawn program minimum in the fall
     const sixApp = est.results.lawn.find((t) => t.v === 6);
     expect(sixApp.programMinimumApplied).toBe(false);
   });
+
+  it("honors a server-provided cost-floor re-arm: floor SELECTION follows the live switch (codex P2 #2827 merge-main)", () => {
+    // Fixture where the 9x cost floor clears its market cell (4,500 sqft:
+    // $591.25 floor vs $588 market on the server table this mirrors).
+    const before = calculateEstimate(lawnInput({ measuredTurfSf: 4500 }));
+    const beforeNine = before.results.lawn.find((t) => t.v === 9);
+    expect(beforeNine.costFloorAnnual).toBeGreaterThan(beforeNine.marketAnnual);
+    expect(beforeNine.costFloorApplied).toBe(false);
+
+    applyServerLawnPricingConfig({ useLawnCostFloor: true });
+    const est = calculateEstimate(lawnInput({ measuredTurfSf: 4500 }));
+    const nine = est.results.lawn.find((t) => t.v === 9);
+    expect(nine.costFloorApplied).toBe(true);
+    expect(nine.pricingSource).toBe("COST_FLOOR");
+    expect(nine.ann).toBeGreaterThanOrEqual(nine.marketAnnual);
+  });
+
+  it("cost-floor re-arm resets with the config like the program minimum", () => {
+    applyServerLawnPricingConfig({ useLawnCostFloor: true });
+    applyServerLawnPricingConfig(null);
+    const est = calculateEstimate(lawnInput({ measuredTurfSf: 4500 }));
+    const nine = est.results.lawn.find((t) => t.v === 9);
+    expect(nine.costFloorApplied).toBe(false);
+  });
 });
 
 describe("collectMarginReviewNotes — report-only low-margin signals for the estimator panel", () => {

@@ -5,6 +5,7 @@ const {
   priceLawnCare,
   priceOneTimeLawn,
 } = require('../services/pricing-engine');
+const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
 const { buildEnrichedProfile, needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
 
 function baseInput(overrides = {}) {
@@ -1125,6 +1126,49 @@ describe('lawn pricing production follow-up', () => {
     });
     expect(withHidden.selected.tier).toBe('basic');
     expect(withHidden.frequency).toBe(4);
+  });
+
+  test('a deep lawn-only manual discount surfaces the below-margin warning while disarmed (report-only)', () => {
+    // 4,500 sqft standard/6x: market $456/yr, 50% manual → $228 collected.
+    // Nothing caps it (floors disarmed), but the owner still gets the
+    // "looks low" signal — the same warn path pest/tree lines already have
+    // (codex P2 on the #2827 main-merge: guardedLineCost had no lawn branch).
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 6 } },
+      manualDiscount: { type: 'PERCENT', value: 50 },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(estimate.summary.manualDiscount.capped).toBe(false);
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(228);
+    expect(lawn.manualFinalAnnual).toBe(228);
+    expect(lawn.manualFinalMargin).toBeLessThan(0.35);
+    expect(lawn.manualMarginWarning).toBe(true);
+    const warning = estimate.marginWarnings.find((w) => (
+      w.service === 'lawn_care' && w.type === 'manual_discount_below_margin_floor'
+    ));
+    expect(warning).toBeTruthy();
+  });
+
+  test('re-armed: the live DB switch arms cost-floor selection for direct priceLawnCare callers', () => {
+    // Direct callers (weekly invariant sweep, public lawn assessment,
+    // snapshots) pass no option — the destructuring default reads the live
+    // lawn_pricing_v2.useLawnCostFloor switch so a no-deploy re-arm reaches
+    // them exactly like generateEstimate (codex P2 on the #2827 main-merge).
+    const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
+    const prior = LAWN_PRICING_V2.useLawnCostFloor;
+    LAWN_PRICING_V2.useLawnCostFloor = true;
+    try {
+      const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
+      // Same fixture as the disarmed default pin below: floor $591.25 sits
+      // above the $588 market cell, so armed selection must take the floor.
+      expect(lawn.selected.costFloorApplied).toBe(true);
+      expect(lawn.selected.pricingSource).toBe('COST_FLOOR');
+      expect(lawn.selected.annual).toBeGreaterThan(588);
+    } finally {
+      LAWN_PRICING_V2.useLawnCostFloor = prior;
+    }
   });
 
   test('useLawnCostFloor defaults to false — cost-floor math is reporting-only (owner 2026-07-17)', () => {
