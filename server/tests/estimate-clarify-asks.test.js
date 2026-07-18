@@ -134,11 +134,16 @@ describe('parkClarifyAsk', () => {
       status: 'pending',
       flags: JSON.stringify({ missing: ['specific_service'], toPhone: '+19415550142' }),
     };
-    const result = await parkClarifyAsk(BASE);
+    const result = await parkClarifyAsk({ ...BASE, channelProvenance: 'voice' });
     expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0' });
     expect(mockState.inserts).toHaveLength(0);
     const update = mockState.updates[0];
-    expect(JSON.parse(update.flags).missing.sort()).toEqual(['specific_service', 'street_address']);
+    const flags = JSON.parse(update.flags);
+    expect(flags.missing.sort()).toEqual(['specific_service', 'street_address']);
+    // The newest request owns the linkage the approval guard judges by.
+    expect(flags.lead_id).toBe('lead-1');
+    expect(flags.source).toBe('estimator_engine_red');
+    expect(flags.channel_provenance).toBe('voice');
     expect(update.draft_response).toContain('service address');
     expect(update.draft_response).toContain('which service');
   });

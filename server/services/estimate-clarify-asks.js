@@ -137,8 +137,20 @@ async function parkClarifyAsk({
           await db('message_drafts')
             .where({ id: existing.id, status: 'pending' })
             .update({
+              // The NEWEST request owns the linkage: the approval guard
+              // judges staleness against it, and the old request's closed
+              // lead / retired estimate must not kill a question the new
+              // request still needs.
+              customer_id: customerId || existing.customer_id || null,
               draft_response: composeClarifyBody({ missing: merged, firstName }),
-              flags: JSON.stringify({ ...existingFlags, missing: merged }),
+              flags: JSON.stringify({
+                ...existingFlags,
+                missing: merged,
+                lead_id: leadId || existingFlags.lead_id || null,
+                estimate_id: estimateId || existingFlags.estimate_id || null,
+                source,
+                channel_provenance: channelProvenance || existingFlags.channel_provenance || null,
+              }),
             });
           return { parked: false, skipped: 'merged_into_open_clarify', draftId: existing.id };
         }

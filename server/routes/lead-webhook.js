@@ -841,12 +841,16 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         });
         // Address-only ask alignment: the webhook seeded
         // lead_intake_status='awaiting_service' above, but this form already
-        // carries a concrete service — a customer answering the approved
-        // address question would hit the service classifier and be dropped.
-        // Advance the machine to awaiting_address (with the interest it
-        // needs) so the reply is captured as the address. Guarded UPDATE:
-        // only from the state this webhook just seeded.
-        if (parkedAsk?.parked
+        // carries a concrete service — a customer answering the address
+        // question would hit the service classifier and be dropped. Advance
+        // the machine to awaiting_address (with the interest it needs) so
+        // the reply is captured as the address. Applies on ANY gate-on park
+        // outcome (parked, merged into an open draft, or cooldown-deduped —
+        // a usable address ask exists either way); gate off keeps today's
+        // behavior untouched. Guarded UPDATE: only from the state this
+        // webhook just seeded.
+        if (parkedAsk
+          && parkedAsk.skipped !== 'gate_off'
           && !clarifyMissing.includes('specific_service')
           && customer?.id) {
           const { classifyServiceIntent } = require('../services/sms-service-intent');
