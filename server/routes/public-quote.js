@@ -140,6 +140,21 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
   };
 }
 
+// Unit-suffixed address on a multi-unit parcel: county parcel data has no
+// per-unit footprint, so the enrichment (and therefore the engine input)
+// describes the WHOLE building — sqft, footprint, lot, commercial
+// classification. Auto-pricing that quoted a 32-unit condo's resident
+// $498/mo for quarterly pest (Unit 408, 2026-07-17). Force the same
+// site-confirmed manual-quote contract as the low-confidence commercial
+// path instead of showing a building-scale price for one door. Requires
+// BOTH signals: a unit line on the address AND parcel unitCount > 1 — a
+// bare unit line (no enrichment) or a multi-unit parcel with no unit
+// (a genuine whole-building/association request, #2721) prices normally.
+function unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress = {}, enrichedProps = {}) {
+  return Boolean(String(normalizedAddress.line2 || '').trim())
+    && Number(enrichedProps.unitCount) > 1;
+}
+
 // Per-application price for the wizard result screen (owner request,
 // 2026-06-12: lead with "$432/yr" wanted "$108 per application"). Only
 // derivable when the quote has exactly ONE recurring line (counted by
@@ -752,14 +767,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const lowConfidenceForcesSiteQuote = commercialLowConfidenceRequiresSiteQuote({
       engineResult: { lineItems: estimate?.lineItems || [] },
     });
+    const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep);
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
     // all assume the quote is wholly priced or wholly manual. A lawn-only or
     // tree-only commercial quote has no manual line, so it prices instantly.
-    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote;
+    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel;
     const quoteRequiredReason = manualQuoteLine?.reason
-      || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null);
+      || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
+      || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     const oneTimeTotal = quoteRequired ? 0 : (
@@ -1624,4 +1641,5 @@ module.exports._internals = {
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,
+  unitOnMultiUnitParcelForcesSiteQuote,
 };

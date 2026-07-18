@@ -264,6 +264,39 @@ class OpportunityQueue {
   }
 
   /**
+   * Defer a claimed opportunity: back to 'pending' with a future
+   * available_at, invisible to claimNext() until the window opens. Used for
+   * publish-cap deferrals (nothing is wrong with the item — the cap is
+   * full) and single-retry gate redrafts, so neither lands in the human
+   * review queue. skip_reason stays NULL — 'pending' rows must look pending;
+   * the deferral reason lives on the autonomous_runs row. expires_at is
+   * pushed past the defer window (GREATEST keeps a later miner-set expiry)
+   * so expireStale() can't expire the row before it ever becomes claimable.
+   */
+  async defer(opportunityId, availableAt, { claimToken } = {}) {
+    if (!(availableAt instanceof Date) || Number.isNaN(availableAt.getTime())) {
+      throw new Error('opportunity-queue: defer requires a valid availableAt Date');
+    }
+    if (!claimToken) {
+      throw new Error('opportunity-queue.defer: claimToken required (pass the claimed_at value returned by claimNext)');
+    }
+    const expiresFloor = new Date(availableAt.getTime() + 3 * 24 * 60 * 60 * 1000);
+    const updated = await db('opportunity_queue')
+      .where('id', opportunityId)
+      .where('status', 'claimed')
+      .where('claimed_at', claimToken)
+      .update({
+        status: 'pending',
+        claimed_at: null,
+        skip_reason: null,
+        available_at: availableAt,
+        expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [expiresFloor, expiresFloor]),
+        updated_at: new Date(),
+      });
+    return updated > 0;
+  }
+
+  /**
    * Recover claims that have been held longer than STALE_CLAIM_MS by
    * returning them to pending. Called inline by claimNext(); also safe
    * to call from a janitor cron. Operates on rows whose claim is

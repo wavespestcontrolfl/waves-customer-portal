@@ -389,4 +389,53 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
   return { sent: false, skipped: result.code || 'blocked' };
 }
 
-module.exports = { sendVoicemailQuoteLink, MESSAGE_TYPE };
+/**
+ * Delivery-status bounce handler (wired into the Twilio /status callback).
+ * A bounced quote-link text (30006 = landline is the common case) means the
+ * lead has had NO successful first contact — the send looked fine at send
+ * time, so nothing else surfaces it and the lead sits silently cold
+ * (observed 2026-07-17: undelivered text-back, lead untouched). Pull the
+ * lead's follow-up to NOW and leave a call-instead breadcrumb on the
+ * timeline. Best-effort by contract: never throws, touches only a still-new
+ * lead, and only pulls next_follow_up_at EARLIER (never pushes one out).
+ */
+async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
+  try {
+    if (!sid) return { handled: false, reason: 'no_sid' };
+    const row = await db('sms_log')
+      .where({ twilio_sid: sid, message_type: MESSAGE_TYPE, direction: 'outbound' })
+      .first('id', 'to_phone');
+    if (!row) return { handled: false, reason: 'not_quote_link' };
+
+    const phone = normalizePhoneE164(to || row.to_phone);
+    if (!phone) return { handled: false, reason: 'no_phone' };
+    const lead = await db('leads')
+      .where('phone', phone)
+      .where('status', 'new')
+      .whereNull('deleted_at')
+      .where('created_at', '>=', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000))
+      .orderBy('created_at', 'desc')
+      .first('id', 'next_follow_up_at');
+    if (!lead) return { handled: false, reason: 'no_open_lead' };
+
+    const now = new Date();
+    const existing = lead.next_follow_up_at ? new Date(lead.next_follow_up_at) : null;
+    if (!existing || Number.isNaN(existing.getTime()) || existing > now) {
+      await db('leads').where({ id: lead.id }).update({ next_follow_up_at: now, updated_at: now });
+    }
+    await stampStatus(lead.id, 'undelivered');
+    const codeText = String(errorCode || '') === '30006'
+      ? 'error 30006 — landline, this number cannot receive SMS'
+      : `status ${status}${errorCode ? `, error ${errorCode}` : ''}`;
+    await logActivity(lead.id, 'note',
+      `Quote-link text-back never arrived (${codeText}). Call the lead instead.`,
+      { message_type: MESSAGE_TYPE, delivery_status: status || null, error_code: errorCode || null });
+    logger.info(`[voicemail-sms] Undelivered quote link for lead ${lead.id} (${maskPhone(phone)}) — follow-up pulled to now`);
+    return { handled: true, leadId: lead.id };
+  } catch (e) {
+    logger.warn(`[voicemail-sms] undelivered quote-link handling failed: ${e.message}`);
+    return { handled: false, reason: 'error' };
+  }
+}
+
+module.exports = { sendVoicemailQuoteLink, handleUndeliveredQuoteLink, MESSAGE_TYPE };

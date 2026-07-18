@@ -295,3 +295,35 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
     ]));
   });
 });
+
+describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {
+  test('claim-guarded update: pending, future available_at, cleared skip_reason, extended expires_at', async () => {
+    const q = chain({ updateResult: 1 });
+    db.mockImplementation(() => q);
+    const when = new Date('2026-07-20T04:00:00Z');
+
+    const ok = await queue.defer('opp_defer', when, { claimToken: 'tok' });
+
+    expect(ok).toBe(true);
+    expect(q._filters).toEqual(expect.arrayContaining([
+      ['id', 'opp_defer'],
+      ['status', 'claimed'],
+      ['claimed_at', 'tok'],
+    ]));
+    const patch = q.update.mock.calls[0][0];
+    expect(patch.status).toBe('pending');
+    expect(patch.claimed_at).toBeNull();
+    // 'pending' rows must look pending — the deferral reason lives on the
+    // autonomous_runs row, not the queue row.
+    expect(patch.skip_reason).toBeNull();
+    expect(patch.available_at).toBe(when);
+    // expires_at must be pushed past the defer horizon or expireStale()
+    // expires the row before it ever becomes claimable again.
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('GREATEST'), expect.any(Array));
+  });
+
+  test('requires a claimToken and a real Date', async () => {
+    await expect(queue.defer('opp_defer', new Date('2026-07-20T04:00:00Z'), {})).rejects.toThrow('claimToken');
+    await expect(queue.defer('opp_defer', 'monday', { claimToken: 'tok' })).rejects.toThrow('availableAt');
+  });
+});

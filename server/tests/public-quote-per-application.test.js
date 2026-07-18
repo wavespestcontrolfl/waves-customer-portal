@@ -424,3 +424,25 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(source).toMatch(/bookingParams\.set\('service_label', recurringServiceLabelParam\)/);
   });
 });
+
+describe('unitOnMultiUnitParcelForcesSiteQuote — unit address on a multi-unit parcel', () => {
+  const { unitOnMultiUnitParcelForcesSiteQuote } = _internals;
+
+  test('unit line + multi-unit parcel forces the site-confirmed manual quote (Unit 408 regression)', () => {
+    expect(unitOnMultiUnitParcelForcesSiteQuote(
+      { line2: 'Unit 408' },
+      { unitCount: 32, homeSqFt: 40704, isCommercial: true },
+    )).toBe(true);
+  });
+
+  test('unit line with no enrichment (or single-unit parcel) prices normally', () => {
+    expect(unitOnMultiUnitParcelForcesSiteQuote({ line2: 'Unit 4' }, {})).toBe(false);
+    expect(unitOnMultiUnitParcelForcesSiteQuote({ line2: 'Apt B' }, { unitCount: 1 })).toBe(false);
+    expect(unitOnMultiUnitParcelForcesSiteQuote({ line2: '  ' }, { unitCount: 32 })).toBe(false);
+  });
+
+  test('multi-unit parcel WITHOUT a unit line is a whole-building request and prices normally (#2721)', () => {
+    expect(unitOnMultiUnitParcelForcesSiteQuote({ line2: null }, { unitCount: 32 })).toBe(false);
+    expect(unitOnMultiUnitParcelForcesSiteQuote({}, { unitCount: 32 })).toBe(false);
+  });
+});
