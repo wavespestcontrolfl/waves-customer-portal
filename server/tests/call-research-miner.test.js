@@ -57,6 +57,48 @@ describe('call-research prompt contract', () => {
     // never collapse to one provider, whatever the env overrides say.
     expect(CALL_RESEARCH_ROUTE.fallback.provider).not.toBe(CALL_RESEARCH_ROUTE.primary.provider);
   });
+
+  test('provider-only override never inherits a foreign default model', () => {
+    jest.resetModules();
+    process.env.CALL_RESEARCH_PROVIDER = 'anthropic';
+    delete process.env.CALL_RESEARCH_MODEL;
+    try {
+      const { CALL_RESEARCH_ROUTE: route } = require('../services/call-research-miner');
+      expect(route.primary.model).not.toMatch(/^gpt-/);
+      expect(route.primary.model).not.toMatch(/^gemini-/);
+      expect(route.fallback.provider).toBe('openai');
+    } finally {
+      delete process.env.CALL_RESEARCH_PROVIDER;
+      jest.resetModules();
+    }
+  });
+
+  test('schema validation runs inside the dispatcher so bad primary output triggers fallback', async () => {
+    jest.resetModules();
+    let capturedValidate = null;
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: jest.fn(async (route, payload, opts = {}) => {
+        capturedValidate = opts.validate;
+        return { ok: true, json: { chunks: [] }, model: 'stub-model' };
+      }),
+    }));
+    try {
+      const miner = require('../services/call-research-miner');
+      const res = await miner.extractResearchChunks(
+        { transcription: 'Agent: Waves, how can I help?\nCaller: I have ants everywhere.' },
+        null,
+      );
+      expect(res.status).toBe('ok');
+      expect(typeof capturedValidate).toBe('function');
+      // contract-invalid output = rejection reason → dispatcher tries Claude
+      expect(capturedValidate({ json: { chunks: [{ speaker: 'caller', quote: 'ants everywhere', tag: 'not-a-tag' }] } })).toBe('research_schema_invalid');
+      expect(capturedValidate({ json: null })).toBe('research_schema_invalid');
+      expect(capturedValidate({ json: { chunks: [] } })).toBeNull();
+    } finally {
+      jest.dontMock('../services/llm/call');
+      jest.resetModules();
+    }
+  });
 });
 
 describe('verbatim guard', () => {

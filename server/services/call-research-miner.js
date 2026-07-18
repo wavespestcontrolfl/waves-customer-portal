@@ -46,9 +46,17 @@ const { buildCallResearchPrompt, validateResearchOutput, PROMPT_HASH } = require
 // mid-corpus mixes extraction provenance — pair a deliberate swap with a
 // PROMPT_VERSION bump when a uniform re-mine is wanted. Re-run the bake-off
 // (scripts/bakeoff-call-research.js) at major model GAs; bump only on a win.
+const PRIMARY_PROVIDER = process.env.CALL_RESEARCH_PROVIDER || MODELS.PROVIDER.OPENAI;
+// A provider-only override must never inherit another provider's model id —
+// each provider gets its own bake-off-informed default.
+const DEFAULT_MODEL_FOR = {
+  [MODELS.PROVIDER.OPENAI]: MODELS.OPENAI_REPORT_WRITER,
+  [MODELS.PROVIDER.ANTHROPIC]: MODELS.FLAGSHIP,
+  [MODELS.PROVIDER.GEMINI]: 'gemini-2.5-pro',
+};
 const CALL_RESEARCH_PRIMARY = Object.freeze({
-  provider: process.env.CALL_RESEARCH_PROVIDER || MODELS.PROVIDER.OPENAI,
-  model: process.env.CALL_RESEARCH_MODEL || MODELS.OPENAI_REPORT_WRITER,
+  provider: PRIMARY_PROVIDER,
+  model: process.env.CALL_RESEARCH_MODEL || DEFAULT_MODEL_FOR[PRIMARY_PROVIDER] || MODELS.OPENAI_REPORT_WRITER,
 });
 const CALL_RESEARCH_ROUTE = Object.freeze({
   primary: CALL_RESEARCH_PRIMARY,
@@ -216,20 +224,23 @@ async function extractResearchChunks(call, customer, { route = CALL_RESEARCH_ROU
     return { status: 'unlabeled', chunks: [], dropped: {} };
   }
 
+  // Schema validation runs INSIDE the dispatcher so contract-invalid primary
+  // output (valid JSON, wrong shape) triggers the fallback leg instead of
+  // failing the call outright.
   const res = await dispatchWithFallback(route, {
     text: buildCallResearchPrompt(transcript),
     jsonMode: true,
     maxTokens: 8192,
     temperature: 0, // closed-enum structured extraction — greedy decode
     timeoutMs: EXTRACTION_TIMEOUT_MS,
+  }, {
+    validate: (result) => (result.json && validateResearchOutput(result.json).valid ? null : 'research_schema_invalid'),
   });
   if (!res.ok || !res.json) {
-    return { status: 'request_failed', reason: res.reason || 'empty_json', chunks: [], dropped: {} };
-  }
-
-  const validation = validateResearchOutput(res.json);
-  if (!validation.valid) {
-    return { status: 'schema_failed', errors: validation.errors, chunks: [], dropped: {} };
+    const schemaReject = (res.failures || []).some((f) => f.reason === 'research_schema_invalid');
+    return schemaReject
+      ? { status: 'schema_failed', errors: res.failures, chunks: [], dropped: {} }
+      : { status: 'request_failed', reason: res.reason || 'empty_json', chunks: [], dropped: {} };
   }
 
   const { chunks, dropped } = normalizeChunks(res.json.chunks, transcript);
