@@ -57,12 +57,13 @@ function targetsQuery({ locationId = null, excludeCustomerIds = [] } = {}) {
     .where('monthly_rate', '>', 0)
     .whereNull('service_paused_at')
     .whereNull('deleted_at')
-    // per_application and annual_prepay customers are skipped by the
-    // monthly billing cron even when a monthly_rate is on file, so a
-    // "per month" price notice would misstate their billing.
-    .where(function monthlyBilledOnly() {
-      this.whereNull('billing_mode').orWhereNotIn('billing_mode', ['per_application', 'annual_prepay']);
-    });
+    // Explicit non-monthly customers are skipped by the monthly billing
+    // cron even when a monthly_rate is on file, and NULL rows follow the
+    // lane resolver's inference (GUARD 3c) — a tier-less or sentinel-tier
+    // row is never dues-charged, so a "per month" price notice would
+    // misstate their billing (Codex r8). Same SQL mirror the pre-charge
+    // reminder uses.
+    .whereRaw(require('./billing-lane').MONTHLY_LANE_SQL);
   if (excludeCustomerIds.length) q = q.whereNotIn('id', excludeCustomerIds);
   if (locationId) {
     q = q.where(function locationMatch() {

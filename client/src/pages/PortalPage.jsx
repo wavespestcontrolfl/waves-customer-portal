@@ -1478,8 +1478,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   // supplies monthlyRate for per-application customers, and labeling that
   // "Monthly rate" contradicts both My Plan and the billing contract.
   const [billingMode, setBillingMode] = useState(null);
+  // Server-resolved lane verdict for NULL modes (non_monthly_billing) — the
+  // cron skips resolver-non-monthly rows, so the summary must not advertise
+  // a monthly plan charge for them (Codex r10).
+  const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
   useEffect(() => {
-    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
+    api.getAutopay().then(d => {
+      setBillingMode(d?.billing_mode || null);
+      setResolvedNonMonthly(d?.non_monthly_billing === true);
+    }).catch(() => {});
   }, []);
   const [satRating, setSatRating] = useState(0);
   const [satHover, setSatHover] = useState(0);
@@ -2027,7 +2034,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   }
                 : billingMode === 'per_application'
                   ? { label: 'Billing', value: 'Per application', sub: tierDiscountSub }
-                  : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
+                  : billingMode === 'per_visit' || billingMode === 'one_time' || (billingMode === null && resolvedNonMonthly)
+                    ? { label: 'Billing', value: 'Per visit', sub: tierDiscountSub }
+                    : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
               {
                 label: 'Services YTD',
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
@@ -4324,7 +4333,15 @@ function BillingTab({ customer }) {
   // Annual prepay is term-covered — no monthly charge runs; the saved method
   // is used at renewal.
   const annualPrepayBilling = autopay?.billing_mode === 'annual_prepay';
-  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
+  // Explicit per-visit lanes invoice each completed service — the monthly
+  // cron skips them, so monthly projection copy is wrong here too (Codex
+  // r6). NULL modes the SERVER resolved non-monthly (non_monthly_billing)
+  // read as per-visit for copy as well — the client has no tier to resolve
+  // with, and a monthly_rate fallback would promise a charge the cron will
+  // never run (Codex r9).
+  const perVisitBilling = autopay?.billing_mode === 'per_visit' || autopay?.billing_mode === 'one_time'
+    || (autopay?.non_monthly_billing === true && !perApplicationBilling && !annualPrepayBilling);
+  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling || perVisitBilling;
   const amountDue = Number(autopayState === 'active'
     ? (autopay?.next_charge_amount ?? (nonMonthlyBilling ? 0 : autopay?.monthly_rate) ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
@@ -4413,7 +4430,9 @@ function BillingTab({ customer }) {
         ? 'Auto Pay is on — charged per application'
         : annualPrepayBilling
           ? 'Auto Pay is on — plan prepaid'
-          : autopayMonthlyUnpriced
+          : perVisitBilling
+            ? 'Auto Pay is on — invoiced per visit'
+            : autopayMonthlyUnpriced
             ? 'Auto Pay is on — rate being finalized'
             : daysUntilDue === 0
               ? 'Auto Pay is processing today'
@@ -4422,7 +4441,9 @@ function BillingTab({ customer }) {
                 : `Next charge ${money(amountDue)}`,
       detail: perApplicationBilling
         ? 'Your saved payment method is charged for each service visit after it is completed.'
-        : annualPrepayBilling
+        : perVisitBilling
+          ? 'We send an invoice after each completed service visit — your saved payment method makes paying it quick.'
+          : annualPrepayBilling
           ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
           : autopayMonthlyUnpriced
             ? 'Your monthly rate is being finalized, so no charge is scheduled yet.'
@@ -4664,13 +4685,13 @@ function BillingTab({ customer }) {
           {[
             // No scheduled date → "Next Not scheduled" reads broken; show a
             // neutral sub instead (eyeball 07-12 finding 3).
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Invoiced per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.
             {
-              label: perApplicationBilling ? 'Plan billing' : annualPrepayBilling ? 'Plan billing' : 'Monthly plan',
-              value: perApplicationBilling ? 'Per application' : annualPrepayBilling ? 'Prepaid' : money(monthlyRate),
+              label: perApplicationBilling || annualPrepayBilling || perVisitBilling ? 'Plan billing' : 'Monthly plan',
+              value: perApplicationBilling ? 'Per application' : annualPrepayBilling ? 'Prepaid' : perVisitBilling ? 'Per visit' : money(monthlyRate),
               sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan'),
             },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
@@ -4751,7 +4772,7 @@ function BillingTab({ customer }) {
             fontWeight: 850,
             color: B.glassNavy,
             fontFamily: FONTS.ui,
-          }}>{perApplicationBilling ? 'Billed per application' : annualPrepayBilling ? 'Prepaid for the year' : `${money(monthlyRate)}/mo`}</span>
+          }}>{perApplicationBilling ? 'Billed per application' : annualPrepayBilling ? 'Prepaid for the year' : perVisitBilling ? 'Billed per visit' : `${money(monthlyRate)}/mo`}</span>
         </div>
         <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
           {/* Service rows list what the plan covers — no per-service price
@@ -8098,6 +8119,9 @@ function MyPlanTab({ customer, focusService }) {
   // must not present a "$X per month" plan rate — same source of truth as
   // the Billing tab's AutopayCard.
   const [billingMode, setBillingMode] = useState(null);
+  // Server-resolved lane verdict for NULL modes — see the dashboard summary
+  // (Codex r10).
+  const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
@@ -8127,7 +8151,10 @@ function MyPlanTab({ customer, focusService }) {
 
   useEffect(() => {
     loadPlan();
-    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
+    api.getAutopay().then(d => {
+      setBillingMode(d?.billing_mode || null);
+      setResolvedNonMonthly(d?.non_monthly_billing === true);
+    }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
   }, [loadPlan]);
 
@@ -8235,14 +8262,19 @@ function MyPlanTab({ customer, focusService }) {
     ? 'No active plan'
     : (annualPrepayLabel || 'Active plan');
   const perApplicationBilled = billingMode === 'per_application';
+  // Explicit per-visit lanes never show the monthly rate as their plan
+  // billing — the cron does not charge it (Codex r6). NULL modes the server
+  // resolved non-monthly read the same way (Codex r10).
+  const perVisitBilled = billingMode === 'per_visit' || billingMode === 'one_time'
+    || (billingMode === null && resolvedNonMonthly);
   const planBillingValue = !activeTierName
     ? '—'
     : (annualPrepay
       ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
-      : (perApplicationBilled ? 'Per application' : formatPortalMoney(monthlyRate)));
+      : (perApplicationBilled ? 'Per application' : perVisitBilled ? 'Per visit' : formatPortalMoney(monthlyRate)));
   const planBillingSub = !activeTierName
     ? 'No WaveGuard plan on file'
-    : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : 'per month'));
+    : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : perVisitBilled ? 'Billed per completed visit' : 'per month'));
 
   // Build bundled services one-liner
   const bundleSummary = includedServices.map(s => s.name.replace(/ Program| Barrier Treatment| Control/g, '').replace('Quarterly ', '')).join(' + ');

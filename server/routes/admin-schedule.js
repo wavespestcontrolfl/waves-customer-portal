@@ -19,6 +19,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected } = require('../services/billing-lane');
 const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
@@ -1338,6 +1339,24 @@ const ZONE_LABELS = {
   sarasota: 'Sarasota', venice_north_port: 'Venice/N.Port', ellenton: 'Ellenton',
 };
 
+// Completion reuses a non-void invoice already attached to the visit
+// (pre-minted Charge Now / accept-minted first-visit with setup fee / payer
+// AP) BEFORE any fresh billing decision (admin-dispatch preMintedInvoice +
+// existingCompletionInvoice) — so when one exists, the sheet's prediction
+// must mirror it, not recompute from the visit price/fee, or the card
+// quotes an amount (or a paying party) completion will ignore (Codex r7).
+function predictionFromAttachedInvoice(invoice) {
+  if (!invoice || invoice.status === 'void') return null;
+  const amount = invoice.total != null
+    ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
+    : null;
+  if (['paid', 'prepaid'].includes(invoice.status)) {
+    return { kind: 'prepaid', amount, conflictStampedPrice: false, source: 'attached_invoice' };
+  }
+  if (invoice.payer_id) return { kind: 'payer', amount, conflictStampedPrice: false, source: 'attached_invoice' };
+  return { kind: 'invoice', amount, conflictStampedPrice: false, source: 'attached_invoice' };
+}
+
 // Compact, client-safe summary of an attached invoice's line items for the
 // schedule payloads. An invoice attached to a scheduled service is what the
 // visit actually collects — completion billing and Charge-now both reuse it
@@ -1418,6 +1437,8 @@ router.get('/', async (req, res, next) => {
         'customers.autopay_enabled', 'customers.autopay_paused_until',
         'customers.autopay_payment_method_id',
         'customers.ach_status',
+        'customers.billing_mode', 'customers.per_application_fee',
+        'customers.service_paused_at',
         'technicians.name as tech_name'
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
@@ -1505,6 +1526,70 @@ router.get('/', async (req, res, next) => {
         autopay_payment_method_id: s.autopay_payment_method_id,
         ach_status: s.ach_status,
       });
+      const lane = resolveBillingLane({
+        billing_mode: s.billing_mode, waveguard_tier: s.waveguard_tier, monthly_rate: s.monthly_rate,
+      });
+      // A stale annual-prepay stamp (refund/void/expired term) must not
+      // read as covered — validate against the live term with the same
+      // authority completion uses; null = validation unavailable, the
+      // prediction falls back to the stamp (Codex r3).
+      let annualCoverageValidated = null;
+      if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
+        try {
+          const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+          annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db);
+        } catch { annualCoverageValidated = null; }
+      }
+      // Present-tense money state for the sheet's billing card: what the
+      // customer already owes (collectible invoices) and, for members,
+      // whether this month's dues actually collected. Non-blocking — a
+      // failed read renders the card without these lines rather than
+      // failing the whole schedule payload.
+      let openInvoices = { balance: 0, count: 0, overdue: false };
+      try {
+        const inv = await db('invoices')
+          .where({ customer_id: s.customer_id })
+          .whereIn('status', ['sent', 'viewed', 'overdue'])
+          // Payer-billed invoices are the third party's AR — never the
+          // homeowner's balance (Codex r1).
+          .whereNull('payer_id')
+          .first(
+            db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
+            db.raw('COUNT(*)::int as count'),
+            db.raw("COALESCE(BOOL_OR(status = 'overdue'), false) as overdue"),
+          );
+        if (inv) openInvoices = { balance: Number(inv.balance || 0), count: Number(inv.count || 0), overdue: !!inv.overdue };
+      } catch { /* non-blocking */ }
+      let duesPaidThisMonth = null;
+      if (lane.mode === 'monthly_membership') {
+        try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+      }
+      const billingLane = {
+        mode: lane.mode,
+        source: lane.source,
+        monthlyRate: s.monthly_rate != null ? parseFloat(s.monthly_rate) : null,
+        autopayActive,
+        openBalance: openInvoices.balance,
+        openInvoiceCount: openInvoices.count,
+        hasOverdue: openInvoices.overdue,
+        duesPaidThisMonth,
+        servicePausedAt: s.service_paused_at || null,
+        prediction: predictionFromAttachedInvoice(checkoutInvoice) || predictCompletionBilling({
+          lane: lane.mode,
+          billingMode: s.billing_mode || null,
+          autopayActive,
+          estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          monthlyRate: s.monthly_rate,
+          perApplicationFee: s.per_application_fee,
+          isRecurring: !!s.is_recurring,
+          isCallback: !!s.is_callback,
+          serviceType: s.service_type,
+          payerBilled: !!s.billed_to_payer_id,
+          prepaidAmount: s.prepaid_amount,
+          prepaidMethod: s.prepaid_method || null,
+          annualCoverageValidated,
+        }),
+      };
 
       return {
         id: s.id, routeOrder: s.route_order,
@@ -1515,6 +1600,7 @@ router.get('/', async (req, res, next) => {
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
+        billingLane,
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
         selfPayOverride: s.self_pay_override === true,
@@ -1706,10 +1792,13 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.skip_weekends',
           'scheduled_services.weekend_shift',
           'scheduled_services.source_estimate_id',
+          'scheduled_services.annual_prepay_term_id',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
           'customers.autopay_payment_method_id',
           'customers.ach_status',
+          'customers.billing_mode', 'customers.per_application_fee',
+          'customers.service_paused_at',
           'technicians.name as tech_name')
         .orderByRaw('COALESCE(route_order, 999)');
 
@@ -1751,6 +1840,81 @@ router.get('/week', async (req, res, next) => {
           autopay_payment_method_id: s.autopay_payment_method_id,
           ach_status: s.ach_status,
         });
+        const lane = resolveBillingLane({
+          billing_mode: s.billing_mode, waveguard_tier: s.waveguard_tier, monthly_rate: s.monthly_rate,
+        });
+        // A stale annual-prepay stamp (refund/void/expired term) must not
+        // read as covered — validate against the live term with the same
+        // authority completion uses; null = validation unavailable, the
+        // prediction falls back to the stamp (Codex r3).
+        let annualCoverageValidated = null;
+        if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
+          try {
+            const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+            annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db);
+          } catch { annualCoverageValidated = null; }
+        }
+        // Present-tense money state for the sheet's billing card: what the
+        // customer already owes (collectible invoices) and, for members,
+        // whether this month's dues actually collected. Non-blocking — a
+        // failed read renders the card without these lines rather than
+        // failing the whole schedule payload.
+        let openInvoices = { balance: 0, count: 0, overdue: false };
+        try {
+          const inv = await db('invoices')
+            .where({ customer_id: s.customer_id })
+            .whereIn('status', ['sent', 'viewed', 'overdue'])
+            // Payer-billed invoices are the third party's AR — never the
+            // homeowner's balance (Codex r1).
+            .whereNull('payer_id')
+            .first(
+              db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
+              db.raw('COUNT(*)::int as count'),
+              db.raw("COALESCE(BOOL_OR(status = 'overdue'), false) as overdue"),
+            );
+          if (inv) openInvoices = { balance: Number(inv.balance || 0), count: Number(inv.count || 0), overdue: !!inv.overdue };
+        } catch { /* non-blocking */ }
+        let duesPaidThisMonth = null;
+        if (lane.mode === 'monthly_membership') {
+          try { duesPaidThisMonth = await monthlyDuesCollected(db, s.customer_id); } catch { duesPaidThisMonth = null; }
+        }
+        // Same attached-invoice precedence as the day payload — the week
+        // sheet must not quote a fresh computation when completion will
+        // reuse an invoice already minted for this visit (Codex r7).
+        let attachedInvoice = null;
+        try {
+          attachedInvoice = await db('invoices')
+            .where({ scheduled_service_id: s.id })
+            .whereNot('status', 'void')
+            .orderBy('created_at', 'desc')
+            .first('id', 'status', 'total', 'credit_applied', 'payer_id');
+        } catch { /* scheduled_service_id may be absent before migration */ }
+        const billingLane = {
+          mode: lane.mode,
+          source: lane.source,
+          monthlyRate: s.monthly_rate != null ? parseFloat(s.monthly_rate) : null,
+          autopayActive,
+          openBalance: openInvoices.balance,
+          openInvoiceCount: openInvoices.count,
+          hasOverdue: openInvoices.overdue,
+          duesPaidThisMonth,
+          servicePausedAt: s.service_paused_at || null,
+          prediction: predictionFromAttachedInvoice(attachedInvoice) || predictCompletionBilling({
+            lane: lane.mode,
+            billingMode: s.billing_mode || null,
+            autopayActive,
+            estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+            monthlyRate: s.monthly_rate,
+            perApplicationFee: s.per_application_fee,
+            isRecurring: !!s.is_recurring,
+            isCallback: !!s.is_callback,
+            serviceType: s.service_type,
+            payerBilled: !!s.billed_to_payer_id,
+            prepaidAmount: s.prepaid_amount,
+            prepaidMethod: s.prepaid_method || null,
+            annualCoverageValidated,
+          }),
+        };
         return {
           id: s.id,
           customerId: s.customer_id,
@@ -1777,6 +1941,7 @@ router.get('/week', async (req, res, next) => {
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
           createInvoiceOnComplete: !!s.create_invoice_on_complete,
+          billingLane,
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
         selfPayOverride: s.self_pay_override === true,
@@ -2287,6 +2452,39 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // nothing (codex P2).
     const createInvoiceEffective = bookingBillingTermEffective === 'prepay_annual' ? true : !!createInvoice;
 
+    // Billing lane (explicit customers.billing_mode; legacy inference for
+    // NULL): a monthly-membership customer's RECURRING series is covered by
+    // dues, so its rows must not carry per-visit price stamps or the
+    // create-invoice default — those stamps are exactly how members got
+    // double-billed (completion honors an explicit price on one-off visits
+    // only). A one-off (non-recurring) booking for a member keeps its price
+    // and bills normally. A prepay_annual BOOKING is excluded outright
+    // (checked on the booking term, not the resolved lane): the customer's
+    // CURRENT lane may still read monthly_membership while the annual
+    // acceptance is in flight, and the pending-prepay path depends on the
+    // forced create_invoice_on_complete + price stamps to bill completions
+    // that land before the annual invoice is paid (Codex r1 P1).
+    // A payer-billed customer's visits invoice the AP payer at completion —
+    // dues coverage never applies (membershipDuesCoverVisit is payer-
+    // guarded) — so stripping the price would underbill the payer's invoice
+    // down to the monthly_rate fallback or nothing (Codex r8 P1). The
+    // booking-time signal is the customer's DEFAULT payer: per-job payers
+    // only attach post-booking via the payer PATCH, and an office attaching
+    // one to an already-stripped member row must (re)price the row there —
+    // the schedule card's payer prediction surfaces the missing amount.
+    const memberSeriesCovered = bookingBillingTermEffective !== 'prepay_annual'
+      && !customer?.payer_id
+      && resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
+    const createInvoiceStamp = memberSeriesCovered ? false : createInvoiceEffective;
+    // A priced ADD-ON riding a covered member visit keeps a price stamp so
+    // the one-per-series review alert fires and Charge Now surfaces the
+    // billable amount — but the stamp is the ADD-ON-ONLY total (pre-
+    // discount), never the base+add-on subtotal: the base is covered by
+    // dues, and stamping the full price would surface/mint a $100 plan
+    // visit + $20 add-on as $120 instead of the billable $20 (Codex r2+r3).
+    // Base-only rows stay stamp-free.
+    const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => sum + (Number(a?.price) > 0 ? Number(a.price) : 0), 0);
+
     const zone = getZone(customer?.city, customer?.zip);
     // Owner directive (2026-07-03): every service call defaults to 60 minutes;
     // the service-record default or an explicit tech-entered duration wins below.
@@ -2404,7 +2602,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
       if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
-      if (cols.estimated_price && finalPrice != null) insertData.estimated_price = finalPrice;
+      if (cols.estimated_price) {
+        if (memberSeriesCovered) {
+          const addonStamp = addonOnlyTotal(pricing.addonLines);
+          if (addonStamp > 0) insertData.estimated_price = addonStamp;
+        } else if (finalPrice != null) insertData.estimated_price = finalPrice;
+      }
       if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
@@ -2435,7 +2638,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
       if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) insertData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
       if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-      if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceEffective;
+      if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = createInvoiceStamp;
 
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
@@ -2499,7 +2702,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
         if (cols.estimated_price) {
           if (zeroCallbackPrice) childData.estimated_price = 0;
-          else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
+          else if (memberSeriesCovered) {
+            const addonStamp = addonOnlyTotal(childAddonLines);
+            if (addonStamp > 0) childData.estimated_price = addonStamp;
+          } else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
         }
         if (cols.primary_line_price && pricing.primaryBase != null) childData.primary_line_price = pricing.primaryBase;
         if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) childData.discount_id = pricing.appointmentDiscount.discountId;
@@ -2514,7 +2720,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
         if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) childData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
         if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) childData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
-        if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceEffective;
+        if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceStamp;
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
@@ -2559,6 +2765,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
+          // Booster rows are is_recurring:false — completion treats them as
+          // one-off visits that BILL their own price, never as dues-covered
+          // plan visits, so the member-series stripping must not touch them:
+          // stripping left base-only boosters unpriced, completing unbilled
+          // (or falling back to the dues rate) instead of invoicing the
+          // booster's real price (Codex r6).
           if (cols.estimated_price) {
             if (zeroCallbackPrice) boosterData.estimated_price = 0;
             else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
@@ -2581,6 +2793,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
           if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) boosterData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
           if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
+          // Same reasoning: boosters keep the modal's invoice intent even on
+          // a covered member series (identical to createInvoiceStamp for
+          // every non-member booking).
           if (cols.create_invoice_on_complete) boosterData.create_invoice_on_complete = createInvoiceEffective;
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
 
@@ -4447,8 +4662,14 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // non-callback recurring/WaveGuard visit falls back to the monthly rate; a
 // callback (re-service) is free by definition. Mirrors the Charge-now amount
 // rule so a mark-time receipt invoices the same figure completion would.
-function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate }) {
+function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode }) {
   if (estimatedPrice != null && Number(estimatedPrice) > 0) return Number(estimatedPrice);
+  // Explicit non-monthly lanes never fall back to the customer-level
+  // monthly_rate — that is the membership dues number, and completion's
+  // completionInvoiceAmount refuses the same fallback (Codex r10): an
+  // unpriced visit in these lanes bills manually, never at the old dues
+  // amount through Charge Now / prepaid-receipt minting.
+  if (billingMode && billingMode !== 'monthly_membership') return 0;
   if (!isCallback && monthlyRate && Number(monthlyRate) > 0) return Number(monthlyRate);
   return 0;
 }
@@ -4567,6 +4788,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     estimatedPrice: svc.estimated_price,
     isCallback: svc.is_callback,
     monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode || null,
   });
   if (!(amount > 0)) return { invoice: null, reason: 'no_chargeable_amount' };
   const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
@@ -4665,6 +4887,7 @@ async function generatePrepaidReceiptForService(serviceId) {
       'customers.monthly_rate as cust_monthly_rate',
       'customers.property_type as cust_property_type',
       'customers.waveguard_tier as cust_waveguard_tier',
+      'customers.billing_mode as cust_billing_mode',
     )
     .first();
   if (!svc) return { sent: false, reason: 'service_not_found' };
@@ -4915,7 +5138,8 @@ router.post('/:id/invoice', async (req, res, next) => {
       .select('scheduled_services.*',
         'customers.monthly_rate as cust_monthly_rate',
         'customers.property_type as cust_property_type',
-        'customers.waveguard_tier as cust_waveguard_tier')
+        'customers.waveguard_tier as cust_waveguard_tier',
+        'customers.billing_mode as cust_billing_mode')
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
 
@@ -5096,9 +5320,12 @@ router.post('/:id/invoice', async (req, res, next) => {
     // no-charge re-service. Mirrors the completion-path suppression in
     // admin-dispatch.js. Honour an explicit positive price if one was set;
     // otherwise the visit is $0.
-    const amount = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
-      ? Number(svc.estimated_price)
-      : (!svc.is_callback && svc.cust_monthly_rate && Number(svc.cust_monthly_rate) > 0 ? Number(svc.cust_monthly_rate) : 0);
+    const amount = resolveScheduledServiceCharge({
+      estimatedPrice: svc.estimated_price,
+      isCallback: svc.is_callback,
+      monthlyRate: svc.cust_monthly_rate,
+      billingMode: svc.cust_billing_mode || null,
+    });
 
     // Mobile checkout sheet can append extra services + discount lines before
     // minting. Each extra is { description, quantity, unit_price, amount,

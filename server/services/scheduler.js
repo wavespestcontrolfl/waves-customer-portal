@@ -1680,6 +1680,32 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 10:05AM — Pre-visit late-balance reminders (owner directive
+  // 2026-07-17). One text+email per RECURRING visit landing in 3 days when
+  // the customer has a late RECURRING balance (unpaid dues / overdue
+  // recurring invoices) — never ahead of one-time visits, never for
+  // one-time invoice debt. Runs every day (visits land on weekends too).
+  // DARK unless PREVISIT_BALANCE_REMINDER=true AND the seeded-inactive
+  // previsit_balance_reminder SMS template is activated by the owner.
+  // =========================================================================
+  cron.schedule('5 10 * * *', async () => {
+    logger.info('Running: pre-visit balance reminders');
+    try {
+      await runExclusive('previsit-balance-reminder', async () => {
+        const PrevisitBalanceReminder = require('./previsit-balance-reminder');
+        const result = await PrevisitBalanceReminder.runSweep();
+        if (result.skipped === true) {
+          logger.info(`Pre-visit balance reminders inert: ${result.reason}`);
+        } else {
+          logger.info(`Pre-visit balance reminders done: ${result.sent} sent, ${result.skipped} skipped of ${result.considered}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Pre-visit balance reminders failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 10:15AM (Tue–Fri) — Payer statement dunning (Phase 2 — P4)
   // Fires the next due AP reminder for each unpaid NET-terms statement past its
   // due date. Gated behind GATE_PAYER_STATEMENTS (runPending no-ops when off).

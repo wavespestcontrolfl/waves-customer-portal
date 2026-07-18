@@ -46,6 +46,21 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: 'Gold', invoiceAmount: 49 })).toBe(true);
   });
 
+  test('a sentinel tier (Commercial/One-Time) never takes the membership billing branch — the cron classifies those rows per_visit (Codex r8)', () => {
+    for (const tier of ['Commercial', 'One-Time', 'None']) {
+      expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: tier, invoiceAmount: 49 })).toBe(false);
+    }
+    // A priced sentinel-tier visit still bills via the scheduler flag.
+    expect(shouldAutoInvoiceCompletion({
+      ...base, waveguardTier: 'Commercial', createInvoiceOnComplete: true, hasVisitPrice: true, invoiceAmount: 129,
+    })).toBe(true);
+  });
+
+  test('an explicit tier-less member whose coverage failed still invoices (Codex r1)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: null, explicitMembership: true, invoiceAmount: 33.33 })).toBe(true);
+    expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: null, explicitMembership: false, invoiceAmount: 33.33 })).toBe(false);
+  });
+
   test('GATE OFF: priced self-pay visit still does NOT invoice (behaviour unchanged)', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: false })).toBe(false);
   });
@@ -64,6 +79,17 @@ describe('shouldAutoInvoiceCompletion', () => {
 
   test('GATE ON: a callback / re-treat is NEVER auto-billed even with a stale price', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true, isCallback: true })).toBe(false);
+  });
+
+  test('EXPLICIT per-visit/one-time lane: a priced, performed visit invoices without flag, tier, or gate (Codex r5)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, explicitPerVisitLane: true })).toBe(true);
+  });
+
+  test('EXPLICIT per-visit lane still exempts callbacks, always-free types, and non-performed visits — a lingering tier cannot bill them via fall-through', () => {
+    const lane = { ...pricedSelfPay, explicitPerVisitLane: true, waveguardTier: 'Gold' };
+    expect(shouldAutoInvoiceCompletion({ ...lane, isCallback: true })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...lane, serviceType: 'Pest Control Re-Service' })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...lane, visitPerformed: false })).toBe(false);
   });
 
   test('GATE ON: a paid inspection/rodent visit (ambiguous, not always-free) DOES invoice — price is authoritative at completion', () => {

@@ -208,7 +208,7 @@ describe('BANK enrollment confirmation (portal ACH lane)', () => {
   });
 
   test('monthly-billed bank accounts get the monthly DEBIT line', async () => {
-    state.tables.customers = [{ ...CUSTOMER, billing_mode: null, monthly_rate: '120.00' }];
+    state.tables.customers = [{ ...CUSTOMER, billing_mode: null, waveguard_tier: 'Silver', monthly_rate: '120.00' }];
     await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
     expect(mockSendTemplate.mock.calls[0][0].payload.debit_timing_line)
       .toBe('Your bank account is debited your monthly plan amount on your billing day each month, and you get a receipt every time.');
@@ -245,13 +245,28 @@ describe('charge timing line by billing mode (Codex r3)', () => {
   });
 
   test('monthly-billed accounts get the monthly line — the cron charges monthly_rate, not per visit', async () => {
-    expect(await timingLineFor({ ...CUSTOMER, billing_mode: null, monthly_rate: '89.00' }))
+    expect(await timingLineFor({ ...CUSTOMER, billing_mode: null, waveguard_tier: 'Silver', monthly_rate: '89.00' }))
       .toBe('Your card is charged your monthly plan amount on your billing day each month, and you get a receipt every time.');
+  });
+
+  test('NULL-mode rows the resolver classifies per_visit (tier-less / sentinel tier) get the per-service line — GUARD 3c skips them (Codex r9)', async () => {
+    expect(await timingLineFor({ ...CUSTOMER, billing_mode: null, waveguard_tier: null, monthly_rate: '89.00' }))
+      .toBe("After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.");
   });
 
   test('annual-prepay accounts get the as-agreed line — no cadence the prepaid term does not have', async () => {
     expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'annual_prepay', monthly_rate: '89.00' }))
       .toBe('Your card is charged for your service invoices as agreed, and you get a receipt every time.');
+  });
+
+  test('explicit per-visit accounts get INVOICE wording, never the monthly or auto-charge promise (Codex r6+r7)', async () => {
+    expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'per_visit', monthly_rate: '89.00' }))
+      .toBe('After each completed service, we send your invoice — your card on file makes paying it quick.');
+  });
+
+  test('explicit one-time accounts get INVOICE wording, never the monthly or auto-charge promise (Codex r6+r7)', async () => {
+    expect(await timingLineFor({ ...CUSTOMER, billing_mode: 'one_time', monthly_rate: '89.00' }))
+      .toBe('After each completed service, we send your invoice — your card on file makes paying it quick.');
   });
 });
 

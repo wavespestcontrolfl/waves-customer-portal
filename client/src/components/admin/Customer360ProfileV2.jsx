@@ -2973,6 +2973,106 @@ function TermiteStationsPanel({ customerId }) {
 }
 
 // ─── Autopay panel ───────────────────────────────────────────────
+const BILLING_LANE_OPTIONS = [
+  { value: "", label: "Not set (legacy — inferred)" },
+  { value: "monthly_membership", label: "Monthly membership — dues cover recurring visits" },
+  { value: "per_visit", label: "Per visit — invoice on completion" },
+  { value: "per_application", label: "Per application — fee collected each visit" },
+  { value: "annual_prepay", label: "Annual prepay" },
+  { value: "one_time", label: "One-time" },
+];
+
+// The ONE place the billing lane is set (customers.billing_mode). Every
+// billing flow — the monthly cron, completion invoicing, booking price
+// stamps, the schedule sheet's prediction — reads this instead of inferring
+// from tier/rate field combinations, so a customer can never sit in two
+// lanes at once. Named export for component tests/harnesses.
+export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate, canEdit }) {
+  const [mode, setMode] = useState(billingMode || "");
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    setMode(billingMode || "");
+  }, [customerId, billingMode]);
+  const inferred =
+    tier && parseFloat(monthlyRate || 0) > 0 ? "Monthly membership" : "Per visit";
+  const save = async (next) => {
+    setSaving(true);
+    setErr("");
+    setMsg("");
+    try {
+      const r = await fetch(`${API_BASE}/admin/customers/${customerId}`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ billingMode: next || null }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+      setMode(next);
+      setMsg("Saved");
+    } catch (e) {
+      setErr(e.message || "Save failed");
+    }
+    setSaving(false);
+  };
+  return (
+    <Card className="mb-5">
+      {" "}
+      <CardBody className="p-4">
+        {" "}
+        <div className="u-label text-ink-secondary mb-1">
+          How this customer pays
+        </div>{" "}
+        <div className="flex items-center gap-2 flex-wrap">
+          {" "}
+          <select
+            value={mode}
+            disabled={!canEdit || saving}
+            onChange={(e) => save(e.target.value)}
+            className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1.5 bg-white"
+          >
+            {BILLING_LANE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>{" "}
+          {saving && <span className="text-12 text-ink-secondary">Saving…</span>}{" "}
+        </div>
+        {!mode && (
+          <div className="text-12 text-ink-secondary mt-1.5">
+            Unset — currently behaves as{" "}
+            <span className="text-zinc-900">{inferred}</span> (inferred from
+            tier + monthly rate).
+          </div>
+        )}
+        {mode === "monthly_membership" && (
+          <div className="text-12 text-ink-secondary mt-1.5">
+            Dues on the 1st cover recurring plan visits — completions never
+            invoice them.
+          </div>
+        )}
+        {msg && (
+          <div className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-12">
+            {msg}
+          </div>
+        )}
+        {err && (
+          <div className="mt-2.5 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+            {err}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
 function AdminAutopayPanelV2({
   customerId,
   monthlyRate,
@@ -5859,6 +5959,13 @@ export default function Customer360ProfileV2({
                   value={fmtCurrency(c.lifetimeRevenue)}
                 />{" "}
               </div>{" "}
+              <BillingLanePanelV2
+                customerId={c.id}
+                billingMode={c.billingMode}
+                tier={c.tier}
+                monthlyRate={c.monthlyRate}
+                canEdit={isAdmin}
+              />{" "}
               <AdminAutopayPanelV2
                 customerId={c.id}
                 monthlyRate={c.monthlyRate}

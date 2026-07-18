@@ -62,7 +62,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn(() => 'msg') }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => Promise.resolve('Hi there')) }));
-jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn() }));
+jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn(), sendPaymentRetryNotice: jest.fn(() => Promise.resolve({ ok: true })) }));
 jest.mock('../services/account-membership-email', () => ({}));
 jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
 jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
@@ -306,6 +306,34 @@ describe('processPaymentRetries — suppression guards', () => {
 // collectible). 'annual_prepay' old debt is governed exclusively by the
 // coverage-DATED absorb, not by current mode.
 describe('processPaymentRetries — billing_mode resolution guard', () => {
+  test('NULL-mode tier-less row resolves per_visit: ladder DISARMED — GUARD 3c parity, no side-door dues retry (Codex r10 P1)', async () => {
+    mockCustomer.billing_mode = null;
+    mockCustomer.waveguard_tier = null;
+    mockFailedPayments = [monthlyFailedPayment()];
+    mockCollectedRow = null;
+
+    await BillingCron.processPaymentRetries();
+
+    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_billing_mode',
+      expect.objectContaining({
+        paymentId: 'pay-failed-1',
+        details: expect.objectContaining({ resolved_mode: 'per_visit', ladder_stopped: true }),
+      }));
+  });
+
+  test('NULL-mode row with a REAL tier still retries — the resolver says monthly', async () => {
+    mockCustomer.billing_mode = null; // Bronze tier + rate from the fixture
+    mockFailedPayments = [monthlyFailedPayment()];
+    mockCollectedRow = null;
+    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay-retried', amount: 33 }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+
+    await BillingCron.processPaymentRetries();
+
+    expect(PaymentRouter.getServiceForCustomer).toHaveBeenCalledWith('cust-1');
+  });
+
   test('per_application customer (never paid monthly): ladder DISARMED but debt stays visible — no auto write-off (Codex round-6)', async () => {
     mockCustomer.billing_mode = 'per_application';
     mockFailedPayments = [monthlyFailedPayment()];
