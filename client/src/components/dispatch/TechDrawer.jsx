@@ -156,7 +156,7 @@ export default function TechDrawer({ techId, onClose }) {
   const open = !!techId;
 
   return (
-    <Sheet open={open} onClose={onClose} width="md">
+    <Sheet open={open} onClose={onClose} width="md" ariaLabel={tech ? `${tech.name} technician details` : 'Technician details'}>
       <SheetHeader>
         <div className="flex items-center gap-3 min-w-0">
           <h2 className="text-18 font-medium text-ink-primary truncate">

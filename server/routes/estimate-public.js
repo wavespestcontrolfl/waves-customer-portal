@@ -27,7 +27,7 @@ const {
   markLinkedLeadEstimateAccepted,
   markLinkedLeadEstimateViewed,
 } = require('../services/lead-estimate-link');
-const { buildEstimateMembershipContext } = require('../services/estimate-membership-context');
+const { buildEstimateMembershipContext, publicMembershipView } = require('../services/estimate-membership-context');
 const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
 const {
   ensureDepositSatisfied,
@@ -3486,8 +3486,9 @@ function renderMembershipBlockHtml(membership) {
       Adding ${escapeHtml(membership.upgrade.addedServiceLabels.join(' & ') || 'this service')}
       bumps your membership from <strong>${escapeHtml(membership.upgrade.fromLabel)}</strong>
       up to <strong>${escapeHtml(membership.upgrade.toLabel)}</strong>
-      &mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service,
-      including the ones you already have.
+      ${membership.discountAppliesTo === 'new_services_only'
+        ? `for this estimate. That tier discounts the new services by up to ${Number(membership.tierDiscountPct) || 0}%; your current service prices stay unchanged.`
+        : `&mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.`}
     </div>` : '';
 
   const existingHtml = existing.length ? `
@@ -7246,7 +7247,10 @@ async function handleEstimateView(req, res, next) {
         noShowFeeAmount: cardHoldOneTimePolicyForView.noShowFeeAmount || CardHolds.cardHoldNoShowFee(),
         cancelWindowHours: cardHoldOneTimePolicyForView.cancelWindowHours || CardHolds.cardHoldCancelWindowHours(),
       } : { enforced: false, requiredForOneTime: false },
-    }, estData, membership, { showYourWork, prepayBaseRate });
+      // Same PUBLIC boundary as /data: renderPage only reads whitelisted
+      // fields today, but projecting here keeps a future SSR embed from
+      // shipping the staff account context to the unauthenticated page.
+    }, estData, publicMembershipView(membership), { showYourWork, prepayBaseRate });
   } catch (err) { next(err); }
 }
 
@@ -8400,6 +8404,12 @@ router.put('/:token/accept', async (req, res, next) => {
             noShowFeeAmount: cardHoldPolicy.noShowFeeAmount,
             cancelWindowHours: cardHoldPolicy.cancelWindowHours,
           },
+          // Freeze the accepted one-time total onto the hold (Codex #2821
+          // P1): the completion-charge cap compares against this stamp, so
+          // a later staff price edit (which rewrites scheduled_services.
+          // estimated_price) can never raise what the saved card may be
+          // charged past what the customer consented to here.
+          acceptedAmount: visitEstimatedPrice,
           trx,
         });
       }
@@ -12624,8 +12634,31 @@ function isRetiredLawnTierKey(tierKey) {
 // per-app never disagree, the pre-discount anchor never drops below the net
 // price, and the reported manual discount shrinks to what the floor actually
 // let through (never display savings the price doesn't reflect).
-function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount }) {
-  const minMonthly = lawnProgramMinimumMonthly();
+function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visits, manualDiscount, marginFloorAnnual }) {
+  const programMinMonthly = lawnProgramMinimumMonthly();
+  // Margin-floor leg armed only with the cost-floor machinery (owner ruling
+  // 2026-07-17: floors report, never enforce). Stored and engine rows carry
+  // minimumCollectedAnnualPrice/costFloorAnnual on EVERY quote for margin
+  // REPORTING, so the field's presence alone must never clamp the ladder.
+  // When re-armed (lawn_pricing_v2.useLawnCostFloor — live db-bridge
+  // reference, same as the program minimum), each cadence re-clamps at its
+  // OWN 35% collected-margin floor: the program minimum alone would let a
+  // discounted alternate cadence render/bill below the margin its own cost
+  // basis requires.
+  // CEIL to cents: nearest-cent rounding of floor/12 can reconstruct an
+  // annual a cent BELOW the floor (630.85 → 52.57/mo → 630.84/yr), quietly
+  // defeating the 35% post-discount guard.
+  const armedMarginFloorAnnual = LAWN_PRICING_V2?.useLawnCostFloor === true
+    ? Number(marginFloorAnnual)
+    : NaN;
+  const marginFloorMonthly = Number.isFinite(armedMarginFloorAnnual) && armedMarginFloorAnnual > 0
+    ? Math.ceil((armedMarginFloorAnnual / 12) * 100) / 100
+    : 0;
+  const minMonthly = Math.max(programMinMonthly > 0 ? programMinMonthly : 0, marginFloorMonthly);
+  const minAnnual = Math.max(
+    programMinMonthly > 0 ? roundMonthly(programMinMonthly * 12) : 0,
+    Number.isFinite(armedMarginFloorAnnual) ? armedMarginFloorAnnual : 0,
+  );
   if (!(minMonthly > 0)) return { monthlyBase, monthly, annual, perTreatment, manualDiscount };
   const clampedMonthlyBase = monthlyBase != null ? Math.max(monthlyBase, minMonthly) : monthlyBase;
   let clampedMonthly = monthly != null ? Math.max(monthly, minMonthly) : monthly;
@@ -12635,14 +12668,14 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
   // truth and carries exact cents the monthly×12 round-trip would lose).
   const clampedAnnual = monthlyWasClamped
     ? roundMonthly(clampedMonthly * 12)
-    : (annual != null && monthly == null ? Math.max(annual, roundMonthly(minMonthly * 12)) : annual);
+    : (annual != null ? Math.max(annual, minAnnual) : annual);
   const annualWasClamped = clampedAnnual != null && annual != null && clampedAnnual !== annual;
   // An annual-only row the floor moved must ALSO carry a derived monthly:
   // accept reads selectedFrequency.monthly first and otherwise falls back to
   // the estimate's stored (pre-floor) monthly_total — without this, the row
   // could show a floored annual while still locking the old monthly charge.
   if (monthly == null && annualWasClamped) {
-    clampedMonthly = roundMonthly(clampedAnnual / 12);
+    clampedMonthly = Math.ceil((clampedAnnual / 12) * 100) / 100;
   }
   const clampedPerTreatment = (monthlyWasClamped || annualWasClamped) && clampedAnnual != null && visits
     ? roundMonthly(clampedAnnual / visits)
@@ -12666,7 +12699,7 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
         recurringAmount: effAmount,
         monthlyAmount: effMonthlyOff,
         capped: true,
-        capReason: 'lawn_program_minimum',
+        capReason: marginFloorMonthly > programMinMonthly ? 'lawn_margin_floor' : 'lawn_program_minimum',
       };
     }
   }
@@ -12677,7 +12710,12 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
     perTreatment: clampedPerTreatment,
     manualDiscount: clampedManualDiscount,
     manualDiscountSuppressed,
-    flooredAtMinimum: monthlyWasClamped || annualWasClamped,
+    // Decoy-hiding (owner ask 2026-07-10) applies to PROGRAM-MINIMUM pins,
+    // where every floored tier lands on the same $/mo and higher-app tiers
+    // dominate. A margin-floor clamp lands each cadence on its OWN cost-based
+    // price — those rows are real choices and must stay visible.
+    flooredAtMinimum: (monthlyWasClamped || annualWasClamped)
+      && programMinMonthly > 0 && minMonthly === programMinMonthly,
   };
 }
 
@@ -12857,6 +12895,15 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         perTreatment: rawPerTreatment,
         visits,
         manualDiscount: rawManualDiscountForTier,
+        // Engine-invocation rows carry marginFloorAnnual directly; v1-backed
+        // stored rows persist the same cadence floor under prov.costFloorAnnual
+        // (v1-legacy-mapper) — both paths must clamp at it.
+        marginFloorAnnual: finiteNumberOrNull(
+          row.marginFloorAnnual
+          ?? row.prov?.minimumCollectedAnnualPrice
+          ?? row.prov?.costFloorAnnual
+          ?? row.costFloorAnnual,
+        ),
       });
       // The engine itself may have already lifted the tier to the program
       // minimum before it was stored (pricingSource PROGRAM_MINIMUM) — that
@@ -12978,7 +13025,13 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
   // lawnFrequenciesFromRows, so only floor-bound tiers are capped.
   const requestedLawnDiscountPct = finiteNumberOrNull(lawnLine?.requestedDiscountPct)
     ?? finiteNumberOrNull(lawnLine?.discount?.effectiveDiscount);
-  const discountFactor = lawnLine?.programMinimumGuardApplied === true && requestedLawnDiscountPct != null
+  // Same treatment when the 35% MARGIN floor (not the program minimum) capped
+  // the selected line: the after/before ratio is the CAPPED ratio, and reusing
+  // it would strip discount headroom the alternate cadences actually have.
+  // Each tier re-clamps at its own floor below.
+  const selectedLineFloorCapped = lawnLine?.programMinimumGuardApplied === true
+    || lawnLine?.marginFloorGuardApplied === true;
+  const discountFactor = selectedLineFloorCapped && requestedLawnDiscountPct != null
     ? Math.min(1, Math.max(0, 1 - requestedLawnDiscountPct))
     : ((beforeAnnual && beforeAnnual > 0 && afterAnnual != null)
       ? afterAnnual / beforeAnnual
@@ -13014,6 +13067,9 @@ function lawnFrequenciesFromEngineResult(engineResult = {}, estData = {}) {
       // (lawnFrequenciesFromRows flags it; display hides it).
       pricingSource: t.pricingSource || null,
       pricingBasis: t.pricingBasis || null,
+      // Per-cadence 35% collected-margin floor — the ladder clamp enforces it
+      // alongside the program minimum so no cadence renders below ITS floor.
+      marginFloorAnnual: finiteNumberOrNull(t.minimumCollectedAnnualPrice ?? t.costFloorAnnual),
       recommended: t.recommended === true,
       selected: t.tier === selectedTierKey,
     };
@@ -16101,7 +16157,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         siteConfirmationHold,
         serviceCategory,
         acceptance,
-        membership,
+        // PUBLIC boundary: anyone holding the token link reads this JSON.
+        // Project the frozen snapshot down to the fields the customer page
+        // renders — the staff account context (per-property addresses,
+        // per-contract prices, payment/visit dates) stays server-side.
+        membership: publicMembershipView(membership),
       },
       pricing: {
         ...pricingBundle,
@@ -16310,6 +16370,7 @@ module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTi
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
+module.exports.clampLawnLadderEntry = clampLawnLadderEntry;
 module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;

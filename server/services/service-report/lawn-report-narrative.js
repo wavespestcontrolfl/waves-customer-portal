@@ -21,7 +21,7 @@
 const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
-const { callAnthropic } = require('../llm/call');
+const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
 const PROMPT_VERSION = 'lawn_report_v2_narrative_v1';
@@ -161,7 +161,10 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
   const hit = _cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
 
-  const callModel = deps.callModel || ((payload) => callAnthropic({ model: MODELS.VOICE, jsonMode: true, maxTokens: 1300, ...payload }));
+  const callModel = deps.callModel || ((payload) => dispatchWithFallback(
+    MODELS.TEXT_POLICIES.customerCopy,
+    { jsonMode: true, maxTokens: 1300, ...payload },
+  ));
 
   let merged = v2;
   try {

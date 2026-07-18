@@ -93,10 +93,17 @@ function bankLineFor(pm) {
 async function chargeTimingLine(customerId, { tender = 'your card', verb = 'charged' } = {}) {
   let mode = null;
   let monthlyRate = 0;
+  let resolvedMonthly = true; // read failure keeps the legacy monthly copy
   try {
-    const row = await db('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate');
+    const row = await db('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate', 'waveguard_tier');
     mode = row?.billing_mode || null;
     monthlyRate = Number(row?.monthly_rate) || 0;
+    // GUARD 3c parity (Codex r9): the cron now runs NULL rows through the
+    // lane resolver, so a tier-less/sentinel-tier row with a lingering rate
+    // is never dues-charged — the monthly line must follow the same verdict
+    // or the enrollment email authorizes a monthly debit that will not run.
+    const { resolveBillingLane } = require('./billing-lane');
+    resolvedMonthly = resolveBillingLane(row || {}).mode === 'monthly_membership';
   } catch { /* billing_mode column absent pre-migration */ }
   const Tender = `${tender.charAt(0).toUpperCase()}${tender.slice(1)}`;
   if (mode === 'annual_prepay') {
@@ -104,7 +111,20 @@ async function chargeTimingLine(customerId, { tender = 'your card', verb = 'char
     // a charge cadence the annual flow doesn't have.
     return `${Tender} is ${verb} for your service invoices as agreed, and you get a receipt every time.`;
   }
-  if (mode !== 'per_application' && monthlyRate > 0) {
+  // The explicit per-visit lanes are INVOICE-on-completion — the saved
+  // method is never auto-charged after a visit (that collection behavior
+  // belongs to per_application only; admin-dispatch's auto-charge block is
+  // gated on it) — so the copy must promise an invoice, not an off-session
+  // charge (Codex r7).
+  if (mode === 'per_visit' || mode === 'one_time') {
+    return `After each completed service, we send your invoice — ${tender} on file makes paying it quick.`;
+  }
+  // The monthly line is promised only when the dues cron will actually run:
+  // explicit non-monthly lanes are skipped by GUARD 3b (per_application
+  // falls through to the auto-charge line below even with a lingering
+  // monthly_rate — Codex r6), and NULL modes follow the lane resolver
+  // exactly as the cron's GUARD 3c does (Codex r9).
+  if (resolvedMonthly && monthlyRate > 0) {
     return `${Tender} is ${verb} your monthly plan amount on your billing day each month, and you get a receipt every time.`;
   }
   return `After each completed service, ${tender} is ${verb} that service's amount automatically, and you get a receipt every time.`;

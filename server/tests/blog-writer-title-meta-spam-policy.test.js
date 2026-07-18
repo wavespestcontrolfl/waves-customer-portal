@@ -55,3 +55,33 @@ describe('writer-agent-config title/meta anti-spam policy (autonomous drafts)', 
     expect(system).toMatch(/never emit FAQPage \/ faqPage structured\s+data unless/);
   });
 });
+
+// Round 8 (Codex P2): the writer prompt told the writer to emit
+// confidence="high"|"moderate"|"situational" on <BottomLineBox>, but the
+// synchronized component contract (packages/blog-schema schema.ts
+// confidenceEnum) accepts ONLY high|medium|low — a draft following the
+// prompt failed component-prop validation in the Astro pipeline. The prompt
+// must only ever instruct schema-valid values.
+describe('writer-agent-config BottomLineBox confidence values (component contract)', () => {
+  const system = WRITER_AGENT_CONFIG.system;
+
+  test('instructs exactly the schema enum values high|medium|low', () => {
+    expect(system).toMatch(/confidence="high"\|"medium"\|"low"/);
+  });
+
+  test('never suggests values the component contract rejects', () => {
+    expect(system).not.toMatch(/"moderate"/);
+    expect(system).not.toMatch(/"situational"/);
+  });
+
+  test('every quoted confidence value in the prompt is schema-valid', () => {
+    const valid = new Set(['high', 'medium', 'low']); // packages/blog-schema schema.ts confidenceEnum
+    const mentions = system.match(/confidence="[^"]+"(?:\|"[^"]+")*/g) || [];
+    expect(mentions.length).toBeGreaterThan(0);
+    for (const mention of mentions) {
+      for (const [, value] of mention.matchAll(/"([^"]+)"/g)) {
+        expect(valid.has(value)).toBe(true);
+      }
+    }
+  });
+});

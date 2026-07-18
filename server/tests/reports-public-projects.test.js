@@ -18,10 +18,14 @@ jest.mock('@aws-sdk/client-s3', () => ({
 jest.mock('@aws-sdk/s3-request-presigner', () => ({
   getSignedUrl: jest.fn(),
 }));
+jest.mock('../services/report-followup-appointment', () => ({
+  findReportFollowupAppointment: jest.fn(),
+}));
 
 const express = require('express');
 const db = require('../models/db');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const reportsRouter = require('../routes/reports-public');
 
 function chain(overrides = {}) {
@@ -62,6 +66,163 @@ describe('public project reports', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.fn.now.mockReturnValue('NOW');
+  });
+
+  test('WDO: fee-bearing captions are scrubbed and a dirty legacy filing gates the PDF', async () => {
+    const wdoProjectRow = {
+      id: 'project-2',
+      customer_id: 'customer-1',
+      report_token: '0123456789abcdef0123456789abcdef',
+      report_viewed_at: 'earlier',
+      project_type: 'wdo_inspection',
+      status: 'sent',
+      title: 'WDO inspection — inspection fee $250',
+      first_name: 'Van',
+      last_name: 'Lee',
+      city: 'Bradenton',
+      state: 'FL',
+      findings: { wdo_finding: 'No visible signs of WDO observed' },
+      wdo_sent_filings: JSON.stringify([{
+        s3_key: 'wdo/filing.pdf',
+        findings: { comments: 'Inspection fee $250 collected on site.' },
+      }]),
+    };
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(wdoProjectRow) });
+    const photosRead = chain({
+      orderBy: jest.fn().mockResolvedValue([
+        { id: 'photo-1', category: 'damage', caption: 'Inspection fee $250 noted at panel', visit: 'primary', s3_key: 'k1' },
+      ]),
+    });
+    getSignedUrl.mockResolvedValueOnce('https://signed.example/p.jpg');
+    const projectQueries = [projectRead];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return photosRead;
+      if (table === 'service_records') return chain();
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      // photo caption is technician free text — scrubbed at the egress
+      expect(body.photos[0].caption).toBe('Inspection fee [fee removed] noted at panel');
+      // the customer-facing headline gets the same scrub
+      expect(body.title).toBe('WDO inspection — inspection fee [fee removed]');
+      // the archived binary carries the raw fee — never advertised...
+      expect(body.fdacsPdfAvailable).toBe(false);
+      // ...while the page's snapshot findings render scrubbed
+      expect(body.findings.comments).toBe('Inspection fee [fee removed] collected on site.');
+    });
+  });
+
+  test('WDO: a filing archived through the sanitized renderer keeps its PDF available', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-3',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        report_viewed_at: 'earlier',
+        project_type: 'wdo_inspection',
+        status: 'sent',
+        title: 'WDO inspection',
+        first_name: 'Van',
+        last_name: 'Lee',
+        city: 'Bradenton',
+        state: 'FL',
+        findings: { wdo_finding: 'No visible signs of WDO observed' },
+        // raw snapshot carries the cue, but the binary was rendered through
+        // the customer-safe scrub — must NOT be gated (codex #2817 P1).
+        wdo_sent_filings: JSON.stringify([{
+          s3_key: 'wdo/filing.pdf',
+          pdf_renderer: 'fee-scrub-v1',
+          findings: { comments: 'Inspection fee $250 collected on site.' },
+        }]),
+      }),
+    });
+    const photosRead = chain({ orderBy: jest.fn().mockResolvedValue([]) });
+    const projectQueries = [projectRead];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return photosRead;
+      if (table === 'service_records') return chain();
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.fdacsPdfAvailable).toBe(true);
+    });
+  });
+
+  test('WDO: /fdacs-pdf 404s a dirty legacy filing with the generic body', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-2',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        project_type: 'wdo_inspection',
+        status: 'sent',
+        wdo_sent_filings: JSON.stringify([{
+          s3_key: 'wdo/filing.pdf',
+          findings: { comments: 'Inspection fee $250 collected on site.' },
+        }]),
+      }),
+    });
+    const projectQueries = [projectRead];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return chain({ count: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ count: 0 }) });
+      if (table === 'service_records') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/fdacs-pdf`);
+      const body = await res.json();
+      expect(res.status).toBe(404);
+      expect(body.error).toBe('Report not found');
+      // The gated 404 carries the same privacy headers as the PDF itself —
+      // they are set before any return (codex #2817).
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    });
+  });
+
+  test('WDO: /fdacs-pdf 404s an unmarked legacy filing whose project has photos — captions are mutable and cannot prove the archive clean', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-2',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        project_type: 'wdo_inspection',
+        status: 'sent',
+        wdo_sent_filings: JSON.stringify([{
+          s3_key: 'wdo/filing.pdf',
+          findings: { comments: 'Clean findings.' },
+        }]),
+      }),
+    });
+    const projectQueries = [projectRead];
+    db.mockImplementation((table) => {
+      if (table === 'projects as p' || table === 'projects') return projectQueries.shift();
+      if (table === 'project_photos') return chain({ count: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ count: 2 }) });
+      if (table === 'service_records') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/fdacs-pdf`);
+      const body = await res.json();
+      expect(res.status).toBe(404);
+      expect(body.error).toBe('Report not found');
+    });
   });
 
   test('returns report data when one project photo cannot be signed', async () => {
@@ -219,5 +380,70 @@ describe('public project reports', () => {
         expect(body.customerPhone).toBe(expectedPhone);
       });
     }
+  });
+
+  // 2026-07-16 egress-hygiene audit fixes: the public project JSON never
+  // carries internal finding keys or the internal window_end, and it ships
+  // the same privacy headers as the sibling /fdacs-pdf route.
+  test('public payload strips internal finding keys, drops window_end, and sets privacy headers', async () => {
+    const projectRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'project-hyg',
+        customer_id: 'customer-1',
+        scheduled_service_id: 'ss-source',
+        report_token: '0123456789abcdef0123456789abcdef',
+        report_viewed_at: '2026-05-02T14:00:00.000Z',
+        status: 'sent',
+        project_type: 'wdo_inspection',
+        first_name: 'Test',
+        last_name: 'Customer',
+        findings: JSON.stringify({
+          wdo_finding: 'No visible signs of WDO observed',
+          inspection_fee: '$250',
+        }),
+        recommendations: 'Inspection fee $250. Keep mulch pulled back from the foundation. Repair cost $1,250 for the sill plate.',
+      }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'projects as p') return projectRead;
+      if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+      if (table === 'service_records') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    // A real linked follow-up whose SOURCE row carries window_end — the
+    // serializer must surface window_start and drop window_end (internal
+    // job-duration block). Mocked so the assertion actually exercises the
+    // serializer, not a null upcomingAppointment (codex P2).
+    findReportFollowupAppointment.mockResolvedValue({
+      service_type: 'WDO Re-Inspection',
+      scheduled_date: '2999-01-05',
+      window_start: '08:00:00',
+      window_end: '12:00:00',
+      technician_name: 'Alex',
+      status: 'confirmed',
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toContain('noindex');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(body.findings.wdo_finding).toBe('No visible signs of WDO observed');
+      expect(body.findings.inspection_fee).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain('$250');
+      // the inspection fee is scrubbed at egress; the rest of the narrative —
+      // including a legitimate repair estimate — survives intact
+      expect(body.recommendations).toContain('Inspection fee [fee removed].');
+      expect(body.recommendations).toContain('Keep mulch pulled back');
+      expect(body.recommendations).toContain('Repair cost $1,250');
+      expect(body.recommendations).not.toContain('$250');
+      // appointment surfaced, window_start present, window_end stripped
+      expect(body.upcomingAppointment).toBeTruthy();
+      expect(body.upcomingAppointment.windowStart).toBe('08:00:00');
+      expect(body.upcomingAppointment.windowEnd).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain('12:00:00');
+    });
   });
 });

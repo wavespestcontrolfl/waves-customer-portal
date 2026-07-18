@@ -20,6 +20,28 @@ prices with reserve-folded cost REPORTING. The lawn golden master was
 regenerated the same way (35 of 65 cases flipped floor→market). The DB
 baselines (`*.baseline.json`) remain pending post-deploy recapture.
 
+Merging the #2795 recovery (2026-07-18) brought in the post-discount
+margin-guard machinery below: it is KEPT but enforcement-gated on
+`useLawnCostFloor` (per-input, or the `lawn_pricing_v2.useLawnCostFloor`
+DB key, in-code default false) alongside the program-minimum kill value —
+disarmed baselines are unchanged; the re-armed tests in
+`lawn-pricing-followup.test.js` pin the armed behavior.
+
+## 2026-07-16 lawn post-discount 35% margin guard
+
+Recurring lawn now keeps its 35% fully loaded collected-margin floor after
+WaveGuard discounts. Previously the floor shaped list price, but bundle
+discounts could reduce collected revenue below it; only the $600 annual program
+minimum survived the discount pass. The engine now caps the lawn discount at
+the greater of that program minimum and `minimumCollectedAnnualPrice`, without
+ever raising a line above its pre-discount price.
+
+Local baselines were recaptured with `CAPTURE_BASELINE=1 LOCAL=1`. Only four
+core cases and three v1-adapter cases moved, all containing discounted lawn;
+non-lawn line items, tier selection, and pre-discount totals stayed unchanged.
+See `pricing_changelog` entry `codex-2026-07-16` and migration
+`20260716150001_lawn_post_discount_margin_floor_changelog`.
+
 ## 2026-07-17 lawn spot-reserve fold
 
 Spot-treatment reserves folded into the lawn cost-floor material budgets

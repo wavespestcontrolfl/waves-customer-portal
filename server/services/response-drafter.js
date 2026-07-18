@@ -1,42 +1,43 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('./llm/call');
 
 class ResponseDrafter {
   async draftResponse(inboundMessage, context, intent) {
-    // Try Claude API first, fall back to template
-    if (process.env.ANTHROPIC_API_KEY) {
-      try { return await this.draftWithClaude(inboundMessage, context, intent); } catch (err) {
-        logger.error(`Claude draft failed: ${err.message}`);
-      }
+    // Cross providers before using the deterministic template, so either vendor
+    // can be unavailable without breaking the reply workflow.
+    try {
+      const drafted = await this.draftWithAI(inboundMessage, context, intent);
+      if (drafted) return drafted;
+    } catch (err) {
+      logger.error(`AI draft failed: ${err.message}`);
     }
     return this.draftFromTemplate(inboundMessage, context, intent);
   }
 
-  async draftWithClaude(inboundMessage, context, intent) {
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
+  async draftWithAI(inboundMessage, context, intent) {
     const conversation = (context.smsHistory || []).slice(0, 10).reverse()
       .map(m => `[${m.direction === 'inbound' ? 'CUSTOMER' : 'WAVES'}] ${m.body}`).join('\n');
 
     const flagsSummary = (context.flags || []).map(f => `${f.severity === 'high' ? '🚨' : '⚠️'} ${f.type}: ${f.detail}`).join('\n') || 'No flags.';
 
-    // Customer voice runs on VOICE (Sonnet 4.6 — warmer, more natural). High-stakes
-    // replies escalate to FLAGSHIP (Opus 4.8): cancellation/complaint intents, or any
-    // high-severity account flag. Uses existing signals only — no new classifier.
+    // Routine replies: Sonnet → OpenAI Terra. High-stakes replies: Opus → Sol.
+    // Uses existing signals only — no new classifier.
     const intentUpper = (intent?.intent || '').toUpperCase();
     const highStakes = intentUpper === 'CANCEL_REQUEST'
       || intentUpper === 'COMPLAINT'
       || (context.flags || []).some(f => f.severity === 'high');
-    const model = highStakes ? MODELS.FLAGSHIP : MODELS.VOICE;
-
-    const resp = await client.messages.create({
-      model, max_tokens: 500,
-      system: `You are Adam Benetti's AI assistant for Waves Pest Control. Draft SMS replies Adam will review before sending. Write as Adam — direct, knowledgeable, friendly. Keep under 300 chars when possible. Reference actual service data. Sign off "— Adam" or "— Waves". FLAGS:\n${flagsSummary}`,
-      messages: [{ role: 'user', content: `CUSTOMER: ${context.summary}\n\nLAST SERVICE: ${context.lastService ? `${context.lastService.type} on ${new Date(context.lastService.date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} — "${(context.lastService.notes || '').slice(0, 150)}"` : 'None'}\n\nNEXT: ${context.upcomingServices?.[0] ? `${context.upcomingServices[0].type} ${new Date(context.upcomingServices[0].date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : 'Nothing'}\n\nBALANCE: ${context.billing?.outstandingBalance > 0 ? `$${context.billing.outstandingBalance.toFixed(2)} overdue` : 'Current'}\n\nRECENT SMS:\n${conversation}\n\nINTENT: ${intent?.intent || 'UNKNOWN'}\n\nNEW MESSAGE: "${inboundMessage}"\n\nDraft reply as Adam:` }],
-    });
-
-    return { draft: resp.content[0].text, context: context.summary, flags: context.flags, intent: intent?.intent };
+    const result = await dispatchWithFallback(
+      highStakes ? MODELS.TEXT_POLICIES.highStakes : MODELS.TEXT_POLICIES.customerCopy,
+      {
+        maxTokens: 500,
+        jsonMode: false,
+        system: `You are Adam Benetti's AI assistant for Waves Pest Control. Draft SMS replies Adam will review before sending. Write as Adam — direct, knowledgeable, friendly. Keep under 300 chars when possible. Reference actual service data. Sign off "— Adam" or "— Waves". FLAGS:\n${flagsSummary}`,
+        text: `CUSTOMER: ${context.summary}\n\nLAST SERVICE: ${context.lastService ? `${context.lastService.type} on ${new Date(context.lastService.date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} — "${(context.lastService.notes || '').slice(0, 150)}"` : 'None'}\n\nNEXT: ${context.upcomingServices?.[0] ? `${context.upcomingServices[0].type} ${new Date(context.upcomingServices[0].date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : 'Nothing'}\n\nBALANCE: ${context.billing?.outstandingBalance > 0 ? `$${context.billing.outstandingBalance.toFixed(2)} overdue` : 'Current'}\n\nRECENT SMS:\n${conversation}\n\nINTENT: ${intent?.intent || 'UNKNOWN'}\n\nNEW MESSAGE: "${inboundMessage}"\n\nDraft reply as Adam:`,
+      },
+    );
+    if (!result.ok || !String(result.text || '').trim()) return null;
+    return { draft: result.text, context: context.summary, flags: context.flags, intent: intent?.intent };
   }
 
   draftFromTemplate(inboundMessage, context, intent) {

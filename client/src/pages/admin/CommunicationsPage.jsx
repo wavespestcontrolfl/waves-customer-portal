@@ -1064,7 +1064,7 @@ function CallLogTab() {
     const params = new URLSearchParams({ phone: phone || "" });
     if (city) params.set("city", city);
     if (state) params.set("state", state);
-    window.open(`/admin/customers/new?${params.toString()}`, "_blank");
+    window.location.assign(`/admin/customers/new?${params.toString()}`);
   };
 
   if (loading)

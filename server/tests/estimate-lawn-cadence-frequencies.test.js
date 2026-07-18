@@ -519,6 +519,59 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(true);
   });
 
+  function marginFlooredLine() {
+    return {
+      service: 'lawn_care',
+      tier: 'enhanced',
+      monthly: 57.5,
+      annual: 747,
+      annualBeforeDiscount: 747,
+      annualAfterDiscount: 690,
+      marginFloorGuardApplied: true,
+      requestedDiscountPct: 0.10,
+      tiers: [
+        { tier: 'standard', label: '6x applications/yr', monthly: 55, annual: 660, perApp: 110, visits: 6, freq: 6, minimumCollectedAnnualPrice: 640 },
+        { tier: 'enhanced', label: '9x applications/yr', monthly: 62.25, annual: 747, perApp: 83, visits: 9, freq: 9, recommended: true, minimumCollectedAnnualPrice: 690 },
+        { tier: 'premium', label: '12x applications/yr', monthly: 84, annual: 1008, perApp: 84, visits: 12, freq: 12, minimumCollectedAnnualPrice: 700 },
+      ],
+    };
+  }
+
+  test('margin floors on tier rows do NOT re-clamp the ladder while disarmed (owner 2026-07-17)', () => {
+    // minimumCollectedAnnualPrice rides every tier row for margin REPORTING;
+    // with the cost floor disarmed (useLawnCostFloor false) its presence must
+    // never move a ladder price — the 640 "floor" on standard reports only
+    // and the requested 10% survives on every cadence.
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] });
+    const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
+    expect(byKey.standard.monthly).toBeCloseTo(49.5, 2);
+    expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
+    expect(byKey.standard.flooredAtMinimum).toBe(false);
+    expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+  });
+
+  test('re-armed: a margin-floor-capped selected line keeps the requested discount per cadence and re-clamps each at ITS floor', () => {
+    const priorUseFloor = LAWN_PRICING_V2.useLawnCostFloor;
+    LAWN_PRICING_V2.useLawnCostFloor = true;
+    try {
+      const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] });
+      const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
+      // Standard: 10% off 660 = 594 breaches its own 640 margin floor -> clamped
+      // there (monthly CEILs to cents so the reconstructed annual never lands
+      // below the floor).
+      expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
+      // Premium has headroom: the full requested 10% survives instead of the
+      // selected line's capped after/before ratio.
+      expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
+      // A margin-floored cadence is a real, distinctly-priced choice - it is
+      // NOT flagged as a program-minimum decoy for hiding.
+      expect(byKey.standard.flooredAtMinimum).toBe(false);
+      expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+    } finally {
+      LAWN_PRICING_V2.useLawnCostFloor = priorUseFloor;
+    }
+  });
+
   test('returns [] for mixed bundles so lawn keeps pricing inside the pest cadence', () => {
     const mixed = {
       lineItems: [

@@ -273,6 +273,14 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db } =
       .whereNotNull('reply_text')
       .whereRaw("COALESCE(outcome->>'optedOut', 'false') <> 'true'")
       .whereRaw("COALESCE(outcome->>'complaintWithin7d', 'false') <> 'true'")
+      // Sealed-exam holdout: human replies frozen into sms_sealed_eval_items
+      // are the exam's answer key. A drafter that sees one as a few-shot
+      // exemplar has studied from the exam — its sealed scores would inflate
+      // and the live/exam comparison would lie. Excluded EVERYWHERE (live,
+      // backfill, and exam paths share this fetch), not just during runs:
+      // "sealed" means never trained on, not merely not trained on today.
+      // (source_id for sms_human_reply rows IS the reply's sms_log id.)
+      .whereNotIn('source_id', dbi('sms_sealed_eval_items').select('human_reply_sms_id').whereNotNull('human_reply_sms_id'))
       .orderBy('occurred_at', 'desc')
       .limit(limit)
       .select('inbound_text', 'reply_text');
@@ -282,8 +290,8 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db } =
   }
 }
 
-function buildUserPrompt(context, inboundMessage, intent, schedulingIntent, exemplarBlock = '') {
-  return `${buildFactsBlock(context)}
+function buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock = '') {
+  return `${factsBlock}
 
 CLASSIFIED INTENT: ${intent?.intent || 'GENERAL'}${schedulingIntent ? ' (scheduling-intent detected — be especially careful to only state schedule facts present above)' : ''}
 
@@ -292,6 +300,14 @@ ${exemplarBlock ? `\n${exemplarBlock}\n` : ''}
 NEW INBOUND MESSAGE: "${inboundMessage}"
 
 Draft the reply JSON now.`;
+}
+
+// Back-compat wrapper: most callers hold a live ContextAggregator context.
+// The sealed-eval exam replays a FROZEN facts_block instead (the facts as
+// they were the day the customer texted), so the facts-string form above is
+// the primitive and this stays a thin adapter.
+function buildUserPrompt(context, inboundMessage, intent, schedulingIntent, exemplarBlock = '') {
+  return buildUserPromptFromFacts(buildFactsBlock(context), inboundMessage, intent, schedulingIntent, exemplarBlock);
 }
 
 // Verify loop tunables. SHADOW_DRAFT_VERIFY=false reverts to single-pass
@@ -329,33 +345,32 @@ function draftRouteFor({ intentName, inboundMessage } = {}) {
 /**
  * One draft generation, routed per the SMS reply-drafting split in
  * config/models.js. Any routed miss — missing provider key, provider error,
- * unparseable output — falls back to the original Anthropic FLAGSHIP call, so
- * a provider issue never causes a gap. Returns { parsed, model } (model = the
+ * unparseable output — falls back to the opposite provider, so a provider
+ * issue never causes a gap. Returns { parsed, model } (model = the
  * one that actually produced the draft, persisted on the row for the judge),
  * or null when both paths are unusable.
  */
-async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault) {
+async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault, { pinned = false } = {}) {
   try {
-    const { dispatch } = require('./llm/call');
-    const routed = await dispatch(route, { system, text: userContent, jsonMode: false, maxTokens: 600 });
-    if (routed.ok) {
-      const parsed = parseShadowResponse(routed.text || '');
-      if (parsed) return { parsed, model: routed.model };
-      logger.warn(`[sms-shadow] routed draft unparseable (${route.provider}/${route.model}); falling back to ${MODELS.FLAGSHIP}`);
-    } else {
-      logger.warn(`[sms-shadow] routed draft unavailable (${route.provider}/${route.model}: ${routed.reason}); falling back to ${MODELS.FLAGSHIP}`);
-    }
+    const { dispatchWithFallback } = require('./llm/call');
+    // pinned = single-provider leg for the sealed exam: a cross-provider
+    // fallback would silently grade provider A's exam with provider B's
+    // draft, corrupting the per-provider comparison. Live drafting always
+    // keeps the fallback (a provider issue must never cause a gap).
+    const fallback = pinned ? null : (route.provider === MODELS.PROVIDER.ANTHROPIC
+      ? MODELS.TEXT_POLICIES.highStakes.fallback
+      : MODELS.TEXT_POLICIES.fastStructured.fallback);
+    const routed = await dispatchWithFallback(
+      { primary: route, ...(fallback ? { fallback } : {}) },
+      { system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
+      { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
+    );
+    if (routed.ok) return { parsed: parseShadowResponse(routed.text), model: routed.model };
+    logger.warn(`[sms-shadow] both draft providers unavailable (${routed.reason})`);
   } catch (err) {
-    logger.warn(`[sms-shadow] draft route dispatch failed (${err.message}); falling back to ${MODELS.FLAGSHIP}`);
+    logger.warn(`[sms-shadow] draft route dispatch failed (${err.message})`);
   }
-  const resp = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 600,
-    system,
-    messages: [{ role: 'user', content: userContent }],
-  });
-  const parsed = parseShadowResponse(resp.content?.[0]?.text || '');
-  return parsed ? { parsed, model: MODELS.FLAGSHIP } : null;
+  return null;
 }
 
 /**
@@ -366,14 +381,19 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * { parsed, passes, converged, model }. converged=true means the verifier
  * signed off (or the reply was empty — nothing to assert). model is whichever
  * model produced the FINAL draft (routed default / save-the-sale, or the
- * FLAGSHIP fallback) — persist it, don't assume FLAGSHIP. Verify failures
+ * opposite-provider fallback) — persist it, don't assume a provider. Verify failures
  * degrade gracefully: keep the current draft, stop, converged=false — a
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride }) {
   const system = buildSystemPrompt();
-  const factsBlock = buildFactsBlock(context);
+  // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
+  // saw the day of the original message — building from a live context here
+  // would grade the draft against today's schedule/balance (the exact drift
+  // confound that contaminated every backfill measurement). Live callers
+  // omit it and get the aggregator-built block as before.
+  const factsBlock = presetFactsBlock || buildFactsBlock(context);
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -383,13 +403,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // without that net, so exemplars are withheld and v7 degrades to v6.
   const exemplars = VERIFY_ENABLED ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
-  const userContent = buildUserPrompt(context, inboundMessage, intent, schedulingIntent, exemplarBlock);
+  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock);
 
   // Route once for the whole loop (revisions included) — routing looks at the
   // intent label AND the raw message so complaints mislabeled as scheduling
-  // still draft on the save-the-sale lane.
-  const route = draftRouteFor({ intentName: intent?.intent, inboundMessage });
-  const first = await generateDraftOnce(client, system, userContent, route);
+  // still draft on the save-the-sale lane. routeOverride (sealed exam) pins
+  // one provider for every generation in the loop, fallback disabled.
+  const pinned = Boolean(routeOverride);
+  const route = routeOverride || draftRouteFor({ intentName: intent?.intent, inboundMessage });
+  const first = await generateDraftOnce(client, system, userContent, route, { pinned });
   if (!first) return { parsed: null, passes: 1, converged: false, model: null };
   let { parsed, model } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
@@ -431,7 +453,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
         client,
         system,
         `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`,
-        route
+        route,
+        { pinned }
       );
     } catch (err) {
       // A revise call that times out / rate-limits must NOT drop the whole
@@ -697,6 +720,7 @@ module.exports = {
   parseShadowResponse,
   buildSystemPrompt,
   buildUserPrompt,
+  buildUserPromptFromFacts,
   buildFactsBlock,
   formatExemplarBlock,
   fetchVoiceExemplars,

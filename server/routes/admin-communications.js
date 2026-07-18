@@ -8,6 +8,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
@@ -1056,15 +1057,10 @@ router.post('/ai-draft', async (req, res, next) => {
       `${s.direction === 'inbound' ? 'Customer' : 'Waves'}: ${s.message_body}`
     ).join('\n');
 
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic();
-
-    const msg = await client.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 200,
-      messages: [{
-        role: 'user',
-        content: `You are responding as Waves Pest Control via SMS. Write a short, friendly reply (under 160 characters).
+    const msg = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      maxTokens: 200,
+      jsonMode: false,
+      text: `You are responding as Waves Pest Control via SMS. Write a short, friendly reply (under 160 characters).
 
 About Waves Pest Control:
 - Family-owned pest control and lawn care in Southwest Florida
@@ -1081,10 +1077,14 @@ ${conversationContext ? `Recent conversation:\n${conversationContext}` : ''}
 ${lastMessage ? `Customer's last message: "${lastMessage}"` : 'No specific message to reply to — write a friendly check-in.'}
 
 Write ONLY the SMS reply text. Keep it under 160 characters. No quotes or labels.`,
-      }],
+    }, {
+      validate: (result) => {
+        const draft = String(result.text || '').trim();
+        return draft && draft.length <= 320 ? null : 'invalid_sms_draft';
+      },
     });
-
-    const draft = (msg.content[0]?.text || '').trim();
+    if (!msg.ok) return res.status(503).json({ error: 'AI drafting is temporarily unavailable' });
+    const draft = String(msg.text || '').trim();
     res.json({ draft });
   } catch (err) {
     logger.error(`AI draft failed: ${err.message}`);
@@ -1271,28 +1271,19 @@ router.post('/rewrite-sms', async (req, res) => {
       recentMessages: req.body?.recentMessages,
     });
 
-    // Tone rewrite runs on Claude Sonnet (ROUTES.smsToneRewrite — owner
-    // directive 2026-07-05); a routed miss falls back to the original
-    // WORKHORSE call so the composer button never breaks.
-    let rewriteText = '';
-    const routed = await require('../services/llm/call')
-      .dispatch(MODELS.ROUTES.smsToneRewrite, { text: rewritePrompt, jsonMode: false, maxTokens: 500 });
-    // A blank routed body counts as a miss (provider-side empty response /
-    // content-filtered output can come back ok at the HTTP level) — otherwise
-    // this would 502 the composer button while the fallback could still work.
-    if (routed.ok && (routed.text || '').trim()) {
-      rewriteText = routed.text;
-    } else {
-      logger.warn(`[sms-rewrite] routed rewrite unavailable (${routed.ok ? 'empty_response' : routed.reason}); falling back to ${MODELS.WORKHORSE}`);
-      const Anthropic = require('@anthropic-ai/sdk');
-      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-      const msg = await client.messages.create({
-        model: MODELS.WORKHORSE,
-        max_tokens: 500,
-        messages: [{ role: 'user', content: rewritePrompt }],
-      });
-      rewriteText = msg.content?.[0]?.text || '';
-    }
+    // Tone rewrite: the dedicated smsToneRewrite registry route (Claude Sonnet
+    // via MODEL_SMS_SONNET — the same model/override the save-the-sale draft
+    // lane and its canary monitor share), with OpenAI Terra as the
+    // cross-provider backup. Dispatching MODEL_VOICE here instead would
+    // silently detach rewrites from the SMS override/canary contract whenever
+    // the two env vars diverge. Blank output is rejected so a content-filtered
+    // success still reaches the other provider.
+    const routed = await require('../services/llm/call').dispatchWithFallback(
+      { primary: MODELS.ROUTES.smsToneRewrite, fallback: MODELS.TEXT_POLICIES.customerCopy.fallback },
+      { text: rewritePrompt, jsonMode: false, maxTokens: 500 },
+      { validate: (result) => (String(result.text || '').trim() ? null : 'empty_response') },
+    );
+    const rewriteText = routed.ok ? routed.text : '';
 
     const rewritten = cleanSmsRewriteOutput(rewriteText);
     if (!rewritten) return res.status(502).json({ error: 'rewrite returned empty message' });

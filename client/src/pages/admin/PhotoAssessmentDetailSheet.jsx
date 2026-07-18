@@ -414,7 +414,7 @@ export default function PhotoAssessmentDetailSheet({ open, type, id, onClose, on
   };
 
   return (
-    <Sheet open={open} onClose={onClose} width="lg">
+    <Sheet open={open} onClose={onClose} width="lg" ariaLabel={`${TYPE_LABELS[type] || 'Assessment'} details`}>
       <SheetHeader>
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div>

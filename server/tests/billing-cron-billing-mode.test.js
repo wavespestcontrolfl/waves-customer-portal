@@ -138,4 +138,39 @@ describe('processMonthlyBilling — billing_mode guard', () => {
 
     expect(chargeMonthly).toHaveBeenCalledWith('cust-MM');
   });
+
+  test('GUARD 3c: a tier-less NULL-mode row resolves per_visit and is never dues-charged (Codex r7 P1)', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-TL', billing_mode: null, waveguard_tier: null }];
+    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_x', amount: 55.3 }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+
+    const result = await BillingCron.processMonthlyBilling();
+
+    expect(chargeMonthly).not.toHaveBeenCalled();
+    expect(logAutopay).toHaveBeenCalledWith('cust-TL', 'skipped_unclassified_lane', expect.objectContaining({
+      details: expect.objectContaining({ resolved_mode: 'per_visit' }),
+    }));
+    expect(result.skipped).toBe(1);
+  });
+
+  test('GUARD 3c: a sentinel-tier NULL-mode row (Commercial) is never dues-charged', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-CM', billing_mode: null, waveguard_tier: 'Commercial' }];
+    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_y', amount: 55.3 }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+
+    await BillingCron.processMonthlyBilling();
+
+    expect(chargeMonthly).not.toHaveBeenCalled();
+    expect(logAutopay).toHaveBeenCalledWith('cust-CM', 'skipped_unclassified_lane', expect.anything());
+  });
+
+  test("GUARD 3c: an explicit 'monthly_membership' row charges even when tier fields are gone", async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-EM', billing_mode: 'monthly_membership', waveguard_tier: null }];
+    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_z', amount: 55.3 }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+
+    await BillingCron.processMonthlyBilling();
+
+    expect(chargeMonthly).toHaveBeenCalledWith('cust-EM');
+  });
 });

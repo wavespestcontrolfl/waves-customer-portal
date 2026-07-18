@@ -808,15 +808,18 @@ async function syncConstantsFromDB(dbInstance) {
     }
     if (config.global_conditional_ceiling?.value) constants.GLOBAL.CONDITIONAL_CEILING = config.global_conditional_ceiling.value;
 
-    // Lawn program-minimum kill value: the constants object is mutated in
-    // place across syncs, so EVERY sync restores the in-code DISARMED
-    // default (0, owner ruling 2026-07-17) before the row merges. Without
-    // this, removing the key (or the whole lawn_pricing_v2 row) after a
-    // temporary live re-arm would leave the stale positive minimum clamping
-    // quotes until a restart (codex P2 on #2827 — same trap as the pest
-    // enforce_floor_post_discount flag below). An explicit DB value
-    // re-arms via the deepMerge.
+    // Lawn floor kill values: the constants object is mutated in place
+    // across syncs, so EVERY sync restores the in-code DISARMED defaults
+    // (owner ruling 2026-07-17) before the row merges. Without this,
+    // removing a key (or the whole lawn_pricing_v2 row) after a temporary
+    // live re-arm would leave stale enforcement clamping quotes until a
+    // restart (codex P2 on #2827 — same trap as the pest
+    // enforce_floor_post_discount flag below). Explicit DB values re-arm
+    // via the deepMerge: programMinimumMonthly > 0 arms the program
+    // minimum; useLawnCostFloor: true arms cost-floor selection plus the
+    // post-discount and public-ladder margin-floor caps.
     constants.LAWN_PRICING_V2.programMinimumMonthly = 0;
+    constants.LAWN_PRICING_V2.useLawnCostFloor = false;
     if (config.lawn_pricing_v2) {
       deepMergePlainObject(constants.LAWN_PRICING_V2, config.lawn_pricing_v2);
       // Tier availability: the row's per-tier metadata drives which lawn

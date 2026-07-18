@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
@@ -8,7 +9,12 @@ import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
-import { INTERNAL_FINDING_KEYS } from "../../lib/wdoReportFields";
+import {
+  INTERNAL_FINDING_KEYS,
+  redactInspectionFeeCues,
+  redactSpecificAmounts,
+  resolveFeeValuesForScrub,
+} from "../../lib/wdoReportFields";
 import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
@@ -65,7 +71,7 @@ function useConfirmDialog() {
     return () => clearTimeout(t);
   }, [pending]);
   const element = pending ? (
-    <Dialog open size="sm" onClose={handleCancel}>
+    <Dialog open size="sm" onClose={handleCancel} aria-label="Confirmation">
       <DialogBody>
         <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
           {pending.message}
@@ -248,11 +254,22 @@ function formatProjectAppointmentTime(value) {
   return `${hour12}:${minute} ${suffix}`;
 }
 
+// The customer promise is ALWAYS windowStart + 2 hours — window_end is the
+// internal job-duration estimate and never customer-facing. The public
+// report page renders start+2h, so the staff preview must too.
+function projectAppointmentWindowEnd(windowStart) {
+  const raw = String(windowStart || "").trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (!match) return "";
+  const hour24 = (Number(match[1]) + 2) % 24;
+  return `${hour24}:${match[2]}`;
+}
+
 function formatProjectAppointmentWindow(appt) {
   if (!appt) return "";
   const date = formatProjectAppointmentDate(appt.scheduledDate);
   const start = formatProjectAppointmentTime(appt.windowStart);
-  const end = formatProjectAppointmentTime(appt.windowEnd);
+  const end = formatProjectAppointmentTime(projectAppointmentWindowEnd(appt.windowStart));
   const window = start && end ? `${start}-${end}` : start || end;
   return [date, window].filter(Boolean).join(" ");
 }
@@ -860,7 +877,6 @@ function CustomerProjectReportPreview({
   sentLink,
 }) {
   const typeLabel = typeCfg?.label || TYPE_LABELS[project.project_type] || "Inspection";
-  const reportTitle = String(title || "").trim() || typeLabel;
   // Same suppression rules as the customer-facing report page — the preview
   // staff approve must match what the customer actually sees: internal keys
   // filtered, and the raw findings hidden when the AI-drafted sectioned
@@ -868,8 +884,53 @@ function CustomerProjectReportPreview({
   // WDO keeps findings unless a filled FDACS filing is archived —
   // fdacs_pdf_available is computed by the detail endpoint with the same
   // rule as the public page (the raw archive index isn't served).
-  const aiNarrativeSections = recommendations
-    ? parseSections(String(recommendations))
+  // Preview == public: the sent link serves the fee-scrubbed narrative and
+  // finding values (server /data egress applies @waves/report-redaction), so
+  // the preview staff approve applies the SAME shared module — a legacy
+  // narrative with a baked-in fee must look redacted here too, or staff
+  // approve text the customer never sees (codex #2817). Type-gated to WDO,
+  // the only type carrying the internal fee field.
+  // Cue + recorded-value passes, matching the server /data serializer — the
+  // fee values are the live edit state (findings.inspection_fee) merged with
+  // the archived filing snapshot fees the detail endpoint derives (a
+  // previously filed report can quote an older fee than the current field),
+  // falling back to the shared flat default when blank, so staff approve
+  // exactly what the customer's token serves (codex #2817).
+  const previewFeeValues = project.project_type === WDO_TYPE
+    ? resolveFeeValuesForScrub([
+      findings?.inspection_fee ?? "",
+      ...(Array.isArray(project.wdo_archived_fee_values) ? project.wdo_archived_fee_values : []),
+    ])
+    : [];
+  const feeRedact = project.project_type === WDO_TYPE
+    ? (text) => (typeof text === "string"
+      ? redactSpecificAmounts(redactInspectionFeeCues(text), previewFeeValues)
+      : text)
+    : (text) => text;
+  // Cue-only variant for STRUCTURED finding fields — the server limits the
+  // value pass to free-prose (textarea) keys so "175 Main Street" with a
+  // $175 fee is never corrupted; the preview must match.
+  const feeRedactCueOnly = project.project_type === WDO_TYPE
+    ? (text) => (typeof text === "string" ? redactInspectionFeeCues(text) : text)
+    : (text) => text;
+  const previewFreeTextKeys = (() => {
+    const acc = new Set();
+    const walk = (fields) => (fields || []).forEach((f) => {
+      if (f.type === "textarea" && f.key) acc.add(f.key);
+      if (f.fields) walk(f.fields);
+    });
+    walk(typeCfg?.findingsFields);
+    walk(typeCfg?.fields);
+    return acc;
+  })();
+  const customerRecommendations = recommendations
+    ? feeRedact(String(recommendations))
+    : recommendations;
+  // Title and photo captions are free text on the same customer surface —
+  // same scrub, or staff approve a headline/label the customer never sees.
+  const reportTitle = feeRedact(String(title || "").trim()) || typeLabel;
+  const aiNarrativeSections = customerRecommendations
+    ? parseSections(String(customerRecommendations))
     : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (project.project_type !== WDO_TYPE || Boolean(project.fdacs_pdf_available));
@@ -885,7 +946,7 @@ function CustomerProjectReportPreview({
       .map(([key, label]) => [label, findings?.[key]])
       .filter(([, v]) => hasMeaningfulValue(formatProjectPreviewValue(v)))
     : [];
-  const visiblePhotos = (photos || []).slice(0, 4);
+  const visiblePhotos = (photos || []).slice(0, 4).map((p) => ({ ...p, caption: feeRedact(p.caption) }));
   const address = customerAddressLine(project);
   const metaRows = [
     projectDate ? `Inspection date: ${fmtDate(projectDate)}` : null,
@@ -1008,7 +1069,7 @@ function CustomerProjectReportPreview({
                       {projectFieldLabel(typeCfg, key)}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      {formatProjectPreviewValue(value)}
+                      {(previewFreeTextKeys.has(key) ? feeRedact : feeRedactCueOnly)(formatProjectPreviewValue(value))}
                     </div>
                   </div>
                 ))}
@@ -1045,7 +1106,7 @@ function CustomerProjectReportPreview({
                       {label}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      {formatProjectPreviewValue(value)}
+                      {feeRedactCueOnly(formatProjectPreviewValue(value))}
                     </div>
                   </div>
                 ))}
@@ -1053,9 +1114,9 @@ function CustomerProjectReportPreview({
             </div>
           )}
 
-          {recommendations ? (
+          {customerRecommendations ? (
             <ProjectPreviewRecommendationsBlock
-              text={recommendations}
+              text={customerRecommendations}
               upcomingAppointment={upcomingAppointment}
             />
           ) : null}
@@ -1123,10 +1184,8 @@ function CustomerProjectReportPreview({
 }
 
 export default function ProjectsPage() {
-  const initialProjectId =
-    typeof window !== "undefined"
-      ? new URLSearchParams(window.location.search).get("projectId")
-      : null;
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialProjectId = searchParams.get("projectId");
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState("");
@@ -1174,11 +1233,33 @@ export default function ProjectsPage() {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (!initialProjectId || selectedId) return;
-    if (projects.some((p) => p.id === initialProjectId)) {
-      setSelectedId(initialProjectId);
+    if (!initialProjectId) {
+      setSelectedId(null);
+      return;
     }
-  }, [initialProjectId, projects, selectedId]);
+    const match = projects.find(
+      (project) => String(project.id) === String(initialProjectId),
+    );
+    setSelectedId(match?.id || null);
+  }, [initialProjectId, projects]);
+
+  const selectProject = useCallback(
+    (projectId) => {
+      if (!projectId) return;
+      const next = new URLSearchParams(searchParams);
+      next.set("projectId", String(projectId));
+      setSearchParams(next);
+      setSelectedId(projectId);
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const closeProject = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("projectId");
+    setSearchParams(next, { replace: true });
+    setSelectedId(null);
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     adminFetch("/admin/projects/types")
@@ -1201,10 +1282,10 @@ export default function ProjectsPage() {
     <div className="max-w-[1300px] mx-auto text-ink-primary">
       {" "}
       <AdminCommandHeader
-        title="Jobs"
+        title="Reports"
         icon={ClipboardList}
         action={{
-          label: "New Job",
+          label: "New Reports",
           icon: Plus,
           onClick: () => setCreateMode("general"),
         }}
@@ -1259,7 +1340,7 @@ export default function ProjectsPage() {
               <div className="p-6 text-13 text-zinc-500">Loading…</div>
             ) : regularProjects.length === 0 ? (
               <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-13 text-zinc-500 text-center">
-                No jobs match these filters.
+                No reports match these filters.
               </div>
             ) : (
               regularProjects.map((p) => (
@@ -1267,7 +1348,7 @@ export default function ProjectsPage() {
                   key={p.id}
                   project={p}
                   active={selectedId === p.id}
-                  onSelect={() => setSelectedId(p.id)}
+                  onSelect={() => selectProject(p.id)}
                 />
               ))
             ))}
@@ -1276,7 +1357,7 @@ export default function ProjectsPage() {
             <WdoReportsSection
               projects={wdoProjects}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={selectProject}
             />
           )}
         </div>
@@ -1288,7 +1369,7 @@ export default function ProjectsPage() {
             key={selected.id}
             projectId={selected.id}
             typesRegistry={typesRegistry}
-            onClose={() => setSelectedId(null)}
+            onClose={closeProject}
             onChanged={loadProjects}
             canAdminActions={isAdmin}
           />
@@ -1317,7 +1398,7 @@ export default function ProjectsPage() {
           onCreated={(p) => {
             setCreateMode(null);
             loadProjects();
-            if (p?.id) setSelectedId(p.id);
+            if (p?.id) selectProject(p.id);
           }}
         />
       )}
@@ -2326,7 +2407,13 @@ export function ProjectDetail({
             color: "#71717A",
             fontSize: 22,
             cursor: "pointer",
-            padding: "0 8px",
+            width: 44,
+            height: 44,
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
           }}
           aria-label="Close"
         >
@@ -2630,6 +2717,7 @@ export function ProjectDetail({
                 title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from selected context."
                 style={{
                   padding: "4px 10px",
+                  minHeight: 44,
                   borderRadius: 6,
                   fontSize: 11,
                   fontWeight: 500,
@@ -2661,7 +2749,7 @@ export function ProjectDetail({
             >
               {" "}
               <label
-                style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 44 }}
               >
                 {" "}
                 <input
@@ -2674,7 +2762,7 @@ export function ProjectDetail({
                 Include recent calls/texts/emails
               </label>{" "}
               <label
-                style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 44 }}
               >
                 {" "}
                 <input
@@ -2715,6 +2803,7 @@ export function ProjectDetail({
                 onClick={() => appendTechnicalSnippet(snippet.text)}
                 style={{
                   padding: "5px 8px",
+                  minHeight: 44,
                   borderRadius: 6,
                   border: `1px solid #D4D4D8`,
                   background: "#FFFFFF",

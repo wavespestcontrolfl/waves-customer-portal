@@ -99,7 +99,6 @@ export const authorSchema = z.object({
   name: z.string().min(1),
   role: z.string().min(1),
   fdacs_license: fdacsLicense.optional(),
-  years_swfl: z.number().int().min(0).optional(),
   bio_url: bioUrl,
 });
 
@@ -155,7 +154,21 @@ export const blogPostFrontmatter = z.object({
 
   // Internal linking
   hub_link: z.string().optional(),
-  spoke_links: z.array(z.string()).max(20),
+  // Object form per content-ops/blog-linking-strategy.md, matching
+  // src/content.config.ts `spokeLinkSchema` (the render-side contract).
+  // Max 1: SpokeLinkCallout only consumes spoke_links[0]. The corpus is
+  // 100% object-form; the old z.array(z.string()) here was drift that
+  // made publish:post block every post with a populated spoke link.
+  spoke_links: z
+    .array(
+      z.object({
+        domain: z.string().min(1),
+        anchor: z.string().min(1),
+        placement: z.enum(['in_body', 'cta', 'both']).optional(),
+        vertical: z.string().optional(),
+      }),
+    )
+    .max(1),
 
   // Byline + review chain (PR 1 trust layer backing)
   author: authorSchema,
@@ -237,27 +250,31 @@ export function detectSchemaVersion(fm: unknown): 1 | 2 {
 // bodies as <BottomLineBox ... />. Adding a component means adding its
 // name here AND registering it Astro-side; both paths must stay in sync
 // or the validator will miss invocations or flag false positives.
+//
+// INVARIANT: every name below MUST be registered in the `mdxComponents`
+// map in src/layouts/BlogPostLayout.astro AND have a real implementation
+// in src/components/blog/. A cataloged-but-unregistered component passes
+// the publish gate here and then crashes the Astro build at merge time
+// ("Expected component X to be defined"), so this list is deliberately
+// the SUBSET of what the renderer can actually mount.
+//
+// Removed 2026-07-04 (accepted by the gate but never implemented or
+// registered — any .mdx post using them would have failed the fleet
+// build): WhyTrustUs, TLDR, DataCallout, ProTip, AnnotatedDiagnosticPhoto,
+// CaseStudy, SeasonalCalendar, PestDiagnosticTree, WaveGuardLadder,
+// RecommendationQuiz, ContentUpgrade, DisclosureBlock, GrassTypeSection,
+// FAQBlock. Re-add a name only after its component ships AND is
+// registered in BlogPostLayout's mdxComponents.
 // ─────────────────────────────────────────────────────────────
 
 export const COMPONENT_NAMES = [
   'BottomLineBox',
-  'WhyTrustUs',
-  'TLDR',
-  'DataCallout',
-  'ProTip',
   'HonestRejection',
   'ComparisonTable',
-  'AnnotatedDiagnosticPhoto',
-  'CaseStudy',
-  'SeasonalCalendar',
-  'PestDiagnosticTree',
-  'WaveGuardLadder',
-  'RecommendationQuiz',
-  'ContentUpgrade',
-  'DisclosureBlock',
-  'GrassTypeSection',
-  'FAQBlock',
+  'SeasonalPressureChart',
+  'HomeZoneMap',
   'PestEvidenceGrid',
+  'AppPhone',
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
@@ -275,38 +292,13 @@ export type ComponentName = (typeof COMPONENT_NAMES)[number];
 // props (reads everything from frontmatter), its schema is `z.object({})`.
 // ─────────────────────────────────────────────────────────────
 
-const waveGuardTierEnum = z.enum(['Bronze', 'Silver', 'Gold', 'Platinum']);
-const grassTypeEnum = z.enum(['st-augustine', 'bahia', 'zoysia', 'bermuda']);
 const confidenceEnum = z.enum(['high', 'medium', 'low']);
-const severityEnum = z.enum(['low', 'medium', 'high']);
-const monthEnum = z.enum([
-  'jan', 'feb', 'mar', 'apr', 'may', 'jun',
-  'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
-]);
 
 export const componentPropSchemas = {
   BottomLineBox: z.object({
     verdict: z.string().min(1),
     recommendation: z.string().min(1),
     confidence: confidenceEnum.optional(),
-  }),
-  WhyTrustUs: z.object({
-    // Reads author + reviewer from frontmatter; override props optional.
-    hideReviewer: z.boolean().optional(),
-  }),
-  TLDR: z.object({
-    summary: z.string().min(1),
-    bullets: z.array(z.string().min(1)).max(7).optional(),
-  }),
-  DataCallout: z.object({
-    stat: z.string().min(1),
-    source: z.string().min(1),
-    sourceUrl: z.string().url().optional(),
-    context: z.string().optional(),
-  }),
-  ProTip: z.object({
-    title: z.string().optional(),
-    tip: z.string().min(1),
   }),
   HonestRejection: z.object({
     audience: z.string().min(1),
@@ -328,15 +320,33 @@ export const componentPropSchemas = {
       // to visually emphasize — e.g. highlight={0} bolds the first option column.
       highlight: z.number().int().min(0).optional(),
     })
-    // highlight must reference an existing option column (columns minus the
-    // leading row-label column), so the renderer actually emphasizes something.
-    // Guarded on columns being a known array — a missing/invalid `columns`
-    // already errors in the base object, so the refine just passes through
-    // rather than dereferencing undefined.
-    .refine((d) => d.highlight === undefined || !Array.isArray(d.columns) || d.highlight < d.columns.length - 1, {
-      message: 'highlight must be a 0-based index within the option columns (0..columns.length-2)',
-      path: ['highlight'],
-    }),
+    // highlight must plausibly reference a real column. Semantics + bounds:
+    //   - The renderer (ComparisonTable.astro) reads highlight as a 0-based
+    //     index into the OPTION columns (columns[1..]); merged content also
+    //     uses the full-column-index convention (highlight={2} meaning the
+    //     third column of three). An index valid under either reading renders
+    //     safely — at worst the renderer silently skips the emphasis (a
+    //     cosmetic no-op, never a build failure) — so the gate accepts
+    //     0..columns.length-1 and only blocks indexes that are nonsense
+    //     under BOTH conventions (>= columns.length).
+    //   - Guarded on `columns` being a plausibly-real parsed array
+    //     (length >= 2). When `columns` arrives as an unparseable JSX
+    //     expression, the validator substitutes an EMPTY placeholder array
+    //     (see placeholderForField); validating highlight against that
+    //     fabricated length rejected every literal highlight, so the refine
+    //     deliberately fails open (skips) when columns.length < 2. A real
+    //     columns array shorter than 2 already errors in the base object.
+    .refine(
+      (d) =>
+        d.highlight === undefined ||
+        !Array.isArray(d.columns) ||
+        d.columns.length < 2 ||
+        d.highlight < d.columns.length,
+      {
+        message: 'highlight must be a 0-based column index (0..columns.length-1)',
+        path: ['highlight'],
+      },
+    ),
   PestEvidenceGrid: z.object({
     title: z.string().optional(),
     items: z
@@ -349,88 +359,45 @@ export const componentPropSchemas = {
       .optional(),
     caption: z.string().optional(),
   }),
-  AnnotatedDiagnosticPhoto: z.object({
+  AppPhone: z.object({
     src: imagePath,
     alt: z.string().min(1),
+    tilt: z.enum(['left', 'right', 'none']).optional(),
     caption: z.string().optional(),
-    annotations: z
+    width: z.number().optional(),
+    height: z.number().optional(),
+  }),
+  // Seasonal pressure band chart — ships with the standard SWFL year baked
+  // in, so it renders standalone with zero props (all props are overrides).
+  SeasonalPressureChart: z.object({
+    title: z.string().min(1).optional(),
+    seasons: z
       .array(
         z.object({
-          x: z.number().min(0).max(100),
-          y: z.number().min(0).max(100),
-          label: z.string().min(1),
+          name: z.string().min(1),
+          months: z.string().min(1),
+          level: z.string().min(1),
+          note: z.string().min(1),
         }),
       )
+      .min(1)
       .optional(),
+    caption: z.string().optional(),
   }),
-  CaseStudy: z.object({
-    neighborhood: z.string().min(1),
-    pest: z.string().min(1),
-    before: imagePath,
-    after: imagePath,
-    outcome: z.string().min(1),
-    duration: z.string().optional(),
-  }),
-  SeasonalCalendar: z.object({
-    activities: z
+  // "Where we inspect & treat" schematic — default zone list baked in;
+  // renders standalone with zero props (all props are overrides).
+  HomeZoneMap: z.object({
+    title: z.string().min(1).optional(),
+    zones: z
       .array(
         z.object({
-          month: monthEnum,
-          activity: z.string().min(1),
-          severity: severityEnum.optional(),
+          label: z.string().min(1),
+          note: z.string().optional(),
         }),
       )
-      .min(1),
-  }),
-  PestDiagnosticTree: z.object({
-    rootQuestion: z.string().min(1),
-    branches: z
-      .array(
-        z.object({
-          condition: z.string().min(1),
-          outcome: z.string().min(1),
-        }),
-      )
-      .min(2),
-  }),
-  WaveGuardLadder: z.object({
-    tiers: z.array(waveGuardTierEnum).min(1).max(4).optional(),
-    highlight: waveGuardTierEnum.optional(),
-  }),
-  RecommendationQuiz: z.object({
-    id: z.string().min(1),
-    questions: z
-      .array(
-        z.object({
-          q: z.string().min(1),
-          options: z.array(z.string().min(1)).min(2),
-        }),
-      )
-      .min(1),
-  }),
-  ContentUpgrade: z.object({
-    title: z.string().min(1),
-    description: z.string().min(1),
-    downloadUrl: z.string().min(1),
-    leadMagnet: z.boolean().optional(),
-  }),
-  DisclosureBlock: z.object({
-    type: disclosureType,
-    text: z.string().optional(),
-  }),
-  GrassTypeSection: z.object({
-    grass: grassTypeEnum,
-    advice: z.string().optional(),
-  }),
-  FAQBlock: z.object({
-    faqs: z
-      .array(
-        z.object({
-          q: z.string().min(1),
-          a: z.string().min(1),
-        }),
-      )
-      .min(1),
+      .min(1)
+      .optional(),
+    caption: z.string().optional(),
   }),
 } satisfies Record<ComponentName, z.ZodObject>;
 
@@ -445,40 +412,49 @@ export interface PostTypeRequirement {
 //
 // Location posts have no body requirements — city-level assets (map
 // ribbon, hero image, tracking number) render from frontmatter at the
-// template level, not from MDX body invocations. Protocol posts require
-// DataCallout for methodology; howto-step structure comes from regular
-// markdown headings. Case-study posts require the single CaseStudy
-// component — before/after pairs, named neighborhoods, and measurable
-// outcomes are its props, not separate components.
+// template level, not from MDX body invocations.
+//
+// 2026-07-04: requirements referencing removed (never-implemented)
+// components were pruned — a post type cannot REQUIRE a component the
+// renderer can't mount (that made those post types unpublishable:
+// omitting the component blocked on missing-required, including it
+// blocked on unknown-component and would have crashed the .mdx build).
+// Previous contracts, restorable once the components actually ship:
+//   diagnostic  required AnnotatedDiagnosticPhoto + PestDiagnosticTree
+//               (recommended CaseStudy)
+//   seasonal    required SeasonalCalendar + ContentUpgrade
+//   protocol    required DataCallout
+//   cost        required WaveGuardLadder + DisclosureBlock
+//   case-study  required CaseStudy
+//   by-grass-type required GrassTypeSection
 export const postTypeRequirements: Record<string, PostTypeRequirement> = {
   decision: {
     required: ['BottomLineBox', 'ComparisonTable', 'HonestRejection'],
   },
   diagnostic: {
-    required: ['AnnotatedDiagnosticPhoto', 'PestDiagnosticTree'],
-    recommended: ['CaseStudy'],
+    required: [],
   },
   seasonal: {
-    required: ['SeasonalCalendar', 'ContentUpgrade'],
+    required: [],
   },
   protocol: {
-    required: ['DataCallout'],
+    required: [],
     recommended: ['HonestRejection'],
   },
   cost: {
-    required: ['WaveGuardLadder', 'DisclosureBlock', 'ComparisonTable'],
+    required: ['ComparisonTable'],
   },
   comparison: {
     required: ['ComparisonTable', 'HonestRejection'],
   },
   'case-study': {
-    required: ['CaseStudy'],
+    required: [],
   },
   location: {
     required: [],
   },
   'by-grass-type': {
-    required: ['GrassTypeSection'],
+    required: [],
   },
 };
 
@@ -548,11 +524,13 @@ function extractMdxComponentNames(mdx: string): Set<string> {
 // prop schema from `componentPropSchemas`.
 //
 // Limitations (intentional, first-pass):
-//   - Only string literals and simple literal-expression props are
-//     validated ({true}, {false}, {null}, {42}). Complex expressions
-//     ({[…]}, {{…}}, {someVariable}) are marked as `unvalidated`
-//     and assumed correct at runtime — the validator does not parse
-//     arbitrary JS/TS expressions.
+//   - String literals, simple literal expressions ({true}, {false},
+//     {null}, {42}) and JSON-shaped container expressions
+//     ({["a", "b"]}, {{"k": "v"}}) are validated against their real
+//     values. Anything else ({someVariable}, JS-flavored object
+//     literals with unquoted keys, trailing commas, …) is marked as
+//     `unvalidated` and assumed correct at runtime — the validator
+//     does not evaluate arbitrary JS/TS expressions.
 //   - Upgrade to a full MDX AST walk (remark-mdx) if false positives
 //     from the regex extractor become real.
 // ─────────────────────────────────────────────────────────────
@@ -726,10 +704,10 @@ function extractComponentInvocations(cleaned: string): ParsedInvocation[] {
 }
 
 function parseJsxProps(attrs: string): {
-  simple: Record<string, string | boolean | number | null>;
+  simple: Record<string, unknown>;
   expressions: Set<string>;
 } {
-  const simple: Record<string, string | boolean | number | null> = {};
+  const simple: Record<string, unknown> = {};
   const expressions = new Set<string>();
 
   // prop="value"
@@ -749,13 +727,65 @@ function parseJsxProps(attrs: string): {
       raw === 'true' ? true : raw === 'false' ? false : raw === 'null' ? null : Number(raw);
   }
 
-  // prop={…anything else…} — record as expression, don't try to parse
+  // prop={…expression…} — extract the balanced expression body and try to
+  // statically parse it as JSON (covers the common authored shape
+  // columns={["a", "b", "c"]}). A successful parse yields the REAL value,
+  // so downstream checks (e.g. ComparisonTable's highlight range refine)
+  // validate against actual element counts instead of a fabricated
+  // placeholder. Anything that isn't statically parseable stays an
+  // opaque expression and is skipped (fail-open), exactly as before.
   const expr = /\b([a-zA-Z_$][\w$]*)\s*=\s*\{/g;
   while ((m = expr.exec(attrs)) !== null) {
-    if (!(m[1] in simple)) expressions.add(m[1]);
+    const propName = m[1];
+    if (propName in simple) continue;
+    const body = extractBalancedExpression(attrs, expr.lastIndex - 1);
+    const parsed = body === null ? undefined : tryParseStaticJson(body);
+    if (parsed !== undefined) {
+      simple[propName] = parsed.value;
+    } else {
+      expressions.add(propName);
+    }
   }
 
   return { simple, expressions };
+}
+
+// Given the index of an opening `{`, returns the expression text between it
+// and its balancing `}` (exclusive), honoring nested braces/brackets and
+// quoted strings. Returns null when the braces never balance (e.g. the attr
+// string was truncated by the invocation-extraction regex).
+function extractBalancedExpression(text: string, openBraceIdx: number): string | null {
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  for (let i = openBraceIdx; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\') i++; // skip escaped char inside a string
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 0) return text.slice(openBraceIdx + 1, i);
+    }
+  }
+  return null;
+}
+
+// Strict JSON.parse wrapper. Wrapped result distinguishes "parsed to a
+// value" (including null) from "not statically parseable" (undefined).
+function tryParseStaticJson(body: string): { value: unknown } | undefined {
+  const trimmed = body.trim();
+  // Only attempt containers here — scalar literals are handled by the
+  // dedicated regexes above, and bare identifiers must stay expressions.
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) return undefined;
+  try {
+    return { value: JSON.parse(trimmed) };
+  } catch {
+    return undefined;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

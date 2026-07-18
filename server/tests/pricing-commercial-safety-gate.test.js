@@ -294,7 +294,9 @@ describe('commercial safety gate in generateEstimate', () => {
     expect(estimate.summary).toMatchObject({
       recurringAnnualBeforeDiscount: 1068,
       // Silver 10% applies in full: pest 468 → 421.20, lawn 600 → 540;
-      // 421.20 + 540 = 961.20.
+      // 421.20 + 540 = 961.20. (Re-armed — useLawnCostFloor — the margin
+      // guard binds at the 642.76 reserve-folded floor and the monthly
+      // CEILs; pinned in lawn-pricing-followup.test.js.)
       recurringAnnualAfterDiscount: 961.2,
       recurringMonthlyAfterDiscount: 80.1,
       year1Total: 961,

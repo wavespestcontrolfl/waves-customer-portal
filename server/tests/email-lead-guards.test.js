@@ -12,7 +12,7 @@
  * (needs-review).
  */
 
-jest.mock('googleapis', () => ({ google: {} }), { virtual: true });
+jest.mock('googleapis', () => ({ google: {} }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
   info: jest.fn(),

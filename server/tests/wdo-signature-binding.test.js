@@ -145,6 +145,10 @@ async function withServer(fn) {
 // which is the point, because a silent algorithm change would mark every
 // previously captured production signature stale.
 function expectedContentHash(findings, projectDate) {
+  // Mirrors wdoContentHash: the hash covers the CUSTOMER-SAFE representation
+  // (internal-key strip + fee-cue scrub) — the same content the FDACS PDF
+  // renders — so the signature authorizes exactly what is emitted.
+  const { stripInternalFindingKeys } = require('../services/project-types');
   const stable = (value) => {
     if (Array.isArray(value)) return value.map(stable);
     if (value && typeof value === 'object') {
@@ -155,7 +159,8 @@ function expectedContentHash(findings, projectDate) {
     }
     return value;
   };
-  const payload = JSON.stringify({ findings: stable(findings), project_date: projectDate });
+  const { projectRecordedFeeValues } = require('../services/project-types');
+  const payload = JSON.stringify({ findings: stable(stripInternalFindingKeys(findings, { redactValues: true, feeValues: projectRecordedFeeValues({ findings }), freeTextKeys: require('../services/project-types').projectTypeFreeTextKeys('wdo_inspection') }) || {}), project_date: projectDate });
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
@@ -263,6 +268,46 @@ describe('WDO signature content binding', () => {
       expect(saved.content_hash).toBe(signature.content_hash);
       const actions = activityLog.insert.mock.calls.map(([row]) => row.action);
       expect(actions).toContain('project_wdo_signature_stale');
+    });
+  });
+
+  test('editing only the internal inspection_fee never stales the signature — the fee is not attested content', async () => {
+    // inspection_fee is stripped from the customer-safe representation the
+    // hash covers (it never prints on the FDACS form), so an office-side fee
+    // edit must not force a re-sign (codex #2817).
+    const signature = {
+      image: PNG_DATA_URL,
+      signer_name: 'Adam Benetti',
+      signed_at: '2026-06-10T12:00:00.000Z',
+      content_hash: expectedContentHash(WDO_FINDINGS, '2026-06-10'),
+    };
+    const editedFindings = { ...WDO_FINDINGS, inspection_fee: '250' };
+    const before = wdoProject({ wdo_signature: JSON.stringify(signature) });
+    const after = wdoProject({ findings: editedFindings, wdo_signature: JSON.stringify(signature) });
+
+    const projectRead = chain({ first: jest.fn().mockResolvedValue(before) });
+    const projectUpdate = chain();
+    const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
+    const spareUpdate = chain();
+    const projectQueries = [projectRead, projectUpdate, projectRefetch, spareUpdate];
+    const activityLog = chain();
+    db.mockImplementation((table) => {
+      if (table === 'projects') return projectQueries.shift();
+      if (table === 'activity_log') return activityLog;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: editedFindings }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.signature_stale).not.toBe(true);
+      const actions = activityLog.insert.mock.calls.map(([row]) => row.action);
+      expect(actions).not.toContain('project_wdo_signature_stale');
     });
   });
 

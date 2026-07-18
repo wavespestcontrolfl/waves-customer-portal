@@ -1,3 +1,7 @@
+// Inert LLM dispatcher so the caption-policy pins below observe exactly which
+// TEXT_POLICIES entry each caption path dispatches (no keys, no network).
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
+
 const { stripModelWrapper } = require('../services/social-media');
 
 // Fixtures below are (lightly trimmed) real published posts from
@@ -128,5 +132,52 @@ describe('stripModelWrapper', () => {
     expect(stripModelWrapper(null)).toBe('');
     expect(stripModelWrapper(undefined)).toBe('');
     expect(stripModelWrapper('   ')).toBe('');
+  });
+});
+
+// Codex 07-18: the registry names social posts VOICE-owned customer-facing
+// copy (config/models.js). Both public caption paths — blog-share autopublish
+// and studio campaigns — must dispatch the customerCopy policy (MODEL_VOICE
+// first, OpenAI Terra backup), never the content-drafting lane, so a
+// WORKHORSE tune/canary can't silently move live public captions off the
+// brand voice. Identity pins (toBe) so an equal-but-different policy object
+// still fails.
+describe('social caption model policy', () => {
+  const MODELS = require('../config/models');
+  const { dispatchWithFallback } = require('../services/llm/call');
+  const SocialMediaService = require('../services/social-media');
+
+  beforeEach(() => {
+    dispatchWithFallback.mockReset();
+    dispatchWithFallback.mockResolvedValue({
+      ok: true,
+      text: 'Venice lawns browning out? Chinch bugs feed at the blade base. Book a lawn check.',
+    });
+  });
+
+  test('blog-share captions dispatch the customerCopy (VOICE) policy', async () => {
+    const copy = await SocialMediaService.generateContent('facebook', {
+      title: 'Chinch bugs in St. Augustine',
+      description: 'How to tell chinch bug damage from drought.',
+      link: 'https://example.test/blog/chinch-bugs',
+      source: 'blog',
+    });
+    expect(copy).toContain('Chinch bugs feed at the blade base');
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(dispatchWithFallback.mock.calls[0][0]).toBe(MODELS.TEXT_POLICIES.customerCopy);
+  });
+
+  test('campaign captions dispatch the customerCopy (VOICE) policy', async () => {
+    const drafts = await SocialMediaService.generateCampaignDrafts({
+      topic: 'lawn fungus after rain',
+      facts: 'St. Augustine lawns brown out fast when chinch bugs feed at the blade base.',
+      cta: 'Book a lawn check',
+      city: 'Venice',
+      service: 'lawn care',
+      channels: ['gbp'],
+    });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(dispatchWithFallback.mock.calls[0][0]).toBe(MODELS.TEXT_POLICIES.customerCopy);
+    expect(drafts.gbp).toBeTruthy();
   });
 });

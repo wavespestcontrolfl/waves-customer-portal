@@ -10,6 +10,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { formatAddress } = require('../../utils/address-normalizer');
+const { getProtocol: readProtocol } = require('../protocol-reader');
 
 const TECH_TOOLS = [
   {
@@ -69,8 +70,8 @@ Use for: "what's the protocol for quarterly pest?", "lawn care protocol for St. 
     input_schema: {
       type: 'object',
       properties: {
-        service_type: { type: 'string', description: 'pest, lawn, mosquito, termite, tree_shrub, rodent, palm_injection, cockroach, bed_bug' },
-        lawn_track: { type: 'string', description: 'For lawn care: st_augustine, bermuda, zoysia, bahia (legacy A/B → st_augustine, C1 → bermuda, C2 → zoysia, D → bahia)' },
+        service_type: { type: 'string', description: 'pest, lawn, mosquito, termite, tree_shrub, rodent, palm_injection, cockroach, or bed_bug' },
+        lawn_track: { type: 'string', description: 'For lawn: st_augustine, bermuda, zoysia, bahia (legacy A/B, C1, C2, D are accepted)' },
       },
       required: ['service_type'],
     },
@@ -355,72 +356,9 @@ async function getProductInfo(productName) {
 }
 
 
-// Legacy admin track labels → real protocols.json lawn keys (mirrors the
-// TRACK_MAP in routes/admin-protocols.js — A/B are both St. Augustine
-// sun/shade variants of the same track).
-const LAWN_TRACK_ALIASES = {
-  a: 'st_augustine',
-  a_st_aug_sun: 'st_augustine',
-  b: 'st_augustine',
-  b_st_aug_shade: 'st_augustine',
-  c1: 'bermuda',
-  c1_bermuda: 'bermuda',
-  c2: 'zoysia',
-  c2_zoysia: 'zoysia',
-  d: 'bahia',
-  d_bahia: 'bahia',
-  'st augustine': 'st_augustine',
-};
-
-// Tool service_type synonyms → protocols.json top-level program keys.
-const PROTOCOL_KEY_ALIASES = {
-  pest: 'pest',
-  pest_control: 'pest',
-  tree: 'tree_shrub',
-  tree_shrub: 'tree_shrub',
-  mosquito: 'mosquito',
-  termite: 'termite',
-  rodent: 'rodent',
-  palm: 'palm_injection',
-  palm_injection: 'palm_injection',
-  cockroach: 'cockroach',
-  german_roach: 'cockroach',
-  roach: 'cockroach',
-  bed_bug: 'bed_bug',
-  bedbug: 'bed_bug',
-};
-
 async function getProtocol(input) {
-  const { service_type, lawn_track } = input;
-
   try {
-    const protocols = require('../../config/protocols.json');
-    const requested = String(service_type || '').trim().toLowerCase();
-
-    if (requested === 'lawn' || requested === 'lawn_care') {
-      const rawTrack = String(lawn_track || '').trim().toLowerCase();
-      const track = protocols.lawn?.[rawTrack]
-        ? rawTrack
-        : LAWN_TRACK_ALIASES[rawTrack] || (rawTrack ? null : 'st_augustine');
-      if (track && protocols.lawn?.[track]) {
-        return { protocol: protocols.lawn[track], track, type: 'lawn_care' };
-      }
-      return {
-        available_tracks: Object.keys(protocols.lawn || {}),
-        note: 'Specify a track: st_augustine, bermuda, zoysia, or bahia (legacy labels A/B = St. Augustine, C1 = Bermuda, C2 = Zoysia, D = Bahia).',
-      };
-    }
-
-    const key = PROTOCOL_KEY_ALIASES[requested] || requested;
-    if (protocols[key] && key !== 'lawn') {
-      return { protocol: protocols[key], type: key };
-    }
-
-    return {
-      type: service_type,
-      available_programs: Object.keys(protocols).filter((k) => k !== 'lawn').concat('lawn'),
-      note: `No "${service_type}" program in protocols.json — pick one of the available programs.`,
-    };
+    return readProtocol(input);
   } catch {
     return { error: 'Protocols config not available' };
   }
@@ -472,26 +410,37 @@ async function checkCustomerStatus(input) {
 
 
 async function searchKnowledgeBase(query) {
-  // Full-text search on the wiki/knowledge base tables
+  // Trusted knowledge only — same gate the admin field-intelligence tool
+  // uses, so red wiki pages awaiting review never reach a tech answer.
   try {
-    const results = await db('wiki_articles')
-      .whereRaw("to_tsvector('english', title || ' ' || COALESCE(content, '')) @@ plainto_tsquery('english', ?)", [query])
-      .select('id', 'title', 'category', db.raw("LEFT(content, 300) as snippet"))
-      .limit(5);
+    const KnowledgeBridge = require('../knowledge-bridge');
+    const { claudeopedia, wiki } = await KnowledgeBridge.unifiedSearch(query, { limit: 5, trustedOnly: true });
 
-    if (results.length > 0) {
-      return { results: results.map(r => ({ title: r.title, category: r.category, snippet: r.snippet })) };
+    // unifiedSearch returns metadata only — attach snippets.
+    const kbIds = (claudeopedia || []).map((r) => r.id).filter(Boolean);
+    const kbSnippets = kbIds.length
+      ? await db('knowledge_base').whereIn('id', kbIds).select('id', db.raw('LEFT(content, 300) as snippet'))
+      : [];
+    const kbSnippetById = Object.fromEntries(kbSnippets.map((r) => [r.id, r.snippet]));
+
+    const wikiIds = (wiki || []).map((r) => r.id).filter(Boolean);
+    const wikiRows = wikiIds.length
+      ? await db('knowledge_entries').whereIn('id', wikiIds).select('id', 'summary', db.raw('LEFT(content, 300) as snippet'))
+      : [];
+    const wikiById = Object.fromEntries(wikiRows.map((r) => [r.id, r]));
+
+    // Interleave the two corpora (wiki first — field outcomes lead, matching
+    // the admin tool's presentation) so a populated KB can never push every
+    // wiki hit past the cap, and vice versa.
+    const wikiResults = (wiki || []).map((r) => ({ title: r.title, category: r.category, snippet: wikiById[r.id]?.summary || wikiById[r.id]?.snippet || null }));
+    const kbResults = (claudeopedia || []).map((r) => ({ title: r.title, category: r.category, snippet: kbSnippetById[r.id] || null }));
+    const results = [];
+    for (let i = 0; results.length < 5 && (i < wikiResults.length || i < kbResults.length); i++) {
+      if (i < wikiResults.length) results.push(wikiResults[i]);
+      if (results.length < 5 && i < kbResults.length) results.push(kbResults[i]);
     }
 
-    // Fallback to ILIKE search
-    const fallback = await db('wiki_articles')
-      .where(function () {
-        this.whereILike('title', `%${query}%`).orWhereILike('content', `%${query}%`);
-      })
-      .select('id', 'title', 'category', db.raw("LEFT(content, 300) as snippet"))
-      .limit(5);
-
-    return { results: fallback.map(r => ({ title: r.title, category: r.category, snippet: r.snippet })), search_method: 'fallback' };
+    return { results };
   } catch {
     return { results: [], note: 'Knowledge base search unavailable' };
   }

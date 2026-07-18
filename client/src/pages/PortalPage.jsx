@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
@@ -1477,8 +1478,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   // supplies monthlyRate for per-application customers, and labeling that
   // "Monthly rate" contradicts both My Plan and the billing contract.
   const [billingMode, setBillingMode] = useState(null);
+  // Server-resolved lane verdict for NULL modes (non_monthly_billing) — the
+  // cron skips resolver-non-monthly rows, so the summary must not advertise
+  // a monthly plan charge for them (Codex r10).
+  const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
   useEffect(() => {
-    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
+    api.getAutopay().then(d => {
+      setBillingMode(d?.billing_mode || null);
+      setResolvedNonMonthly(d?.non_monthly_billing === true);
+    }).catch(() => {});
   }, []);
   const [satRating, setSatRating] = useState(0);
   const [satHover, setSatHover] = useState(0);
@@ -1626,17 +1634,38 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   };
 
   const handleSatFeedback = async () => {
+    const note = satFeedback.trim();
+    if (!note) {
+      // Nothing to save — the rating from the previous step already went
+      // through, and an empty POST would only draw the duplicate 409.
+      setSatPhase('thanks');
+      return;
+    }
     setSatSubmitting(true);
+    setSatError('');
     try {
+      // The server updates the response the rating step inserted, filling
+      // in the written note (satisfaction.js duplicate-update path).
       await api.submitSatisfaction({
         serviceRecordId: pendingSatisfaction.id,
         rating: satRating,
-        feedbackText: satFeedback,
+        feedbackText: note,
       });
-    } catch {
-      // Rating is already recorded; feedback is supplemental.
+      setSatPhase('thanks');
+    } catch (err) {
+      if (err?.status === 409) {
+        // A note is already stored for this visit (double-submit) — that IS
+        // the saved state, not a failure.
+        setSatPhase('thanks');
+        setSatSubmitting(false);
+        return;
+      }
+      // The rating from the previous step is already recorded, but this
+      // note is NOT — thanking the customer for a message we never received
+      // silently loses a service concern. Keep the form open to retry.
+      console.error(err);
+      setSatError('Your note could not be sent. Your rating is saved — please try sending the note again.');
     }
-    setSatPhase('thanks');
     setSatSubmitting(false);
   };
 
@@ -1894,6 +1923,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   resize: 'vertical',
                 }}
               />
+              {satError && (
+                <div role="alert" style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 10 }}>
+                  {satError}
+                </div>
+              )}
               <button type="button" onClick={handleSatFeedback} disabled={satSubmitting} style={{
                 ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.glassNavy,
                 color: '#fff', boxShadow: 'none', borderRadius: 8,
@@ -2000,7 +2034,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   }
                 : billingMode === 'per_application'
                   ? { label: 'Billing', value: 'Per application', sub: tierDiscountSub }
-                  : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
+                  : billingMode === 'per_visit' || billingMode === 'one_time' || (billingMode === null && resolvedNonMonthly)
+                    ? { label: 'Billing', value: 'Per visit', sub: tierDiscountSub }
+                    : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
               {
                 label: 'Services YTD',
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
@@ -2221,24 +2257,60 @@ function ServicesTab() {
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
-  const [photoMap, setPhotoMap] = useState({});
+  const [detailMap, setDetailMap] = useState({});
+  const [totalServices, setTotalServices] = useState(null);
+  // Raw pagination cursor — counts rows RECEIVED, not rows kept after the
+  // boundary-row dedupe, so the next page never re-requests a seen row.
+  const [servicesOffset, setServicesOffset] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [lightbox, setLightbox] = useState(null);
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
   const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
     (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
   );
 
+  const SERVICES_PAGE_SIZE = 100;
   const loadServices = useCallback(() => {
     setLoading(true);
     setLoadError('');
-    api.getServices({ limit: 100 })
-      .then(d => { setServices(d.services || []); })
+    api.getServices({ limit: SERVICES_PAGE_SIZE })
+      .then(d => {
+        setServices(d.services || []);
+        setServicesOffset((d.services || []).length);
+        setTotalServices(Number.isFinite(d.total) ? d.total : null);
+      })
       .catch(err => {
         console.error(err);
         setLoadError(err?.message || 'Could not load service history.');
       })
       .finally(() => setLoading(false));
   }, []);
+
+  // The server caps each page at 100 rows — older visits stay reachable
+  // through an explicit Load More instead of silently vanishing from history.
+  const loadMoreServices = () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
+      .then(d => {
+        // The offset runs against a live newest-first query — a visit
+        // completed between pages shifts the boundary and re-sends the last
+        // row of the previous page. Dedupe by id so it can't render twice,
+        // but advance the cursor by rows RECEIVED so paging never stalls.
+        setServices(prev => {
+          const seen = new Set(prev.map(s => s.id));
+          return [...prev, ...(d.services || []).filter(s => !seen.has(s.id))];
+        });
+        setServicesOffset(prev => prev + (d.services || []).length);
+        if (Number.isFinite(d.total)) setTotalServices(d.total);
+      })
+      .catch(err => {
+        console.error(err);
+        showCustomerAlert(err?.message || 'Could not load more visits. Please try again.');
+      })
+      .finally(() => setLoadingMore(false));
+  };
+  const hasMoreServices = totalServices != null && servicesOffset < totalServices;
 
   useEffect(() => {
     loadServices();
@@ -2247,10 +2319,13 @@ function ServicesTab() {
   const toggleExpand = (svc) => {
     const next = expanded === svc.id ? null : svc.id;
     setExpanded(next);
-    if (next && svc.hasPhotos && !photoMap[svc.id]) {
+    // The list payload carries a reduced product projection (no rate or
+    // amount) — hydrate the full record once per row so the expanded table
+    // and photos render the stored data instead of dashes.
+    if (next && !detailMap[svc.id]) {
       api.getService(svc.id)
-        .then(d => setPhotoMap(prev => ({ ...prev, [svc.id]: d.photos || [] })))
-        .catch(err => console.error('Failed to load service photos', err));
+        .then(d => setDetailMap(prev => ({ ...prev, [svc.id]: d })))
+        .catch(err => console.error('Failed to load service details', err));
     }
   };
 
@@ -2517,6 +2592,11 @@ function ServicesTab() {
                 const status = getStatus(s);
                 const cat = classifyType(s.type);
                 const tip = aftercareTips[cat];
+                // Hydrated full record (rate/amount columns + photos); the
+                // reduced list projection is the fallback while it loads.
+                const detail = detailMap[s.id];
+                const rowProducts = detail?.products?.length ? detail.products : (s.products || []);
+                const rowPhotos = detail ? (detail.photos || []) : null;
                 return (
                   <div key={s.id} style={{
                     ...card,
@@ -2621,7 +2701,7 @@ function ServicesTab() {
                         )}
 
                         {/* Products Applied — full table */}
-                        {s.products?.length > 0 && (
+                        {rowProducts.length > 0 && (
                           <div style={{ padding: '14px 18px', borderBottom: '1px solid #E7E2D7' }}>
                             <div style={{ ...sectionTitle, marginBottom: 10 }}>Products Applied</div>
                             <div style={{ overflowX: 'auto', border: '1px solid #E7E2D7', borderRadius: 8 }}>
@@ -2635,7 +2715,7 @@ function ServicesTab() {
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {s.products.map((p, i) => (
+                                  {rowProducts.map((p, i) => (
                                     <tr key={`${s.id}-${p.product_name || ''}-${p.active_ingredient || ''}-${i}`}>
                                       <td style={{ ...tdSt, fontWeight: 600 }}>
                                         {p.product_name}
@@ -2669,13 +2749,13 @@ function ServicesTab() {
                             <div style={{ ...sectionTitle, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
                               <Icon name="camera" size={16} strokeWidth={1.75} /> Service Photos ({s.photoCount})
                             </div>
-                            {!photoMap[s.id] ? (
+                            {!rowPhotos ? (
                               <PortalInlineState
                                 icon="camera"
                                 title="Loading photos"
                                 message="Fetching service photos for this visit."
                               />
-                            ) : photoMap[s.id].length === 0 ? (
+                            ) : rowPhotos.length === 0 ? (
                               <PortalInlineState
                                 icon="camera"
                                 title="No photos available"
@@ -2683,7 +2763,7 @@ function ServicesTab() {
                               />
                             ) : (
                               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 8 }}>
-                                {photoMap[s.id].map((p) => (
+                                {rowPhotos.map((p) => (
                                   <div key={p.id}
                                     onClick={() => setLightbox(p)}
                                     style={{
@@ -2804,6 +2884,23 @@ function ServicesTab() {
           </div>
         );
       })}
+
+      {hasMoreServices && (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '4px 0 8px' }}>
+          <button
+            type="button"
+            onClick={loadMoreServices}
+            disabled={loadingMore}
+            style={{ ...PORTAL_SECONDARY_ACTION, opacity: loadingMore ? 0.65 : 1, cursor: loadingMore ? 'wait' : 'pointer' }}
+          >
+            {loadingMore ? 'Loading...' : 'Load More Visits'}
+          </button>
+          <div style={{ fontSize: 12, color: muted, fontWeight: 700 }}>
+            Showing {services.length} of {totalServices} visits
+          </div>
+        </div>
+      )}
+
       {preview && (
         <DocumentPreviewOverlay
           preview={preview}
@@ -2924,6 +3021,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const compact = useIsMobile(760);
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
+  const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -2935,15 +3033,25 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const loadSchedule = useCallback(() => {
     setLoading(true);
     setLoadError('');
+    // Notification preferences are presentation data — a transient failure
+    // there must not hide the customer's valid appointments (or the confirm
+    // and reschedule controls) behind a schedule error. Only /schedule
+    // itself can fail the load.
     Promise.all([
       api.getSchedule(90),
-      api.getNotificationPrefs(),
+      api.getNotificationPrefs()
+        .then(data => ({ data, failed: false }))
+        .catch(() => ({ data: null, failed: true })),
       api.getPropertyNotificationPrefs()
         .then(data => ({ data, failed: false }))
         .catch(() => ({ data: null, failed: true })),
-    ]).then(([schedData, prefsData, propertyPrefsData]) => {
+    ]).then(([schedData, prefsResult, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
-      setPrefs(prefsData);
+      setPrefsError(prefsResult.failed);
+      if (prefsResult.data) setPrefs(prefsResult.data);
+      // A failed refresh must not keep rendering stale interactive settings
+      // from an earlier load — clear them so the failure panel shows.
+      else if (prefsResult.failed) setPrefs(null);
       setPropertyPrefsError(propertyPrefsData.failed);
       if (propertyPrefsData.data) {
         setPropertyPrefs(propertyPrefsData.data.properties || []);
@@ -3504,7 +3612,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </section>
       )}
 
-      {/* Notification Preferences */}
+      {/* Notification Preferences — when the prefs request failed, say so
+          with a retry instead of silently omitting the section (the schedule
+          above stays fully usable). */}
+      {prefsError && !prefs && (
+        <section data-glass="card" style={{ ...card, padding: 18 }}>
+          <div style={sectionTitle}>Reminder Settings</div>
+          <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
+            Your schedule is up to date, but notification preferences couldn&apos;t be loaded.
+            <button type="button" onClick={loadSchedule} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
+          </div>
+        </section>
+      )}
       {prefs && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
@@ -4214,7 +4333,15 @@ function BillingTab({ customer }) {
   // Annual prepay is term-covered — no monthly charge runs; the saved method
   // is used at renewal.
   const annualPrepayBilling = autopay?.billing_mode === 'annual_prepay';
-  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
+  // Explicit per-visit lanes invoice each completed service — the monthly
+  // cron skips them, so monthly projection copy is wrong here too (Codex
+  // r6). NULL modes the SERVER resolved non-monthly (non_monthly_billing)
+  // read as per-visit for copy as well — the client has no tier to resolve
+  // with, and a monthly_rate fallback would promise a charge the cron will
+  // never run (Codex r9).
+  const perVisitBilling = autopay?.billing_mode === 'per_visit' || autopay?.billing_mode === 'one_time'
+    || (autopay?.non_monthly_billing === true && !perApplicationBilling && !annualPrepayBilling);
+  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling || perVisitBilling;
   const amountDue = Number(autopayState === 'active'
     ? (autopay?.next_charge_amount ?? (nonMonthlyBilling ? 0 : autopay?.monthly_rate) ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
@@ -4240,26 +4367,37 @@ function BillingTab({ customer }) {
   const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
   const discount = activeTierName ? (TIER_DISCOUNTS[tierName] || 0) : 0;
 
-  // Card expiry check — within 60 days
+  // Card expiry check — already expired, or expiring within 60 days. An
+  // expired default card must never fall through to the green "all good"
+  // state: it cannot be charged.
   const cardExpiringSoon = (() => {
     if (!defaultCard) return null;
+    // Bank accounts (ACH) carry null expiry fields — they never expire and
+    // must not be flagged. Only real cards with expiry data participate.
+    if (defaultCard.methodType && defaultCard.methodType !== 'card') return null;
+    if (!defaultCard.expMonth || !defaultCard.expYear) return null;
     const now = new Date();
-    const expDate = new Date(defaultCard.expYear, defaultCard.expMonth, 0); // last day of exp month
+    // End of the last day of the expiry month (23:59:59, matching
+    // useCustomerCards) — the card stays valid through month-end.
+    const expDate = new Date(defaultCard.expYear, defaultCard.expMonth, 0, 23, 59, 59);
     const diffMs = expDate - now;
     const diffDays = Math.ceil(diffMs / 86400000);
-    if (diffDays > 0 && diffDays <= 60) {
+    if (diffDays <= 0) return { last4: defaultCard.lastFour, expired: true };
+    if (diffDays <= 60) {
       const months = Math.ceil(diffDays / 30);
       return { last4: defaultCard.lastFour, months };
     }
     return null;
   })();
 
-  // Banner state: red (failed) > amber (expiring) > green (all good)
+  // Banner state: red (failed/expired) > amber (expiring) > green (all good)
   const bannerState = lastPaymentFailed
     ? 'failed'
-    : cardExpiringSoon
-      ? 'expiring'
-      : autopayState === 'active'
+    : cardExpiringSoon?.expired
+      ? 'expired'
+      : cardExpiringSoon
+        ? 'expiring'
+        : autopayState === 'active'
         ? 'active'
         : autopayState === 'paused'
           ? 'paused'
@@ -4272,6 +4410,12 @@ function BillingTab({ customer }) {
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: 'Payment failed - update your payment method',
       detail: 'Your last payment could not be processed. Update your card to avoid service interruption.',
+    },
+    expired: {
+      bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
+      badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
+      title: `Card ending in ${cardExpiringSoon?.last4 || ''} has expired`,
+      detail: 'This card can no longer be charged. Update your payment method to avoid any disruption to service.',
     },
     expiring: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'warning',
@@ -4286,7 +4430,9 @@ function BillingTab({ customer }) {
         ? 'Auto Pay is on — charged per application'
         : annualPrepayBilling
           ? 'Auto Pay is on — plan prepaid'
-          : autopayMonthlyUnpriced
+          : perVisitBilling
+            ? 'Auto Pay is on — invoiced per visit'
+            : autopayMonthlyUnpriced
             ? 'Auto Pay is on — rate being finalized'
             : daysUntilDue === 0
               ? 'Auto Pay is processing today'
@@ -4295,7 +4441,9 @@ function BillingTab({ customer }) {
                 : `Next charge ${money(amountDue)}`,
       detail: perApplicationBilling
         ? 'Your saved payment method is charged for each service visit after it is completed.'
-        : annualPrepayBilling
+        : perVisitBilling
+          ? 'We send an invoice after each completed service visit — your saved payment method makes paying it quick.'
+          : annualPrepayBilling
           ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
           : autopayMonthlyUnpriced
             ? 'Your monthly rate is being finalized, so no charge is scheduled yet.'
@@ -4358,9 +4506,13 @@ function BillingTab({ customer }) {
     const yr = parseDate(p.date).getFullYear();
     return yr === currentYear && p.status === 'paid';
   });
-  const ytdTotal = ytdPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
-  const ytdRecurring = ytdPayments.filter(p => p.type === 'recurring').reduce((sum, p) => sum + (p.amount || 0), 0);
-  const ytdOneTime = ytdPayments.filter(p => p.type === 'one_time').reduce((sum, p) => sum + (p.amount || 0), 0);
+  // Partially refunded payments stay status 'paid' while refundAmount
+  // carries the returned portion — YTD figures count only what the customer
+  // actually kept paying.
+  const netPaid = (p) => Math.max(0, (p.amount || 0) - (p.refundAmount || 0));
+  const ytdTotal = ytdPayments.reduce((sum, p) => sum + netPaid(p), 0);
+  const ytdRecurring = ytdPayments.filter(p => p.type === 'recurring').reduce((sum, p) => sum + netPaid(p), 0);
+  const ytdOneTime = ytdPayments.filter(p => p.type === 'one_time').reduce((sum, p) => sum + netPaid(p), 0);
   const paymentYears = Array.from(new Set([
     currentYear,
     ...payments.map(p => parseDate(p.date).getFullYear()).filter(Number.isFinite),
@@ -4533,13 +4685,13 @@ function BillingTab({ customer }) {
           {[
             // No scheduled date → "Next Not scheduled" reads broken; show a
             // neutral sub instead (eyeball 07-12 finding 3).
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : perVisitBilling ? 'Invoiced per visit' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.
             {
-              label: perApplicationBilling ? 'Plan billing' : annualPrepayBilling ? 'Plan billing' : 'Monthly plan',
-              value: perApplicationBilling ? 'Per application' : annualPrepayBilling ? 'Prepaid' : money(monthlyRate),
+              label: perApplicationBilling || annualPrepayBilling || perVisitBilling ? 'Plan billing' : 'Monthly plan',
+              value: perApplicationBilling ? 'Per application' : annualPrepayBilling ? 'Prepaid' : perVisitBilling ? 'Per visit' : money(monthlyRate),
               sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan'),
             },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
@@ -4620,7 +4772,7 @@ function BillingTab({ customer }) {
             fontWeight: 850,
             color: B.glassNavy,
             fontFamily: FONTS.ui,
-          }}>{perApplicationBilling ? 'Billed per application' : annualPrepayBilling ? 'Prepaid for the year' : `${money(monthlyRate)}/mo`}</span>
+          }}>{perApplicationBilling ? 'Billed per application' : annualPrepayBilling ? 'Prepaid for the year' : perVisitBilling ? 'Billed per visit' : `${money(monthlyRate)}/mo`}</span>
         </div>
         <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
           {/* Service rows list what the plan covers — no per-service price
@@ -4938,6 +5090,11 @@ function BillingTab({ customer }) {
             </div>
             <div style={{ textAlign: 'right', flexShrink: 0 }}>
               <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>{money(p.amount)}</div>
+              {p.refundAmount > 0 && p.status === 'paid' && (
+                <div style={{ fontSize: 12, color: muted, marginTop: 2, fontWeight: 700 }}>
+                  −{money(p.refundAmount)} refunded
+                </div>
+              )}
               <span style={{
                 display: 'inline-flex',
                 marginTop: 5,
@@ -5306,12 +5463,21 @@ function ServicePrefsSection() {
   const [prefs, setPrefs] = useState(null);
   const [busy, setBusy] = useState(null); // which key is currently saving
   const [error, setError] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
 
-  useEffect(() => {
+  // Fail closed: a read failure must never render defaults — a customer who
+  // opted out of interior spraying would see the opposite of the work-order
+  // source of truth, including the safety-sensitive exterior-only choice.
+  const loadPrefs = useCallback(() => {
+    setLoadFailed(false);
     api.getServicePreferences()
       .then((d) => setPrefs(d.preferences || { interior_spray: true, exterior_sweep: true }))
-      .catch(() => setPrefs({ interior_spray: true, exterior_sweep: true }));
+      .catch(() => setLoadFailed(true));
   }, []);
+
+  useEffect(() => {
+    loadPrefs();
+  }, [loadPrefs]);
 
   async function toggle(key) {
     if (!prefs) return;
@@ -5331,7 +5497,21 @@ function ServicePrefsSection() {
     }
   }
 
-  if (!prefs) return null;
+  if (!prefs) {
+    if (!loadFailed) return null; // still loading
+    return (
+      <PropertySection
+        title="Service preferences"
+        icon="wrench"
+        summary="Choose what is included on each recurring pest control visit."
+      >
+        <div role="alert" style={{ fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px', lineHeight: 1.5 }}>
+          Your saved visit preferences couldn&apos;t be loaded, so they aren&apos;t shown here. Your work orders still follow what&apos;s on file.
+          <button type="button" onClick={loadPrefs} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
+        </div>
+      </PropertySection>
+    );
+  }
 
   const rows = [
     { key: 'interior_spray', icon: 'home', title: 'Interior spraying', desc: 'Treat inside the home on each visit. Turn off for exterior-only service.' },
@@ -5683,9 +5863,11 @@ function PropertyTab({ customer }) {
   const cleanTurf = (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '').trim() || 'Not set';
   const tierHasLawnCare = ['Silver', 'Gold', 'Platinum'].includes(String(customer.tier || ''));
   const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim();
-  const homeSqFt = Number(customer.property?.propertySqFt || 0);
+  // Schema semantics (initial_schema.js): property_sqft IS the treated lawn
+  // area and bed_sqft is the separate ornamental-bed measurement — never
+  // subtract one from the other, that understates the service area.
+  const lawnSqFt = Number(customer.property?.propertySqFt || 0);
   const bedSqFt = Number(customer.property?.bedSqFt || 0);
-  const treatedSqFt = homeSqFt ? Math.max(0, homeSqFt - bedSqFt) : 0;
   const accessReady = [
     prefs.neighborhoodGateCode,
     prefs.propertyGateCode,
@@ -5803,8 +5985,8 @@ function PropertyTab({ customer }) {
           }}>
             {[
               { label: 'Turf', value: cleanTurf, sub: 'Lawn profile' },
-              { label: 'Home', value: sqft(homeSqFt), sub: 'Property size' },
-              { label: 'Treated Area', value: treatedSqFt ? sqft(treatedSqFt) : sqft(homeSqFt), sub: 'Estimated service area' },
+              { label: 'Treated Lawn', value: sqft(lawnSqFt), sub: 'Service area on file' },
+              { label: 'Beds', value: sqft(bedSqFt), sub: 'Ornamental beds' },
               { label: 'Lot', value: sqft(customer.property?.lotSqFt), sub: 'Parcel size' },
             ].map((item) => (
               <div key={item.label} style={{
@@ -7937,6 +8119,9 @@ function MyPlanTab({ customer, focusService }) {
   // must not present a "$X per month" plan rate — same source of truth as
   // the Billing tab's AutopayCard.
   const [billingMode, setBillingMode] = useState(null);
+  // Server-resolved lane verdict for NULL modes — see the dashboard summary
+  // (Codex r10).
+  const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
@@ -7966,7 +8151,10 @@ function MyPlanTab({ customer, focusService }) {
 
   useEffect(() => {
     loadPlan();
-    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
+    api.getAutopay().then(d => {
+      setBillingMode(d?.billing_mode || null);
+      setResolvedNonMonthly(d?.non_monthly_billing === true);
+    }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
   }, [loadPlan]);
 
@@ -8074,14 +8262,19 @@ function MyPlanTab({ customer, focusService }) {
     ? 'No active plan'
     : (annualPrepayLabel || 'Active plan');
   const perApplicationBilled = billingMode === 'per_application';
+  // Explicit per-visit lanes never show the monthly rate as their plan
+  // billing — the cron does not charge it (Codex r6). NULL modes the server
+  // resolved non-monthly read the same way (Codex r10).
+  const perVisitBilled = billingMode === 'per_visit' || billingMode === 'one_time'
+    || (billingMode === null && resolvedNonMonthly);
   const planBillingValue = !activeTierName
     ? '—'
     : (annualPrepay
       ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
-      : (perApplicationBilled ? 'Per application' : formatPortalMoney(monthlyRate)));
+      : (perApplicationBilled ? 'Per application' : perVisitBilled ? 'Per visit' : formatPortalMoney(monthlyRate)));
   const planBillingSub = !activeTierName
     ? 'No WaveGuard plan on file'
-    : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : 'per month'));
+    : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : perVisitBilled ? 'Billed per completed visit' : 'per month'));
 
   // Build bundled services one-liner
   const bundleSummary = includedServices.map(s => s.name.replace(/ Program| Barrier Treatment| Control/g, '').replace('Quarterly ', '')).join(' + ');
@@ -9171,7 +9364,11 @@ function ServiceTracker() {
   }, [fetchTracker]);
 
   useEffect(() => {
-    if (!tracker || tracker.currentStep <= 1 || tracker.currentStep >= 7) return;
+    // Poll from step 1 (Scheduled) too — nothing else updates this
+    // component, so a portal left open before dispatch would otherwise stay
+    // stuck at Scheduled through confirmation and en-route. Only terminal
+    // states stop the refresh loop.
+    if (!tracker || tracker.currentStep >= 7) return;
     const interval = setInterval(fetchTracker, 15000);
     return () => clearInterval(interval);
   }, [tracker?.currentStep, fetchTracker]);
@@ -9689,7 +9886,13 @@ function ReferTab({ customer, onSwitchTab }) {
   const handleCopy = async (value) => {
     if (!value) return;
     try {
-      await navigator.clipboard?.writeText(value);
+      // Optional chaining resolves undefined (no throw) when the Clipboard
+      // API is absent (in-app webviews, non-secure contexts) — never report
+      // "Copied" without an actual write. Mirrors ReportViewPage's share().
+      if (typeof navigator.clipboard?.writeText !== 'function') {
+        throw new Error('Clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(value);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -11361,6 +11564,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const [photos, setPhotos] = useState([]); // array of { preview, data }
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [submittedNote, setSubmittedNote] = useState('');
   const [submitError, setSubmitError] = useState('');
   const [lastService, setLastService] = useState(null);
   const [nextService, setNextService] = useState(null);
@@ -11521,7 +11725,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     setSubmitting(true);
     setSubmitError('');
     try {
-      await api.createRequest({
+      const result = await api.createRequest({
         category,
         subject: description.trim().slice(0, 80),
         description: description.trim(),
@@ -11529,14 +11733,25 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         locationOnProperty: location || null,
         photos: photos.map(p => p.data),
       });
+      // The server's 60s dedupe path returns success against the EARLIER
+      // request with photoCount: 0 — if the customer attached photos this
+      // time, say so instead of implying they were received.
+      setSubmittedNote(
+        result?.deduped && photos.length > 0 && !(Number(result.photoCount) > 0)
+          ? 'We already had this request from a moment ago, so your new photos were not attached. Text them to us if they show something new.'
+          : '',
+      );
       setSubmitted(true);
       onSubmitted?.();
+      const hadNote = result?.deduped && photos.length > 0 && !(Number(result.photoCount) > 0);
       setTimeout(() => {
         setSubmitted(false);
         setCategory(''); setDescription('');
         setUrgency('routine'); setLocation(''); setPhotos([]); setSubmitError('');
+        setSubmittedNote('');
         onClose();
-      }, 2500);
+        // Give the photos-not-attached note time to be read before closing.
+      }, hadNote ? 7000 : 2500);
     } catch (err) {
       console.error(err);
       setSubmitError(err?.message || 'Could not submit the request. Please try again or call Waves at (941) 297-5749.');
@@ -11641,6 +11856,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 Waves will review this and follow up directly.
                 {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized for the next available response.' : ''}
               </div>
+              {submittedNote && (
+                <div role="alert" style={{ fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px', marginTop: 10, lineHeight: 1.5, textAlign: 'left' }}>
+                  {submittedNote}
+                </div>
+              )}
               <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
                 <a href="tel:+19412975749" style={secondaryAction}>Call</a>
                 <a href="sms:+19412975749" style={secondaryAction}>Text</a>
@@ -12811,6 +13031,55 @@ export default function PortalPage() {
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
   const [showReportIssue, setShowReportIssue] = useState(initialOpenRequest);
+  // Tab navigation writes the URL and back/forward adopts it, so a refresh
+  // returns to the same tab (the deep-link parser above already reads
+  // ?tab=) and the browser Back button walks portal tabs instead of
+  // leaving the app.
+  const location = useLocation();
+  const navigate = useNavigate();
+  // Canonical view token for a URL search string — legacy spellings collapse
+  // to the view they render (?tab=schedule and plain ?tab=visits are both
+  // visits:upcoming; a plan service param is row focus, not a different
+  // view), so equivalent URLs never stack duplicate history entries.
+  const searchView = (search) => {
+    const params = new URLSearchParams(search);
+    const t = params.get('tab');
+    if (t === 'schedule') return 'visits:upcoming';
+    if (t === 'services') return 'visits:completed';
+    const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+    const tab = t && allowed.includes(t) ? t : 'dashboard';
+    return tab === 'visits' ? 'visits:upcoming' : tab;
+  };
+  // urlId is the deep-link token, which may be a LEGACY value ('schedule',
+  // 'services') the initial parser understands — writing it verbatim keeps
+  // a refreshed or shared URL restoring the exact Visits sub-tab.
+  const syncTabUrl = (urlId) => {
+    const target = urlId === 'dashboard' ? '/' : `/?tab=${urlId}`;
+    if (searchView(window.location.search) === searchView(urlId === 'dashboard' ? '' : `?tab=${urlId}`)) return;
+    if (window.location.pathname + window.location.search !== target) navigate(target);
+  };
+  // Back/forward: adopt what the URL names — tab, legacy Visits sub-tab,
+  // and plan service focus — using the same rules as the initial deep-link
+  // parser. A no-op when the navigation came from switchTab (state already
+  // matches). The request overlay is never reopened from history.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const t = params.get('tab');
+    const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+    let urlTab;
+    if (t === 'schedule' || t === 'services') {
+      urlTab = 'visits';
+      setVisitsSubTab(t === 'schedule' ? 'upcoming' : 'completed');
+    } else {
+      urlTab = t && allowed.includes(t) ? t : 'dashboard';
+      // Plain ?tab=visits means upcoming (the parser's default) — adopt it
+      // so the URL and the rendered sub-tab can never disagree on refresh.
+      if (urlTab === 'visits') setVisitsSubTab('upcoming');
+    }
+    const svc = params.get('service');
+    setPlanFocusService(urlTab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null);
+    setActiveTab(prev => (prev === urlTab ? prev : urlTab));
+  }, [location.search]);
   // Translates legacy 'schedule' / 'services' / 'request' targets into
   // their consolidated surfaces (Visits sub-tabs, request overlay) so
   // existing call-sites route correctly without rewriting each one.
@@ -12818,14 +13087,20 @@ export default function PortalPage() {
     // Plain nav clears any pending row focus so Plan doesn't keep
     // re-expanding a row the customer already closed.
     setPlanFocusService(null);
-    if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); return; }
-    if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); return; }
+    if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); syncTabUrl('schedule'); return; }
+    if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); syncTabUrl('services'); return; }
     if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
+    // The plain Visits nav keeps whatever sub-tab is showing — encode it in
+    // the URL (services = completed) so a refresh restores the same view.
+    syncTabUrl(id === 'visits' && visitsSubTab === 'completed' ? 'services' : id);
   };
   const openPlanService = (svcId) => {
     setPlanFocusService(svcId);
     setActiveTab('plan');
+    // Carry the service in the URL so refresh/back restore the focused row.
+    const target = SERVICE_CATALOG.some(s => s.id === svcId) ? `/?tab=plan&service=${svcId}` : '/?tab=plan';
+    if (window.location.pathname + window.location.search !== target) navigate(target);
   };
   const headerNavItems = [...PRIMARY_TABS, ...MORE_TABS];
   const headerNavButton = (tab) => {
@@ -12920,6 +13195,10 @@ export default function PortalPage() {
     setSwitchingPropertyId(null);
     if (switched) {
       setActiveTab('dashboard');
+      // Replace, not push: the prior tab history belongs to the PREVIOUS
+      // property's session — Back must not restore a stale tab context
+      // against the newly selected property.
+      if (window.location.pathname + window.location.search !== '/') navigate('/', { replace: true });
       setVisitsSubTab('upcoming');
       setShowMenu(false);
       setShowMoreSheet(false);
@@ -13393,7 +13672,13 @@ export default function PortalPage() {
         <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} />}
-        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
+        {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
+          setVisitsSubTab(sub);
+          // Keep the URL's legacy token in step so refresh/share restores the
+          // same sub-tab; replace (not push) so pill toggles don't stack
+          // history entries.
+          navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
+        }} onRequestVisit={() => setShowReportIssue(true)} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
@@ -13437,4 +13722,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab };

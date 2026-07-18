@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Activity,
   ArrowLeft,
@@ -783,8 +784,22 @@ function staffRole() {
   }
 }
 
-export default function KnowledgePage() {
-  const [tab, setTab] = useState("articles");
+export default function KnowledgePage({ embedded = false }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const availableTabs = staffRole() === "admin"
+    ? TABS
+    : TABS.filter((item) => item.key !== "health");
+  const requestedTab = searchParams.get(embedded ? "wikiTab" : "tab");
+  const tab = availableTabs.some(({ key }) => key === requestedTab)
+    ? requestedTab
+    : "articles";
+  const setTab = (nextTab) => {
+    const queryKey = embedded ? "wikiTab" : "tab";
+    const next = new URLSearchParams(searchParams);
+    if (nextTab === "articles") next.delete(queryKey);
+    else next.set(queryKey, nextTab);
+    setSearchParams(next, { replace: true });
+  };
   const [articles, setArticles] = useState([]);
   const [categoryCounts, setCategoryCounts] = useState({});
   const [loading, setLoading] = useState(true);
@@ -822,6 +837,8 @@ export default function KnowledgePage() {
         <AdminCommandHeader
           title="Wiki"
           icon={BookOpen}
+          headingLevel={embedded ? 2 : 1}
+          sticky={!embedded}
           action={{
             label: "All Articles",
             icon: ArrowLeft,
@@ -837,11 +854,6 @@ export default function KnowledgePage() {
     );
   }
 
-  const totalArticles = Object.values(categoryCounts).reduce(
-    (s, c) => s + c,
-    0,
-  );
-
   return (
     <div>
       {showQA && <QAModal onClose={() => setShowQA(false)} />}
@@ -849,9 +861,11 @@ export default function KnowledgePage() {
       <AdminCommandHeader
         title="Wiki"
         icon={BookOpen}
-        sections={staffRole() === "admin" ? TABS : TABS.filter((t) => t.key !== "health")}
+        sections={availableTabs}
         activeKey={tab}
         onSectionChange={setTab}
+        headingLevel={embedded ? 2 : 1}
+        sticky={!embedded}
         action={{
           label: "Ask a Question",
           icon: MessageSquare,

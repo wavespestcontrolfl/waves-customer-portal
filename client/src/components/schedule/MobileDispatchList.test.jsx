@@ -40,7 +40,9 @@ describe('MobileDispatchList technician workflow', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Assign technician' }));
+    const assignButton = screen.getByRole('button', { name: 'Assign technician' });
+    expect(assignButton).toHaveClass('h-11');
+    fireEvent.click(assignButton);
     fireEvent.click(screen.getByRole('button', { name: 'Alex Tech' }));
 
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(
@@ -71,6 +73,7 @@ describe('MobileDispatchList technician workflow', () => {
     );
 
     const action = await screen.findByRole('button', { name: 'Tech En Route' });
+    expect(action).toHaveClass('h-11');
     fireEvent.click(action);
 
     await waitFor(() => expect(onEnRoute).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-1' })));

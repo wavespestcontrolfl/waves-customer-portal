@@ -253,7 +253,17 @@ export default function AutopayCard({ onStateChange }) {
   // Annual prepay is term-covered — no monthly charge runs either; the saved
   // method is used at renewal.
   const annualPrepayBilling = data.billing_mode === 'annual_prepay';
-  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
+  // Explicit per-visit lanes invoice each completed service (saved method
+  // collects per invoice) — the monthly cron skips them too, so the monthly
+  // projection copy is wrong for them as well (Codex r6). NULL modes the
+  // SERVER resolved non-monthly (non_monthly_billing — the client has no
+  // tier to resolve with) read as per-visit for copy too: the cron skips
+  // them and their visits invoice individually, so falling back to a
+  // monthly_rate "Next charge" would promise a charge that never runs
+  // (Codex r9).
+  const perVisitBilling = data.billing_mode === 'per_visit' || data.billing_mode === 'one_time'
+    || (data.non_monthly_billing === true && !perApplicationBilling && !annualPrepayBilling);
+  const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling || perVisitBilling;
   const nextChargeAmount = Number(next_charge_amount ?? (nonMonthlyBilling ? 0 : monthly_rate) ?? 0);
   // NULL monthly_rate = unpriced (manual quote pending), never a real $0.00
   // charge — the server sends next_charge_amount/date as null and the cron
@@ -468,7 +478,9 @@ export default function AutopayCard({ onStateChange }) {
                 ? 'Auto Pay is on — your saved payment method is charged after each application.'
                 : annualPrepayBilling
                   ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
-                  : monthlyUnpriced
+                  : perVisitBilling
+                    ? 'Your payment method is saved — we send an invoice after each completed service.'
+                    : monthlyUnpriced
                     ? 'Auto Pay is on — your monthly rate is being finalized, so no charge is scheduled yet.'
                     // No date → drop the "on <date>" clause instead of
                     // rendering "on Not scheduled" (eyeball 07-12 finding 4).
@@ -676,6 +688,10 @@ function Modal({ title, children, onClose }) {
         display: 'flex', flexDirection: 'column', gap: 14, fontFamily: FONTS.body,
         border: `1px solid ${PORTAL_BILLING.border}`,
         boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+        // The body behind is scroll-locked, so on short viewports (landscape
+        // phones, small screens with the Payment Element open) the dialog
+        // itself must scroll or the bottom controls become unreachable.
+        maxHeight: 'min(92dvh, 92vh)', overflowY: 'auto', WebkitOverflowScrolling: 'touch',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: 16, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading }}>{title}</div>

@@ -74,6 +74,14 @@ const gates = {
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
 
+  // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
+  // IB's search_field_intelligence, plus the nightly knowledge-index sync
+  // that embeds corpus chunks (paid OpenAI embedding calls — pennies/run,
+  // but still spend). Opt-in in EVERY environment. Kill switch: unset —
+  // search instantly reverts to the lane-A1 FTS path, the nightly sync
+  // no-ops, and existing embeddings stay in place for a later re-enable.
+  hybridKnowledge: process.env.GATE_HYBRID_KNOWLEDGE === 'true',
+
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
 
@@ -188,6 +196,16 @@ const gates = {
   // intents never auto-send — the gate only unlocks the path, the data still
   // has to earn each intent.
   smsAutoSend: process.env.GATE_SMS_AUTO_SEND === 'true',
+
+  // SMS Sealed Eval (brand-voice loop measurement) — a locked exam for the
+  // house-voice drafter: frozen (inbound, day-of facts, human reply) items
+  // replayed through the current drafter per provider leg and graded by the
+  // live judge, with McNemar significance vs a baseline run. The weekly cron
+  // only tops up the item pool (pure selection, no LLM); exam RUNS are
+  // manual-trigger only (admin endpoint) because each burns items × several
+  // LLM calls. No sends, no customer-visible effect; prod opt-in per house
+  // pattern.
+  smsSealedEval: isProd ? process.env.GATE_SMS_SEALED_EVAL === 'true' : true,
 
   // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
   // replies for HISTORICAL inbound SMS that already have a human reply and

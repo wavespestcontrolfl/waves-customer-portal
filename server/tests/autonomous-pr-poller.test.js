@@ -689,6 +689,73 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(runUpdates(updates)).toHaveLength(0);
   });
 
+  test('Codex NOT clear but P2-only merge bar met: merges anyway (P2s logged, guards below still ran)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    const codexErr = new Error('2 unresolved Codex findings on head headsha1');
+    codexErr.code = 'CODEX_REVIEW_REQUIRED';
+    publisher.assertCodexReviewClear.mockRejectedValue(codexErr);
+    const rem = require('../services/content/codex-remediation');
+    const barSpy = jest.spyOn(rem, 'p2OnlyMergeEligible').mockResolvedValue({ eligible: true, p2Count: 2, rounds: 1 });
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(barSpy).toHaveBeenCalledWith(42, 'headsha1');
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+    barSpy.mockRestore();
+  });
+
+  test('Codex NOT clear + P2 bar not eligible (P1 present): strict pending path with the bar reason surfaced', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    const codexErr = new Error('findings on head');
+    codexErr.code = 'CODEX_REVIEW_REQUIRED';
+    publisher.assertCodexReviewClear.mockRejectedValue(codexErr);
+    const rem = require('../services/content/codex-remediation');
+    const barSpy = jest.spyOn(rem, 'p2OnlyMergeEligible').mockResolvedValue({ eligible: false, reason: 'blocking findings present (P1, P2)' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].pending).toBe(true);
+    expect(res.results[0].reason).toMatch(/codex_review_pending/);
+    expect(res.results[0].reason).toMatch(/p2 bar: blocking findings/);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    barSpy.mockRestore();
+  });
+
+  test('P2 bar check failure fails CLOSED to the strict path', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    const codexErr = new Error('findings on head');
+    codexErr.code = 'CODEX_REVIEW_REQUIRED';
+    publisher.assertCodexReviewClear.mockRejectedValue(codexErr);
+    const rem = require('../services/content/codex-remediation');
+    const barSpy = jest.spyOn(rem, 'p2OnlyMergeEligible').mockRejectedValue(new Error('github 500'));
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0].pending).toBe(true);
+    expect(res.results[0].reason).toMatch(/codex_review_pending/);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    barSpy.mockRestore();
+  });
+
   test('flag on + green head build + Codex clear: merges and runs the post-merge chain', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     const updates = setupDb({ pending: [makeRun()] });

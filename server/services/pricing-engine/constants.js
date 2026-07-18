@@ -234,6 +234,14 @@ const LAWN_PRICING_V2 = {
   // lawn_pricing_v2 row by migration 20260717120000. Re-arm: set the DB key
   // back to a monthly dollar amount (was 50, owner directive 2026-07-09).
   programMinimumMonthly: 0,
+  // Cost-floor ENFORCEMENT arm switch, DISARMED (same 2026-07-17 ruling).
+  // Governs floor-priced tier selection, the WaveGuard/manual post-discount
+  // margin-floor caps (estimate-engine), and the public-ladder margin
+  // re-clamp (estimate-public clampLawnLadderEntry). Floor math still runs
+  // on every quote for margin REPORTING regardless. Re-arm: explicit
+  // per-input useLawnCostFloor, or set this key true on the pricing_config
+  // lawn_pricing_v2 row (db-bridge resets it false when absent).
+  useLawnCostFloor: false,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',

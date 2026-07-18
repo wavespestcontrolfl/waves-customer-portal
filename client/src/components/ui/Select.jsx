@@ -2,14 +2,14 @@ import React, { forwardRef } from 'react';
 import { cn } from './cn';
 
 const BASE =
-  'block w-full bg-white text-zinc-900 appearance-none pr-8 ' +
+  'block box-border min-w-0 w-full bg-white text-zinc-900 appearance-none pr-8 ' +
   'border-hairline border-zinc-300 rounded-sm ' +
   'focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900 ' +
   'disabled:bg-zinc-50 disabled:text-ink-disabled disabled:cursor-not-allowed';
 
 const SIZES = {
-  sm: 'h-7 px-2 text-12',
-  md: 'h-9 px-3 text-13',
+  sm: 'h-11 pl-2 text-16 md:h-7 md:text-12',
+  md: 'h-11 pl-3 text-16 md:h-9 md:text-13',
 };
 
 const CARET =

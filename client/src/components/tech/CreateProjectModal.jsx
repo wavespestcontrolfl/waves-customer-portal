@@ -7,6 +7,7 @@ import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/
 import { computePretreatChemistry } from '../../lib/termitePretreatRates';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 import DictationButton from './DictationButton';
+import useModalFocus from '../../hooks/useModalFocus';
 import {
   useCustomerCards,
   chargeableCardOnFile,
@@ -466,6 +467,14 @@ export default function CreateProjectModal({
   // Keep its own lock so no sign-step exit can unmount either request.
   const [completionBusy, setCompletionBusy] = useState(false);
   const [completionAction, setCompletionAction] = useState(null);
+  // Escape follows the same exit contract as the scrim and close button: on
+  // the sign step it must route through finishSignStep so the parent still
+  // learns about the saved project.
+  const dialogRef = useModalFocus(true, () => {
+    if (saving || completionBusy) return;
+    if (signStep) { finishSignStep(); return; }
+    onClose?.();
+  });
 
   // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
   // company's treatment sticker/notice (or visible evidence) into the
@@ -1781,6 +1790,8 @@ export default function CreateProjectModal({
   // are unaffected: the card sets P.bodyFont per theme.
   return createPortal(
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       role="dialog"
       aria-modal="true"
       aria-labelledby="create-project-modal-title"

@@ -168,6 +168,27 @@ const NEWSLETTER_TYPES = {
       humanApprovalRequired: true,
     },
   },
+
+  'reengagement': {
+    key: 'reengagement',
+    label: 'Re-engagement (Win-back)',
+    flagship: false,
+    cadence: 'as-needed',
+    defaultSendDay: null,
+    voiceProfile: null,
+    coverage: null,
+    requiredSections: [],
+    sourceRequirements: null,
+    // Seeded as a parked draft by the weekly sunset job
+    // (newsletter-sunset.js); copy is house-written and the owner edits,
+    // approves, and sends. Never AI-drafted, never auto-sent.
+    autonomy: {
+      aiDraftAllowed: false,
+      autoScheduleAllowed: false,
+      autoSendAllowed: false,
+      humanApprovalRequired: true,
+    },
+  },
 };
 
 /**

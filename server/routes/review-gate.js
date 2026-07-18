@@ -4,6 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { WAVES_LOCATIONS, nearestLocation } = require('../config/locations');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('../services/llm/call');
 
 // Nearest GBP to the customer's geocoded address, with fallbacks. Prefers the
 // haversine winner when the customer has a lat/lng; otherwise falls back to
@@ -421,20 +422,18 @@ Rules:
 
 Return ONLY the review body. No quotes, no preamble, no sign-off.`;
 
-    // Call Claude API — VOICE tier: this is customer-voice copy destined for
-    // a real Google review, where a warm natural voice beats raw reasoning.
+    // VOICE-tier customer-voice copy — a warm natural voice beats raw
+    // reasoning for a real Google review — with cross-provider failover;
+    // deterministic template last.
     let reviewText = '';
     try {
-      const Anthropic = require('@anthropic-ai/sdk');
-      const anthropic = new Anthropic();
-
-      const message = await anthropic.messages.create({
-        model: MODELS.VOICE,
-        max_tokens: 256,
-        messages: [{ role: 'user', content: prompt }],
+      const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+        text: prompt,
+        jsonMode: false,
+        maxTokens: 256,
       });
-
-      reviewText = message.content[0]?.text?.trim() || '';
+      if (!result.ok) throw new Error('both AI providers unavailable');
+      reviewText = result.text?.trim() || '';
       // Strip accidental quotes or "Review:" preambles
       reviewText = reviewText.replace(/^["']+|["']+$/g, '').replace(/^(Review|My review):\s*/i, '').trim();
     } catch (aiErr) {

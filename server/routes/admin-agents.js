@@ -1604,6 +1604,92 @@ router.put('/intent-modes/:intent', async (req, res, next) => {
   }
 });
 
+// GET /sealed-eval — sealed-exam state for the Agents hub: item-pool counts,
+// recent runs (aggregates + significance vs baseline), latest complete run
+// per provider leg for the current prompt version. Read-only.
+router.get('/sealed-eval', async (req, res, next) => {
+  try {
+    const sealedEval = require('../services/sms-sealed-eval');
+    const summary = await sealedEval.getSealedExamSummary();
+    res.json({
+      generatedAt: new Date().toISOString(),
+      gateEnabled: require('../config/feature-gates').isEnabled('smsSealedEval'),
+      examRequiredForGraduation: process.env.GRAD_REQUIRE_SEALED_EXAM === 'true',
+      ...summary,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /sealed-eval/seal — top up the sealed item pool (pure selection, no
+// LLM spend). requireAdmin: sealing decides what the exam measures forever.
+router.post('/sealed-eval/seal', requireAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').isEnabled('smsSealedEval')) {
+      return res.status(409).json({ error: 'Sealed eval is gated off (GATE_SMS_SEALED_EVAL).' });
+    }
+    const { runExclusive } = require('../utils/cron-lock');
+    const { sealEvalItems } = require('../services/sms-sealed-eval');
+    const result = await runExclusive('sms-sealed-eval-seal', () => sealEvalItems(), { recordHealth: false });
+    if (result?.skipped) return res.status(409).json({ error: 'A seal pass is already running.' });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /sealed-eval/runs — start (or resume) one exam sitting on a provider
+// leg. Body: { providerLeg: 'anthropic'|'openai', baselineRunId?, resumeRunId? }.
+// Creates the run row synchronously (the 202 carries its id for polling) and
+// processes items in the background under the sms-sealed-eval advisory lock.
+// requireAdmin: each run burns items × several LLM calls.
+router.post('/sealed-eval/runs', requireAdmin, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').isEnabled('smsSealedEval')) {
+      return res.status(409).json({ error: 'Sealed eval is gated off (GATE_SMS_SEALED_EVAL).' });
+    }
+    const sealedEval = require('../services/sms-sealed-eval');
+    const resumeRunId = typeof req.body?.resumeRunId === 'string' && req.body.resumeRunId.trim()
+      ? req.body.resumeRunId.trim()
+      : null;
+    let runId = resumeRunId;
+
+    if (!runId) {
+      const providerLeg = String(req.body?.providerLeg || '').trim();
+      if (!sealedEval.EXAM_LEGS.includes(providerLeg)) {
+        return res.status(400).json({ error: `providerLeg must be one of: ${sealedEval.EXAM_LEGS.join(', ')}` });
+      }
+      const baselineRunId = typeof req.body?.baselineRunId === 'string' && req.body.baselineRunId.trim()
+        ? req.body.baselineRunId.trim()
+        : null;
+      try {
+        const run = await sealedEval.createExamRun({ providerLeg, baselineRunId, triggeredBy: actorName(req) });
+        runId = run.id;
+      } catch (err) {
+        if (err.code === 'RUN_IN_PROGRESS') {
+          return res.status(409).json({ error: err.message, resumeRunId: err.runId });
+        }
+        if (err.code === 'INVALID_BASELINE') return res.status(400).json({ error: err.message });
+        if (/no active sealed items/.test(err.message)) return res.status(409).json({ error: err.message });
+        throw err;
+      }
+    }
+
+    // Fire-and-forget: the exam takes minutes. The advisory lock serializes
+    // processing across instances; a resume request while the original holder
+    // is still working skips harmlessly (lease_held) and the UI keeps polling.
+    setImmediate(() => {
+      const { runExclusive } = require('../utils/cron-lock');
+      runExclusive('sms-sealed-eval', () => sealedEval.runSealedExam({ runId }), { recordHealth: false })
+        .catch((err) => logger.error(`[sealed-eval] background run ${String(runId).slice(0, 8)} failed: ${err.message}`));
+    });
+    res.status(202).json({ runId, resumed: Boolean(resumeRunId) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /voice-profiles — Loop 2 review surface: the pending profile (if any),
 // the currently approved one, and recent history. Read-only.
 router.get('/voice-profiles', async (req, res, next) => {

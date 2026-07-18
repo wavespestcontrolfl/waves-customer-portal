@@ -176,3 +176,27 @@ describe('buildPostLogRow', () => {
     expect(buildPostLogRow({ ...base, results: [{ success: true }] }).ai_model).toBeNull();
   });
 });
+
+// Codex round (07-18, P2): tech field-photo captions are PUBLIC social copy
+// — VOICE-owned per the model registry, same as the admin social paths —
+// so they must dispatch customerCopy, not the WORKHORSE content lane, or
+// voice canaries/overrides silently skip this feed surface.
+describe('generateCaptions policy routing', () => {
+  const MODELS = require('../config/models');
+  const llm = require('../services/llm/call');
+
+  afterEach(() => jest.restoreAllMocks());
+
+  test('captions dispatch the customerCopy (VOICE) policy', async () => {
+    jest.spyOn(llm, 'dispatchWithFallback').mockResolvedValue({
+      ok: true,
+      json: { facebook: 'a', instagram: 'b', gbp: 'c', nextdoor: 'd' },
+      model: 'unit-test-model-id',
+    });
+    const loc = resolveCaptionLocation({ locationId: 'venice' });
+    const out = await captionService.generateCaptions({ vision: null, techNote: 'clean bait line', location: loc, photoType: 'after' });
+    expect(out.model).toBe('unit-test-model-id');
+    expect(llm.dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(llm.dispatchWithFallback.mock.calls[0][0]).toBe(MODELS.TEXT_POLICIES.customerCopy);
+  });
+});

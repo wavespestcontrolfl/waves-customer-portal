@@ -55,7 +55,9 @@ const ZIP_MAP = {
   '34202': 'lakewood_ranch', '34211': 'lakewood_ranch', '34212': 'lakewood_ranch',
   '34205': 'lakewood_ranch', '34207': 'lakewood_ranch', '34208': 'lakewood_ranch',
   '34209': 'lakewood_ranch', '34210': 'lakewood_ranch', '34217': 'lakewood_ranch',
-  '34218': 'lakewood_ranch', '34219': 'lakewood_ranch', '34221': 'lakewood_ranch',
+  // 34219 is Parrish (mapped below) — it was duplicated here too, and JS
+  // last-key-wins meant the Parrish entry already governed at runtime.
+  '34218': 'lakewood_ranch', '34221': 'lakewood_ranch',
 
   // Sarasota
   '34230': 'sarasota', '34231': 'sarasota', '34232': 'sarasota',
@@ -160,6 +162,31 @@ router.post('/', async (req, res, next) => {
       .first();
 
     if (existing) {
+      // The rating step already inserted this row; the follow-up feedback
+      // step legitimately adds the written note to it. Accept that update
+      // (filling an empty note only) instead of stranding the customer's
+      // concern behind the duplicate 409 — and forward the note to the
+      // office, which only saw the bare rating at alert time.
+      if (feedbackText && !existing.feedback_text) {
+        await db('satisfaction_responses')
+          .where({ id: existing.id })
+          .update({ feedback_text: feedbackText });
+        if (existing.flagged_for_followup) {
+          try {
+            await TwilioService.sendSMS(
+              ADMIN_ALERT_PHONE,
+              `Follow-up note added\n\n` +
+              `${req.customer.first_name} ${req.customer.last_name} added a note to their ` +
+              `${service.service_type} (${service.service_date}) rating of ${existing.rating}/10:\n` +
+              `"${feedbackText}"\n` +
+              `Phone: ${req.customer.phone}`,
+            );
+          } catch (smsErr) {
+            logger.error(`Failed to send feedback follow-up alert: ${smsErr.message}`);
+          }
+        }
+        return res.json({ success: true, action: 'feedback_saved' });
+      }
       return res.status(409).json({ error: 'Already rated this service' });
     }
 

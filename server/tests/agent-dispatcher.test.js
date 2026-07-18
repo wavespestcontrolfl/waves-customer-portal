@@ -314,6 +314,92 @@ describe('get_existing_page registry fallback', () => {
   });
 });
 
+// ── check_existing_content autonomous-run city scoping ──────────────
+// Round-10 (Codex P2 on #2816): the legacy blog_posts overlap query is
+// city-scoped, but the autonomous-run lookups (pending-review AND
+// completed_published) were not — a Sarasota draft on a broad keyword
+// falsely suppressed a Naples/Venice brief because the writer prompt
+// treats any returned in-flight draft as same-intent. Both autonomous
+// queries must carry the service_areas_tag containment filter whenever a
+// city is passed, and stay global when it is not.
+
+describe('check_existing_content autonomous-run city scoping (Codex round-10)', () => {
+  // Chainable knex stub that records every builder call. Function args
+  // (kwFilter / cityFilter / the blog_posts city modify) execute against
+  // the chain itself so the real filters run; the terminal .limit()
+  // resolves the provided rows.
+  function chainRows(rows, log) {
+    const chain = {};
+    const record = (name) => jest.fn((...args) => {
+      if (typeof args[0] === 'function') args[0](chain);
+      else log.push([name, ...args]);
+      return chain;
+    });
+    for (const m of ['whereIn', 'where', 'join', 'modify', 'select']) chain[m] = record(m);
+    chain.whereRaw = jest.fn((sql, bindings) => { log.push(['whereRaw', sql, bindings]); return chain; });
+    chain.orWhereRaw = jest.fn((sql, bindings) => { log.push(['orWhereRaw', sql, bindings]); return chain; });
+    chain.limit = jest.fn(async () => rows);
+    return chain;
+  }
+  const containment = (log) => log.filter(([m, sql]) => m === 'whereRaw' && /service_areas_tag/.test(String(sql)));
+
+  beforeEach(() => {
+    db.mockReset();
+    db.raw = jest.fn((sql) => sql);
+  });
+
+  test('city-scoped call filters BOTH autonomous queries by service_areas_tag', async () => {
+    const logs = { blog: [], inflight: [], published: [] };
+    const chains = [chainRows([], logs.blog), chainRows([], logs.inflight), chainRows([], logs.published)];
+    db.mockImplementation(() => chains.shift());
+
+    const r = await executeBriefTool('check_existing_content', { keyword: 'ant control', city: 'Venice' }, { sessionId: 'sess-city' });
+    expect(r.error).toBeUndefined();
+    expect(r.pending_autonomous_drafts).toEqual([]);
+    // legacy blog_posts query keeps its city scope
+    expect(logs.blog).toContainEqual(['where', 'city', 'Venice']);
+    // pending-review AND completed_published lookups are both scoped
+    for (const log of [logs.inflight, logs.published]) {
+      const hits = containment(log);
+      expect(hits).toHaveLength(1);
+      expect(hits[0][1]).toContain("draft_payload->'frontmatter'->'service_areas_tag' @> ?::jsonb");
+      expect(hits[0][2]).toEqual([JSON.stringify(['Venice'])]);
+    }
+  });
+
+  test('no city → autonomous dedupe stays GLOBAL (no service_areas_tag filter)', async () => {
+    const logs = { blog: [], inflight: [], published: [] };
+    const chains = [chainRows([], logs.blog), chainRows([], logs.inflight), chainRows([], logs.published)];
+    db.mockImplementation(() => chains.shift());
+
+    const r = await executeBriefTool('check_existing_content', { keyword: 'ant control' }, { sessionId: 'sess-nocity' });
+    expect(r.error).toBeUndefined();
+    expect(logs.blog.some(([m, col]) => m === 'where' && col === 'city')).toBe(false);
+    for (const log of [logs.inflight, logs.published]) expect(containment(log)).toHaveLength(0);
+  });
+
+  test('a city-tagged autonomous draft is still returned for its own city', async () => {
+    const draft = {
+      id: 'run-1',
+      action_type: 'new_supporting_blog',
+      outcome: 'completed_pending_review',
+      astro_pr_url: 'https://github.com/x/y/pull/9',
+      title: 'Ant Control in Venice',
+      keyword: 'ant control',
+      slug: 'ant-control-venice',
+      canonical: 'https://wavespestcontrol.com/pest-control/ant-control-venice/',
+    };
+    const logs = { blog: [], inflight: [], published: [] };
+    const chains = [chainRows([], logs.blog), chainRows([draft], logs.inflight), chainRows([], logs.published)];
+    db.mockImplementation(() => chains.shift());
+
+    const r = await executeBriefTool('check_existing_content', { keyword: 'ant control', city: 'Venice' }, { sessionId: 'sess-city-hit' });
+    expect(r.error).toBeUndefined();
+    expect(r.pending_autonomous_drafts).toHaveLength(1);
+    expect(r.pending_autonomous_drafts[0].route).toBe('/pest-control/ant-control-venice/');
+  });
+});
+
 // ── parseJsonbColumns helper ────────────────────────────────────────
 
 describe('parseJsonbColumns', () => {

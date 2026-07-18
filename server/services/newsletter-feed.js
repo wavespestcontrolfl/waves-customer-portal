@@ -59,6 +59,10 @@ async function getPublishedPosts({ limit = 6 } = {}) {
   const rows = await db('newsletter_sends')
     .where({ status: 'sent' })
     .whereNotNull('sent_at')
+    // Re-engagement win-backs are list hygiene, not content — keep them out
+    // of every public surface built on this query (feed, archive list, RSS).
+    // IS DISTINCT FROM so legacy NULL-type sends stay included.
+    .whereRaw("newsletter_type IS DISTINCT FROM 'reengagement'")
     .orderBy('sent_at', 'desc')
     .limit(cap);
 
@@ -84,6 +88,8 @@ async function getPostBySlug(slug) {
   if (!slug || typeof slug !== 'string') return null;
   const row = await db('newsletter_sends')
     .where({ slug, status: 'sent' })
+    // Same exclusion as getPublishedPosts — win-backs never render publicly.
+    .whereRaw("newsletter_type IS DISTINCT FROM 'reengagement'")
     .first();
   return row || null;
 }
