@@ -51,7 +51,7 @@ jest.mock('../middleware/admin-auth', () => {
 // the fake is a test failure (denials must be side-effect free), recorded
 // in state.writes.
 jest.mock('../models/db', () => {
-  const state = { scheduledServices: [], writes: [] };
+  const state = { scheduledServices: [], customers: [], writes: [] };
   const normCol = (c) => String(c).replace(/^scheduled_services\./, '');
   const cmp = (a, op, v) => {
     if (op === '>') return a > v;
@@ -80,11 +80,13 @@ jest.mock('../models/db', () => {
       forUpdate() { return builder; },
       orderBy() { return builder; },
       select() { return builder; },
+      whereNull(col) { builder._cmp.push([col, 'null', null]); return builder; },
       async first() {
-        if (table !== 'scheduled_services') return undefined;
-        const found = state.scheduledServices.find((r) =>
+        const rows = table === 'scheduled_services' ? state.scheduledServices
+          : table === 'customers' ? state.customers : [];
+        const found = rows.find((r) =>
           Object.entries(builder._where).every(([k, v]) => r[normCol(k)] === v)
-          && builder._cmp.every(([c, op, v]) => cmp(r[normCol(c)], op, v))
+          && builder._cmp.every(([c, op, v]) => (op === 'null' ? r[normCol(c)] == null : cmp(r[normCol(c)], op, v)))
           && builder._notIn.every(([c, vals]) => !vals.includes(r[normCol(c)])));
         return found ? { ...found } : undefined;
       },
@@ -157,6 +159,7 @@ beforeEach(() => {
     { id: 'svc-stale-pending', technician_id: 'tech-1', customer_id: 'cust-stale-pending', status: 'pending', scheduled_date: daysFromNow(-45) },
     { id: 'svc-dead', technician_id: 'tech-1', customer_id: 'cust-dead', status: 'cancelled', scheduled_date: daysFromNow(3) },
   ];
+  db.__state.customers = [];
   db.__state.writes = [];
 });
 
@@ -295,6 +298,7 @@ describe('customer routes: requireAdmin on non-tech surfaces', () => {
     ['GET', '/api/admin/customers/cust-own/comms'],
     ['GET', '/api/admin/customers/cust-own/timeline'],
     ['GET', '/api/admin/customers/cust-own/credits'],
+    ['GET', '/api/admin/customers/cust-own/schedule-estimates'],
     ['PUT', '/api/admin/customers/cust-own/stage'],
     ['POST', '/api/admin/customers/cust-own/tags'],
     ['DELETE', '/api/admin/customers/cust-own/tags/vip'],
@@ -323,6 +327,21 @@ describe('customer routes: assigned-customer proxy (technician role)', () => {
     await expect(technicianServicesCustomer({ techRole: 'admin' }, 'cust-other')).resolves.toBe(true);
     await expect(technicianServicesCustomer({ techRole: 'technician', technicianId: 'tech-1' }, 'cust-own')).resolves.toBe(true);
     await expect(technicianServicesCustomer({ techRole: 'technician', technicianId: 'tech-1' }, 'cust-other')).resolves.toBe(false);
+  });
+
+  test('estimates-summary returns only customer basics to techs — no estimate history/stats/SMS preview or lead attribution', async () => {
+    db.__state.customers = [{
+      id: 'cust-own', first_name: 'Pat', last_name: 'Lee', phone: '941',
+      lead_source: 'ads', lead_source_detail: 'ppc', deleted_at: null,
+    }];
+    const { status, body } = await call('GET', '/api/admin/customers/cust-own/estimates-summary');
+    expect(status).toBe(200);
+    expect(body.customer).toEqual(expect.objectContaining({ id: 'cust-own', first_name: 'Pat' }));
+    expect(body.customer).not.toHaveProperty('lead_source');
+    expect(body.customer).not.toHaveProperty('lead_source_detail');
+    expect(body.estimates).toEqual([]);
+    expect(body.stats).toBeNull();
+    expect(body.lastContact).toBeNull();
   });
 
   test('latest-scheduled-service prefill is the tech\'s OWN visit, not another tech\'s follow-up', async () => {

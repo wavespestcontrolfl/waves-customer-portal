@@ -1818,11 +1818,11 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
 // `status` so the UI can show whether it's accepted yet. This keeps the UI
 // from guessing at estimate_data shapes and returns service-library ids when
 // we can match the quoted line to a schedulable service.
-router.get('/:id/schedule-estimates', async (req, res, next) => {
+// requireAdmin: office booking data — sent/accepted quote pricing, payment
+// posture, and permanent estimate bearer tokens. Its only consumer is
+// CreateAppointmentModal, and appointment creation is already admin-only.
+router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
   try {
-    if (!(await technicianServicesCustomer(req, req.params.id))) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
     const customer = await db('customers')
       .where({ id: req.params.id })
       .whereNull('deleted_at')
@@ -1981,6 +1981,15 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
       )
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Technician tokens: the tech CreateProjectModal consumes only
+    // `customer`. Office analytics — estimate history (with bearer tokens
+    // and decline reasons), conversion stats, the last-SMS preview — and
+    // lead attribution stay office-only, same boundary as /comms.
+    if (req.techRole === 'technician') {
+      const { lead_source, lead_source_detail, ...techCustomer } = customer;
+      return res.json({ customer: techCustomer, estimates: [], stats: null, lastContact: null });
+    }
 
     const [estimates, lastMessage] = await Promise.all([
       db('estimates')
