@@ -118,13 +118,18 @@ async function smsTemplateActive() {
 // recurring scheduled visit, homeowner-billed (payer AR excluded). One-time
 // invoice debt deliberately never counts here.
 async function overdueRecurringInvoices(customerId) {
+  // The follow-up engine records its sends on
+  // invoice_followup_sequences.last_touch_at, NOT invoices.last_reminder_at
+  // — the recent-touch guard must read the real timestamp or the 10:00
+  // dun and this 10:05 sweep double-text the same invoice (Codex r4).
   return db('invoices')
     .join('scheduled_services as ss', 'invoices.scheduled_service_id', 'ss.id')
+    .leftJoin('invoice_followup_sequences as ifs', 'ifs.invoice_id', 'invoices.id')
     .where('invoices.customer_id', customerId)
     .where('invoices.status', 'overdue')
     .whereNull('invoices.payer_id')
     .where('ss.is_recurring', true)
-    .select('invoices.*');
+    .select('invoices.*', 'ifs.last_touch_at as followup_last_touch_at');
 }
 
 async function runSweep({ now = new Date() } = {}) {
@@ -199,7 +204,9 @@ async function runSweep({ now = new Date() } = {}) {
       const overdue = await overdueRecurringInvoices(visit.customer_id);
       // Recently-touched overdue invoices stay with the follow-up engine.
       const cutoff = new Date(now.getTime() - RECENT_TOUCH_HOURS * 3600 * 1000);
-      const fresh = overdue.filter((inv) => !inv.last_reminder_at || new Date(inv.last_reminder_at) < cutoff);
+      const fresh = overdue.filter((inv) => [inv.last_reminder_at, inv.followup_last_touch_at]
+        .filter(Boolean)
+        .every((touch) => new Date(touch) < cutoff));
       const overdueRecurringDue = fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
 
       const verdict = previsitBalanceReminderEligible({
@@ -226,7 +233,7 @@ async function runSweep({ now = new Date() } = {}) {
         .update({ balance_reminder_sent_at: new Date() });
       if (!claimed) { skipped++; continue; }
 
-      let delivered = false;
+      let smsDelivered = false;
       try {
         const body = await renderSmsTemplate(TEMPLATE_KEY, {
           first_name: visit.first_name || 'there',
@@ -244,18 +251,24 @@ async function runSweep({ now = new Date() } = {}) {
           purpose: 'billing',
           customerId: visit.customer_id,
           entryPoint: 'previsit_balance_reminder',
+          // This flow HAS an email sidecar (below), so the billing-channel
+          // preference gate applies: an email-preferring customer gets the
+          // email only, never both (Codex r4).
+          hasEmailLeg: true,
           metadata: { scheduled_service_id: visit.id, amount },
         });
-        delivered = !result.blocked && result.sent !== false;
+        smsDelivered = !result.blocked && result.sent !== false;
       } catch (smsErr) {
         logger.warn(`[previsit-balance] SMS failed for visit ${visit.id}: ${smsErr.message}`);
       }
 
-      // Email rides the same eligibility; failure is non-fatal (SMS may
-      // still have landed).
+      // Email rides the same eligibility. For an email-preferring customer
+      // the SMS above is suppressed by the channel gate and THIS is the
+      // reminder.
+      let emailDelivered = false;
       try {
         const AccountMembershipEmail = require('./account-membership-email');
-        await AccountMembershipEmail.sendPrevisitBalanceReminder({
+        const emailResult = await AccountMembershipEmail.sendPrevisitBalanceReminder({
           customerId: visit.customer_id,
           amount: `$${amount.toFixed(2)}`,
           serviceType: visit.service_type || 'service',
@@ -263,12 +276,15 @@ async function runSweep({ now = new Date() } = {}) {
           billingUrl: BILLING_PORTAL_URL,
           idempotencyKey: `${EMAIL_TEMPLATE_KEY}:${visit.id}`,
         });
+        emailDelivered = emailResult?.ok === true;
       } catch (emailErr) {
         logger.warn(`[previsit-balance] email failed for visit ${visit.id}: ${emailErr.message}`);
       }
 
-      if (!delivered) {
-        // A text that never left releases the claim so a later sweep retries.
+      // Keep the claim when EITHER leg landed (an email-only customer's
+      // suppressed SMS must not release it — retries would re-email daily);
+      // release only when BOTH legs failed so a later sweep day can retry.
+      if (!smsDelivered && !emailDelivered) {
         await db('scheduled_services')
           .where({ id: visit.id })
           .update({ balance_reminder_sent_at: null })

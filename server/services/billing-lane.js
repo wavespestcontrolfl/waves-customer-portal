@@ -89,12 +89,20 @@ function completionInvoiceAmount({
   perApplicationBilling,
   perApplicationFee,
   monthlyRate,
+  billingMode,
 }) {
   if (estimatedPrice != null && Number(estimatedPrice) > 0) return Number(estimatedPrice);
   if (isCallback) return 0;
   if (perApplicationBilling) {
     return Number(perApplicationFee) > 0 ? Number(perApplicationFee) : 0;
   }
+  // The customer-level monthly_rate is the MEMBERSHIP dues number. An
+  // explicit non-monthly lane must never fall back to it as a per-visit
+  // price: a member reclassified to per_visit/one_time keeps lingering
+  // tier/rate fields, and invoicing the old dues amount on every unpriced
+  // visit would over-bill (Codex r4). Unpriced explicit-lane visits
+  // complete unbilled and the caller flags them for manual invoicing.
+  if (billingMode && billingMode !== 'monthly_membership') return 0;
   return monthlyRate && Number(monthlyRate) > 0 ? Number(monthlyRate) : 0;
 }
 
@@ -165,7 +173,7 @@ function predictCompletionBilling({
     // (Codex r1).
     if (isCallback || isAlwaysFreeServiceType(serviceType)) return none;
     const amount = completionInvoiceAmount({
-      estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate,
+      estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate, billingMode,
     });
     if (!(amount > 0)) return none;
     // Completion only suppresses when the prepayment covers the WHOLE
@@ -190,7 +198,7 @@ function predictCompletionBilling({
     return { kind: 'covered_membership', amount: null, conflictStampedPrice: hasVisitPrice };
   }
   const amount = completionInvoiceAmount({
-    estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate,
+    estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate, billingMode,
   });
   if (!(amount > 0)) return none;
   if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };

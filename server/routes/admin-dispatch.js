@@ -4742,6 +4742,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       perApplicationBilling,
       perApplicationFee: svc.cust_per_application_fee,
       monthlyRate: svc.cust_monthly_rate,
+      billingMode: svc.cust_billing_mode,
     });
     // A billable per-application visit with no amount on file (multi-service
     // accept: fee + row prices intentionally NULL) completes UNINVOICED — flag
@@ -4749,6 +4750,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (perApplicationBilling && !(invoiceAmount > 0)
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
       logger.warn(`[dispatch] per-application visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (no visit price, no per_application_fee — multi-service plan?) — invoice manually`);
+    }
+    // Same loud-flag convention for the explicit per-visit/one-time lanes:
+    // their monthly-rate fallback is suppressed (the dues number is not a
+    // per-visit price — Codex r4), so an unpriced billable visit completes
+    // uninvoiced and must be billed manually.
+    if (['per_visit', 'one_time'].includes(svc.cust_billing_mode || '') && !perApplicationBilling
+      && !(invoiceAmount > 0) && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)) {
+      logger.warn(`[dispatch] ${svc.cust_billing_mode} visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (monthly-rate fallback suppressed for explicit non-monthly lanes) — invoice manually`);
     }
     // Third-party Bill-To: a payer-billed visit is owed by the payer's AP inbox,
     // so the service customer's autopay/prepay must neither suppress the AP

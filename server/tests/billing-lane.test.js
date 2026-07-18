@@ -152,6 +152,17 @@ describe('predictCompletionBilling', () => {
       .toBe('covered_annual');
   });
 
+  test('explicit non-monthly lanes never invoice the lingering monthly rate (Codex r4)', () => {
+    const exMember = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: 33.33, estimatedPrice: null };
+    expect(predictCompletionBilling(exMember))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...exMember, billingMode: 'one_time', lane: 'one_time' }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+    // NULL (legacy) keeps the historical monthly-rate fallback.
+    expect(predictCompletionBilling({ ...memberBase, billingMode: null, autopayActive: false }))
+      .toEqual({ kind: 'invoice', amount: 33.33, conflictStampedPrice: false });
+  });
+
   test('per-visit lane invoices the stamped price, callback bills nothing', () => {
     const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null };
     expect(predictCompletionBilling({ ...perVisit, estimatedPrice: 129 }))
