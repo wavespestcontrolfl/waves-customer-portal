@@ -42,6 +42,10 @@ jest.mock('../services/invoice-followups', () => ({
 }));
 
 const db = require('../models/db');
+// The send-progress snapshot passes db.raw(...) aggregate columns into
+// .first(); the table mocks ignore first()'s arguments, but raw must exist.
+// Plain function (not jest.fn) so clearAllMocks can't blank it.
+db.raw = (sql) => sql;
 const InvoiceService = require('../services/invoice');
 
 function setupDb({ customer }) {
@@ -513,6 +517,119 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     );
     await expect(InvoiceService.update('inv-1', { notes: 'mid-send edit' }))
       .rejects.toThrow(/sending right now/);
+  });
+
+  it('refuses a retotal when a reminder touch COMPLETED between the guard read and the row lock', async () => {
+    // fireStep can claim, deliver, and release its claim entirely inside
+    // the pre-lock window — neither claim check sees anything fresh. The
+    // progression write (touches_sent+1, last_touch_at) commits before the
+    // claim clears, so the locked aggregate re-read must catch the delta
+    // and fail the retotal closed instead of committing a new total behind
+    // the reminder the customer just received (codex r10).
+    const stored = { id: 'inv-1', status: 'sent', customer_id: 'cust-1', invoice_number: 'INV-109', line_items: '[]', due_date: '2026-07-30' };
+    const invoicesUpdate = jest.fn(() => ({ returning: jest.fn(async () => [stored]) }));
+    // Sequenced OUTSIDE the dispatcher (the dispatcher recreates q per db()
+    // call): claim pre-check → pre-lock snapshot → in-txn claim re-check →
+    // locked snapshot.
+    const followupFirst = jest.fn(async () => null);
+    followupFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ touches_sent: '2', last_touch_at: '2026-07-17T09:00:00Z' })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ touches_sent: '3', last_touch_at: '2026-07-17T12:00:30Z' });
+    db.transaction = jest.fn(async (fn) => fn(db));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: invoicesUpdate,
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'payments') {
+        const q = { whereIn: jest.fn(() => q), whereRaw: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'stripe_invoice_charge_attempts') {
+        const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), whereIn: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: followupFirst };
+        return q;
+      }
+      if (table === 'customers') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ id: 'cust-1', customer_type: 'residential' })) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await expect(InvoiceService.update('inv-1', { line_items: [{ description: 'X', quantity: 1, unit_price: 10 }] }))
+      .rejects.toThrow(/just went out/);
+    expect(invoicesUpdate).not.toHaveBeenCalled();
+  });
+
+  it('unchanged send progress across the lock does NOT block the retotal (no false refusals)', async () => {
+    const stored = { id: 'inv-1', status: 'sent', customer_id: 'cust-1', invoice_number: 'INV-110', line_items: '[]', due_date: '2026-07-30' };
+    const activityInsert = jest.fn(async () => [1]);
+    const invoicesUpdate = jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored }]) }));
+    const followupFirst = jest.fn(async () => null);
+    followupFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ touches_sent: '2', last_touch_at: '2026-07-17T09:00:00Z' })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ touches_sent: '2', last_touch_at: '2026-07-17T09:00:00Z' });
+    db.transaction = jest.fn(async (fn) => fn(db));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereRaw: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: invoicesUpdate,
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'payments') {
+        const q = { whereIn: jest.fn(() => q), whereRaw: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'stripe_invoice_charge_attempts') {
+        const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), whereIn: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: followupFirst };
+        return q;
+      }
+      if (table === 'customers') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ id: 'cust-1', customer_type: 'residential' })) };
+        return q;
+      }
+      if (table === 'activity_log') {
+        return { insert: activityInsert };
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await InvoiceService.update('inv-1', { line_items: [{ description: 'X', quantity: 1, unit_price: 10 }] });
+    expect(invoicesUpdate).toHaveBeenCalled();
   });
 
   it('refuses to retotal a delivered invoice that carries a recorded partial payment (payment_recorded_at)', async () => {

@@ -3006,6 +3006,18 @@ const InvoiceService = {
     // edits (title/notes/email_message/due_date) stay allowed. Fail CLOSED
     // if the ledger can't be read, same as the payment-plan guard.
     const isRetotal = Boolean(updates.line_items) || updates.tax_rate !== undefined;
+    // Lock-window send guard applies to DELIVERED retotals only: dun
+    // sequences are created at send, so a draft/scheduled invoice has no
+    // touch that could race the edit (the claim fences still run for every
+    // edit as the cheap backstop). Keying on the pre-read status also keeps
+    // the WDO draft repricer and other draft-only retotal paths free of the
+    // extra aggregate read.
+    const sendWindowGuarded =
+      isRetotal && ["sent", "viewed", "overdue"].includes(currentStatus);
+    // Send-progress snapshot for runEdit's lock-window compare — see the
+    // in-transaction check for why the claim fences alone can't see a touch
+    // that claimed, delivered, and released entirely before the row lock.
+    let preSendState = null;
     if (isRetotal) {
       if (existing.payment_recorded_at) {
         throw new Error(
@@ -3059,6 +3071,29 @@ const InvoiceService = {
         throw new Error(
           "A saved-card charge for this invoice is still processing or awaiting reconciliation — wait for it to resolve before editing amounts",
         );
+      }
+      // Snapshot the invoice's aggregate send progress BEFORE the retotal
+      // work below. fireStep's progression write (touches_sent+1,
+      // last_touch_at) commits before its finally-block releases the
+      // claim, so any touch delivered after this read leaves evidence one
+      // of the runEdit checks will see: claim still fresh → the in-txn
+      // claim re-check; claim already released → this snapshot no longer
+      // matches. Aggregated across the invoice's sequence rows (SUM/MAX)
+      // so duplicate cadences can't hide a send. Fail CLOSED, same as the
+      // claim read above.
+      if (sendWindowGuarded) {
+        try {
+          preSendState = await db("invoice_followup_sequences")
+            .where({ invoice_id: id })
+            .first(
+              db.raw("COALESCE(SUM(touches_sent), 0) AS touches_sent"),
+              db.raw("MAX(last_touch_at) AS last_touch_at"),
+            );
+        } catch (err) {
+          throw new Error(
+            `Could not verify the follow-up send state — refusing to edit (${err.message})`,
+          );
+        }
       }
     }
 
@@ -3235,6 +3270,46 @@ const InvoiceService = {
         throw new Error(
           "A payment reminder for this invoice is sending right now — try again in a minute",
         );
+      }
+      // Lock-window send detection (retotals): the claim fences only see a
+      // claim that is STILL fresh. A touch that claimed, delivered, and
+      // released entirely between the guard reads above and this row lock
+      // left no claim — committing the retotal would put a new total
+      // behind the pay link the customer was just texted. The cycle can't
+      // hide: fireStep commits its progression write (touches_sent+1,
+      // last_touch_at) before its finally-block clears the claim, so under
+      // this lock either the claim is still visible (caught above) or the
+      // aggregates have moved past the pre-check snapshot. Sends that
+      // completed before the snapshot are the ordinary edit-after-send
+      // case, mitigated by the invoice_edited_after_send resend trail.
+      // Fail closed; the admin re-applies against the post-send state.
+      if (sendWindowGuarded) {
+        let nowSendState = null;
+        try {
+          nowSendState = await client("invoice_followup_sequences")
+            .where({ invoice_id: id })
+            .first(
+              db.raw("COALESCE(SUM(touches_sent), 0) AS touches_sent"),
+              db.raw("MAX(last_touch_at) AS last_touch_at"),
+            );
+        } catch (err) {
+          throw new Error(
+            `Could not verify the follow-up send state — refusing to edit (${err.message})`,
+          );
+        }
+        const touchesBefore = Number(preSendState?.touches_sent) || 0;
+        const touchesNow = Number(nowSendState?.touches_sent) || 0;
+        const lastBefore = preSendState?.last_touch_at
+          ? new Date(preSendState.last_touch_at).getTime()
+          : 0;
+        const lastNow = nowSendState?.last_touch_at
+          ? new Date(nowSendState.last_touch_at).getTime()
+          : 0;
+        if (touchesNow > touchesBefore || lastNow > lastBefore) {
+          throw new Error(
+            "A payment reminder for this invoice just went out — re-check the invoice and try again",
+          );
+        }
       }
       // Accrued: lock the parent statement and re-verify it's still OPEN inside
       // this transaction, so a concurrent close can't finalize between the
