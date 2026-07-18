@@ -135,6 +135,40 @@ async function notifyAdam(customer, interest, estimate) {
   }
 }
 
+// Engine supersede (GATE_ESTIMATOR_SMS_DRAFTS): instead of the unpriced
+// sms_intake shell + raw "ready to price" SMS, the estimator engine drafts a
+// PRICED estimate off the thread — or bells red when it can't, which is the
+// same "quote this manually" signal the shell delivered. Ordering matters:
+// startSmsThreadDraft AWAITS a durable owed-quote bell before detaching the
+// composer, and only after it reports started does the intake status flip —
+// the customer leaves the state machine only once a manual-task artifact
+// exists. Any handoff failure falls back to the shell path — the supersede
+// must never lose a lead.
+async function engineDraftHandoff(customer, body, reason) {
+  try {
+    const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
+    if (!smsThreadDraftsEnabled()) return false;
+    const started = await startSmsThreadDraft({
+      phone: customer.phone,
+      triggerBody: body,
+      skipIntentGate: true,
+    });
+    if (!started?.started) {
+      logger.warn(`[lead-intake] engine handoff not started (${started?.skipped || 'unknown'}) — falling back to shell`);
+      return false;
+    }
+    await db('customers').where({ id: customer.id }).update({
+      lead_intake_status: 'estimate_drafted',
+      updated_at: new Date(),
+    });
+    logger.info(`[lead-intake] Engine handoff for customer ${customer.id} — ${reason}`);
+    return true;
+  } catch (e) {
+    logger.error(`[lead-intake] engine handoff failed (falling back to shell): ${e.message}`);
+    return false;
+  }
+}
+
 async function handleIntakeReply(customer, body) {
   if (!customer || !body || typeof body !== 'string') return { handled: false };
   const status = customer.lead_intake_status;
@@ -156,6 +190,9 @@ async function handleIntakeReply(customer, body) {
     const hasAddress = !!(customer.address_line1 && String(customer.address_line1).trim());
     if (hasAddress) {
       // Address already on file — create draft + notify immediately.
+      if (await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
+        return { handled: true, next: 'estimate_drafted' };
+      }
       const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
       await db('customers').where({ id: customer.id }).update({
         lead_intake_status: 'estimate_drafted',
@@ -192,6 +229,10 @@ async function handleIntakeReply(customer, body) {
     if (!interest) {
       // Shouldn't normally happen, but guard against it — fall through.
       return { handled: false };
+    }
+
+    if (await engineDraftHandoff(customer, body, `address captured (${interest})`)) {
+      return { handled: true, next: 'estimate_drafted' };
     }
 
     const estimate = await createOrUpdateDraftEstimate(customer, interest);

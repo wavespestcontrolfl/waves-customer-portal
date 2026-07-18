@@ -143,7 +143,9 @@ function buildUserContent(context, propertyFacts) {
   }));
 
   return [
-    '## CALL TRANSCRIPT',
+    // Non-call origins (SMS thread drafting) label their conversation
+    // honestly; the call path's header is unchanged.
+    `## ${context.origin?.transcriptLabel || 'CALL TRANSCRIPT'}`,
     context.transcript,
     '',
     '## STRUCTURED EXTRACTION (machine-parsed from this call; may be partial)',

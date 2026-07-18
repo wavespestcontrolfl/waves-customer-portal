@@ -304,8 +304,63 @@ async function buildCallContext(callLogId) {
   };
 }
 
+// SMS-origin context: the thread IS the conversation, so it becomes the
+// transcript (and smsThread stays empty — duplicating it would double-weight
+// the same evidence in the composer prompt). Ambiguous shared-phone lines
+// error out entirely: unlike a call, there is no independent transcript —
+// the thread history itself cannot be attributed to one profile, and no
+// caller-name extraction exists to disambiguate.
+async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBody = '' }) {
+  if (!last10(phone)) return { error: 'no_usable_phone' };
+  const customerMatch = await loadCustomerByPhone(phone, null);
+  if (customerMatch.ambiguous) return { error: 'ambiguous_phone' };
+  // A FAILED lookup is not a no-match: an existing member could be hiding
+  // behind the error, and pricing them as a prospect would drop membership
+  // discounts and fee waivers. Red out; the bell owns the manual path.
+  if (customerMatch.unavailable) return { error: 'customer_lookup_unavailable' };
+  const customer = customerMatch.customer;
+  const before = new Date(triggerAt);
+  const smsSince = new Date(before.getTime() - 30 * 86400000);
+  const [leadMatch, smsThread, priorEstimates] = await Promise.all([
+    // call=null: skips the sid + reused-lead branches; pure phone fallback.
+    loadLeadForCall(null, phone, { phoneFallback: true }),
+    loadSmsThread(phone, { limit: 40, before, since: smsSince }),
+    loadPriorEstimates(phone),
+  ]);
+  // The webhook records the TRIGGERING inbound message to sms_log after the
+  // handlers run, so the thread read here can miss exactly the text that
+  // asked for the quote (or supplied the address). Append it when the
+  // thread doesn't already end with it.
+  const trigger = String(triggerBody || '').trim().slice(0, 500);
+  if (trigger && smsThread[smsThread.length - 1]?.body !== trigger) {
+    smsThread.push({ direction: 'inbound', body: trigger, at: before });
+  }
+  const transcript = smsThread
+    .map((m) => `[${m.direction === 'inbound' ? 'Customer' : 'Waves'}] ${m.body}`)
+    .join('\n');
+  if (transcript.trim().length < 40) return { error: 'no_usable_thread' };
+  return {
+    call: null,
+    transcript,
+    extraction: null,
+    // 'none' keeps the lane classifier's non-enriched flag — an SMS draft
+    // can never land green, which is the right floor for text-only evidence.
+    extractionSource: 'none',
+    phone,
+    customer: customer || null,
+    customerPhoneAmbiguous: false,
+    lead: leadMatch.lead || null,
+    leadIsForThisCall: false,
+    smsThread: [],
+    priorEstimates,
+    isExistingCustomer: !!(customer
+      && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)),
+  };
+}
+
 module.exports = {
   buildCallContext,
+  buildSmsThreadContext,
   existingDraftForCall,
   // Origin-specific context builders reuse these reads so call, web-lead,
   // and SMS sessions all resolve contacts/history with the same shared-line

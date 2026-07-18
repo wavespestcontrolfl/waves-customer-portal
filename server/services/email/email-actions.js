@@ -20,6 +20,153 @@ function shouldSkipAutoAction(category, fromAddress) {
     && isOperationalDomain(domainFromAddress(fromAddress));
 }
 
+// ── Email → draft-estimate (GATE_EMAIL_QUOTE_DRAFTS, default OFF) ────────
+function emailQuoteDraftsEnabled() {
+  const flag = process.env.GATE_EMAIL_QUOTE_DRAFTS;
+  return flag === '1' || flag === 'true' || flag === 'on';
+}
+
+// The classifier extracts a single address string ("123 Main St, Sarasota,
+// FL 34239" or partial). Light comma-split parse — the automation readiness
+// gate only needs a digit-bearing street line; city/zip absence just drops
+// confidence to medium, which the builder accepts. Unit designators after
+// the street ("…, Apt 4, Sarasota, …") fold into line1 so the real city
+// survives; state/zip tokens are only stripped from the tail parts, never
+// part 0 (streets like "Florida Ave" are real).
+const ADDRESS_UNIT_RE = /^(?:apt|apartment|unit|suite|ste|bldg|building|lot|rm|room|#)\b/i;
+function parseExtractedAddress(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { line1: null, city: null, state: null, zip: null };
+  const zip = (text.match(/\b\d{5}\b/) || [null])[0];
+  const parts = text.split(',').map((p) => p.trim()).filter(Boolean);
+  const line1Parts = [parts[0] || text];
+  const rest = parts.slice(1);
+  while (rest.length && (ADDRESS_UNIT_RE.test(rest[0]) || /^#?\d+[A-Za-z]?$/.test(rest[0]))) {
+    line1Parts.push(rest.shift());
+  }
+  const tailState = rest.some((p) => /\bFL(?:ORIDA)?\b/i.test(p)) ? 'FL' : null;
+  const city = rest
+    .map((p) => p.replace(/\bFL(?:ORIDA)?\b/i, '').replace(/\b\d{5}(?:-\d{4})?\b/, '').trim())
+    .find(Boolean) || null;
+  return {
+    line1: line1Parts.join(', ') || null,
+    city,
+    state: tailState,
+    zip: zip || null,
+  };
+}
+
+/**
+ * Reuses the exact readiness + builder pair the lead-webhook path uses, so
+ * an emailed quote request produces the same priced (or blocked) DRAFT a
+ * form submission would. Phone + digit-bearing street address + concrete
+ * service interest are required by the readiness gate — an email without
+ * them stays a plain lead exactly as today. Never sends anything.
+ */
+async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
+  const {
+    buildAutomatedLeadDraftEstimate,
+    evaluateLeadEstimateAutomationReadiness,
+  } = require('../lead-estimate-automation');
+  const {
+    blockIfAutomatedEstimateDuplicate,
+    withAutomatedEstimatePhoneLock,
+  } = require('../estimate-automation-duplicates');
+
+  // The lock and duplicate guard silently degrade without a usable last-10,
+  // and readiness only checks non-emptiness — an LLM-extracted partial
+  // number must not mint an unserialized draft with an unusable
+  // customer_phone. No usable phone ⇒ the email stays a plain lead.
+  const phone = extracted.phone || null;
+  if (String(phone || '').replace(/\D/g, '').length < 10) {
+    return { created: false, skipped: 'no_usable_phone' };
+  }
+  const addr = parseExtractedAddress(extracted.address);
+  const intake = {
+    email: lead.email || null,
+    rawPhone: phone,
+    serviceInterest: extracted.service_interest || null,
+    normalizedAddress: {
+      line1: addr.line1,
+      city: addr.city,
+      state: addr.state,
+      zip: addr.zip,
+      fullAddress: String(extracted.address || '').trim() || null,
+    },
+  };
+  // Same global kill switch as the form-lead path: GATE_LEAD_ESTIMATE_AUTOMATION
+  // off must stop EVERY automated lead draft, email-originated included.
+  // Lazy route require (load-order), fail-closed: no gate helper ⇒ no draft.
+  let applyGate;
+  try {
+    ({ applyLeadEstimateAutomationGate: applyGate } = require('../../routes/lead-webhook'));
+  } catch (e) {
+    logger.warn(`[email-actions] automation gate unavailable — not drafting: ${e.message}`);
+    return { created: false, skipped: 'automation_gate_unavailable' };
+  }
+  const readiness = applyGate(evaluateLeadEstimateAutomationReadiness({
+    intake,
+    customer: {},
+    phone,
+    serviceInterest: intake.serviceInterest,
+  }));
+  if (!readiness.ready) {
+    return {
+      created: false,
+      skipped: readiness.disabled ? 'automation_disabled' : 'not_ready',
+      missing: readiness.missing,
+    };
+  }
+
+  let outcome = { created: false };
+  await withAutomatedEstimatePhoneLock(phone, async (trx) => {
+    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx });
+    if (duplicateBlock) {
+      outcome = { created: false, skipped: 'duplicate', existingEstimateId: duplicateBlock.existingEstimateId || null };
+      return;
+    }
+    const built = buildAutomatedLeadDraftEstimate({ intake, customer: {}, body: {}, readiness });
+    const crypto = require('crypto');
+    const estimateData = built?.estimateData
+      || { automation: { leadEstimateAutomation: readiness } };
+    estimateData.emailInquiry = {
+      emailId: email.id,
+      gmailThreadId: email.gmail_thread_id || null,
+      receivedAt: email.received_at || null,
+    };
+    estimateData.lead_id = lead.id;
+    const [row] = await trx('estimates').insert({
+      customer_id: null,
+      customer_name: `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || 'Unknown',
+      customer_phone: phone,
+      customer_email: lead.email || null,
+      address: [addr.line1, addr.city, [addr.state, addr.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
+      monthly_total: built?.monthly || null,
+      annual_total: built?.annual || null,
+      onetime_total: built?.oneTimeTotal || null,
+      status: 'draft',
+      source: 'email_inquiry',
+      service_interest: readiness.serviceInterest || null,
+      lead_source: 'email',
+      token: crypto.randomBytes(16).toString('hex'),
+      estimate_data: JSON.stringify(estimateData),
+      // estimates.notes is CUSTOMER-VISIBLE via the public estimate
+      // endpoint — automation provenance lives in estimate_data only.
+      notes: null,
+    }).returning(['id']);
+    outcome = { created: true, estimateId: row.id, status: built?.automation?.status || null };
+  });
+
+  if (outcome.created) {
+    try {
+      await db('leads').where({ id: lead.id }).update({ estimate_id: outcome.estimateId });
+    } catch (e) {
+      logger.warn(`[email-actions] lead→estimate link failed (non-blocking): ${e.message}`);
+    }
+  }
+  return outcome;
+}
+
 async function executeAutoAction(email, classification) {
   try {
     if (shouldSkipAutoAction(classification.category, email.from_address)) {
@@ -321,7 +468,75 @@ async function handleLeadInquiry(email, classification) {
       auto_action: 'linked_to_existing_lead',
       updated_at: new Date(),
     });
-    return { action: 'linked_to_existing_lead', leadId: existingLead.id };
+    // A follow-up email often supplies exactly what the first lacked (phone,
+    // address, concrete service) — behind the gate, try the same draft path
+    // with gaps back-filled from the lead row. This branch sits before the
+    // shared guards, so it re-applies the two that matter here: the
+    // confidence floor, and the live-customer check — a lead that belongs
+    // to a now-live (or inactive-CRM) customer must not be priced as a
+    // prospect without membership context. The phone duplicate guard
+    // prevents double-drafting an already-quoted lead.
+    let followUpDraft = null;
+    const followUpConfidence = Number(classification.confidence);
+    // The SAME merged extraction feeds the customer guard and the draft:
+    // drafting backfills phone/address from the lead row, so the guard must
+    // see those too — a follow-up with no phone from a sender address that
+    // differs from the customer record would otherwise miss a live customer
+    // whose lead phone matches, and price them as a prospect.
+    const mergedExtracted = {
+      ...extracted,
+      phone: extracted.phone || existingLead.phone || null,
+      address: extracted.address || existingLead.address || null,
+      service_interest: extracted.service_interest || existingLead.service_interest || null,
+    };
+    let followUpCustomerMatch = { live: null, inactive: null };
+    if (emailQuoteDraftsEnabled()
+      && Number.isFinite(followUpConfidence)
+      && followUpConfidence >= leadMinConfidence()) {
+      try {
+        followUpCustomerMatch = await findExistingCustomerForLead(email, mergedExtracted);
+      } catch (e) {
+        // Unknown customer state must not price as a prospect — skip.
+        followUpCustomerMatch = { live: true, inactive: null };
+      }
+    }
+    if (emailQuoteDraftsEnabled()
+      && Number.isFinite(followUpConfidence)
+      && followUpConfidence >= leadMinConfidence()
+      && !followUpCustomerMatch.live
+      && !followUpCustomerMatch.inactive) {
+      try {
+        followUpDraft = await maybeDraftEstimateFromEmailLead({
+          email,
+          extracted: mergedExtracted,
+          lead: existingLead,
+        });
+      } catch (e) {
+        logger.warn(`[email-actions] follow-up email draft failed (link stands): ${e.message}`);
+      }
+      if (followUpDraft?.created) {
+        try {
+          await db('notifications').insert({
+            recipient_type: 'admin',
+            category: 'new_lead',
+            title: `Email follow-up completed a quote request — draft estimate ready`,
+            body: classification.summary || email.subject,
+            icon: '📧',
+            link: '/admin/estimates',
+            metadata: JSON.stringify({
+              emailId: email.id,
+              leadId: existingLead.id,
+              estimateId: followUpDraft.estimateId,
+            }),
+          });
+        } catch (e) { /* non-critical */ }
+      }
+    }
+    return {
+      action: 'linked_to_existing_lead',
+      leadId: existingLead.id,
+      ...(followUpDraft?.created ? { estimateId: followUpDraft.estimateId } : {}),
+    };
   }
 
   // Guard: an existing LIVE customer must not come back as a lead (silent
@@ -421,21 +636,45 @@ async function handleLeadInquiry(email, classification) {
     performed_by: 'Email Classifier',
   });
 
+  // Draft estimate from the same extraction (dark: GATE_EMAIL_QUOTE_DRAFTS).
+  // Fail-soft — a draft failure must never undo the lead that just landed.
+  let emailDraft = null;
+  if (emailQuoteDraftsEnabled()) {
+    try {
+      emailDraft = await maybeDraftEstimateFromEmailLead({ email, extracted, lead });
+    } catch (e) {
+      logger.warn(`[email-actions] email draft estimate failed (lead stands): ${e.message}`);
+    }
+  }
+  const drafted = emailDraft?.created === true;
+
   // Notification
   try {
     await db('notifications').insert({
       recipient_type: 'admin',
       category: 'new_lead',
-      title: `New lead from email: ${firstName} ${lastName}`,
-      body: classification.summary || email.subject,
+      title: drafted
+        ? `New lead from email: ${firstName} ${lastName} — draft estimate ready`
+        : `New lead from email: ${firstName} ${lastName}`,
+      body: drafted
+        ? `${classification.summary || email.subject} Draft estimate created — review and send.`
+        : (classification.summary || email.subject),
       icon: '\uD83D\uDCE7',
-      link: '/admin/email',
-      metadata: JSON.stringify({ emailId: email.id, leadId: lead.id }),
+      link: drafted ? '/admin/estimates' : '/admin/email',
+      metadata: JSON.stringify({
+        emailId: email.id,
+        leadId: lead.id,
+        ...(drafted ? { estimateId: emailDraft.estimateId } : {}),
+      }),
     });
   } catch (e) { /* non-critical */ }
 
   logger.info(`[email-actions] Lead created: ${lead.id} — ${extracted.service_interest || 'general'}`);
-  return { action: 'lead_created', leadId: lead.id };
+  return {
+    action: 'lead_created',
+    leadId: lead.id,
+    ...(drafted ? { estimateId: emailDraft.estimateId } : {}),
+  };
 }
 
 async function handleCustomerRequest(email, classification) {
@@ -523,4 +762,8 @@ module.exports = {
   isWavesAutoAckReply,
   LEAD_HARD_SKIP_SENDERS,
   DEFAULT_LEAD_MIN_CONFIDENCE,
+  // Exported for unit testing the email → draft-estimate lane
+  emailQuoteDraftsEnabled,
+  parseExtractedAddress,
+  maybeDraftEstimateFromEmailLead,
 };

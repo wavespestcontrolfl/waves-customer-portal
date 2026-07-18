@@ -570,6 +570,12 @@ export default function AgentEstimatePage() {
   // drive the retry buttons that remain after status leaves "draft".
   const [failedChannels, setFailedChannels] = useState([]);
   const [memories, setMemories] = useState([]);
+  // Paste-any-text: an email / forwarded SMS / note the operator drops in as
+  // customer-supplied context. It only seeds the Ask AI prompt — the agent
+  // still verifies contact/address against the lead record, and evidence
+  // quotes from pasted text land the draft in the yellow lane by design.
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
   const fileInputRef = useRef(null);
   const primedLeadRef = useRef(null);
   const activeLeadRef = useRef(selectedLeadId);
@@ -890,7 +896,65 @@ export default function AgentEstimatePage() {
                         {action.label}
                       </button>
                     ))}
+                    <button
+                      type="button"
+                      disabled={askDisabled}
+                      onClick={() => setPasteOpen((open) => !open)}
+                      className="h-11 shrink-0 rounded-sm border border-zinc-300 bg-white px-3 text-[14px] font-medium text-zinc-800 disabled:opacity-40"
+                    >
+                      Paste customer text…
+                    </button>
                   </div>
+
+                  {pasteOpen && (
+                    <div className="space-y-2 rounded-sm border border-zinc-300 bg-zinc-50 p-3">
+                      <div className="text-[14px] font-medium text-zinc-800">Paste customer text</div>
+                      <div className="text-[14px] leading-5 text-zinc-600">
+                        An email, forwarded text, or note from this customer. The estimator reads it
+                        as customer-supplied context for the selected lead — it still verifies
+                        contact and address against the lead record before using them.
+                      </div>
+                      <textarea
+                        value={pasteText}
+                        onChange={(event) => setPasteText(event.target.value)}
+                        placeholder="Paste the customer's email, text message, or notes here…"
+                        className="min-h-28 w-full rounded-sm border border-zinc-300 bg-white p-3 text-[16px] leading-6 text-zinc-950 outline-none placeholder:text-zinc-400 focus:border-zinc-900"
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={!pasteText.trim() || askDisabled}
+                          onClick={() => {
+                            const pasted = pasteText.trim();
+                            if (!pasted) return;
+                            const existing = intelligence.prompt.trim();
+                            intelligence.setPrompt(
+                              "The operator pasted customer-provided text (an email, forwarded SMS, or notes). "
+                              + "Treat it as evidence for this lead's estimate: extract the requested services, property details, "
+                              + "and constraints, and verify any contact or address it mentions against the lead record before relying on them.\n\n"
+                              + `---\n${pasted}\n---\n\n`
+                              + (existing || "Build the estimate from the pasted text and this lead's evidence."),
+                            );
+                            setPasteOpen(false);
+                            setPasteText("");
+                          }}
+                          className="flex h-11 items-center justify-center rounded-sm bg-zinc-900 px-4 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Use in prompt
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPasteOpen(false);
+                            setPasteText("");
+                          }}
+                          className="flex h-11 items-center justify-center rounded-sm border border-zinc-300 bg-white px-4 text-[14px] font-medium text-zinc-800"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <textarea
                     value={intelligence.prompt}

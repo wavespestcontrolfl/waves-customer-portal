@@ -513,7 +513,7 @@ function conflictingOpenEstimate(openEstimates, intentAddress) {
 }
 
 // ── Draft row ─────────────────────────────────────────────────
-async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [] }) {
+async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
@@ -615,6 +615,12 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           version: 1,
           callLogId: call?.id || null,
           callSid: call?.twilio_call_sid || null,
+          // Channel provenance: absent = the original call pipeline. The
+          // SMS entry stamps its phone-scoped thread key so thread-level
+          // dedupe and reporting can distinguish text-drafted quotes.
+          ...(origin?.channel && origin.channel !== 'call'
+            ? { origin: origin.channel, ...(origin.threadKey ? { smsThreadKey: origin.threadKey } : {}) }
+            : {}),
           lane,
           laneReasons,
           evidence: intent.evidence || [],
