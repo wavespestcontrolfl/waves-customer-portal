@@ -779,10 +779,16 @@ describe('admin projects routes', () => {
         propertyType: 'Single Family',
         squareFootage: 1840,
       }));
-      expect(mockAnthropicCreate).toHaveBeenCalledWith(expect.objectContaining({
-        model: expect.any(String),
-        messages: expect.any(Array),
-      }));
+      // The chain runs under dispatchWithFallback's default budget, so the
+      // Anthropic leg always carries per-request options (bounded timeout,
+      // SDK retries off) — pinning the budgeted two-arg shape on a real lane.
+      expect(mockAnthropicCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: expect.any(String),
+          messages: expect.any(Array),
+        }),
+        expect.objectContaining({ maxRetries: 0, timeout: expect.any(Number) }),
+      );
     });
     delete process.env.ANTHROPIC_API_KEY;
   });

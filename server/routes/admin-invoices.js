@@ -860,9 +860,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     res.json(invoice);
   } catch (err) {
     // Editability guards (status race, live PaymentIntent, payment plan,
-    // annual prepay, deposit/account credit) are operator-actionable conflicts,
-    // not server faults — surface them so the UI can toast the reason.
-    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied/i.test(err.message)) {
+    // annual prepay, deposit/account credit, applied-money/dispute fence)
+    // are operator-actionable conflicts, not server faults — surface them
+    // so the UI can toast the reason. "could not verify the" covers every
+    // fail-closed verify fence ("Could not verify the X — refusing to
+    // edit"): a transient read failure is a retry, not a server fault.
+    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied|payment already applied|payment dispute|sending right now|just went out|saved-card charge|could not verify the/i.test(err.message)) {
       return res.status(409).json({ error: err.message });
     }
     if (/Invalid line-item discount/i.test(err.message)) {

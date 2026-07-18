@@ -3,7 +3,13 @@ const logger = require('./logger');
 const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact, getServiceContact } = require('./customer-contact');
-const { getProjectType } = require('./project-types');
+const {
+  getProjectType,
+  redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeHasInternalFindingKeys,
+} = require('./project-types');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { invoiceAmountDue } = require('./invoice-helpers');
@@ -82,7 +88,10 @@ function propertyAddress(customer = {}, project = {}) {
     || findings.treatment_address
     || findings.service_address
   );
-  if (projectAddress) return projectAddress;
+  // Free-text finding value on a customer/third-party email — same
+  // type-gated fee scrub as the public payload and the FDACS PDF, so every
+  // report egress serves one representation (codex #2817).
+  if (projectAddress) return redactInspectionFeeCuesForType(projectAddress, project.project_type);
   return [
     customer.address_line1,
     [customer.city, customer.state].filter(Boolean).join(', '),
@@ -100,7 +109,17 @@ function projectTypeLabel(project = {}) {
 }
 
 function projectTitle(project = {}) {
-  return clean(project.title) || projectTypeLabel(project);
+  const title = clean(project.title);
+  if (!title) return projectTypeLabel(project);
+  // same type-gated cue+value scrub as the public /data headline — a
+  // legacy/deploy-window title can carry the fee literally or as a bare
+  // paraphrased amount, and it rides customer/third-party emails
+  // (codex #2817)
+  let safe = redactInspectionFeeCuesForType(title, project.project_type);
+  if (projectTypeHasInternalFindingKeys(project.project_type)) {
+    safe = redactSpecificAmounts(safe, projectRecordedFeeValues(project));
+  }
+  return safe;
 }
 
 function resolveProjectEmailRecipient(customer = {}) {

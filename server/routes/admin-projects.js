@@ -30,6 +30,20 @@ const {
   TERMITE_PERIMETER_METHODS,
   isValidProjectType,
   getProjectType,
+  stripInternalFindingKeys,
+  redactInspectionFeeCues,
+  redactSpecificAmounts,
+  resolveFeeValuesForScrub,
+  projectRecordedFeeValues,
+  projectArchivedFeeValues,
+  projectTypeHasInternalFindingKeys,
+  projectTypeFreeTextKeys,
+  projectTypeConfigFreeTextKeys,
+  redactInspectionFeeCuesForType,
+  redactProjectTitleForWrite,
+  redactProjectFreeTextForWrite,
+  projectTypeConfigHasInternalFindingKeys,
+  filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
@@ -864,9 +878,54 @@ function formatFindingForPrompt(value) {
   return String(value ?? '');
 }
 
-function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext }) {
+function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext, archivedFeeValues = [] }) {
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
-  const findingsLines = Object.entries(findings || {})
+  // Internal keys (inspection_fee) must never reach the model — the drafted
+  // narrative is returned verbatim as customer-facing `recommendations`.
+  // Stripping the structured findings keeps the fee out of the prompt, and
+  // sanitizing rawRecommendations keeps it out of the free-text input: both
+  // AI-write endpoints default that input to the editable recommendations
+  // field, so an admin note or edit like "Inspection fee $250" would otherwise
+  // reach the model and yield a new customer-facing narrative containing it
+  // (codex #2817 P2). redactInspectionFeeCues removes only fee language, never
+  // a legitimate estimate. Gated on the type config: only a type carrying the
+  // internal fee field (WDO) gets its free text scrubbed.
+  const typeCarriesFee = projectTypeConfigHasInternalFindingKeys(typeCfg);
+  // Two passes on every free-text prompt input: the literal-cue scrub, plus
+  // the VALUE scrub with the fee this project actually recorded — customer
+  // text can mention the amount without the words "inspection fee" ("buyer
+  // asked whether the $250 charge is due"), and once the model paraphrases
+  // it the downstream cue guards can no longer recognize it (codex #2817).
+  let parsedFindingsForFee = findings;
+  if (typeof parsedFindingsForFee === 'string') {
+    try { parsedFindingsForFee = JSON.parse(parsedFindingsForFee); } catch { parsedFindingsForFee = null; }
+  }
+  // Resolved like every other scrub site: an absent/blank/digit-free fee
+  // bills at the flat default, so the default must join the scrub targets
+  // here too — "buyer asked about the $250 charge" has no literal cue and
+  // would otherwise reach the model. Archived filing snapshot fees (passed
+  // by the on-project endpoint; the pre-save preview has none) join for the
+  // same reason: a legacy note can quote an older filed fee (codex #2817).
+  const recordedFeeValues = typeCarriesFee
+    ? resolveFeeValuesForScrub([
+      parsedFindingsForFee?.inspection_fee ?? '',
+      ...archivedFeeValues,
+    ])
+    : [];
+  const scrubPromptInput = (text) => {
+    if (!typeCarriesFee) return text;
+    let safe = redactInspectionFeeCues(text);
+    if (recordedFeeValues.length) safe = redactSpecificAmounts(safe, recordedFeeValues);
+    return safe;
+  };
+  const safeRawRecommendations = scrubPromptInput(rawRecommendations);
+  const safeCommunicationContext = scrubPromptInput(communicationContext);
+  const safePhotoLines = scrubPromptInput(photoLines);
+  const findingsLines = Object.entries(stripInternalFindingKeys(findings, {
+    redactValues: typeCarriesFee,
+    feeValues: recordedFeeValues,
+    freeTextKeys: projectTypeConfigFreeTextKeys(typeCfg),
+  }) || {})
     .map(([k, v]) => [k, formatFindingForPrompt(v)])
     .filter(([, v]) => v.trim() !== '')
     .map(([k, v]) => `${labelMap[k] || k.replace(/_/g, ' ')}: ${v}`)
@@ -999,13 +1058,13 @@ Structured findings:
 ${findingsLines}
 
 Technician's raw recommendations / notes:
-${rawRecommendations || '[none provided]'}
+${safeRawRecommendations || '[none provided]'}
 
 Attached photo review:
-${photoLines || '[no photos attached]'}
+${safePhotoLines || '[no photos attached]'}
 
 Recent customer communication context:
-${communicationContext || '[none provided]'}
+${safeCommunicationContext || '[none provided]'}
 
 ## OUTPUT FORMAT
 
@@ -1040,7 +1099,7 @@ If recent customer communication context is [none provided], omit CUSTOMER CONCE
 Do not include the customer name as a header. Do not add greetings, sign-offs, or any text outside the allowed sections.`;
 }
 
-async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [], communicationContext = '' }) {
+async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [], communicationContext = '', archivedFeeValues = [] }) {
   const { photoLines, images } = await buildAiPhotoInputs(photos);
   const prompt = buildProjectReportPrompt({
     typeCfg,
@@ -1051,6 +1110,7 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
     projectDate,
     photoLines,
     communicationContext,
+    archivedFeeValues,
   });
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.report, {
     text: prompt,
@@ -1373,13 +1433,24 @@ router.get('/:id', async (req, res, next) => {
         // lists filings via GET /:id/wdo-filings instead.
         wdo_sent_filings: undefined,
         wdo_sent_filings_count: loadWdoFilings(project).length,
+        // The archive index is stripped above, but the customer preview must
+        // scrub against archived snapshot fees exactly like the public /data
+        // serializer — a previously filed report can quote an older fee than
+        // the current editable field, and preview == public has to hold for
+        // it. Only the derived fee values ride the payload (codex #2817).
+        wdo_archived_fee_values: projectTypeHasInternalFindingKeys(project.project_type)
+          ? projectArchivedFeeValues(project)
+          : [],
         // Same computation as the public report page's fdacsPdfAvailable —
         // the customer-preview needs it to mirror the page's WDO findings
         // suppression rule (the raw archive index is stripped above).
+        // Includes the legacy-binary fee gate so staff never see a filing
+        // advertised that the customer page withholds (codex #2817).
         fdacs_pdf_available: (() => {
           const filings = loadWdoFilings(project);
           const lastFiling = filings.length ? filings[filings.length - 1] : null;
-          return Boolean(lastFiling?.s3_key && config.s3?.bucket);
+          return Boolean(lastFiling?.s3_key && config.s3?.bucket)
+            && !filingBinaryMayDiscloseFee(lastFiling);
         })(),
         property_profile: propertyProfile,
         wdo_history: wdoHistory,
@@ -1596,15 +1667,29 @@ router.post('/', async (req, res, next) => {
       }
     }
 
+    // Cue + recorded-value write scrub for the customer-facing free text —
+    // no filings can exist yet, so the fee set is the incoming findings
+    // resolved against the flat default (codex #2817).
+    const createFeeValues = projectTypeHasInternalFindingKeys(project_type)
+      ? projectRecordedFeeValues({ findings: findings || {} })
+      : [];
     let row;
     try {
       [row] = await db('projects').insert({
         customer_id,
         project_type,
         project_date: projectDate,
-        title: title || null,
+        // title is customer-facing headline text — same write-time fee scrub
+        // as recommendations, clamped to the varchar(200) column since the
+        // scrub can lengthen text (codex #2817)
+        title: title ? redactProjectTitleForWrite(title, project_type, createFeeValues) : null,
         findings: findings || null,
-        recommendations: recommendations || null,
+        // inspection fee must never be customer-facing — sanitized on WRITE
+        // (durable for new rows; migration 20260717000001 cleaned legacy rows
+        // at rest, codex #2817). Type-gated: only WDO carries the internal
+        // fee field; on other types "inspection fee" prose is a legitimate
+        // customer disclosure.
+        recommendations: recommendations ? redactProjectFreeTextForWrite(recommendations, project_type, createFeeValues) : null,
         service_record_id: service_record_id || null,
         // Persist the DERIVED link too (record-only callers): the linked-only
         // gate accepted this create because the record resolved to a scheduled
@@ -1992,6 +2077,21 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
+    // Durable inspection-fee guard: an admin-saved narrative/title can't
+    // persist the internal fee (legacy rows cleaned at rest by migration
+    // 20260717000001, codex #2817). Cue AND recorded-value passes — a
+    // paraphrase without the literal cue must not be re-persisted either.
+    // The fee set is what THIS save produces: incoming findings (falling
+    // back to the stored row) merged with the archived filing snapshots.
+    // Type-gated — see the create path.
+    const writeFeeValues = projectTypeHasInternalFindingKeys(project.project_type)
+      ? projectRecordedFeeValues({
+        findings: updates.findings !== undefined ? updates.findings : project.findings,
+        wdo_sent_filings: project.wdo_sent_filings,
+      })
+      : [];
+    if (updates.recommendations != null) updates.recommendations = redactProjectFreeTextForWrite(updates.recommendations, project.project_type, writeFeeValues);
+    if (updates.title != null) updates.title = redactProjectTitleForWrite(updates.title, project.project_type, writeFeeValues);
     dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
@@ -2081,11 +2181,20 @@ function loadWdoFilings(project) {
   return Array.isArray(filings) ? filings : [];
 }
 
-// Canonical hash of the content the licensee attests to: the findings JSON
-// (key-order independent) plus the inspection date. Captured onto the
-// signature at sign time and recomputed at every send/stamp, so a
-// signed-then-edited report can never be emitted as a signed FDACS-13645 —
-// the signature only authorizes the content it was drawn against.
+// Canonical hash of the content the licensee attests to: the CUSTOMER-SAFE
+// findings JSON (key-order independent) plus the inspection date. The
+// customer-safe transform (internal-key strip + fee-cue scrub, via
+// stripInternalFindingKeys) is applied BEFORE hashing because it is also what
+// the FDACS PDF renders and what the sign-time preview shows — hash, preview,
+// and emitted filing all agree on one representation, so the signature
+// authorizes exactly the content that is emitted (codex #2817: sanitizing
+// only at render time would emit content the hash never authorized). The
+// scrub is deterministic, so the hash is stable across recomputes.
+// Consequence: signatures captured over the RAW representation (pre-change)
+// no longer verify and force one re-sign — the safe direction.
+// Captured onto the signature at sign time and recomputed at every
+// send/stamp, so a signed-then-edited report can never be emitted as a
+// signed FDACS-13645.
 function wdoContentHash(project) {
   const stable = (value) => {
     if (Array.isArray(value)) return value.map(stable);
@@ -2098,7 +2207,13 @@ function wdoContentHash(project) {
     return value;
   };
   const payload = JSON.stringify({
-    findings: stable(parseFindings(project)),
+    // identical inputs to the PDF's customerSafeFindings — hash == render,
+    // including the recorded-value pass (codex #2817)
+    findings: stable(stripInternalFindingKeys(parseFindings(project), {
+      redactValues: true,
+      feeValues: projectRecordedFeeValues(project),
+      freeTextKeys: projectTypeFreeTextKeys('wdo_inspection'),
+    }) || {}),
     project_date: normalizeDateOnly(project.project_date),
   });
   return crypto.createHash('sha256').update(payload).digest('hex');
@@ -2412,8 +2527,16 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
     signer_name: signature?.signerName || null,
     signed_at: signature?.signedAt || null,
     content_hash: wdoContentHash(project),
+    // The archived binary was rendered through the customer-safe scrub
+    // (buildWdoReportPDFBuffer applies customerSafeFindings) — the public
+    // /fdacs-pdf gate uses this to distinguish a clean modern archive from a
+    // legacy binary that may print a raw fee (codex #2817). Bump the tag if
+    // the redaction contract ever changes incompatibly.
+    pdf_renderer: 'fee-scrub-v1',
     // As-sent snapshot — the public token viewer serves these for WDO so the
     // web report can never silently diverge from the emailed signed PDF.
+    // Stored RAW deliberately: /data scrubs at egress, and the raw snapshot
+    // is what content_hash-adjacent tooling and admin views expect.
     findings: parseFindings(project),
     project_date: normalizeDateOnly(project.project_date),
   };
@@ -3058,7 +3181,10 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         ? `${sendAction === 'project_report_resent' ? 'Project report resent' : 'Project report sent'}: ${typeLabel}`
         : `Project report delivery failed: ${typeLabel}`,
       {
-        report_token: token,
+        // prefix only — activity metadata is an audit trail, and the full
+        // value is a never-expiring bearer credential (audit 2026-07-16);
+        // the projects row holds the real token
+        report_token_prefix: String(token).slice(0, 6),
         channels,
         delivery_status: deliveryStatus,
         ...(hasReadinessOverride ? {
@@ -3070,7 +3196,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       },
     );
 
-    logger.info(`[projects] delivery ${project.id} token=${token} status=${deliveryStatus} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
+    logger.info(`[projects] delivery ${project.id} token=${String(token).slice(0, 6)}… status=${deliveryStatus} sms=${channels.sms?.ok} email=${channels.email?.ok}`);
     res.json({
       project_id: project.id,
       report_token: token,
@@ -3519,10 +3645,10 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
       refreshed,
       'project_report_released_after_payment',
       `Paid report released: ${typeLabel} (invoice ${invoice.invoice_number || invoice.id} settled)`,
-      { invoice_id: invoice.id, channels, source },
+      { report_token_prefix: String(token).slice(0, 6), invoice_id: invoice.id, channels, source },
     ).catch(() => {});
 
-    logger.info(`[projects] hold release delivered ${projectId} source=${source} email=${channels.email?.ok} sms=${channels.sms?.ok}`);
+    logger.info(`[projects] hold release delivered ${projectId} token=${String(token).slice(0, 6)}… source=${source} email=${channels.email?.ok} sms=${channels.sms?.ok}`);
     return { released: true, channels, reportUrl };
   } catch (err) {
     logger.error(`[projects] hold release failed for ${projectId}: ${err.message}`);
@@ -4571,7 +4697,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         : (holdActive
           ? `Invoice delivery failed (report hold not armed): ${typeLabel}`
           : `Report + invoice delivery failed: ${typeLabel}`),
-      { report_token: token, invoice_id: invoice.id, invoice_created: created, channels,
+      { report_token_prefix: String(token).slice(0, 6), invoice_id: invoice.id, invoice_created: created, channels,
         ...(holdActive ? { report_hold: true } : {}),
         ...(hasReadinessOverride ? { readiness_override: { reason: overrideReason, missing: readiness.missing } } : {}) },
     );
@@ -4932,6 +5058,7 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       projectDate,
       photos,
       communicationContext,
+      archivedFeeValues: projectArchivedFeeValues(project),
     });
     logger.info(`[projects] ai-write ${project.id} — ${report.length} chars`);
     res.json({ report });

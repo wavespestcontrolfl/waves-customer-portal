@@ -6,11 +6,19 @@
  * from data already rendered on the page — no LLM, nothing new can leak.
  */
 
-const { getProjectType } = require('./project-types');
+const {
+  getProjectType,
+  INTERNAL_FINDING_KEYS,
+  redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeFreeTextKeys,
+  projectTypeHasInternalFindingKeys,
+} = require('./project-types');
 
-// Internal/office-only finding keys — never in an answer (mirrors the client
-// registry in client/src/lib/wdoReportFields.js).
-const INTERNAL_FINDING_KEYS = new Set(['inspection_fee']);
+// Internal/office-only finding keys — never in an answer. Shared with the
+// payload + narrative egress points via project-types (codex #2807).
+const INTERNAL_FINDING_KEY_SET = new Set(INTERNAL_FINDING_KEYS);
 
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 
@@ -21,9 +29,19 @@ function cleanFindings(project) {
   }
   const findings = raw && typeof raw === 'object' ? raw : {};
   const entries = {};
+  // A fee typed into a free-text finding (WDO comments) must not surface in
+  // an answer either — same type-gated cue+value guard as the /data payload
+  // (codex #2817).
+  const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
+  const feeValues = typeCarriesFee ? projectRecordedFeeValues(project) : [];
+  // value pass on free-prose fields only — structured fields (addresses)
+  // can legitimately contain the fee's digits
+  const freeTextKeys = projectTypeFreeTextKeys(project.project_type);
   for (const [key, value] of Object.entries(findings)) {
-    if (INTERNAL_FINDING_KEYS.has(key)) continue;
-    const text = String(value ?? '').trim();
+    if (INTERNAL_FINDING_KEY_SET.has(key)) continue;
+    let text = redactInspectionFeeCuesForType(String(value ?? ''), project.project_type);
+    if (feeValues.length && freeTextKeys.has(key)) text = redactSpecificAmounts(text, feeValues);
+    text = text.trim();
     if (text) entries[key] = text;
   }
   return entries;
@@ -85,7 +103,14 @@ function answerNextVisit({ project, payload }) {
 }
 
 function answerRecommendations({ project }) {
-  const rec = String(project.recommendations || '').trim();
+  // same two-pass (cue + recorded-value) guard as the /data egress
+  // (codex #2817)
+  let rec = redactInspectionFeeCuesForType(String(project.recommendations || ''), project.project_type);
+  if (projectTypeHasInternalFindingKeys(project.project_type)) {
+    const feeValues = projectRecordedFeeValues(project);
+    if (feeValues.length) rec = redactSpecificAmounts(rec, feeValues);
+  }
+  rec = rec.trim();
   if (rec) {
     // Narrative drafts use WHAT WE RECOMMEND sections — answer with that
     // section when present, else the first two sentences.

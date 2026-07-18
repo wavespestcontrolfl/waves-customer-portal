@@ -216,6 +216,18 @@ ${(voice?.tone_rules || []).map(r => `- ${r}`).join('\n')}
 SWFL-SPECIFIC KNOWLEDGE:
 ${voice?.swfl_knowledge ? Object.entries(voice.swfl_knowledge).map(([k, v]) => `- ${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join('\n') : '- Sandy soil, afternoon thunderstorms, St. Augustine grass, nitrogen blackout June-Sept'}
 
+CLAIMS RULES (the publish guardrail hard-fails violations):
+- Never name a professional pesticide product or active ingredient (Advion,
+  Termidor, indoxacarb, fipronil, …) and never claim what Waves technicians
+  carry or use — describe the product class generically and defer to the
+  label. Consumer brands only in cautionary "don't do this" context.
+- Never promise prevention or elimination ("prevents them from coming back",
+  "pest-free for good", "100% effective"). The offer is reduced recurrence
+  plus free re-treatment between visits — always conditional.
+- Any DIY pesticide instruction must say: follow the label, keep it off
+  food-contact surfaces, keep it away from children and pets. Species-dependent
+  treatment advice must make identification a prerequisite.
+
 FORMAT:
 - 800-1200 words
 - H2 subheadings every 200-300 words (casual, not keyword-stuffed)

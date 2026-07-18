@@ -7,6 +7,12 @@ const { resolveCompletionProfileForScheduledService } = require('./service-compl
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
+const {
+  redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeHasInternalFindingKeys,
+} = require('./project-types');
 const { createAlertOnce } = require('./dispatch-alerts');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspection-fee');
 
@@ -258,6 +264,13 @@ function projectCompletionNotes({ project, profile, portalAttached, reportPath }
     projectCompletion: true,
     projectId: project.id,
     projectType: project.project_type,
+    // Stamped so every later egress of the copied notes (service history,
+    // invoice snapshots, service-report PDFs) can run the VALUE-based fee
+    // scrub without refetching the project (codex #2817). Fee-carrying
+    // types only.
+    ...(projectTypeHasInternalFindingKeys(project.project_type)
+      ? { feeValues: projectRecordedFeeValues(project) }
+      : {}),
     projectTitle: project.title || null,
     completionMode: profile.completionMode || null,
     portalVisibility: profile.portalVisibility || null,
@@ -332,9 +345,26 @@ function buildServiceRecordInsert({
   const serviceDate = normalizeDateOnly(project.project_date)
     || normalizeDateOnly(scheduledService.scheduled_date)
     || etDateString();
+  // The recommendation copied here lands in service_records.technician_notes,
+  // which the authenticated portal service-history API returns verbatim — so
+  // a legacy narrative that predates the create/PUT write guard gets its
+  // inspection-fee scrub at this copy boundary too (codex #2817). Type-gated:
+  // only WDO carries the internal fee field.
+  // Cue + recorded-value passes, same as the public /data egress — a
+  // legacy/deploy-window title or narrative can carry the fee literally OR
+  // as a bare paraphrased amount, and this copy lands in customer-served
+  // technician_notes (codex #2817).
+  const scrubCompletionText = (text) => {
+    let safe = redactInspectionFeeCuesForType(String(text), project.project_type);
+    if (projectTypeHasInternalFindingKeys(project.project_type)) {
+      const feeValues = projectRecordedFeeValues(project);
+      if (feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+    }
+    return safe;
+  };
   const notes = [
-    project.title ? `Project completed: ${project.title}` : 'Project completed.',
-    project.recommendations ? String(project.recommendations).trim() : '',
+    project.title ? `Project completed: ${scrubCompletionText(project.title)}` : 'Project completed.',
+    project.recommendations ? scrubCompletionText(project.recommendations) : '',
   ].filter(Boolean).join('\n\n');
   const structuredNotes = projectCompletionNotes({
     project,

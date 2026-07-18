@@ -1,0 +1,7 @@
+{
+  "name": "@waves/report-redaction",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Single source of truth for project-report internal-fee redaction: the INTERNAL_FINDING_KEYS registry and the inspection-fee cue scrubber. Imported by BOTH the server egress/write guards (project-types.js) and the client report surfaces (wdoReportFields.js) so the customer page, the admin preview, and the server payload cannot drift. Pure CommonJS, no dependencies.",
+  "main": "index.js"
+}

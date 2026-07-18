@@ -505,6 +505,34 @@ describe('project completion helpers', () => {
     });
   });
 
+  // The completion copy lands in service_records.technician_notes, which the
+  // authenticated portal service-history returns verbatim — a legacy narrative
+  // that predates the create/PUT write guard must be scrubbed at THIS boundary
+  // too, or closing an unedited project duplicates the fee durably (codex #2817).
+  test('service record insert scrubs a legacy inspection fee from the copied narrative', () => {
+    const insert = buildServiceRecordInsert({
+      scheduledService: {
+        id: 'svc-1',
+        customer_id: 'cust-1',
+        technician_id: 'tech-1',
+        scheduled_date: '2026-05-21',
+        service_type: 'WDO Inspection',
+      },
+      project: {
+        id: 'project-1',
+        project_type: 'wdo_inspection',
+        title: 'WDO inspection',
+        project_date: '2026-05-21',
+        recommendations: 'Inspection fee $250 due at service. Repair estimate $1,250 for the sill plate.',
+      },
+      profile: { completionMode: 'project_required' },
+    });
+
+    expect(insert.technician_notes).toContain('[fee removed]');
+    expect(insert.technician_notes).not.toContain('$250');
+    expect(insert.technician_notes).toContain('Repair estimate $1,250');
+  });
+
   test('existing service record update converts routine report fields to project completion', () => {
     const update = buildServiceRecordProjectCompletionUpdate({
       serviceRecord: {

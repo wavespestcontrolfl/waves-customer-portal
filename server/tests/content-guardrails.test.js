@@ -765,3 +765,415 @@ describe('JSX spread attributes fail closed (Codex round 16)', () => {
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 });
+
+describe('product-claim guard (P1 PRODUCT_CLAIM)', () => {
+  test('professional product brand blocks', () => {
+    const r = guardrails.evaluate({ body: 'The gel pros reach for is Advion — place pea-sized dabs along the trail.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('active ingredient blocks', () => {
+    const r = guardrails.evaluate({ body: 'Look for a bait whose active ingredient is indoxacarb for slow knockdown.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('tech inventory claim blocks', () => {
+    const r = guardrails.evaluate({ body: 'A sweet gel — which is what our techs carry on every ant call.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('product claim hiding in meta description blocks', () => {
+    const r = guardrails.evaluate({ body: 'Generic bait guidance.', frontmatter: { meta_description: 'Why Termidor is the pro choice for SWFL ants.' } }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('consumer-brand cautionary mention and generic class language pass', () => {
+    const r = guardrails.evaluate({ body: 'Do not blast the trail with Raid or Ortho Home Defense. Use a slow-acting, sugar-based bait gel labeled for indoor use instead, and homemade borax bait is risky to dose.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('professional product as an informational TOPIC passes (no recommendation context)', () => {
+    const r = guardrails.evaluate({
+      body: 'Bait stations target the colony itself.',
+      frontmatter: { title: 'Sentricon in Southwest Florida', meta_description: 'How termite bait stations work in Southwest Florida sandy soil, and what a monitored bait program actually covers for SWFL homeowners.' },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+});
+
+describe('prevention-promise guard (P1 PREVENTION_PROMISE)', () => {
+  test('"keeps them from coming back" blocks', () => {
+    const r = guardrails.evaluate({ body: 'Sealing the slab gap keeps the ants from coming back next month.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('"prevents next month\'s trail" blocks', () => {
+    const r = guardrails.evaluate({ body: 'A quarterly program prevents next month’s trail entirely.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('guaranteed elimination blocks', () => {
+    const r = guardrails.evaluate({ body: 'Our approach is guaranteed elimination of roaches in one visit.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('"gets rid of ants for good" blocks', () => {
+    const r = guardrails.evaluate({ body: 'This plan gets rid of the ants for good.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('reduced-recurrence + callback phrasing passes', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant. A quarterly program reduces recurrence, and if ants flare up between visits the re-treatment is free. Prevention tips: fix moisture, trim landscaping. Whenever storms hit, expect scouts.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('non-pest "prevents X from" phrasing passes', () => {
+    const r = guardrails.evaluate({ body: 'A door sweep prevents rainwater from pooling at the threshold, and mulch spacing prevents moisture buildup along the slab.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+});
+
+describe('product-claim guard — round-2 hardening (Codex findings)', () => {
+  test('passive usage claim blocks ("Advion is applied…")', () => {
+    const r = guardrails.evaluate({ body: 'Advion is applied in pea-sized dabs along ant trails.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('inventory "rely on" phrasing blocks', () => {
+    const r = guardrails.evaluate({ body: 'Our technicians rely on Advion for sweet-feeding ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('efficacy claims after the brand block', () => {
+    for (const body of ['Advion works best for ants in Florida kitchens.', 'Advion kills ants quickly and quietly.']) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+    }
+  });
+
+  test('ambiguous brand words in ordinary prose pass', () => {
+    const r = guardrails.evaluate({ body: 'Use these prevention steps in tandem, and use labeled bait to target phantom ants on the premises.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('ambiguous brand word next to a product noun blocks', () => {
+    const r = guardrails.evaluate({ body: 'A can of Phantom aerosol handles the voids.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+});
+
+describe('prevention-promise guard — round-2 hardening (Codex findings)', () => {
+  test('a later promise is caught even after an exempt disclaimer of the same shape', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant. Our service means you will never see another ant.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('future-period promise requires a pest object', () => {
+    const ok = guardrails.evaluate({ body: 'Autopay prevents next month’s water bill surprise.' }, {});
+    expect(ok.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    const bad = guardrails.evaluate({ body: 'One treatment prevents next month’s ant trail.' }, {});
+    expect(bad.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('bare service-subject promises block', () => {
+    for (const body of [
+      'This quarterly treatment prevents infestations.',
+      'Our treatment eliminates ants in your home.',
+      'A professional application eradicates cockroaches.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+    }
+  });
+
+  test('qualifier promises block (comparison-table row shape)', () => {
+    const r = guardrails.evaluate({ body: '<ComparisonTable rows={[{"label":"Prevents future infestations","values":["No","Yes"]}]} />' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('question framing and homeowner how-to phrasing stay legal', () => {
+    const r = guardrails.evaluate({ body: 'How do I get rid of sugar ants? This guide walks you through the bait-first plan that reduces recurrence, and these steps make it harder for the next scout.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+});
+
+describe('prevention-promise guard — round-3 hardening (Codex findings)', () => {
+  test('a disclaimer cannot shield a promise in the NEXT sentence', () => {
+    const r = guardrails.evaluate({ body: 'No honest company can promise permanent prevention. Our treatment eliminates ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('same-sentence disclaimer still exempts', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant, and we will not either.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('past-tense passive product usage blocks', () => {
+    const r = guardrails.evaluate({ body: 'Advion was applied in pea-sized dabs along ant trails.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+});
+
+describe('prevention/product guards — round-4 hardening (Codex findings)', () => {
+  test('a disclaimer cannot shield a coordinated promise in the SAME sentence', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant, but our service eliminates ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('the claim directly governed by the negated promise stays exempt', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant — Florida does not work that way.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('non-product tool/inventory statements pass', () => {
+    const r = guardrails.evaluate({ body: 'Our team uses inspection notes to tailor each visit, and our technicians use moisture meters to find leaks.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('product-context inventory statements still block', () => {
+    const r = guardrails.evaluate({ body: 'Our techs carry more than one bait on every ant call.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+});
+
+describe('guards — round-5 polish (Codex findings)', () => {
+  test('product noun must be the OBJECT of the inventory verb', () => {
+    const ok = guardrails.evaluate({ body: 'Our team uses inspection notes to decide where bait should go.' }, {});
+    expect(ok.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+    const bad = guardrails.evaluate({ body: 'Our techs carry more than one bait on every ant call.' }, {});
+    expect(bad.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('"we don\'t promise" disclaimers are exempt', () => {
+    const r = guardrails.evaluate({ body: 'We don’t promise you will never see another ant.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('"ants will never come back" blocks', () => {
+    const r = guardrails.evaluate({ body: 'Our treatment means the ants will never come back.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+});
+
+// Round 8 (Codex P1): DIRECTLY negated claims are the honest disclaimers the
+// gate exists to encourage — they must be exempt, while every affirmative
+// shape from rounds 1-5 keeps flagging.
+describe('prevention-promise guard — round-8 hardening (directly negated claims)', () => {
+  test('"does not eliminate" disclaimers are exempt (the flagged case)', () => {
+    const r = guardrails.evaluate({ body: 'This treatment does not eliminate ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('"won\'t eliminate" disclaimers are exempt — curly AND straight apostrophes', () => {
+    for (const body of ['This treatment won’t eliminate ants.', "This treatment won't eliminate ants."]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('two-word auxiliary negation in the subject gap is exempt ("will not eliminate")', () => {
+    const r = guardrails.evaluate({ body: 'The treatment will not eliminate ants overnight.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+  });
+
+  test('other negated auxiliaries in the subject gap are exempt (cannot / doesn\'t)', () => {
+    for (const body of [
+      'This treatment cannot eliminate the ants on its own.',
+      'Our service doesn’t eliminate the ants overnight.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('direct negation before a VERB-anchored pattern is exempt too', () => {
+    for (const body of [
+      // pattern: "prevents <pest> from returning" — negated
+      'A single visit will not prevent ants from returning.',
+      // pattern: "prevents all/every <pest>" — negated
+      'Even a professional treatment cannot prevent all ants.',
+      // pattern: "guaranteed elimination" — negated determiner
+      'There is no guaranteed elimination in Florida pest work.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('the bare affirmative promise still flags P1 (no round-1..5 regression)', () => {
+    for (const body of [
+      'This treatment prevents ants.',
+      'This quarterly treatment prevents infestations.',
+      'Our treatment eliminates ants in your home.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE' && f.severity === 'P1')).toBe(true);
+    }
+  });
+
+  test('"not only prevents" is an AFFIRMATIVE claim and still flags', () => {
+    const r = guardrails.evaluate({ body: 'This treatment not only prevents ants, it starves the colony.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('a disclaimer still cannot shield a coordinated promise (round-4 shape intact)', () => {
+    const r = guardrails.evaluate({ body: 'No honest company will promise you will never see another ant, but our service eliminates ants.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+
+  test('"Nothing stops ants…" hype is NOT treated as negation and still flags', () => {
+    const r = guardrails.evaluate({ body: 'Nothing stops ants from coming back like our quarterly program.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+});
+
+// Round 9 (Codex P2 x3): label-reading compliance copy, choice-verb product
+// recommendations, and subject-negated disclaimers.
+describe('product/prevention guards — round-9 hardening (Codex findings)', () => {
+  test('label-following compliance copy is NOT an inventory claim', () => {
+    for (const body of [
+      'Our technicians use the product label to choose safe placement.',
+      'Our techs use the bait label to set re-entry expectations.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+    }
+  });
+
+  test('real inventory claims still flag after the label carve-out', () => {
+    for (const body of [
+      'Our techs carry more than one bait on every ant call.',
+      'Our technicians use a professional gel in wall voids.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+    }
+  });
+
+  test('ambiguous-brand adjacency keeps "label" ("the Premise label" still flags)', () => {
+    const r = guardrails.evaluate({ body: 'Always read the Premise label before treating.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(true);
+  });
+
+  test('choice-verb recommendations of professional products flag', () => {
+    for (const body of [
+      'Choose Advion for ants.',
+      'For sugar ants, select Termidor along the slab.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM' && f.severity === 'P1')).toBe(true);
+    }
+  });
+
+  test('choice verbs without a professional product stay legal', () => {
+    const r = guardrails.evaluate({ body: 'Choose a licensed professional instead of DIY sprays, and select a service cadence that fits your home.' }, {});
+    expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('subject-negated prevention disclaimers are exempt', () => {
+    for (const body of [
+      'No service prevents all ants.',
+      'No treatment eliminates ants forever.',
+      'No single quarterly plan prevents every infestation.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('subject negation does NOT leak past punctuation or "no matter"', () => {
+    for (const body of [
+      'With no contract, our treatment eliminates ants for good.',
+      'No matter what, our treatment gets rid of the ants for good.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+    }
+  });
+
+  test('promotional inversions still flag after the subject-negation carve-out (round-8 pin)', () => {
+    const r = guardrails.evaluate({ body: 'Nothing stops ants from coming back like our quarterly program.' }, {});
+    expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+  });
+});
+
+// Round 10 (Codex P2 x2): product-as-topic "how <product> works" copy and
+// educational question/how-to prevention titles are the writer's bread and
+// butter — they must pass, while efficacy claims and affirmative promises
+// keep flagging exactly as every prior round pinned them.
+describe('product/prevention guards — round-10 hardening (Codex findings)', () => {
+  test('"How Sentricon works" product-as-topic copy passes (title AND body)', () => {
+    const viaTitle = guardrails.evaluate({
+      body: 'Bait stations target the colony itself.',
+      frontmatter: { title: 'How Sentricon works in Southwest Florida', meta_description: 'What a monitored termite bait program actually does in SWFL sandy soil, and how a colony-level approach differs from liquid treatments for area homeowners.' },
+    }, {});
+    expect(viaTitle.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+    const viaBody = guardrails.evaluate({ body: 'Sentricon works by intercepting foraging termites before they reach the slab.' }, {});
+    expect(viaBody.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('efficacy "works" claims still flag after the topic carve-out', () => {
+    for (const body of [
+      'Termidor works better than anything else on the market.',
+      'Sentricon works guaranteed.',
+      'Advion works best for ants in Florida kitchens.',
+      'Advion really works on sweet-feeding ants.',
+      'Termidor works every time along the slab.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM' && f.severity === 'P1')).toBe(true);
+    }
+  });
+
+  test('educational how-to prevention titles pass', () => {
+    for (const body of [
+      'How to prevent ants from coming back',
+      'Steps to keep ants from coming back after treatment.',
+      'To prevent ants from getting in, seal the weep holes and fix the moisture first.',
+      'How to keep your kitchen pest-free between visits.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('prevention QUESTIONS pass (fronted-auxiliary inversion)', () => {
+    for (const body of [
+      'Can pest control prevent ants from coming back?',
+      'Will a quarterly treatment stop ants from returning?',
+      'How do exterminators keep roaches from coming back?',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('affirmative promises still flag after the question/how-to carve-out', () => {
+    for (const body of [
+      'Our service prevents ants from coming back.',
+      'We prevent ants from coming back.',
+      'Our treatment is designed to prevent ants from coming back.',
+      'This program is guaranteed to keep ants from coming back.',
+      // question WRAPPER around an inflected embedded promise is still a promise
+      'Did you know our treatment prevents ants from coming back?',
+      'This is how our treatment prevents ants from coming back.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE' && f.severity === 'P1')).toBe(true);
+    }
+  });
+
+  test('every prior round\'s pinned bypass shape still flags', () => {
+    for (const body of [
+      'Sealing the slab gap keeps the ants from coming back next month.', // round 1
+      'No honest company will promise you will never see another ant, but our service eliminates ants.', // round 4
+      'This treatment not only prevents ants, it starves the colony.', // round 8
+      'Nothing stops ants from coming back like our quarterly program.', // rounds 8+9
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+    }
+  });
+});

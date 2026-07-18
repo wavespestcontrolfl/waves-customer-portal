@@ -29,7 +29,66 @@ const logger = require('../services/logger');
  * NOT for jobs that already claim work atomically (FOR UPDATE SKIP LOCKED
  * queues, conditional-UPDATE claims) — those are fleet-safe without it.
  */
-async function runExclusive(jobName, fn) {
+const MAX_RECORDED_ERROR_LENGTH = 500;
+
+// Provider errors can echo request payloads — Twilio errors are known to
+// embed phone numbers (see review-request.js's deliberate refusal to log
+// err.message). Mask digit runs before the message is persisted anywhere.
+function sanitizeJobError(message) {
+  return String(message || 'unknown error')
+    .replace(/\+?\d[\d\s().-]{5,}\d/g, '[redacted-number]')
+    .slice(0, MAX_RECORDED_ERROR_LENGTH);
+}
+
+// Best-effort job-health recorder (job_health table, one row per job) —
+// feeds the Intelligence Bar's get_scheduled_job_health. Every write is
+// wrapped so ledger problems (missing table pre-migration, transient DB
+// errors) can NEVER break or delay the job itself. Skipped ticks
+// (lease_held / no_connection) are normal fleet behavior and are not
+// recorded.
+async function recordJobStart(jobName) {
+  try {
+    await db('job_health')
+      .insert({ job_name: jobName, last_started_at: new Date(), last_status: 'running', updated_at: new Date() })
+      .onConflict('job_name')
+      .merge({ last_started_at: new Date(), last_status: 'running', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[cron-lock] ${jobName}: job_health start record failed (${err.message})`);
+  }
+}
+
+async function recordJobEnd(jobName, startedAtMs, error) {
+  try {
+    const finishedAt = new Date();
+    const patch = {
+      last_finished_at: finishedAt,
+      last_duration_ms: Math.max(0, Date.now() - startedAtMs),
+      updated_at: finishedAt,
+    };
+    if (error) {
+      patch.last_status = 'failed';
+      patch.last_error = sanitizeJobError(error.message || error);
+      await db('job_health').where({ job_name: jobName })
+        .update({ ...patch, consecutive_failures: db.raw('consecutive_failures + 1') });
+    } else {
+      patch.last_status = 'success';
+      patch.last_success_at = finishedAt;
+      patch.last_error = null;
+      patch.consecutive_failures = 0;
+      await db('job_health').where({ job_name: jobName }).update(patch);
+    }
+  } catch (err) {
+    logger.warn(`[cron-lock] ${jobName}: job_health end record failed (${err.message})`);
+  }
+}
+
+// options.recordHealth (default true): set false for DYNAMIC per-entity
+// locks (review-send:${customerId}, per-run approval locks) — those are
+// mutual-exclusion uses, not scheduled jobs, and recording them would grow
+// job_health by one row per customer/run and leave one-off failures listed
+// as "failing" forever. Bounded-enum names (per-conversion-type upload
+// syncs) stay recorded — they ARE the scheduled jobs.
+async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
   const lockKey = `cron:${jobName}`;
   let conn;
   try {
@@ -50,7 +109,18 @@ async function runExclusive(jobName, fn) {
       logger.info(`[cron-lock] ${jobName}: lease held elsewhere (overlapping instance or prior tick) — skipping`);
       return { skipped: true, reason: 'lease_held' };
     }
-    return await fn();
+    const startedAtMs = Date.now();
+    if (recordHealth) await recordJobStart(jobName);
+    try {
+      const result = await fn();
+      if (recordHealth) await recordJobEnd(jobName, startedAtMs, null);
+      return result;
+    } catch (err) {
+      // Record the failure, then preserve the existing contract: the
+      // error still propagates to the job's own handler.
+      if (recordHealth) await recordJobEnd(jobName, startedAtMs, err);
+      throw err;
+    }
   } finally {
     if (locked) {
       try {
