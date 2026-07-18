@@ -29,6 +29,7 @@
 import { X, ChevronRight } from 'lucide-react';
 import { useState } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
+import { getAdminUser } from '../../lib/adminAuth';
 import MobileManualCardSheet from './MobileManualCardSheet';
 import MobileCashTenderSheet from './MobileCashTenderSheet';
 import MobileCheckTenderSheet from './MobileCheckTenderSheet';
@@ -100,7 +101,13 @@ export default function MobilePaymentSheet({
     { key: 'cash', label: 'Cash', onClick: () => setShowCash(true) },
     { key: 'check', label: 'Check', onClick: () => setShowCheck(true) },
     { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => setShowManualCard(true) },
-    { key: 'card_on_file', label: 'Card on File', onClick: () => setShowCardOnFile(true) },
+    // Card on File posts /admin/invoices/:id/charge-card, which is
+    // requireAdmin on the server (off-session charge of a saved card) — a
+    // technician token gets 403, so the tender only renders for admins.
+    // Missing/unknown role fails closed to hidden.
+    ...(getAdminUser()?.role === 'admin'
+      ? [{ key: 'card_on_file', label: 'Card on File', onClick: () => setShowCardOnFile(true) }]
+      : []),
     // The Invoice (send pay-link) tender is suppressed for the charge-in-person
     // annual-prepay flow: that path means "collect now", and hiding the send option
     // keeps closing-the-sheet unambiguously an abort (so the caller can void the

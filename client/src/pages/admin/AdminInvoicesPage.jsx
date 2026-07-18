@@ -80,6 +80,7 @@ import { invoiceDateOnly, formatInvoiceDate } from "../../lib/invoiceDates";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
+import { getAdminUser } from "../../lib/adminAuth";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -616,6 +617,11 @@ function InvoiceList({
   promptResendId,
   onPromptResendHandled,
 }) {
+  // POST /admin/invoices/:id/charge-card is requireAdmin on the server
+  // (off-session saved-card charges are admin-only); the charge action only
+  // renders for admin-role users, failing closed on missing/unknown role.
+  // The "card on file" info badge stays visible to all staff.
+  const isAdminUser = getAdminUser()?.role === "admin";
   const PAGE_SIZE = 100;
   const [invoices, setInvoices] = useState([]);
   const [total, setTotal] = useState(0);
@@ -1361,7 +1367,7 @@ function InvoiceList({
                           {/* Payer-billed invoices collect from the payer's AP
                               inbox — the saved card belongs to the homeowner,
                               so the charge endpoint rejects them. */}
-                          {canCollect && cardOnFile && !inv.payer_id && (
+                          {isAdminUser && canCollect && cardOnFile && !inv.payer_id && (
                             <button
                               onClick={() => setCardOnFileInvoice(inv)}
                               style={sBtn(D.heading, D.white, isMobile)}
