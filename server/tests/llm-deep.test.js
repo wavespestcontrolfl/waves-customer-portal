@@ -116,6 +116,41 @@ describe('createDeepMessage', () => {
     });
   });
 
+  // The error path must share the client's timeout budget exactly like the
+  // refusal path — otherwise an Anthropic request that THROWS after burning
+  // its budget passes a non-positive remaining number, which maps to
+  // undefined and lets callOpenAI apply its 10-minute default (holding
+  // 60s-budget callers like the quarantine arbiter ~10 extra minutes).
+  describe('error fallback shares the client timeout budget', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    test('OpenAI backup gets only the time remaining on the client timeout', async () => {
+      jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(10000);
+      const create = jest.fn().mockRejectedValueOnce(new Error('api 529'));
+      const client = { messages: { create }, timeout: 60000 };
+      mockCallOpenAI.mockResolvedValue({ ok: true, model: 'openai-backup', text: 'ok' });
+      const resp = await createDeepMessage(client, { max_tokens: 100, messages: [] });
+      expect(mockCallOpenAI).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 50000 }));
+      expect(resp.content[0].text).toBe('ok');
+    });
+
+    test('near the deadline the backup is skipped and the error rethrows', async () => {
+      jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(58000);
+      const create = jest.fn().mockRejectedValueOnce(new Error('api 529'));
+      const client = { messages: { create }, timeout: 60000 };
+      await expect(createDeepMessage(client, { max_tokens: 100, messages: [] })).rejects.toThrow('api 529');
+      expect(mockCallOpenAI).not.toHaveBeenCalled();
+    });
+
+    test('an exhausted budget (negative remaining) never becomes the 10-minute default', async () => {
+      jest.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(70000);
+      const create = jest.fn().mockRejectedValueOnce(new Error('Request timed out'));
+      const client = { messages: { create }, timeout: 60000 };
+      await expect(createDeepMessage(client, { max_tokens: 100, messages: [] })).rejects.toThrow('Request timed out');
+      expect(mockCallOpenAI).not.toHaveBeenCalled();
+    });
+  });
+
   test('API errors fall back to OpenAI', async () => {
     const create = jest.fn().mockRejectedValueOnce(new Error('api 529'));
     mockCallOpenAI.mockResolvedValue({ ok: true, model: 'openai-backup', text: 'ok' });

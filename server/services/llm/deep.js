@@ -41,8 +41,19 @@ async function createDeepMessage(client, params = {}) {
   try {
     response = await client.messages.create({ ...params, model });
   } catch (err) {
+    // Same remaining-budget guard as the refusal path below. Without it, an
+    // Anthropic request that THROWS after consuming its budget (e.g. its own
+    // timeout) passes a non-positive remaining number, which
+    // callOpenAIDeepFallback maps to undefined — and callOpenAI then applies
+    // its 10-minute default, holding 60s-budget callers (contact-quarantine
+    // arbiter, call self-audit) ~10 extra minutes.
+    const remainingMs = remainingBudget(client, startedAt);
+    if (remainingMs !== null && remainingMs < FALLBACK_MIN_MS) {
+      logger.warn(`[llm-deep] ${model} failed (${err.message}) — skipping OpenAI backup, only ${Math.max(0, remainingMs)}ms left`);
+      throw err;
+    }
     logger.warn(`[llm-deep] ${model} failed (${err.message}) — trying OpenAI backup`);
-    const fallback = await callOpenAIDeepFallback(params, remainingBudget(client, startedAt));
+    const fallback = await callOpenAIDeepFallback(params, remainingMs);
     if (fallback) return fallback;
     throw err;
   }

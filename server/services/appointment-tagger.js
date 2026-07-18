@@ -208,7 +208,9 @@ class AppointmentTagger {
   async generateWDOBriefAI(service, rc) {
     try {
       const resp = await dispatchWithFallback(MODELS.TEXT_POLICIES.deepAnalysis, {
-        maxTokens: 4000,
+        // Documented DEEP floor — MODEL_DEEP may point at a thinking model
+        // (fable line) where thinking spends from the same token budget.
+        maxTokens: 4096,
         jsonMode: true,
         system: 'You are a pre-inspection research assistant for a Florida pest control company. Analyze public property data and return a JSON WDO pre-inspection brief with: risk_score (Low/Moderate/High), risk_reason, top_3_priorities, top_3_unknowns, vulnerabilities, homeowner_questions. Return VALID JSON ONLY.',
         text: `WDO brief for ${service.address_line1}, ${service.city}, FL ${service.zip}. Client: ${service.first_name} ${service.last_name}. Date: ${service.scheduled_date}.\n\nProperty data: ${JSON.stringify(rc)}`,

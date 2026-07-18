@@ -290,7 +290,10 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     if (!post) throw new Error('Post not found');
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.deepAnalysis, {
-      maxTokens: 3000,
+      // Documented DEEP floor — MODEL_DEEP may point at a thinking model
+      // (fable line) where thinking spends from the same token budget, so a
+      // sub-4096 cap can starve the visible JSON.
+      maxTokens: 4096,
       jsonMode: true,
       system: 'You optimize existing blog posts for Waves Pest Control. Improve SEO without changing core content. Match the Waves voice: snarky, casual, Florida-specific, technically knowledgeable.',
       text: `Optimize this published blog post. Current SEO score: ${post.seo_score || 'unknown'}/100.

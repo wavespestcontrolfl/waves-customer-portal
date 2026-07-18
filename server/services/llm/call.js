@@ -33,6 +33,16 @@ const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 // connection and then stalls can never hang forever — it aborts and the
 // dispatcher moves to the backup provider.
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Reasoning-safe floor for GPT-5-line Responses requests. OpenAI bills
+// reasoning tokens against max_output_tokens, so a tiny caller cap (e.g. the
+// 60-token SMS service-intent classifier) can be consumed entirely by
+// reasoning: the response returns status:"incomplete" with no visible JSON
+// and the whole leg reads as a provider failure. Below this floor the adapter
+// requests minimal reasoning AND widens the wire-level cap to the floor so
+// the visible JSON always has room; lanes at/above the floor keep the
+// caller's cap and effort unchanged.
+const OPENAI_REASONING_FLOOR_TOKENS = 1024;
 const geminiKey = () => process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const geminiUrl = (model, key) =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
@@ -61,7 +71,27 @@ function parseLooseJson(text) {
   const start = Math.min(...starts);
   const end = clean[start] === '[' ? clean.lastIndexOf(']') : clean.lastIndexOf('}');
   if (end <= start) return null;
-  try { return JSON.parse(clean.slice(start, end + 1)); } catch { return null; }
+  const candidate = clean.slice(start, end + 1);
+  try { return JSON.parse(candidate); } catch { /* fall through to mechanical repair */ }
+  return parseRepairedJson(candidate);
+}
+
+// Mechanical repair for the two syntax slips models actually produce, ported
+// from the pre-failover newsletter drafter (which repaired before failing):
+// trailing commas before a closing bracket, and raw control characters inside
+// string literals. \n / \r / \t are preserved — they legitimately appear as
+// formatting BETWEEN tokens, where escaping them would corrupt valid JSON.
+// Returns the parsed value or null; never throws. Living here (not in the
+// newsletter) means every dispatchWithFallback lane recovers repairable
+// output instead of burning the leg as empty_json.
+function parseRepairedJson(raw) {
+  let fixed = String(raw).replace(/,\s*([\]}])/g, '$1'); // trailing commas
+  fixed = fixed.replace(/[\x00-\x1F\x7F]/g, (ch) => ( // unescaped control chars
+    ch === '\n' || ch === '\r' || ch === '\t'
+      ? ch
+      : `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+  ));
+  try { return JSON.parse(fixed); } catch { return null; }
 }
 
 // Per-provider image block shapes (normalized input: { data: base64, mimeType }).
@@ -91,8 +121,14 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, m
     // retains application state by default, and these lanes carry customer PII
     // (inbound email sender/subject/body, call transcripts, names/addresses).
     const body = { model, input: [{ role: 'user', content }], store: false };
-    if (maxTokens) body.max_output_tokens = maxTokens;
-    if (/^gpt-5(?:\.|-|$)/i.test(String(model || ''))) body.reasoning = { effort: reasoningEffort };
+    // Gate reasoning by cap — see OPENAI_REASONING_FLOOR_TOKENS. Big lanes
+    // keep the caller's cap and the standard effort (default 'low') exactly
+    // as before; tiny structured lanes drop to minimal effort with a widened
+    // wire cap so reasoning can never starve the visible output.
+    const isGpt5 = /^gpt-5(?:\.|-|$)/i.test(String(model || ''));
+    const tinyCap = isGpt5 && Number.isFinite(maxTokens) && maxTokens > 0 && maxTokens < OPENAI_REASONING_FLOOR_TOKENS;
+    if (maxTokens) body.max_output_tokens = tinyCap ? OPENAI_REASONING_FLOOR_TOKENS : maxTokens;
+    if (isGpt5) body.reasoning = { effort: tinyCap ? 'minimal' : reasoningEffort };
     const resp = await fetch(OPENAI_RESPONSES_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },

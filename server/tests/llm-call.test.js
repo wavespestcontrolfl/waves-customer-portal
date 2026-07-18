@@ -33,6 +33,20 @@ describe('llm/call parsers', () => {
     expect(parseLooseJson('')).toBeNull();
   });
 
+  // The pre-failover newsletter drafter repaired trailing commas and raw
+  // control characters before failing; the shared parser must do the same so
+  // repairable output never burns a provider leg as empty_json (and the
+  // newsletter path never 500s where it used to produce a draft).
+  test('parseLooseJson mechanically repairs trailing commas and control chars', () => {
+    expect(parseLooseJson('{"a": 1, "b": [1, 2,],}')).toEqual({ a: 1, b: [1, 2] });
+    expect(parseLooseJson('sure: {"a":1,} done')).toEqual({ a: 1 });
+    expect(parseLooseJson('{"subject":"Bug\x07 alert"}')).toEqual({ subject: 'Bug\x07 alert' });
+    // formatting newlines between tokens stay valid through the repair path
+    expect(parseLooseJson('{"a": 1,\n  "b": 2,\n}')).toEqual({ a: 1, b: 2 });
+    // truly broken (truncated) JSON still returns null
+    expect(parseLooseJson('{"a": [1, 2')).toBeNull();
+  });
+
   test('providerErrorReason preserves a provider HTTP status without response text', () => {
     expect(providerErrorReason('anthropic', { status: 529 })).toBe('anthropic_529');
     expect(providerErrorReason('anthropic', { message: '529 overloaded' })).toBe('anthropic_529');
@@ -182,6 +196,27 @@ describe('callOpenAI jsonMode parsing', () => {
     expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: false })).toEqual({ ok: false, reason: 'openai_incomplete' });
     const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
     expect(body.reasoning).toEqual({ effort: 'low' });
+  });
+
+  // OpenAI bills reasoning tokens against max_output_tokens: a 60-token
+  // classifier cap can be consumed entirely by reasoning, returning
+  // status:"incomplete" with no visible JSON. Tiny caps must drop to minimal
+  // effort with a widened wire cap; big lanes stay exactly as before.
+  test('tiny maxTokens → minimal reasoning effort and widened wire cap', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"interest":"pest"}' }) });
+    const r = await callOpenAI({ model: 'gpt-5.6-luna', text: 'classify', jsonMode: true, maxTokens: 60 });
+    expect(r.ok).toBe(true);
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.reasoning).toEqual({ effort: 'minimal' });
+    expect(body.max_output_tokens).toBe(1024);
+  });
+
+  test('at/above the reasoning floor the caller cap and effort pass through unchanged', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+    await callOpenAI({ model: 'gpt-5.6-terra', text: 'hi', jsonMode: true, maxTokens: 4096 });
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.reasoning).toEqual({ effort: 'low' });
+    expect(body.max_output_tokens).toBe(4096);
   });
 
   // These lanes route customer PII (inbound email sender/subject/body, call
