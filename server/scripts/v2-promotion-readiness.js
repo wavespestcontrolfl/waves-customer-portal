@@ -23,6 +23,7 @@ const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInSer
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
 const SCHEMA_PASS_THRESHOLD = 0.95;
@@ -32,8 +33,10 @@ const AGREEMENT_THRESHOLD = 0.95;
 // Shadow rows from a prior model/prompt (e.g. the pre-Gemini-Pro/JSON-mode
 // extractor that 100% schema-failed) would otherwise dilute the metrics and
 // let a stale ≥95% sample green-light a freshly-changed extractor. Mirror the
-// processor's defaults; override via env if those change.
-const CURRENT_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
+// processor's route resolution; override via env if those change.
+const CURRENT_MODEL = process.env.CALL_EXTRACTION_MODEL
+  || ({ openai: 'gpt-5.6-sol', anthropic: MODELS.CALL_EXTRACTION_ANTHROPIC, gemini: process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro' })[process.env.CALL_EXTRACTION_PROVIDER || 'openai']
+  || 'gpt-5.6-sol';
 const CURRENT_PROMPT_VERSION = PROMPT_HASH;
 
 function dbConn() {

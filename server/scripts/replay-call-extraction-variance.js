@@ -1078,8 +1078,10 @@ function defaultReplayHelpers() {
 async function runReplayVariance(rawOptions = {}, context = {}) {
   const options = buildOptions(rawOptions);
 
-  if (context.requireGeminiKey !== false && !process.env.GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is not present; the current v2 extractor cannot be replayed here');
+  if (context.requireGeminiKey !== false
+      && !process.env.OPENAI_API_KEY && !process.env.ANTHROPIC_API_KEY
+      && !process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
+    throw new Error('No provider API key present for the v2 extraction route; the current v2 extractor cannot be replayed here');
   }
 
   const db = context.db || require('../models/db');

@@ -107,15 +107,42 @@ describe('v2 extraction function (extractCallDataV2)', () => {
     expect(typeof extractCallDataV2).toBe('function');
   });
 
-  test('returns not_run when GEMINI_API_KEY is not set', async () => {
-    const originalKey = process.env.GEMINI_API_KEY;
-    delete process.env.GEMINI_API_KEY;
+  test('returns not_run when no provider key exists for either route leg', async () => {
+    const KEYS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+    const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    KEYS.forEach((k) => delete process.env[k]);
     try {
       const result = await extractCallDataV2('test transcript', '+19415551234', {});
       expect(result.status).toBe('not_run');
       expect(result.extraction).toBeNull();
     } finally {
-      if (originalKey) process.env.GEMINI_API_KEY = originalKey;
+      KEYS.forEach((k) => {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      });
+    }
+  });
+
+  test('extraction route crosses providers and pins the bake-off winner', () => {
+    const { CALL_EXTRACTION_ROUTE } = CallRecordingProcessor._test;
+    expect(CALL_EXTRACTION_ROUTE.primary).toEqual({ provider: 'openai', model: 'gpt-5.6-sol' });
+    expect(CALL_EXTRACTION_ROUTE.fallback.provider).toBe('anthropic');
+    // dispatchWithFallback rejects same-provider policies — the route must
+    // never collapse to one provider.
+    expect(CALL_EXTRACTION_ROUTE.fallback.provider).not.toBe(CALL_EXTRACTION_ROUTE.primary.provider);
+  });
+
+  test('report-writer env overrides must not move the extraction default', () => {
+    jest.resetModules();
+    const prev = process.env.MODEL_OPENAI_REPORT_WRITER;
+    process.env.MODEL_OPENAI_REPORT_WRITER = 'gpt-hypothetical-writer';
+    try {
+      const fresh = require('../services/call-recording-processor');
+      expect(fresh._test.CALL_EXTRACTION_ROUTE.primary.model).toBe('gpt-5.6-sol');
+    } finally {
+      if (prev === undefined) delete process.env.MODEL_OPENAI_REPORT_WRITER;
+      else process.env.MODEL_OPENAI_REPORT_WRITER = prev;
+      jest.resetModules();
     }
   });
 });
