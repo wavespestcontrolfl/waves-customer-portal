@@ -163,6 +163,18 @@ describe('JSON-RPC plumbing', () => {
     expect(body).toBeNull();
   });
 
+  test('recognized-method notifications execute but are never answered', async () => {
+    const ping = await rpc({ jsonrpc: '2.0', method: 'ping' });
+    expect(ping.status).toBe(202);
+    expect(ping.body).toBeNull();
+
+    mockRows = [{ source: 'kb', chunks: '1', last_updated: 'x' }];
+    const call = await rpc({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'list_sources', arguments: {} } });
+    expect(call.status).toBe(202);
+    expect(call.body).toBeNull();
+    expect(builders.length).toBeGreaterThan(0); // the tool DID run
+  });
+
   test('batches answer per-message and reject over the cap', async () => {
     const { body } = await rpc([
       { jsonrpc: '2.0', id: 1, method: 'ping' },

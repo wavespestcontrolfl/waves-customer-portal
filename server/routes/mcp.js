@@ -204,21 +204,23 @@ async function handleRpc(message) {
   }
   const { id, method, params } = message;
   const isNotification = id === undefined || id === null;
+  // JSON-RPC: notifications execute but are never answered.
+  const respond = (result) => (isNotification ? null : rpcResult(id, result));
 
   switch (method) {
     case 'initialize':
-      return rpcResult(id, {
+      return respond({
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: 'waves-knowledge', version: '1.0.0' },
       });
     case 'ping':
-      return rpcResult(id, {});
+      return respond({});
     case 'tools/list':
-      return rpcResult(id, { tools: MCP_TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
+      return respond({ tools: MCP_TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
     case 'tools/call': {
       const result = await executeMcpTool(params?.name, params?.arguments);
-      return rpcResult(id, {
+      return respond({
         content: [{ type: 'text', text: JSON.stringify(result) }],
         isError: Boolean(result && result.error),
       });

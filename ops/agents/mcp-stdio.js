@@ -66,4 +66,6 @@ process.stdin.on('data', (chunk) => {
     if (line) queue = queue.then(() => forward(line));
   }
 });
-process.stdin.on('end', () => queue.then(() => process.exit(0)));
+// Natural shutdown once the queue drains — process.exit() here could
+// truncate a final response still buffered in stdout.
+process.stdin.on('end', () => queue.then(() => { process.exitCode = 0; }));
