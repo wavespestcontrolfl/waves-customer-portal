@@ -309,10 +309,12 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // unscoped.
 const isTechnicianRequest = (req) => req.techRole === 'technician';
 
+// Board/list scoping for technician tokens: the FULL current-assignment
+// predicate, not just technician_id — otherwise ?from=<years ago> or
+// status=all on /list re-opens the historical archive the per-visit gates
+// close (same TECH_ACCESS_WINDOW_DAYS / dead-status contract).
 function scopeToAssignedTech(req, q) {
-  if (isTechnicianRequest(req)) {
-    q.where('scheduled_services.technician_id', req.technicianId);
-  }
+  technicianCurrentVisitFilter(req, q);
 }
 
 // Assignment currency: a dead or ancient row must not keep authorizing.

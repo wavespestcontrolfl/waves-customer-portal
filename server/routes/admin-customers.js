@@ -104,6 +104,37 @@ function techSafeSort(sort) {
   return TECH_SAFE_SORTS.has(sort) ? sort : 'name';
 }
 
+// 360 payload keys a technician token never receives: payment instruments,
+// billing/consent/contract records, comms history, and CRM/marketing state.
+// /comms and /timeline are requireAdmin — the 360 endpoint must not
+// re-expose the same data to an assigned tech.
+const TECH_360_STRIPPED_KEYS = [
+  'interactions', 'smsLog', 'payments', 'invoices', 'cards',
+  'paymentMethodConsents', 'contracts', 'annualPrepayTerms', 'prepaidPlans',
+  'notificationPrefs', 'referralInfo', 'customerDiscounts', 'healthScore',
+  'tags',
+];
+const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
+  'payerId', 'billingMode', 'monthlyRate', 'annualValue', 'lifetimeRevenue',
+  'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
+  'landingPageUrl', 'lastContactDate', 'nextFollowUp', 'followUpNotes',
+  'crmNotes', 'referralCode', 'hasLeftGoogleReview', 'reviewMarkedAt',
+];
+
+function techSafe360Payload(payload) {
+  const out = { ...payload };
+  for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
+  out.customer = { ...payload.customer };
+  for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) delete out.customer[field];
+  out.accountProperties = (payload.accountProperties || []).map((p) => {
+    const row = { ...p };
+    delete row.monthlyRate;
+    delete row.pipelineStage;
+    return row;
+  });
+  return out;
+}
+
 function dateOnlyForApi(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -2012,6 +2043,12 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
     const service = await db('scheduled_services')
       .where({ customer_id: req.params.id })
       .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'])
+      // Same predicate as the existence gate: the prefill must be the
+      // TECH'S OWN latest visit — without this, an office-scheduled
+      // follow-up assigned to another tech leaks into the project modal.
+      .modify((q) => {
+        if (req.techRole === 'technician') currentAssignmentFilter(q, req.technicianId);
+      })
       .orderBy('scheduled_date', 'desc')
       .orderBy('created_at', 'desc')
       .first('id', 'service_type', 'scheduled_date', 'status');
@@ -2205,7 +2242,7 @@ router.get('/:id', async (req, res, next) => {
       }
     }));
 
-    res.json({
+    const payload = {
       customer: {
         id: c.id, firstName: c.first_name, lastName: c.last_name,
         accountId: c.account_id,
@@ -2350,7 +2387,8 @@ router.get('/:id', async (req, res, next) => {
         rows: nutrientLedgerRows || [],
       },
       customerDiscounts: customerDiscounts || [],
-    });
+    };
+    res.json(req.techRole === 'technician' ? techSafe360Payload(payload) : payload);
   } catch (err) { next(err); }
 });
 
@@ -3732,7 +3770,10 @@ router._private = {
   techSafeListRow,
   techSafeListFilters,
   techSafeSort,
+  techSafe360Payload,
   TECH_LIST_STRIPPED_FIELDS,
+  TECH_360_STRIPPED_KEYS,
+  TECH_360_STRIPPED_CUSTOMER_FIELDS,
   TECH_ACCESS_DEAD_STATUSES,
   adminMembershipDailyIdempotencyKey,
   adminMembershipStartIdempotencyKey,

@@ -114,7 +114,8 @@ const customersRouter = require('../routes/admin-customers');
 const { scopeToAssignedTech, technicianOwnsScheduledService } = scheduleRouter._test;
 const {
   technicianServicesCustomer, techSafeListRow, techSafeListFilters, techSafeSort,
-  TECH_LIST_STRIPPED_FIELDS,
+  techSafe360Payload,
+  TECH_LIST_STRIPPED_FIELDS, TECH_360_STRIPPED_KEYS, TECH_360_STRIPPED_CUSTOMER_FIELDS,
 } = customersRouter._private;
 
 const daysFromNow = (n) => etDateString(addETDays(new Date(), n));
@@ -264,13 +265,21 @@ describe('technicianOwnsScheduledService', () => {
 describe('scopeToAssignedTech', () => {
   const fakeQuery = () => {
     const calls = [];
-    return { calls, where(...args) { calls.push(args); return this; } };
+    return {
+      calls,
+      where(...args) { calls.push(['where', ...args]); return this; },
+      whereNotIn(...args) { calls.push(['whereNotIn', ...args]); return this; },
+    };
   };
 
-  test('technician requests are pinned to their own technician_id', () => {
+  test('technician requests get the FULL current-assignment predicate, not just technician_id', () => {
     const q = fakeQuery();
     scopeToAssignedTech({ techRole: 'technician', technicianId: 'tech-1' }, q);
-    expect(q.calls).toEqual([['scheduled_services.technician_id', 'tech-1']]);
+    expect(q.calls).toContainEqual(['where', 'scheduled_services.technician_id', 'tech-1']);
+    // Dead statuses excluded — ?status=all on /list must not re-open them.
+    expect(q.calls.some(([op, col]) => op === 'whereNotIn' && col === 'scheduled_services.status')).toBe(true);
+    // Date window — ?from=<years ago> must not re-open the archive.
+    expect(q.calls.some(([op, col, cmp]) => op === 'where' && col === 'scheduled_services.scheduled_date' && cmp === '>=')).toBe(true);
   });
 
   test('admin requests stay unscoped', () => {
@@ -316,6 +325,18 @@ describe('customer routes: assigned-customer proxy (technician role)', () => {
     await expect(technicianServicesCustomer({ techRole: 'technician', technicianId: 'tech-1' }, 'cust-other')).resolves.toBe(false);
   });
 
+  test('latest-scheduled-service prefill is the tech\'s OWN visit, not another tech\'s follow-up', async () => {
+    db.__state.scheduledServices = [
+      // Office already booked a follow-up with ANOTHER tech — listed first
+      // so an unscoped query would surface it.
+      { id: 'svc-follow-up', technician_id: 'tech-2', customer_id: 'cust-own', status: 'pending', scheduled_date: daysFromNow(10) },
+      { id: 'svc-own', technician_id: 'tech-1', customer_id: 'cust-own', status: 'pending', scheduled_date: daysFromNow(3) },
+    ];
+    const { status, body } = await call('GET', '/api/admin/customers/cust-own/latest-scheduled-service');
+    expect(status).toBe(200);
+    expect(body.service.id).toBe('svc-own');
+  });
+
   test('only CURRENT assignments authorize: recent completion yes, stale or cancelled no', async () => {
     const tech = { techRole: 'technician', technicianId: 'tech-1' };
     // Completed 2 days ago — inside the post-visit paperwork window.
@@ -326,6 +347,45 @@ describe('customer routes: assigned-customer proxy (technician role)', () => {
     await expect(technicianServicesCustomer(tech, 'cust-stale-pending')).resolves.toBe(false);
     // Cancelled visit — never authorizes, even with a future date.
     await expect(technicianServicesCustomer(tech, 'cust-dead')).resolves.toBe(false);
+  });
+});
+
+describe('techSafe360Payload', () => {
+  test('strips billing/comms/CRM keys and customer financial fields, keeps service context', () => {
+    const payload = {
+      customer: {
+        id: 'c1', firstName: 'Pat', phone: '941', tier: 'gold',
+        monthlyRate: 89, annualValue: 1068, lifetimeRevenue: 5000, payerId: 'payer-1',
+        billingMode: 'invoice', pipelineStage: 'active_customer', leadScore: 90,
+        crmNotes: 'internal', referralCode: 'WAVES-XYZ1',
+        address: { line1: '1 Main' }, property: { type: 'residential' },
+      },
+      accountProperties: [{ id: 'p1', monthlyRate: 89, pipelineStage: 'won', address: { line1: '1 Main' } }],
+      interactions: [{ id: 1 }], smsLog: [{ id: 1 }], payments: [{ id: 1 }],
+      invoices: [{ id: 1 }], cards: [{ id: 1 }], paymentMethodConsents: [{ id: 1 }],
+      contracts: [{ id: 1 }], annualPrepayTerms: [{ id: 1 }], prepaidPlans: [{ id: 1 }],
+      notificationPrefs: {}, referralInfo: {}, customerDiscounts: [{ id: 1 }],
+      healthScore: 88, tags: ['vip'],
+      preferences: { gate_code: '1234' }, services: [{ id: 's1' }],
+      scheduled: [{ id: 'v1' }], upcomingScheduled: [{ id: 'v2' }],
+      photos: [{ id: 'ph1' }], complianceRecords: [], nutrientLedger: { rows: [] },
+      estimates: [{ id: 'e1' }],
+    };
+    const safe = techSafe360Payload(payload);
+    for (const key of TECH_360_STRIPPED_KEYS) expect(safe).not.toHaveProperty(key);
+    for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) expect(safe.customer).not.toHaveProperty(field);
+    expect(safe.customer).toEqual(expect.objectContaining({ id: 'c1', tier: 'gold' }));
+    expect(safe.accountProperties[0]).not.toHaveProperty('monthlyRate');
+    expect(safe.accountProperties[0]).not.toHaveProperty('pipelineStage');
+    // Field-relevant context survives.
+    expect(safe.preferences).toEqual({ gate_code: '1234' });
+    expect(safe.services).toHaveLength(1);
+    expect(safe.upcomingScheduled).toHaveLength(1);
+    expect(safe.photos).toHaveLength(1);
+    expect(safe.estimates).toHaveLength(1);
+    // Original payload untouched (admin path reuses it).
+    expect(payload.cards).toHaveLength(1);
+    expect(payload.customer.monthlyRate).toBe(89);
   });
 });
 
