@@ -784,6 +784,15 @@ const gates = {
   // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
+
+  // Treatment Zone Mapper — tech traces the treated perimeter over a satellite
+  // photo of the property; the traced path + snapshot replace the generic
+  // schematic on the customer's service report. Gates BOTH the tech capture
+  // routes (/api/tech/services/:id/treatment-zone) and the report payload's
+  // treatmentMap.traced block. Dev-open for local testing; dark in prod until
+  // Adam flips GATE_TREATMENT_ZONE_MAP=true. Kill switch: unset the var —
+  // reports instantly fall back to the schematic; stored rows are untouched.
+  treatmentZoneMap: isProd ? process.env.GATE_TREATMENT_ZONE_MAP === 'true' : true,
 };
 
 function isEnabled(gate) {

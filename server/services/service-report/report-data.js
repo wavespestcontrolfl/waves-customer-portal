@@ -39,6 +39,7 @@ const {
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const featureGates = require('../../config/feature-gates');
 
 let PhotoService = null;
 try {
@@ -2294,6 +2295,38 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     mode: 'live',
   }).catch(() => ({ available: false, fallbackReason: 'build_failed' }));
 
+  // Technician-traced treatment perimeter (Treatment Zone Mapper): the traced
+  // path + composited satellite snapshot saved from the tech portal. When
+  // present it replaces the generic schematic as the report's coverage map.
+  // Fail-soft everywhere — a missing table, row, or S3 signature must never
+  // break report rendering. Gated by GATE_TREATMENT_ZONE_MAP.
+  let tracedTreatmentZone = null;
+  try {
+    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id) {
+      const tracedRow = await knex('treatment_zone_maps')
+        .where({ scheduled_service_id: service.scheduled_service_id })
+        .first()
+        .catch(() => null);
+      if (tracedRow?.snapshot_s3_key && PhotoService) {
+        const tracedSnapshotUrl = await PhotoService.getViewUrl(
+          tracedRow.snapshot_s3_key,
+          PhotoService.CUSTOMER_DWELL_TTL_SECONDS
+        ).catch(() => null);
+        if (tracedSnapshotUrl) {
+          tracedTreatmentZone = {
+            snapshotUrl: tracedSnapshotUrl,
+            linearFt: numberOrNull(tracedRow.linear_ft),
+            closedLoop: Boolean(tracedRow.closed_loop),
+            capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
+            label: 'Treated perimeter traced on-site by your technician.',
+          };
+        }
+      }
+    }
+  } catch {
+    tracedTreatmentZone = null;
+  }
+
   // Bait station map (station-map-v1): numbered pins + this visit's statuses
   // over the same live satellite image. Gated to termite-bait-typed reports —
   // the VIEWER-VISIBLE snapshot types, so an internal_only companion's
@@ -2909,6 +2942,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         label: 'Schematic view of inspected and treated zones. Service zones are approximate.',
       },
       satellite: satelliteMap,
+      traced: tracedTreatmentZone,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     stationMap,

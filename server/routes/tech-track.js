@@ -606,4 +606,86 @@ router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
+// ── Treatment Zone Mapper (traced perimeter over the satellite photo) ────────
+// The tech traces the treated perimeter over a satellite view of the property;
+// we store the path (image px + lat/lng), linear feet, and the composited
+// snapshot PNG. Keyed on the scheduled-service id like the recap lane so it
+// works before or after completion — the report joins back through
+// service_records.scheduled_service_id. Gated: GATE_TREATMENT_ZONE_MAP.
+const featureGates = require('../config/feature-gates');
+const {
+  saveTreatmentZoneMap,
+  getTreatmentZoneMapForScheduledService,
+} = require('../services/treatment-zone-maps');
+
+router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(req.body?.payload || '');
+    } catch {
+      return res.status(400).json({ error: 'payload must be valid JSON' });
+    }
+    if (req.file && req.file.mimetype !== 'image/png') {
+      return res.status(400).json({ error: 'snapshot must be a PNG' });
+    }
+
+    const row = await saveTreatmentZoneMap({
+      scheduledServiceId: svc.id,
+      customerId: svc.customer_id,
+      technicianId: req.technicianId,
+      pathPoints: payload.pathPoints,
+      closedLoop: payload.closedLoop,
+      linearFt: payload.linearFt,
+      centerLat: payload.lat,
+      centerLng: payload.lng,
+      zoom: payload.zoom,
+      address: payload.address,
+      snapshotPngBuffer: req.file?.buffer || null,
+    });
+
+    logger.info(
+      `[tech-track] treatment zone saved service=${svc.id} tech=${req.technicianId} ` +
+      `points=${Array.isArray(payload.pathPoints) ? payload.pathPoints.length : 0} ` +
+      `linearFt=${row.linear_ft ?? 'n/a'}`
+    );
+    return res.json({ treatmentZone: row });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone save failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+router.get('/:id/treatment-zone', async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    const row = await getTreatmentZoneMapForScheduledService(req.params.id);
+    if (!row) return res.json({ treatmentZone: null });
+    let snapshotUrl = null;
+    if (row.snapshot_s3_key && config.s3?.bucket) {
+      snapshotUrl = await getSignedUrl(s3, new GetObjectCommand({
+        Bucket: config.s3.bucket, Key: row.snapshot_s3_key,
+      }), { expiresIn: 3600 });
+    }
+    return res.json({ treatmentZone: { ...row, snapshotUrl } });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone fetch failed: ${err.message}`);
+    return next(err);
+  }
+});
+
 module.exports = router;
