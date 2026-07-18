@@ -416,6 +416,9 @@ router.post('/:token/setup', async (req, res, next) => {
     // the updated invoice instead of charging against details the customer
     // isn't looking at. Backward-compatible: clients that don't echo a
     // version (older bundles) skip the check, matching today's behavior.
+    // This unlocked read is only the cheap early exit — the authoritative
+    // recheck runs against the FOR UPDATE row inside the mint transaction
+    // (expectedVersion below), closing the check→lock edit window.
     if (
       invoiceVersion != null
       && invoice.updated_at
@@ -466,6 +469,7 @@ router.post('/:token/setup', async (req, res, next) => {
       saveCard: !!saveCard || requireSave,
       cardOnly: !!cardOnly,
       holdCoverageForCapture,
+      expectedVersion: invoiceVersion,
     });
     const captureNeeded = !!result.covered_by_credit && holdCoverageForCapture;
 
@@ -500,7 +504,10 @@ router.post('/:token/setup', async (req, res, next) => {
     //     card PI merely stuck in requires_action is no longer a 409 — setup now
     //     cancels and re-mints it so the customer can pay (no operator needed).
     if (err.statusCode === 409) {
-      if (!err.inProgress) {
+      // A stale-render refusal from the in-txn version recheck is the same
+      // benign reload-and-retry as the unlocked pre-check above — no
+      // operator alert, the page just refreshes to the updated invoice.
+      if (!err.inProgress && !err.staleInvoice) {
         // Never log the raw pay-link token — it is the bearer credential for
         // this invoice and errors.log is broadly readable. When the invoice id
         // is unavailable, fall back to a masked suffix that still aids
@@ -522,6 +529,7 @@ router.post('/:token/setup', async (req, res, next) => {
         microdepositPending: !!err.microdepositPending,
         savedCardPending: !!err.savedCardPending,
         reconciliationRequired: !!err.reconciliationRequired,
+        staleInvoice: !!err.staleInvoice,
       });
     }
     logger.error(`[pay-v2] Setup error: ${err.message}`);

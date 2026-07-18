@@ -216,6 +216,33 @@ describe('POST /api/pay/:token/setup stale-render (invoiceVersion) fence', () =>
     });
   });
 
+  test('a lock-window edit is caught by the in-txn recheck and maps to the reload 409', async () => {
+    // The unlocked pre-check passes (the route read still matches the echoed
+    // version) but an edit commits before the mint's FOR UPDATE lock — the
+    // service recheck refuses and the route must surface the same
+    // staleInvoice reload signal as the pre-check, not a generic conflict.
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+    StripeService.createInvoicePaymentIntent.mockRejectedValue(Object.assign(
+      new Error('This invoice was just updated — refreshing to the latest version.'),
+      { statusCode: 409, inProgress: false, staleInvoice: true },
+    ));
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceVersion: new Date(UPDATED_AT).getTime() }),
+      });
+      const body = await response.json();
+      expect(response.status).toBe(409);
+      expect(body.staleInvoice).toBe(true);
+    });
+    // The echoed version must ride into the mint so the service CAN recheck
+    // it against the locked row.
+    expect(StripeService.createInvoicePaymentIntent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+      expectedVersion: new Date(UPDATED_AT).getTime(),
+    }));
+  });
+
   test('clients that do not echo a version skip the check (backward compatible)', async () => {
     StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValue(
       Object.assign(new Error('saved-card collection is fenced'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }),

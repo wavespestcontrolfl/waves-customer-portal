@@ -863,7 +863,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // annual prepay, deposit/account credit, applied-money/dispute fence)
     // are operator-actionable conflicts, not server faults — surface them
     // so the UI can toast the reason.
-    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied|payment already applied|payment dispute|sending right now/i.test(err.message)) {
+    if (/can be edited|already started paying|annual prepay term|active payment plan|deposit credit|account credit applied|payment already applied|payment dispute|sending right now|saved-card charge/i.test(err.message)) {
       return res.status(409).json({ error: err.message });
     }
     if (/Invalid line-item discount/i.test(err.message)) {
