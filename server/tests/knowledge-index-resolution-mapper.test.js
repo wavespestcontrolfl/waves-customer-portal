@@ -41,6 +41,31 @@ describe('resolution mapper — calls', () => {
     expect(a.outcome.disposition).toBe('booked');
   });
 
+  test('single-name references are redacted via the context pass (codex P1)', () => {
+    const a = mapCall({
+      call: CALL,
+      extraction: extraction(),
+      triageNotes: [{ reason_code: 'callback', resolution_note: 'Spoke with Jane about the side gate' }],
+      context: CONTEXT,
+    });
+    expect(a.resolution).not.toMatch(/Jane/);
+    expect(a.resolution).toContain('[name]');
+  });
+
+  test('V2 object-shaped pests render names, never [object Object] (codex P2)', () => {
+    const a = mapCall({
+      call: CALL,
+      extraction: extraction({
+        service_request: { primary_service_category: 'pest_control', pests_observed: [{ pest_type: 'german roach', severity_signal: 'high' }, 'silverfish'] },
+      }),
+      context: CONTEXT,
+    });
+    expect(a.question).toContain('german roach');
+    expect(a.question).toContain('silverfish');
+    expect(JSON.stringify(a)).not.toContain('[object Object]');
+    expect(a.systems).toEqual(expect.arrayContaining(['german roach', 'silverfish']));
+  });
+
   test('triage resolution notes and differing final action land in resolution', () => {
     const a = mapCall({
       call: CALL,
@@ -62,6 +87,28 @@ describe('resolution mapper — visits', () => {
 
   test('no recommendations → null', () => {
     expect(mapVisit({ record: RECORD, findings: [{ category: 'turf', detail: 'thin patches' }] })).toBeNull();
+  });
+
+  test('free-form finding titles are redacted (codex P1)', () => {
+    const a = mapVisit({
+      record: RECORD,
+      findings: [{ category: 'access', severity: 'info', title: 'Gate code from Jane Doe', detail: 'x', recommendation: 'Use side entrance' }],
+      context: { first_name: 'Jane', last_name: 'Doe' },
+    });
+    expect(a.resolution).not.toMatch(/Jane|Doe/);
+    expect(a.resolution).toContain('Use side entrance');
+  });
+
+  test('structured-notes recommendations map when findings carry none (codex P2)', () => {
+    const a = mapVisit({
+      record: RECORD,
+      findings: [{ category: 'turf', detail: 'thin patches', recommendation: null }],
+      structuredRecommendations: ['Raise mow height to 4 inches', 'Water 2x weekly for Jane Doe'],
+      context: { first_name: 'Jane', last_name: 'Doe' },
+    });
+    expect(a).not.toBeNull();
+    expect(a.resolution).toContain('Raise mow height');
+    expect(a.resolution).not.toMatch(/Doe/);
   });
 
   test('findings with recommendations map, redacted', () => {

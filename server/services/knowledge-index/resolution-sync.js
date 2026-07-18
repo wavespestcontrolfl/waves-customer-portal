@@ -14,11 +14,17 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { mapCall, mapVisit } = require('./resolution-mapper');
+const { preferredRouteDecisionForFeedback } = require('../call-route-decisions');
 
 const DEFAULT_BATCH = 500;
 const PAGE_SIZE = 200;
+const REFRESH_BATCH = 200;
 
-async function insertArtifact(artifact) {
+// Upsert-merge (NOT ignore): a call artifacted before staff closes its
+// triage card must pick up the later resolution_note — the refresh pass
+// re-maps such calls and this merge applies the new content. The embedding
+// layer's hash-diff then re-embeds only genuinely changed chunks.
+async function upsertArtifact(artifact) {
   await db('resolution_artifacts')
     .insert({
       source: artifact.source,
@@ -32,7 +38,36 @@ async function insertArtifact(artifact) {
       occurred_at: artifact.occurredAt,
     })
     .onConflict(['source', 'source_id'])
-    .ignore();
+    .merge(['customer_id', 'question', 'situation', 'resolution', 'outcome', 'systems', 'occurred_at', 'updated_at']);
+}
+
+// Batch-load triage notes + the production-representative route action for a
+// set of call ids. Route rows use the same preference the feedback path uses
+// (enforce over shadow, newer decision versions, then newest) instead of a
+// bare created_at sort that could crown a shadow/replay row.
+async function loadCallSideData(callIds) {
+  const triageRows = await db('triage_items')
+    .whereIn('call_log_id', callIds)
+    .select('call_log_id', 'reason_code', 'resolution_note');
+  const triageByCall = new Map();
+  for (const t of triageRows) {
+    if (!triageByCall.has(t.call_log_id)) triageByCall.set(t.call_log_id, []);
+    triageByCall.get(t.call_log_id).push(t);
+  }
+  const routeRows = await db('route_decisions')
+    .whereIn('call_log_id', callIds)
+    .select('call_log_id', 'mode', 'decision_version', 'created_at', 'final_action_taken');
+  const routesByCall = new Map();
+  for (const r of routeRows) {
+    if (!routesByCall.has(r.call_log_id)) routesByCall.set(r.call_log_id, []);
+    routesByCall.get(r.call_log_id).push(r);
+  }
+  const actionByCall = new Map();
+  for (const [callId, rows] of routesByCall) {
+    const preferred = preferredRouteDecisionForFeedback(rows);
+    if (preferred?.final_action_taken) actionByCall.set(callId, preferred.final_action_taken);
+  }
+  return { triageByCall, actionByCall };
 }
 
 /**
@@ -50,6 +85,13 @@ async function syncCallArtifacts({ limit = DEFAULT_BATCH } = {}) {
     let query = db('call_log as c')
       .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
       .whereNotNull('c.ai_extraction_enriched')
+      // Schema-failed V2 payloads persist in ai_extraction_enriched for
+      // audit; only 'valid' rows may drive behavior (same contract as the
+      // estimator context-builder). NULL = legacy pre-V2 rows written by the
+      // v1 path — the explicitly trusted fallback.
+      .where(function () {
+        this.where('c.v2_extraction_status', 'valid').orWhereNull('c.v2_extraction_status');
+      })
       .whereNotExists(function () {
         this.select(db.raw('1')).from('resolution_artifacts as ra')
           .whereRaw("ra.source = 'call'").whereRaw('ra.source_id = c.id');
@@ -64,22 +106,7 @@ async function syncCallArtifacts({ limit = DEFAULT_BATCH } = {}) {
     if (!calls.length) { stats.exhausted = true; break; }
     cursor = { created_at: calls[calls.length - 1].created_at, id: calls[calls.length - 1].id };
 
-    const callIds = calls.map((c) => c.id);
-    const triageRows = await db('triage_items')
-      .whereIn('call_log_id', callIds)
-      .select('call_log_id', 'reason_code', 'resolution_note');
-    const triageByCall = new Map();
-    for (const t of triageRows) {
-      if (!triageByCall.has(t.call_log_id)) triageByCall.set(t.call_log_id, []);
-      triageByCall.get(t.call_log_id).push(t);
-    }
-    const routeRows = await db('route_decisions')
-      .whereIn('call_log_id', callIds)
-      .whereNotNull('final_action_taken')
-      .orderBy('created_at', 'desc')
-      .select('call_log_id', 'final_action_taken');
-    const actionByCall = new Map();
-    for (const r of routeRows) if (!actionByCall.has(r.call_log_id)) actionByCall.set(r.call_log_id, r.final_action_taken);
+    const { triageByCall, actionByCall } = await loadCallSideData(calls.map((c) => c.id));
 
     for (const call of calls) {
       if (stats.mapped >= limit) break;
@@ -92,10 +119,55 @@ async function syncCallArtifacts({ limit = DEFAULT_BATCH } = {}) {
         context: { first_name: call.first_name, last_name: call.last_name, phone: call.phone },
       });
       if (!artifact) { stats.skipped += 1; continue; }
-      await insertArtifact(artifact);
+      await upsertArtifact(artifact);
       stats.mapped += 1;
     }
     if (calls.length < PAGE_SIZE && stats.mapped < limit) { stats.exhausted = true; break; }
+  }
+  return stats;
+}
+
+/**
+ * Refresh pass: calls whose triage/route rows changed AFTER their artifact
+ * was written get re-mapped, so institutional memory records the actual
+ * resolution, not the preliminary disposition. Bounded per run.
+ */
+async function refreshCallArtifacts() {
+  const stats = { refreshed: 0 };
+  const stale = await db('resolution_artifacts as ra')
+    .where('ra.source', 'call')
+    .where(function () {
+      this.whereExists(function () {
+        this.select(db.raw('1')).from('triage_items as ti')
+          .whereRaw('ti.call_log_id = ra.source_id')
+          .whereRaw('ti.updated_at > ra.updated_at');
+      }).orWhereExists(function () {
+        this.select(db.raw('1')).from('route_decisions as rd')
+          .whereRaw('rd.call_log_id = ra.source_id')
+          .whereRaw('rd.created_at > ra.updated_at');
+      });
+    })
+    .limit(REFRESH_BATCH)
+    .select('ra.source_id');
+  if (!stale.length) return stats;
+
+  const calls = await db('call_log as c')
+    .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
+    .whereIn('c.id', stale.map((r) => r.source_id))
+    .select('c.id', 'c.customer_id', 'c.created_at', 'c.call_summary', 'c.ai_extraction_enriched',
+      'cu.first_name', 'cu.last_name', 'cu.phone');
+  const { triageByCall, actionByCall } = await loadCallSideData(calls.map((c) => c.id));
+  for (const call of calls) {
+    const artifact = mapCall({
+      call,
+      extraction: call.ai_extraction_enriched,
+      triageNotes: triageByCall.get(call.id) || [],
+      finalAction: actionByCall.get(call.id) || null,
+      context: { first_name: call.first_name, last_name: call.last_name, phone: call.phone },
+    });
+    if (!artifact) continue;
+    await upsertArtifact(artifact);
+    stats.refreshed += 1;
   }
   return stats;
 }
@@ -106,11 +178,16 @@ async function syncCallArtifacts({ limit = DEFAULT_BATCH } = {}) {
 // per invocation; exhausted=true when a short page comes back.
 async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
   const stats = { examined: 0, mapped: 0, skipped: 0, exhausted: false };
+  // Two recommendation homes: findings rows (service-report flow) and
+  // structured_notes.protocol.recommendations (ordinary completions store
+  // tech-entered recommendations there with finding recommendation NULL).
   const records = await db('service_records as sr')
     .leftJoin('customers as cu', 'cu.id', 'sr.customer_id')
-    .whereExists(function () {
-      this.select(db.raw('1')).from('service_findings as sf')
-        .whereRaw('sf.service_record_id = sr.id').whereNotNull('sf.recommendation');
+    .where(function () {
+      this.whereExists(function () {
+        this.select(db.raw('1')).from('service_findings as sf')
+          .whereRaw('sf.service_record_id = sr.id').whereNotNull('sf.recommendation');
+      }).orWhereRaw("jsonb_array_length(coalesce(sr.structured_notes->'protocol'->'recommendations', '[]'::jsonb)) > 0");
     })
     .whereNotExists(function () {
       this.select(db.raw('1')).from('resolution_artifacts as ra')
@@ -118,7 +195,7 @@ async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
     })
     .orderBy('sr.service_date', 'asc')
     .limit(limit)
-    .select('sr.id', 'sr.customer_id', 'sr.service_date', 'sr.created_at', 'sr.service_type', 'sr.technician_notes',
+    .select('sr.id', 'sr.customer_id', 'sr.service_date', 'sr.created_at', 'sr.service_type', 'sr.technician_notes', 'sr.structured_notes',
       'cu.first_name', 'cu.last_name', 'cu.phone');
 
   if (!records.length) { stats.exhausted = true; return stats; }
@@ -133,9 +210,11 @@ async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
     if (!findingsByRecord.has(f.service_record_id)) findingsByRecord.set(f.service_record_id, []);
     findingsByRecord.get(f.service_record_id).push(f);
   }
+  // Writer stores 'fallback' or 'hidden'; table default is 'generated' —
+  // there is no 'ready'. Admit everything except hidden.
   const summaries = await db('service_report_ai_summaries')
     .whereIn('service_record_id', recordIds)
-    .where({ status: 'ready' })
+    .whereNotIn('status', ['hidden'])
     .select('service_record_id', 'summary_json')
     .catch(() => []);
   const summaryByRecord = new Map(summaries.map((s) => {
@@ -145,14 +224,18 @@ async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
 
   for (const record of records) {
     stats.examined += 1;
+    const structuredNotes = typeof record.structured_notes === 'string'
+      ? (() => { try { return JSON.parse(record.structured_notes); } catch { return {}; } })()
+      : (record.structured_notes || {});
     const artifact = mapVisit({
       record,
       findings: findingsByRecord.get(record.id) || [],
+      structuredRecommendations: structuredNotes?.protocol?.recommendations || [],
       aiSummary: summaryByRecord.get(record.id) || null,
       context: { first_name: record.first_name, last_name: record.last_name, phone: record.phone },
     });
     if (!artifact) { stats.skipped += 1; continue; }
-    await insertArtifact(artifact);
+    await upsertArtifact(artifact);
     stats.mapped += 1;
   }
   return stats;
@@ -161,9 +244,10 @@ async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
 async function syncResolutionArtifacts(options = {}) {
   const calls = await syncCallArtifacts(options);
   const visits = await syncVisitArtifacts(options);
-  const summary = { calls, visits };
+  const refresh = await refreshCallArtifacts();
+  const summary = { calls, visits, refresh };
   logger.info(`[resolution-sync] ${JSON.stringify(summary)}`);
   return summary;
 }
 
-module.exports = { syncResolutionArtifacts, syncCallArtifacts, syncVisitArtifacts };
+module.exports = { syncResolutionArtifacts, syncCallArtifacts, syncVisitArtifacts, refreshCallArtifacts };

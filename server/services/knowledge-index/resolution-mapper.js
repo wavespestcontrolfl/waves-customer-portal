@@ -35,7 +35,19 @@ const clean = (v) => String(v || '').trim();
 function redact(text, context = {}) {
   const value = clean(text);
   if (!value) return '';
-  return redactPii(redactText(value, context)).text;
+  // redactText exact-matches names from context.customer.* (nested) — a flat
+  // context is a silent no-op for the name pass; the pii-redactor heuristic
+  // alone misses single-name references ("Spoke with Jane").
+  return redactPii(redactText(value, { customer: context })).text;
+}
+
+// V2 extractions store pests_observed as objects ({ pest_type, ... });
+// older shapes used plain strings. Normalize both to names.
+function pestNames(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((p) => (typeof p === 'string' ? p : clean(p?.pest_type || p?.name)))
+    .map(clean)
+    .filter(Boolean);
 }
 
 function parseEnriched(raw) {
@@ -49,7 +61,7 @@ function renderQuestion(extraction) {
   const sr = extraction.service_request || {};
   const parts = [];
   if (sr.primary_service_category) parts.push(clean(sr.primary_service_category).replace(/_/g, ' '));
-  const pests = Array.isArray(sr.pests_observed) ? sr.pests_observed.filter(Boolean) : [];
+  const pests = pestNames(sr.pests_observed);
   if (pests.length) parts.push(`pests: ${pests.join(', ')}`);
   if (sr.service_intent) parts.push(`intent: ${clean(sr.service_intent).replace(/_/g, ' ')}`);
   if (sr.urgency) parts.push(`urgency: ${clean(sr.urgency)}`);
@@ -90,7 +102,7 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
     clean(extraction.call_nature),
     clean(sr.primary_service_category),
     ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : []),
-    ...(Array.isArray(sr.pests_observed) ? sr.pests_observed : []),
+    ...pestNames(sr.pests_observed),
   ].map(clean).filter(Boolean);
 
   return {
@@ -111,16 +123,28 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
 }
 
 /**
- * mapVisit({ record, findings, aiSummary, context }) → artifact | null
+ * mapVisit({ record, findings, structuredRecommendations, aiSummary, context })
+ *   → artifact | null
  *  record: service_records row (id, customer_id, service_date, service_type,
  *          technician_notes)
  *  findings: [{ category, severity, title, detail, recommendation }]
+ *  structuredRecommendations: string[] from
+ *          service_records.structured_notes.protocol.recommendations —
+ *          ordinary completions store tech-entered recommendations there,
+ *          not on findings rows
  *  aiSummary: service_report_ai_summaries.summary_json (optional)
  */
-function mapVisit({ record, findings = [], aiSummary = null, context = {} }) {
-  const recommendations = findings
-    .filter((f) => clean(f.recommendation))
-    .map((f) => `${clean(f.title) || clean(f.category)}: ${redact(f.recommendation, context)}`);
+function mapVisit({ record, findings = [], structuredRecommendations = [], aiSummary = null, context = {} }) {
+  const recommendations = [
+    // Finding titles are free-form tech observations — redact them like any
+    // other text; only the category label is a controlled value.
+    ...findings
+      .filter((f) => clean(f.recommendation))
+      .map((f) => `${redact(f.title, context) || clean(f.category)}: ${redact(f.recommendation, context)}`),
+    ...(Array.isArray(structuredRecommendations) ? structuredRecommendations : [])
+      .map((r) => redact(r, context))
+      .filter(Boolean),
+  ];
   if (!recommendations.length) return null; // no reusable recommendation — skip
 
   const situationParts = [];
