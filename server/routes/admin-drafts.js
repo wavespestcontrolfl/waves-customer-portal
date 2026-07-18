@@ -368,7 +368,9 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
   };
   try {
     const [lead, customer, estimate] = await Promise.all([
-      flags.lead_id ? db('leads').where({ id: flags.lead_id }).first() : null,
+      // whereNull(deleted_at): a soft-deleted lead reads as gone, retiring
+      // the draft — matching how every other lead query treats deletion.
+      flags.lead_id ? db('leads').where({ id: flags.lead_id }).whereNull('deleted_at').first() : null,
       draft.customer_id ? db('customers').where({ id: draft.customer_id }).first() : null,
       flags.estimate_id ? db('estimates').where({ id: flags.estimate_id }).first() : null,
     ]);

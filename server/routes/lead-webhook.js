@@ -843,26 +843,26 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // lead_intake_status='awaiting_service' above, but this form already
         // carries a concrete service — a customer answering the address
         // question would hit the service classifier and be dropped. Advance
-        // the machine to awaiting_address (with the interest it needs) so
-        // the reply is captured as the address. Applies on ANY gate-on park
-        // outcome (parked, merged into an open draft, or cooldown-deduped —
-        // a usable address ask exists either way); gate off keeps today's
-        // behavior untouched. Guarded UPDATE: only from the state this
-        // webhook just seeded.
-        if (parkedAsk
-          && parkedAsk.skipped !== 'gate_off'
+        // the machine to awaiting_address ONLY when a usable ask actually
+        // exists (parked, merged, or cooldown-deduped against a live one) —
+        // an internal park error means no SMS is coming, and moving the
+        // state then would strand the reply. The SUBMITTED service label is
+        // stored as-is: the readiness gate already certified it concrete,
+        // and the intake shell's SERVICE_LABEL map falls back to the raw
+        // label for non-core services (Mosquito Control, Termite …) — a
+        // coarse pest/lawn re-bucket would erase what they asked for.
+        // Guarded UPDATE: only from the state this webhook just seeded.
+        const askExists = parkedAsk?.parked === true
+          || ['merged_into_open_clarify', 'open_or_recent_clarify'].includes(parkedAsk?.skipped);
+        if (askExists
           && !clarifyMissing.includes('specific_service')
           && customer?.id) {
-          const { classifyServiceIntent } = require('../services/sms-service-intent');
-          const cls = await classifyServiceIntent(serviceInterest || '');
-          if (cls?.interest) {
-            await db('customers')
-              .where({ id: customer.id, lead_intake_status: 'awaiting_service' })
-              .update({
-                lead_intake_status: 'awaiting_address',
-                lead_service_interest: cls.interest,
-              });
-          }
+          await db('customers')
+            .where({ id: customer.id, lead_intake_status: 'awaiting_service' })
+            .update({
+              lead_intake_status: 'awaiting_address',
+              lead_service_interest: serviceInterest,
+            });
         }
       } catch (askErr) {
         logger.error(`Lead clarify ask failed: ${askErr.message}`);

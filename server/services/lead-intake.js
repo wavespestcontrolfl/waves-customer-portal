@@ -66,8 +66,11 @@ function extractAddressCandidate(body) {
   const text = String(body || '');
   let best = null;
   for (const match of text.matchAll(/\d{1,6}\s+[A-Za-z]/g)) {
-    const candidate = text.slice(match.index).trim();
-    if (candidate.length >= 6 && candidate.length <= 300 && STREET_SUFFIX_RE.test(candidate)) {
+    // Cut the tail at the first clause boundary so trailing prose ("… 123
+    // Main St for ants, they're everywhere") doesn't ride into
+    // address_line1 — commas stay (city/zip live after them).
+    const candidate = text.slice(match.index).split(/[.;!?\n]/)[0].trim();
+    if (candidate.length >= 6 && candidate.length <= 160 && STREET_SUFFIX_RE.test(candidate)) {
       best = candidate;
     }
   }
