@@ -10,6 +10,19 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(),
 }));
 
+// Controllable consent snapshot for the conversion-lane suppression tests.
+// The consent module's own matching rules are pinned in
+// ad-audience-consent.test.js — here we only exercise the conversion seam.
+const mockLoadSuppression = jest.fn();
+jest.mock('../services/ads/ad-audience-consent', () => ({
+  loadMarketingSuppression: (...args) => mockLoadSuppression(...args),
+  normPhone: (p) => {
+    const digits = String(p || '').replace(/\D/g, '');
+    if (!digits) return null;
+    return digits.length > 10 ? digits.slice(-10) : digits;
+  },
+}));
+
 const crypto = require('crypto');
 const DataManager = require('../services/ads/data-manager');
 
@@ -27,6 +40,7 @@ const {
   normalizePhone,
   redactedEventSummary,
   sha256Hex,
+  applyMarketingConsent,
   skipReason,
   summarizeCandidates,
   uploadLogStatusForIngest,
@@ -333,5 +347,81 @@ describe('Google Data Manager upload helpers', () => {
       }],
     }));
     expect(request.events).toHaveLength(1);
+  });
+});
+
+describe('conversion-lane marketing-consent suppression', () => {
+  const snapshot = ({ phones = [], emails = [], invalid = [] } = {}) => ({
+    invalidPhones: new Set(invalid),
+    isSuppressed: (m) => {
+      const digits = String((m && m.phone) || '').replace(/\D/g, '');
+      const ph = digits.length > 10 ? digits.slice(-10) : digits;
+      const em = String((m && m.email) || '').trim().toLowerCase();
+      return Boolean((ph && phones.includes(ph)) || (em && emails.includes(em)));
+    },
+  });
+
+  beforeEach(() => {
+    mockLoadSuppression.mockReset();
+    mockLoadSuppression.mockResolvedValue(snapshot());
+  });
+
+  test('strips email AND phone from an opted-out contact and flags it', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 't-1', email: 'optout@example.com', phone: '+19415550100', gclid: 'g-1',
+    }]);
+    expect(cleaned).toMatchObject({ transactionId: 't-1', email: null, phone: null, consentSuppressed: true });
+  });
+
+  test('a suppressed contact WITH a click id still measures — click-id-only event, no hashed PII', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      conversionType: 'completed_job_revenue', transactionId: 't-1', eventTimestamp: '2026-07-01T12:00:00Z',
+      conversionValue: 100, email: 'optout@example.com', phone: '+19415550100', gclid: 'g-1',
+    }]);
+    expect(skipReason(cleaned)).toBeNull();
+    const event = buildEvent(cleaned);
+    expect(event.adIdentifiers).toEqual({ gclid: 'g-1' });
+    expect(event.userData).toBeUndefined();
+  });
+
+  test('a suppressed contact WITHOUT a click id is skipped as consent_suppressed, not missing_match_keys', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ phones: ['9415550100'] }));
+    const [cleaned] = await applyMarketingConsent('qualified_lead', [{
+      conversionType: 'qualified_lead', transactionId: 't-2', eventTimestamp: '2026-07-01T12:00:00Z',
+      email: null, phone: '(941) 555-0100',
+    }]);
+    expect(skipReason(cleaned)).toBe('consent_suppressed');
+    const { counts } = summarizeCandidates([cleaned]);
+    expect(counts.consentSuppressed).toBe(1);
+    expect(counts.missingMatchKeys).toBe(0);
+    expect(counts.skipped).toBe(1);
+  });
+
+  test('a never-had-keys row still reports missing_match_keys (no consent involved)', () => {
+    expect(skipReason({
+      conversionType: 'qualified_lead', transactionId: 't-3', eventTimestamp: '2026-07-01T12:00:00Z',
+    })).toBe('missing_match_keys');
+  });
+
+  test('wrong_number strips ONLY the (stranger\'s) phone; person is not opted out', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ invalid: ['9415550100'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 't-4', email: 'fine@example.com', phone: '+19415550100',
+    }]);
+    expect(cleaned).toMatchObject({ email: 'fine@example.com', phone: null });
+    expect(cleaned.consentSuppressed).toBeUndefined();
+  });
+
+  test('fails CLOSED — a suppression-load error propagates and aborts the run', async () => {
+    mockLoadSuppression.mockRejectedValue(new Error('db unavailable'));
+    await expect(applyMarketingConsent('completed_job_revenue', [{ transactionId: 't-5', email: 'a@b.com' }]))
+      .rejects.toThrow('db unavailable');
+  });
+
+  test('empty candidate list never loads the suppression set', async () => {
+    await expect(applyMarketingConsent('completed_job_revenue', [])).resolves.toEqual([]);
+    expect(mockLoadSuppression).not.toHaveBeenCalled();
   });
 });

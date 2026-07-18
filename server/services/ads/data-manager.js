@@ -14,6 +14,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { runExclusive } = require('../../utils/cron-lock');
+const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-audience-consent');
 
 let _googleapis;
 function getGoogle() {
@@ -236,7 +237,11 @@ function candidateHasUserData(candidate) {
 
 function skipReason(candidate) {
   if (!candidate.eventTimestamp) return 'missing_event_timestamp';
-  if (!candidateHasClickId(candidate) && !candidateHasUserData(candidate)) return 'missing_match_keys';
+  if (!candidateHasClickId(candidate) && !candidateHasUserData(candidate)) {
+    // Distinguish "we stripped the identifiers for consent" from "the source
+    // row never had match keys" — the counts mean different things.
+    return candidate.consentSuppressed ? 'consent_suppressed' : 'missing_match_keys';
+  }
   if (candidate.conversionType === 'completed_job_revenue' && !(number(candidate.conversionValue) > 0)) {
     return 'missing_conversion_value';
   }
@@ -529,12 +534,48 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
   return dedupeCandidatesByTransaction(rows.map(mapCompletedJobCandidate)).slice(0, cap);
 }
 
+// Consent-clean conversion candidates before either lane (Google Data Manager
+// or Meta CAPI — both build their events from these candidates) hashes any
+// identifier. A marketing opt-out means the person's CRM identifiers
+// (email/phone) never upload to an ad platform. The conversion itself can
+// still measure through the platform's OWN click identifier (gclid / wbraid /
+// gbraid / fbc / fbp / fbclid) — that came from the ad-click session, not our
+// CRM, so keeping it costs no privacy. Candidates left with no match key at
+// all are skipped downstream as 'consent_suppressed'. wrong_number phones
+// belong to a STRANGER and are stripped unconditionally (the person's email
+// remains usable — mirrors the audience lanes).
+//
+// Fail-closed: a suppression-load error propagates and aborts the whole
+// upload run (retried next cron) rather than uploading an unverified set.
+async function applyMarketingConsent(conversionType, candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return candidates || [];
+  const sup = await loadMarketingSuppression();
+  let suppressed = 0;
+  let strippedPhones = 0;
+  const cleaned = candidates.map((candidate) => {
+    if (sup.isSuppressed(candidate)) {
+      suppressed += 1;
+      return { ...candidate, email: null, phone: null, consentSuppressed: true };
+    }
+    const ph = consentNormPhone(candidate.phone);
+    if (ph && sup.invalidPhones.has(ph)) {
+      strippedPhones += 1;
+      return { ...candidate, phone: null };
+    }
+    return candidate;
+  });
+  if (suppressed || strippedPhones) {
+    logger.info(`[ad-consent] ${conversionType} conversions: stripped identifiers from ${suppressed} opted-out contacts, ${strippedPhones} invalid phones`);
+  }
+  return cleaned;
+}
+
 async function collectCandidates(conversionType, options = {}) {
   if (conversionType === 'qualified_lead') {
-    return dedupeCandidatesByTransaction(await collectQualifiedLeadCandidates(options));
+    return applyMarketingConsent(conversionType, dedupeCandidatesByTransaction(await collectQualifiedLeadCandidates(options)));
   }
   if (conversionType === 'completed_job_revenue') {
-    return dedupeCandidatesByTransaction(await collectCompletedJobCandidates(options));
+    return applyMarketingConsent(conversionType, dedupeCandidatesByTransaction(await collectCompletedJobCandidates(options)));
   }
   throw new Error(`Unsupported conversion type: ${conversionType}`);
 }
@@ -560,6 +601,7 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     missingMatchKeys: 0,
     missingConversionValue: 0,
     missingEventTimestamp: 0,
+    consentSuppressed: 0,
     skipped: 0,
   };
   const rows = candidates.map((candidate) => {
@@ -568,6 +610,7 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     const priorReason = priorUploadSkipReason(existing);
     if (priorReason === 'already_sent') counts.alreadySent += 1;
     if (priorReason === 'upload_pending') counts.pending += 1;
+    if (reason === 'consent_suppressed') counts.consentSuppressed += 1;
     if (reason === 'missing_match_keys') counts.missingMatchKeys += 1;
     if (reason === 'missing_conversion_value') counts.missingConversionValue += 1;
     if (reason === 'missing_event_timestamp') counts.missingEventTimestamp += 1;
@@ -957,6 +1000,7 @@ module.exports = {
     adIdentifiers,
     buildEvent,
     buildIngestRequest,
+    applyMarketingConsent,
     collectCandidates,
     candidateHasClickId,
     candidateHasUserData,
