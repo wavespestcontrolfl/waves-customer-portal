@@ -63,6 +63,21 @@ describe('request URL log redaction', () => {
     expect(redactRequestUrl(`/api/service-outlines/${b64url}/cta-click`)).toBe('/api/service-outlines/[REDACTED]/cta-click');
   });
 
+  test('redacts legacy estimate slug tokens (nameSlug-8hex) under estimate parents', () => {
+    // Pre-estimate-versions admin share links — estimate-public and
+    // estimate-slots-public TOKEN_REs still accept them, so they are live
+    // bearer credentials the hex/base64url length rules never match.
+    expect(redactRequestUrl('/estimate/jane-doe-9f8e7d6c')).toBe('/estimate/[REDACTED]');
+    expect(redactRequestUrl('/api/estimates/jane-doe-9f8e7d6c/data')).toBe('/api/estimates/[REDACTED]/data');
+    expect(redactRequestUrl('/api/estimates/jane-doe-9f8e7d6c/pdf?download=1')).toBe('/api/estimates/[REDACTED]/pdf?download=1');
+    // Scoped to estimate parents: the same shape elsewhere is a slug, not
+    // a token, and admin fixed children / row ids stay readable.
+    expect(redactRequestUrl('/learn/pest-guide-deadbeef')).toBe('/learn/pest-guide-deadbeef');
+    const uuid = '123e4567-e89b-42d3-a456-426614174000';
+    expect(redactRequestUrl(`/api/admin/estimates/${uuid}`)).toBe(`/api/admin/estimates/${uuid}`);
+    expect(redactRequestUrl('/api/admin/estimates/slots')).toBe('/api/admin/estimates/slots');
+  });
+
   test('keeps non-credential path segments (row-id UUIDs, invoice numbers, short ids)', () => {
     const uuid = '123e4567-e89b-42d3-a456-426614174000';
     expect(redactRequestUrl(`/api/admin/customers/${uuid}`)).toBe(`/api/admin/customers/${uuid}`);

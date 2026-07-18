@@ -1570,13 +1570,29 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         const { enrollConsentedMethod } = require('../services/autopay-enrollment');
         // authorizedAt: for the ACH micro-deposit signup this event arrives
         // days after the customer authorized — an Auto Pay disable recorded
-        // since then must win over the stale authorization.
+        // since then must win over the stale authorization. The newest
+        // consent ROW is that authorization moment, not the PI's `created`:
+        // /update-amount can flip an already-minted PI to save-card, so PI
+        // creation can PREDATE the customer's actual save-card election —
+        // an opt-out between mint and the fresh consent must not veto the
+        // consent the customer gave afterwards. PI creation stays as the
+        // fallback when the lookup fails (fails toward the guard).
+        let authorizedAt = paymentIntent.created ? new Date(paymentIntent.created * 1000) : null;
+        try {
+          const latestConsent = await db('payment_method_consents')
+            .where({ customer_id: wavesCustomerId, stripe_payment_method_id: stripePmId })
+            .orderBy('created_at', 'desc')
+            .first('created_at');
+          if (latestConsent?.created_at) authorizedAt = new Date(latestConsent.created_at);
+        } catch (lookupErr) {
+          logger.warn(`[stripe-webhook] consent-time lookup failed for pm ${stripePmId}: ${lookupErr.message}`);
+        }
         await enrollConsentedMethod({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,
           source: 'save_card_consent',
           details: { billing_mode: signupBillingMode },
-          authorizedAt: paymentIntent.created ? new Date(paymentIntent.created * 1000) : null,
+          authorizedAt,
         });
       }
       if (!existing) {
