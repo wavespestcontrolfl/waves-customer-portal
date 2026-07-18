@@ -33,6 +33,15 @@ jest.mock('../services/cancellation-processor', () => ({
   CANCELLABLE_STATUSES: ['pending', 'confirmed', 'rescheduled'],
 }));
 jest.mock('../models/db', () => jest.fn());
+// The live-annual-term leg uses the renewal service's own coverage
+// predicate — its query shape (aliased join + raw invoice guards) is unit-
+// tested in annual-prepay-late-payment-gaps.test.js; here it is a lookup.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  coveredTermsAsOf: jest.fn(() => ({
+    where: jest.fn(function where() { return this; }),
+    first: jest.fn(async () => (state.annual_prepay_terms || [])[0] || null),
+  })),
+}));
 
 const express = require('express');
 const db = require('../models/db');
@@ -197,6 +206,14 @@ describe('POST /api/requests cancellation guard', () => {
     const body = await res.json();
     expect(body.code).toBe('nothing_to_cancel');
     expect(processCancellationRequest).not.toHaveBeenCalled();
+  }));
+
+  test('a live annual-prepay term alone → allowed (coverage rows are not recurring_ongoing)', () => withServer(async (baseUrl) => {
+    state.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'annual_prepay', next_charge_date: null }];
+    state.annual_prepay_terms = [{ id: 'term-1' }];
+    const res = await postCancellation(baseUrl);
+    expect(res.status).toBe(201);
+    expect(processCancellationRequest).toHaveBeenCalledTimes(1);
   }));
 
   test('non-cancellation categories are untouched by the guard', () => withServer(async (baseUrl) => {

@@ -35,7 +35,11 @@ const LIVE_TRACK_STATES = ['en_route', 'on_property'];
  */
 async function hasCancellableWork(customerId) {
   if (!customerId) return false;
-  const [recurringRow, upcomingRow, billingRow] = await Promise.all([
+  // Lazy require: annual-prepay-renewals is a heavy module and
+  // cancellation-processor requires THIS module at load time — resolving it
+  // at call time keeps the import graph cycle-free.
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  const [recurringRow, upcomingRow, billingRow, liveTermRow] = await Promise.all([
     db('scheduled_services')
       .where({ customer_id: customerId, recurring_ongoing: true })
       .first('id'),
@@ -50,6 +54,14 @@ async function hasCancellableWork(customerId) {
     db('customers')
       .where({ id: customerId })
       .first('monthly_rate', 'next_charge_date', 'billing_mode', 'waveguard_tier'),
+    // A LIVE annual-prepay term is a plan to cancel even with no scheduled
+    // rows: coverage visits are recurring_ongoing=false and the last visit
+    // can precede term_end by months. Use the renewal service's own
+    // coverage predicate (paid/live terms whose window contains today) —
+    // one classifier everywhere.
+    coveredTermsAsOf(db, etDateString())
+      .where('t.customer_id', customerId)
+      .first('t.id'),
   ]);
   // monthly_rate is the MEMBERSHIP dues number: explicit non-monthly lanes
   // (per_visit / one_time / per_application / annual_prepay) retain
@@ -72,7 +84,8 @@ async function hasCancellableWork(customerId) {
   return !!recurringRow
     || !!upcomingRow
     || liveDues
-    || armedCharge;
+    || armedCharge
+    || !!liveTermRow;
 }
 
 module.exports = { CANCELLABLE_STATUSES, LIVE_TRACK_STATES, hasCancellableWork };
