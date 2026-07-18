@@ -4686,19 +4686,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // visit permanently on the generic report (audit 2026-07-18 P2).
           // The persist path dedupes on service_record_id before any paid
           // vision call, so a retry racing a late first attempt can't
-          // double-insert.
-          scoringPromise = runScore()
-            .catch((err) => {
-              logger.warn(`[tree-shrub] assessment scoring attempt 1 failed for service_record ${record.id}: ${err.message}`);
-              return null;
-            })
-            .then((stored) => {
-              if (stored) return stored;
-              return new Promise((resolve) => setTimeout(resolve, 60000)).then(runScore).then((retried) => {
+          // double-insert. The retry rides OUTSIDE scoringPromise: the
+          // pre-artifact race below must wait only on attempt 1 — a fast
+          // double-provider failure completes promptly and the retried
+          // assessment reaches the report on its next view (codex P2 r5).
+          const firstAttempt = runScore().catch((err) => {
+            logger.warn(`[tree-shrub] assessment scoring attempt 1 failed for service_record ${record.id}: ${err.message}`);
+            return null;
+          });
+          firstAttempt.then((stored) => {
+            if (stored) return;
+            new Promise((resolve) => setTimeout(resolve, 60000))
+              .then(runScore)
+              .then((retried) => {
                 if (!retried) logger.error(`[tree-shrub] assessment scoring yielded no row after retry for service_record ${record.id} — report stays on the generic layout`);
-                return retried;
-              });
-            });
+              })
+              .catch((err) => logger.error(`[tree-shrub] assessment scoring retry failed for service_record ${record.id}: ${err.message}`));
+          });
+          scoringPromise = firstAttempt;
         }
       }
       if (scoringPromise) {

@@ -20,6 +20,7 @@ const {
   recurringTreeShrubRowAtRetiredCadence,
   retiredTreeShrubRequoteNeeded,
   rewriteTreeShrubRecurringServices,
+  treeShrubTierCatalogStamp,
 } = require('../routes/estimate-public');
 const { remainingUnitCatalogKey } = require('../services/estimate-converter');
 
@@ -133,6 +134,17 @@ describe('retiredTreeShrubRequoteNeeded — shared quote gate (deposit mirror co
     })).toBe(false);
   });
 
+  test('a Premium-only (12x) ladder requotes too (codex P1 r5)', () => {
+    expect(retiredTreeShrubRequoteNeeded({
+      results: { ts: [{ key: 'premium', ann: 1100 }] },
+      recurring: { services: [{ name: 'Tree & Shrub Care' }] },
+    })).toBe(true);
+    expect(retiredTreeShrubRequoteNeeded({
+      results: { ts: [{ name: '12x Premium Tree & Shrub' }] },
+      recurring: { services: [{ name: 'Tree & Shrub Care' }] },
+    })).toBe(true);
+  });
+
   test('no tier rows: explicit retired-cadence row requotes; cadence-less and non-T&S stay self-serve', () => {
     expect(retiredTreeShrubRequoteNeeded({
       recurring: { services: [{ name: 'Tree & Shrub Care', frequency: 'monthly' }] },
@@ -144,6 +156,59 @@ describe('retiredTreeShrubRequoteNeeded — shared quote gate (deposit mirror co
       recurring: { services: [{ name: 'Quarterly Pest Control' }] },
     })).toBe(false);
     expect(retiredTreeShrubRequoteNeeded(null)).toBe(false);
+  });
+});
+
+describe('treeShrubTierCatalogStamp — adopted reservation rows get the tier catalog identity', () => {
+  const CATALOG_ID = 'cat-uuid-1';
+  const fakeTrx = (table) => ({
+    where: () => ({
+      first: async () => (table === 'services' ? { id: CATALOG_ID, name: 'Quarterly Tree & Shrub Care Service' } : null),
+    }),
+  });
+  const lightTierCard = { serviceCategory: 'tree_shrub', key: 'light', visitsPerYear: 4, billingFrequencyKey: 'monthly' };
+
+  test('non-T&S rows are never stamped (split bundle: the adopted slot can be the pest visit)', async () => {
+    expect(await treeShrubTierCatalogStamp(fakeTrx, {
+      selectedFrequency: lightTierCard,
+      rowServiceType: 'Quarterly Pest Control',
+    })).toBeNull();
+  });
+
+  test('directly-selected T&S tier card stamps name + service_id', async () => {
+    const stamp = await treeShrubTierCatalogStamp(fakeTrx, {
+      selectedFrequency: lightTierCard,
+      rowServiceType: 'Tree & Shrub',
+    });
+    expect(stamp.service_type).toBe('Quarterly Tree & Shrub Care Service');
+    expect(stamp.service_id).toBe(CATALOG_ID);
+  });
+
+  test('split bundle: tier chosen via serviceCadences rides the accepted estimate data (codex P2 r5)', async () => {
+    // selectedFrequency is the pest card; the restamped T&S recurring row
+    // carries the tier's catalog key + name.
+    const stamp = await treeShrubTierCatalogStamp(fakeTrx, {
+      selectedFrequency: { serviceCategory: 'pest_control', key: 'quarterly' },
+      estData: {
+        recurring: {
+          services: [
+            { name: 'Quarterly Pest Control', serviceKey: 'pest_control' },
+            { name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly' },
+          ],
+        },
+      },
+      rowServiceType: 'Tree & Shrub',
+    });
+    expect(stamp.service_type).toBe('Quarterly Tree & Shrub Care Service');
+    expect(stamp.service_id).toBe(CATALOG_ID);
+  });
+
+  test('no tier selection anywhere returns null (legacy accepts unchanged)', async () => {
+    expect(await treeShrubTierCatalogStamp(fakeTrx, {
+      selectedFrequency: null,
+      estData: { recurring: { services: [{ name: 'Tree & Shrub Care' }] } },
+      rowServiceType: 'Tree & Shrub',
+    })).toBeNull();
   });
 });
 
