@@ -9,6 +9,7 @@ const { publicPortalUrl } = require("../utils/portal-url");
 const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
 const PhotoService = require("./photos");
 const config = require("../config");
+const { customerSafeServiceNotes } = require("./project-types");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
 // cover page DWELL time, not link age (the customer-photo blank-render class).
@@ -996,7 +997,11 @@ const InvoiceService = {
           service_date: invoiceServiceDate,
           service_type: sr.service_type,
           tech_name: sr.tech_name,
-          tech_notes: sr.technician_notes,
+          // The invoice snapshots these notes durably and the pay page serves
+          // them on an unauthenticated invoice token — a WDO completion's
+          // notes get the same legacy inspection-fee scrub as every other
+          // customer render (codex #2817).
+          tech_notes: customerSafeServiceNotes(sr.technician_notes, sr.structured_notes),
           products_applied: JSON.stringify(products),
           service_photos: JSON.stringify(photos),
         };

@@ -33,6 +33,7 @@
     "@react-google-maps/api": "2.20.8",
     "@vitejs/plugin-react": "^4.2.1",
     "@waves/lawn-cost-floor": "1.0.0",
+    "@waves/report-redaction": "1.0.0",
     "autoprefixer": "^10.4.16",
     "clsx": "^2.1.1",
     "date-fns": "^3.2.0",

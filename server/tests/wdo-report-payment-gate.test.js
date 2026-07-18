@@ -229,8 +229,11 @@ async function withServer(fn) {
 }
 
 // Mirror of wdoContentHash in routes/admin-projects.js (deliberately
-// duplicated — see wdo-signature-binding.test.js).
+// duplicated — see wdo-signature-binding.test.js). The hash covers the
+// CUSTOMER-SAFE findings (internal-key strip + fee-cue scrub) — the same
+// representation the FDACS PDF renders (codex #2817).
 function expectedContentHash(findings, projectDate) {
+  const { stripInternalFindingKeys } = require('../services/project-types');
   const stable = (value) => {
     if (Array.isArray(value)) return value.map(stable);
     if (value && typeof value === 'object') {
@@ -241,7 +244,8 @@ function expectedContentHash(findings, projectDate) {
     }
     return value;
   };
-  const payload = JSON.stringify({ findings: stable(findings), project_date: projectDate });
+  const { projectRecordedFeeValues } = require('../services/project-types');
+  const payload = JSON.stringify({ findings: stable(stripInternalFindingKeys(findings, { redactValues: true, feeValues: projectRecordedFeeValues({ findings }), freeTextKeys: require('../services/project-types').projectTypeFreeTextKeys('wdo_inspection') }) || {}), project_date: projectDate });
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
@@ -941,6 +945,11 @@ describe('public report routes while held', () => {
       // No report content leaks on the 402 payload.
       expect(body.findings).toBeUndefined();
       expect(body.photos).toBeUndefined();
+      // The held payload carries the invoice number and a bearer pay URL —
+      // it gets the same privacy headers as the report itself (codex #2817).
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     });
   });
 
@@ -989,6 +998,11 @@ describe('public report routes while held', () => {
       const body = await res.json();
       expect(res.status).toBe(402);
       expect(body.code).toBe('report_payment_required');
+      // The early 402 carries the same privacy headers as the PDF itself —
+      // they are set before any return (codex #2817).
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     });
   });
 });
