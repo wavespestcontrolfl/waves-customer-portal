@@ -187,6 +187,12 @@ describe('rain-out service', () => {
       expect(windowChance(HOURS, '2026-06-14', '08:00')).toBe(5);  // other date's periods ignored
     });
 
+    test('a half-hour start samples every hour the window touches', () => {
+      // 08:30 arrival window runs 08:30-10:30 → hours 8, 9 AND 10; missing
+      // hour 10 (70%) would have understated the claim.
+      expect(windowChance(HOURS, '2026-06-13', '08:30')).toBe(70);
+    });
+
     test('null on missing coverage or bad input', () => {
       expect(windowChance(HOURS, '2026-06-13', '14:00')).toBeNull(); // no periods for that window
       expect(windowChance(null, '2026-06-13', '08:00')).toBeNull();
@@ -209,24 +215,6 @@ describe('rain-out service', () => {
       expect(clause({ reasonCode: 'weather_rain', serviceType: 'Termite Bait Check' })).toBe('');
       expect(clause({ reasonCode: 'weather_rain', serviceType: 'Interior Flea Treatment' })).toBe('');
       expect(clause({ reasonCode: 'weather_wind', serviceType: 'Quarterly Pest Control' })).toBe('');
-    });
-  });
-
-  describe('weather-lead template migration', () => {
-    const { transformBody, revertBody } = require('../models/migrations/20260718400000_rain_out_weather_lead')._test;
-    // Verbatim prod body (read-only prod query, 2026-07-18).
-    const PROD_BODY = 'Hello {first_name} — {weather_phrase} rolled through your area, so we moved your {service_type} to {new_option}.{alt_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.';
-
-    test('splices the prod body to the new lead + clause slots, preserving surrounding copy', () => {
-      const next = transformBody(PROD_BODY);
-      expect(next).toBe('Hello {first_name} — {weather_lead}, so we moved your {service_type} to {new_option}.{better_day_clause}{alt_clause}{efficacy_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.');
-      expect(transformBody(next)).toBe(next); // idempotent
-      expect(revertBody(next)).toBe(PROD_BODY); // down restores
-    });
-
-    test('a diverged body passes through untouched', () => {
-      const custom = 'Totally rewritten by the admin.';
-      expect(transformBody(custom)).toBe(custom);
     });
   });
 

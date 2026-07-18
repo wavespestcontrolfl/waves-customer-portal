@@ -26,7 +26,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
-const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+const { arrivalWindowRange, formatSmsTimeRange, ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 const WEATHER_PHRASES = {
   weather_rain: 'heavy rain',
@@ -72,16 +72,20 @@ function partOfDay(hour) {
   return hour < 12 ? 'morning' : (hour < 17 ? 'afternoon' : 'evening');
 }
 
-// Max precip chance across the customer-facing 2-hour arrival window
-// (start hour + the hour after) from NWS hourly periods. Null when the
-// hourly feed has no coverage for those hours — callers fall back to
-// the day-level number.
+// Max precip chance across the customer-facing arrival window from NWS
+// hourly periods — every hour the window touches, so a half-hour start
+// like 11:30 samples 11, 12 AND 13 (understating the last hour let the
+// SMS claim "looks better" into a stormy period). Null when the hourly
+// feed has no coverage for those hours — callers fall back to the
+// day-level number.
 function windowRainChance(hours, dateStr, windowStartHHMM) {
   if (!Array.isArray(hours)) return null;
   const startMinutes = hhmmToMinutes(windowStartHHMM);
   if (startMinutes == null) return null;
-  const startHour = Math.floor(startMinutes / 60);
-  const wanted = [startHour, startHour + 1];
+  const firstHour = Math.floor(startMinutes / 60);
+  const lastHour = Math.floor((startMinutes + ARRIVAL_WINDOW_MINUTES - 1) / 60);
+  const wanted = [];
+  for (let h = firstHour; h <= lastHour; h += 1) wanted.push(h);
   let max = null;
   for (const period of hours) {
     const start = String(period?.startTime || '');
@@ -261,7 +265,11 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
     .where({ technician_id: technicianId, scheduled_date: todayStr })
     .whereIn('status', MOVABLE_STATUSES)
     .orderByRaw('COALESCE(route_order, 999), window_start NULLS LAST')
-    .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order');
+    .select(
+      'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order',
+      // Stamped service-address fields feed the moved-SMS forecast copy.
+      'lat', 'lng', 'service_address_zip',
+    );
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
     const anchorOrder = anchor.route_order == null ? 999 : anchor.route_order;
@@ -382,7 +390,14 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId }) {
   const altClause = rescheduleUrl
     ? ` Need a different time? Reschedule online: ${rescheduleUrl}`
     : ' Need a different time? Reply to this message.';
-  const forecastLink = forecastLinkForZip(customer.zip);
+  // Stamped service-address coordinates/zip beat the customer profile —
+  // same precedence as track-transitions and gps-arrival-detector — so a
+  // rain-out at a secondary property quotes THAT address's forecast.
+  const lat = job.lat ?? customer.latitude;
+  const lng = job.lng ?? customer.longitude;
+  const zip = job.service_address_zip || customer.zip;
+
+  const forecastLink = forecastLinkForZip(zip);
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
 
   // Forecast decoration is fail-open (same rule as the options sheet):
@@ -394,10 +409,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId }) {
   const isSameDay = String(chosen.date) === todayStr;
   let outlook = null;
   let hourly = null;
-  if (customer.latitude != null && customer.longitude != null) {
+  if (lat != null && lng != null) {
     [outlook, hourly] = await Promise.all([
-      getDailyRainOutlook(customer.latitude, customer.longitude).catch(() => null),
-      getHourlyRainOutlook(customer.latitude, customer.longitude).catch(() => null),
+      getDailyRainOutlook(lat, lng).catch(() => null),
+      getHourlyRainOutlook(lat, lng).catch(() => null),
     ]);
   }
   const todayChance = outlook?.[todayStr]?.rainChance ?? null;
