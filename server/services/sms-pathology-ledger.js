@@ -282,6 +282,14 @@ HARD RULES: no prices, no customer names, no invented evidence; stay under ${Mat
  */
 async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSAL_MIN_EVIDENCE, maxCells = PROPOSAL_MAX_CELLS } = {}) {
   const startedAt = Date.now();
+  // The evidence window CLOSES here, before anything is read. Every query in
+  // this run is bounded by this instant, and it is persisted on each
+  // proposal row (evidence_cutoff_at) as the watermark the NEXT run measures
+  // freshness against. Using the proposal's own created_at instead would
+  // lose entries the (differently-locked) classifier inserts while a DEEP
+  // call runs: classified before created_at, yet absent from this proposal —
+  // no future window would ever pick them up (audit P1).
+  const evidenceCutoff = new Date();
   // New-evidence counts per cell since that cell's last proposal of ANY
   // status — dismissed/accepted proposals reset the counter on purpose
   // (re-proposing the same cell needs NEW evidence, not the old pile).
@@ -289,7 +297,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
     .leftJoin(
       dbi('sms_patch_proposals')
         .select('surface', 'failure_mode')
-        .max('created_at as last_proposed_at')
+        .select(dbi.raw('MAX(COALESCE(evidence_cutoff_at, created_at)) as last_proposed_at'))
         .groupBy('surface', 'failure_mode')
         .as('pp'),
       function cellJoin() {
@@ -297,6 +305,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
       }
     )
     .whereRaw('pp.last_proposed_at IS NULL OR pe.classified_at > pp.last_proposed_at')
+    .where('pe.classified_at', '<=', evidenceCutoff)
     .groupBy('pe.surface', 'pe.failure_mode')
     .select('pe.surface', 'pe.failure_mode')
     .count('* as fresh')
@@ -332,6 +341,10 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
         .modify((q) => {
           if (cell.last_proposed_at) q.where('classified_at', '>', cell.last_proposed_at);
         })
+        // Upper bound = the run's evidence cutoff: entries the classifier
+        // lands mid-run belong to the NEXT window, matching the persisted
+        // watermark exactly — nothing is double-counted or skipped.
+        .where('classified_at', '<=', evidenceCutoff)
         .orderBy('classified_at', 'desc')
         .limit(25)
         .select('intent', 'prompt_version', 'verifier_missed', 'summary', 'id');
@@ -366,6 +379,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
             failure_mode: cell.failure_mode,
             evidence_count: Number(cell.fresh),
             evidence_ids: JSON.stringify(entries.map((e) => e.id)),
+            evidence_cutoff_at: evidenceCutoff,
             proposal,
             status: 'pending',
             model: resp?.model || null,

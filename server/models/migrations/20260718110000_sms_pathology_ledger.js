@@ -42,6 +42,10 @@ exports.up = async function up(knex) {
       t.string('failure_mode', 60).notNullable();
       t.integer('evidence_count').notNullable().defaultTo(0);
       t.jsonb('evidence_ids');
+      // The exact instant this proposal's evidence window CLOSED — the next
+      // run measures freshness against this, not created_at, so entries
+      // classified while the proposer's LLM call ran are never skipped.
+      t.timestamp('evidence_cutoff_at');
       t.text('proposal').notNullable();
       t.string('status', 20).notNullable().defaultTo('pending');
       t.string('reviewed_by', 100);

@@ -116,9 +116,16 @@ describe('proposePatches — threshold + cap + ordering', () => {
       entries: entryRows,
     });
     await proposePatches({ dbi, anthropicClient: {} });
-    const cutoff = dbi.kvWheres.find(([col, op]) => col === 'classified_at' && op === '>');
-    expect(cutoff).toBeTruthy();
-    expect(cutoff[2]).toBe('2026-07-11T00:00:00Z');
+    const lower = dbi.kvWheres.find(([col, op]) => col === 'classified_at' && op === '>');
+    expect(lower).toBeTruthy();
+    expect(lower[2]).toBe('2026-07-11T00:00:00Z');
+    // ...and bounded above by the run's evidence cutoff, which is persisted
+    // on the proposal row as the next run's freshness watermark — entries
+    // classified mid-run belong to the NEXT window, never lost between runs.
+    const upper = dbi.kvWheres.find(([col, op]) => col === 'classified_at' && op === '<=');
+    expect(upper).toBeTruthy();
+    expect(upper[2]).toBeInstanceOf(Date);
+    expect(dbi.inserts[0].evidence_cutoff_at).toBe(upper[2]);
   });
 
   test('at most maxCells proposals per run, highest-evidence cells first', async () => {
