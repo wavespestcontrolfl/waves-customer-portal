@@ -19,7 +19,7 @@ const NewsletterSender = require('../services/newsletter-sender');
 const { linkToCustomer, subscribeOrResubscribe } = require('../services/newsletter-subscribers');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
-const { isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
+const { isFlagshipType, requiresClaimValidation, getNewsletterType } = require('../config/newsletter-types');
 const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt, weekLockKey } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
@@ -500,6 +500,18 @@ router.patch('/sends/:id', async (req, res, next) => {
       });
     }
 
+    // Same class of guard for the sunset win-back: retyping the parked
+    // reengagement draft would orphan the sunset lane (its delivered-win-back
+    // join keys on newsletter_type='reengagement') and leak the row into the
+    // public archive surfaces that exclude that type.
+    if (newsletterType !== undefined
+        && send.newsletter_type === 'reengagement'
+        && newsletterType !== 'reengagement') {
+      return res.status(400).json({
+        error: 'Cannot change a re-engagement (win-back) newsletter to another type — the sunset lane keys on it. Delete and recreate instead.',
+      });
+    }
+
     // Validate from_email only when the caller is changing it. Skipping
     // validation on PATCHes that don't touch the field keeps existing
     // drafts editable even if the allowlist contracts.
@@ -866,6 +878,13 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     const { prompt, template, newsletterType, eventIds, audience, tone, includeCTA } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
+    }
+    // Type-autonomy contract: types declaring aiDraftAllowed:false (the
+    // sunset win-back) are house-written — refuse to AI-draft them here so
+    // the registry flag is enforced server-side, not just by UI affordances.
+    const typeCfg = getNewsletterType(newsletterType);
+    if (typeCfg && typeCfg.autonomy?.aiDraftAllowed === false) {
+      return res.status(400).json({ error: `newsletter type '${newsletterType}' is house-written — AI drafting is disabled for it` });
     }
     if (prompt.length > 4000) {
       return res.status(400).json({ error: 'prompt too long (max 4000 chars)' });

@@ -885,7 +885,16 @@ export function ComposeView({
           action={
             <div className="flex items-center gap-2">
               {draftId && <Badge tone="neutral">Draft saved</Badge>}
-              <Button onClick={() => setAiOpen(true)} variant="secondary">
+              {/* Off-template loaded drafts (e.g. the sunset win-back) are
+                  house-written by type contract — /draft-ai also refuses them
+                  server-side, so disable the affordance rather than surface
+                  the 400. */}
+              <Button
+                onClick={() => setAiOpen(true)}
+                variant="secondary"
+                disabled={!!loadedNewsletterType}
+                title={loadedNewsletterType ? "This draft's type is house-written — AI drafting is disabled for it" : undefined}
+              >
                 {" "}
                 <Wand2
                   size={14}

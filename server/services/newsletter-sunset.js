@@ -8,11 +8,14 @@
  * win-back it stages is a normal draft in /admin/newsletter that the owner
  * edits and fires through the existing send flow. Four phases, in order:
  *
- *   A. RECOVER — flagged subscribers who engaged since flagging lose the
- *      'reengagement_due' tag (any open / click / quiz answer). Sunset
- *      ('inactive') subscribers who CONFIRM after deactivation reactivate —
- *      quiz_answered_at only, since raw opens/clicks can be scanner
- *      prefetches and must not resurrect a suppressed address.
+ *   A. RECOVER — flagged subscribers who CONFIRMED (stay-subscribed quiz
+ *      submit) since flagging lose the 'reengagement_due' tag, and sunset
+ *      ('inactive') subscribers who confirm after deactivation reactivate.
+ *      Post-flag decisions run on quiz_answered_at ONLY — raw opens/clicks
+ *      can be scanner prefetches, and the win-back copy's contract is
+ *      explicit: confirm, or the emails stop. (The pre-flag inactivity
+ *      clock stays generous: any open/click/quiz counts, so scanner noise
+ *      merely delays flagging.)
  *   B. FLAG — active subscribers with ≥MIN_DELIVERED_SENDS delivered
  *      campaigns, the earliest ≥INACTIVITY_DAYS old, and zero engagement
  *      inside INACTIVITY_DAYS get tagged + stamped. A safety valve pauses
@@ -96,13 +99,18 @@ function engagementSubquery(after, { signals = 'all' } = {}) {
   };
 }
 
-// Phase A — flagged subscribers who engaged since flagging get un-flagged.
+// Phase A — flagged subscribers who CONFIRMED since flagging get un-flagged.
+// quiz_answered_at only: the win-back copy's contract is "confirm or we stop",
+// and scanner-prefetched opens/clicks on the tracked links must not count as
+// a response (they'd exempt exactly the scanner-heavy inboxes where dead
+// addresses accumulate). The confirm write comes from OUR public route, not a
+// SendGrid webhook, so it is also immune to provider-webhook outages.
 async function recoverEngagedFlagged(now) {
   const ids = (
     await db('newsletter_subscribers')
       .where({ status: 'active' })
       .whereNotNull('reengagement_flagged_at')
-      .whereExists(engagementSubquery('flagged_at'))
+      .whereExists(engagementSubquery('flagged_at', { signals: 'quiz' }))
       .select('id')
   ).map((r) => r.id);
   if (!ids.length) return 0;
@@ -159,11 +167,20 @@ async function findFlagCandidates(now) {
       .whereNull('reengagement_flagged_at')
       .whereRaw("NOT (COALESCE(tags, '[]'::jsonb) @> ?::jsonb)", [JSON.stringify([REENGAGEMENT_TAG])])
       .whereNotExists(engagementSubquery(cutoff))
+      // Delivered-history gate, bounded to the CURRENT subscription episode:
+      // a resubscribed comeback keeps their old delivery rows, and lifetime
+      // counting would re-flag them on the next weekly run before a single
+      // post-resubscribe newsletter went out. GREATEST over the three
+      // episode-start stamps (any may be NULL).
       .whereExists(function () {
         this.select(db.raw('1'))
           .from('newsletter_send_deliveries as hist')
           .whereRaw('hist.subscriber_id = newsletter_subscribers.id')
           .whereNotNull('hist.delivered_at')
+          .whereRaw(`hist.delivered_at >= GREATEST(
+            COALESCE(newsletter_subscribers.subscribed_at, '-infinity'::timestamptz),
+            COALESCE(newsletter_subscribers.resubscribed_at, '-infinity'::timestamptz),
+            COALESCE(newsletter_subscribers.confirmed_at, '-infinity'::timestamptz))`)
           .groupBy('hist.subscriber_id')
           .havingRaw('COUNT(*) >= ?', [MIN_DELIVERED_SENDS])
           .havingRaw('MIN(hist.delivered_at) <= ?', [cutoff]);
@@ -291,7 +308,9 @@ async function findSunsetCandidates(now) {
         .whereRaw('wd.delivered_at >= newsletter_subscribers.reengagement_flagged_at')
         .where('wd.delivered_at', '<=', graceCutoff);
     })
-    .whereNotExists(engagementSubquery('flagged_at'))
+    // Only a deliberate quiz confirm exempts from suppression — see
+    // recoverEngagedFlagged (scanner opens/clicks are not a response).
+    .whereNotExists(engagementSubquery('flagged_at', { signals: 'quiz' }))
     .select('id');
   return rows.map((r) => r.id);
 }
@@ -351,9 +370,11 @@ async function syncAlert(summary, now) {
     description: summary.valveTripped
       ? `Safety valve: ${summary.candidates} flag + ${summary.sunsetCandidates} sunset candidates out of ${summary.activeCount} active subscribers matched the ${INACTIVITY_DAYS}-day inactivity criteria (> ${Math.round(MAX_FLAG_FRACTION * 100)}%). That usually means an open/click tracking outage or a criteria bug, not a real mass lapse — nothing was flagged or suppressed. Review before re-running.`
     : `${summary.cohortAwaiting} subscriber(s) have ${INACTIVITY_DAYS}+ days of zero opens/clicks across ${MIN_DELIVERED_SENDS}+ delivered campaigns. A re-engagement draft is parked in /admin/newsletter — review, edit, and send it; non-responders auto-suppress ${GRACE_DAYS} days after delivery.`,
-    // Deep-link straight into the parked draft: Compose hydrates the lane
-    // named by ?autopilotType= (same mechanism as the Pest Insider bell).
-    href: '/admin/newsletter?autopilotType=reengagement',
+    // Deep-link straight into the parked draft: tab=compose mounts
+    // ComposeView (the page defaults to the dashboard tab otherwise), and
+    // ?autopilotType= names the lane it hydrates (same mechanism as the
+    // Pest Insider bell).
+    href: '/admin/newsletter?tab=compose&autopilotType=reengagement',
     detected_at: now,
     last_seen_at: now,
     created_by_rule: 'newsletter_sunset_weekly',
