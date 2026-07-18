@@ -78,6 +78,13 @@ function sanitizeLine(text, cap = 300) {
   const { EXEMPLAR_INJECTION_RE } = require('./sms-shadow-drafter');
   const line = String(text || '')
     .replace(/[\u0000-\u001F\u007F]+/g, ' ')
+    // Prompt-frame delimiters and quotes are neutralized too: evidence is
+    // interpolated inside double quotes between <<<EVIDENCE markers, and a
+    // customer text containing EVIDENCE>>> (or a stray quote) could
+    // otherwise close the quoted-data block and steer the classifier —
+    // whose summary would then poison the proposer prompt downstream.
+    .replace(/<{2,}|>{2,}/g, ' ')
+    .replace(/"/g, "'")
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, cap);
@@ -324,28 +331,30 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
       const proposal = String(resp?.content?.[0]?.text || '').trim().slice(0, MAX_PROPOSAL_CHARS);
       if (!proposal) throw new Error('proposer returned empty text');
 
-      const priorPending = await dbi('sms_patch_proposals')
-        .where({ surface: cell.surface, failure_mode: cell.failure_mode, status: 'pending' })
-        .first('id');
-      const [row] = await dbi('sms_patch_proposals')
-        .insert({
-          surface: cell.surface,
-          failure_mode: cell.failure_mode,
-          evidence_count: Number(cell.fresh),
-          evidence_ids: JSON.stringify(entries.map((e) => e.id)),
-          proposal,
-          status: 'pending',
-          model: resp?.model || null,
-          schema_version: SCHEMA_VERSION,
-        })
-        .returning(['id']);
-      // Supersede AFTER the replacement landed — an LLM/DB failure above must
-      // never vanish the only reviewable card for the cell.
-      if (priorPending) {
-        await dbi('sms_patch_proposals')
-          .where({ id: priorPending.id, status: 'pending' })
-          .update({ status: 'superseded', reviewed_by: 'auto:proposer', reviewed_at: dbi.fn.now() });
-      }
+      // Supersede-then-insert in ONE transaction: atomic, so a failure rolls
+      // back both and the old reviewable card survives (an LLM failure above
+      // never reaches this point at all). The one-pending partial unique
+      // index requires this order and catches any concurrent proposer that
+      // slipped past the advisory lock.
+      let insertedId = null;
+      await dbi.transaction(async (trx) => {
+        await trx('sms_patch_proposals')
+          .where({ surface: cell.surface, failure_mode: cell.failure_mode, status: 'pending' })
+          .update({ status: 'superseded', reviewed_by: 'auto:proposer', reviewed_at: trx.fn.now() });
+        const [row] = await trx('sms_patch_proposals')
+          .insert({
+            surface: cell.surface,
+            failure_mode: cell.failure_mode,
+            evidence_count: Number(cell.fresh),
+            evidence_ids: JSON.stringify(entries.map((e) => e.id)),
+            proposal,
+            status: 'pending',
+            model: resp?.model || null,
+            schema_version: SCHEMA_VERSION,
+          })
+          .returning(['id']);
+        insertedId = row.id;
+      });
       proposed += 1;
 
       try {
@@ -359,7 +368,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
       } catch (err) {
         logger.warn(`[pathology] bell notification failed: ${err.message}`);
       }
-      logger.info(`[pathology] proposal parked for ${cell.surface}/${cell.failure_mode} (${cell.fresh} fresh, id ${String(row.id).slice(0, 8)})`);
+      logger.info(`[pathology] proposal parked for ${cell.surface}/${cell.failure_mode} (${cell.fresh} fresh, id ${String(insertedId).slice(0, 8)})`);
     } catch (err) {
       logger.error(`[pathology] proposer failed for ${cell.surface}/${cell.failure_mode}: ${err.message}`);
     }

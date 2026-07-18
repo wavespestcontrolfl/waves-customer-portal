@@ -53,9 +53,18 @@ function makeProposerDb({ cells = [], entries = [], priorPending = null } = {}) 
   };
   dbi.fn = { now: () => new Date() };
   dbi.raw = (sql) => sql;
+  // The proposer supersedes-then-inserts inside dbi.transaction — the fake
+  // reuses the same table router as the trx and counts entries so tests can
+  // assert both writes happened inside one transaction.
+  let transactions = 0;
+  dbi.transaction = (fn) => {
+    transactions += 1;
+    return Promise.resolve(fn(dbi));
+  };
   dbi.inserts = inserts;
   dbi.updates = updates;
   dbi.order = order;
+  dbi.transactionCount = () => transactions;
   return dbi;
 }
 
@@ -112,19 +121,26 @@ describe('proposePatches — threshold + cap + ordering', () => {
     expect(dbi.inserts.map((i) => i.surface)).toEqual(['facts_block_gap', 'prompt_discipline']);
   });
 
-  test('a prior pending proposal for the cell is superseded AFTER its replacement inserts', async () => {
+  test('a prior pending proposal is superseded and replaced inside ONE transaction (atomic swap)', async () => {
     const dbi = makeProposerDb({
       cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '6' }],
       entries: entryRows,
-      priorPending: { id: 'p-old' },
     });
     await proposePatches({ dbi, anthropicClient: {} });
-    expect(dbi.order).toEqual(['insert', 'update']); // never supersede-first
-    expect(dbi.updates[0].wheres[0]).toMatchObject({ id: 'p-old', status: 'pending' });
+    expect(dbi.transactionCount()).toBe(1);
+    // Supersede-then-insert (the one-pending unique index requires this
+    // order); atomicity comes from the shared transaction, so a failure of
+    // either write rolls back both and the old card survives.
+    expect(dbi.order).toEqual(['update', 'insert']);
+    expect(dbi.updates[0].wheres[0]).toMatchObject({
+      surface: 'facts_block_gap',
+      failure_mode: 'invented_schedule_eta',
+      status: 'pending',
+    });
     expect(dbi.updates[0].patch.status).toBe('superseded');
   });
 
-  test('an empty proposer response fails that cell without inserting or superseding', async () => {
+  test('an empty proposer response fails that cell before any transaction — nothing inserted or superseded', async () => {
     createDeepMessage.mockResolvedValue({ content: [{ text: '' }] });
     const dbi = makeProposerDb({
       cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '6' }],
@@ -133,6 +149,7 @@ describe('proposePatches — threshold + cap + ordering', () => {
     });
     const out = await proposePatches({ dbi, anthropicClient: {} });
     expect(out.proposed).toBe(0);
+    expect(dbi.transactionCount()).toBe(0);
     expect(dbi.inserts).toHaveLength(0);
     expect(dbi.updates).toHaveLength(0); // the old reviewable card survives
   });

@@ -57,6 +57,14 @@ exports.up = async function up(knex) {
         ADD CONSTRAINT sms_patch_proposals_status_check
         CHECK (status IN ('pending', 'accepted', 'dismissed', 'superseded'))
     `);
+    // One reviewable card per cell: the proposer supersedes-then-inserts in a
+    // single transaction, and this index makes two concurrent pendings for
+    // the same cell impossible even if a second proposer slipped the lock.
+    await knex.raw(`
+      CREATE UNIQUE INDEX sms_patch_proposals_one_pending
+        ON sms_patch_proposals (surface, failure_mode)
+        WHERE status = 'pending'
+    `);
   }
 };
 
