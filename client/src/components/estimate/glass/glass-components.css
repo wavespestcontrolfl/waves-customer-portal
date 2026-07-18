@@ -438,10 +438,12 @@
   margin: 14px 0 16px;
 }
 
-/* ---------- mobile: glass material off (owner ask 2026-07-10) ----------
-   Same de-glass as glass-theme.css — backdrop-filter chrome smears during
-   touch scrolling. White glass goes near-solid; gold pills keep their
-   gradient over an opaque brand-gold base. */
+/* ---------- mobile: frosted look without backdrop-filter (owner ask
+   2026-07-18; supersedes the 2026-07-10 solid-card ruling) ----------
+   Same trade as glass-theme.css — backdrop-filter stays off (its per-frame
+   re-compositing is the scroll smear), but the chrome goes translucent
+   instead of near-solid so the scene shows through the estimate pills and
+   strips again. */
 @media (max-width: 640px) {
   [data-glass-theme] .gc-freq-btn,
   [data-glass-theme] .gc-scarcity,
@@ -456,16 +458,17 @@
   [data-glass-theme] .gc-tech-chip,
   [data-glass-theme] .gc-proof,
   [data-glass-theme] .gc-mbb {
-    background: rgba(255, 255, 255, 0.93);
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.46), rgba(255, 255, 255, 0.22)),
+      rgba(255, 255, 255, 0.5);
   }
   [data-glass-theme] .gc-freq-btn[data-active],
   [data-glass-theme] .gc-section-cta {
-    background: linear-gradient(135deg, rgba(255, 222, 120, 0.6), rgba(244, 176, 20, 0.45)),
-      rgb(240, 165, 0);
+    background: linear-gradient(135deg, rgba(255, 222, 120, 0.62), rgba(244, 176, 20, 0.48)),
+      rgba(240, 165, 0, 0.82);
   }
   [data-glass-theme] .gc-scarcity {
     background: linear-gradient(135deg, rgba(255, 230, 150, 0.6), rgba(244, 176, 20, 0.35)),
-      #fffdf5;
+      rgba(255, 253, 245, 0.85);
   }
 }
 
