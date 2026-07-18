@@ -1545,6 +1545,31 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       // enroll a method that belongs to another customer (Codex round-2
       // short-circuit note).
       if (!existing || existing.customer_id === wavesCustomerId) {
+        // Opt-out anchor for enrollConsentedMethod, resolved BEFORE any
+        // backfill below: a PRE-EXISTING consent row captures the customer's
+        // actual save-card election (which can postdate PI mint —
+        // /update-amount flips an already-minted PI to save-card). A row
+        // THIS webhook is about to backfill would carry TODAY's timestamp,
+        // days after the customer authorized, and would erase an opt-out
+        // made in between (Codex r2 P1). Anchor on the NEWEST of
+        // PI-creation and any prior consent: covers the late-flip case
+        // (prior consent newer than mint), the ACH micro-deposit backfill
+        // (no prior row → PI time), and a stale pre-v8 row beside a fresh
+        // election (PI time newer). Lookup failure falls back to PI time —
+        // toward the guard, never past it.
+        let authorizedAt = paymentIntent.created ? new Date(paymentIntent.created * 1000) : null;
+        try {
+          const priorConsent = await db('payment_method_consents')
+            .where({ customer_id: wavesCustomerId, stripe_payment_method_id: stripePmId })
+            .orderBy('created_at', 'desc')
+            .first('created_at');
+          if (priorConsent?.created_at) {
+            const consentAt = new Date(priorConsent.created_at);
+            if (!authorizedAt || consentAt > authorizedAt) authorizedAt = consentAt;
+          }
+        } catch (lookupErr) {
+          logger.warn(`[stripe-webhook] consent-time lookup failed for pm ${stripePmId}: ${lookupErr.message}`);
+        }
         if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
           // Record the consent snapshot SERVER-SIDE — same recipe as the
           // covered_capture webhook (Codex #2507 round-7 P1): for an ACH
@@ -1568,25 +1593,6 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           });
         }
         const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-        // authorizedAt: for the ACH micro-deposit signup this event arrives
-        // days after the customer authorized — an Auto Pay disable recorded
-        // since then must win over the stale authorization. The newest
-        // consent ROW is that authorization moment, not the PI's `created`:
-        // /update-amount can flip an already-minted PI to save-card, so PI
-        // creation can PREDATE the customer's actual save-card election —
-        // an opt-out between mint and the fresh consent must not veto the
-        // consent the customer gave afterwards. PI creation stays as the
-        // fallback when the lookup fails (fails toward the guard).
-        let authorizedAt = paymentIntent.created ? new Date(paymentIntent.created * 1000) : null;
-        try {
-          const latestConsent = await db('payment_method_consents')
-            .where({ customer_id: wavesCustomerId, stripe_payment_method_id: stripePmId })
-            .orderBy('created_at', 'desc')
-            .first('created_at');
-          if (latestConsent?.created_at) authorizedAt = new Date(latestConsent.created_at);
-        } catch (lookupErr) {
-          logger.warn(`[stripe-webhook] consent-time lookup failed for pm ${stripePmId}: ${lookupErr.message}`);
-        }
         await enrollConsentedMethod({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,

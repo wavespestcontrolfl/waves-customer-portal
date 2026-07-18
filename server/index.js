@@ -393,7 +393,11 @@ app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
 // anonymous endpoint force 50 MB of JSON parsing work per request.
 // (/api/admin/auth keeps its stricter cap — mounted above, first parser wins.)
 const LARGE_BODY_LIMIT = '50mb';
-for (const largeBodyPrefix of ['/api/admin', '/api/tech', '/api/public/lawn-assessment', '/api/public/pest-identifier']) {
+// The public photo funnels get the big parser ONLY on their /analyze
+// route — the base64 uploads travel there alone, and a prefix-wide mount
+// handed the anonymous /:id/claim and read endpoints 50 MB of JSON parse
+// work per bogus request too (Codex #2853 r2).
+for (const largeBodyPrefix of ['/api/admin', '/api/tech', '/api/public/lawn-assessment/analyze', '/api/public/pest-identifier/analyze']) {
   app.use(largeBodyPrefix, express.json({ limit: LARGE_BODY_LIMIT }));
 }
 // Customer service requests carry up to 3 base64 photos (validate caps each at

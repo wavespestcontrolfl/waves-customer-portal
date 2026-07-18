@@ -1701,9 +1701,17 @@ const StripeService = {
     // the fallback check, rejecting the pointer just reselected the same
     // row (the pointer normally IS the default) and charged it anyway.
     const { isBankMethodType, isExpiredCardMethod } = require('./autopay-eligibility');
+    // Legacy rows store 2-digit expiry years — normalize before the expiry
+    // check (same recipe as the set-default guard) or a valid '12/32' card
+    // reads as year 32 and collection refuses a method the portal accepts.
+    // Full normalization at write time is a separate cleanup.
+    const normalizeLegacyExpiry = (m) => {
+      const rawYear = parseInt(m.exp_year, 10);
+      return Number.isFinite(rawYear) && rawYear < 100 ? { ...m, exp_year: rawYear + 2000 } : m;
+    };
     const methodEligibleForCharge = (m) => !!m
       && !!m.stripe_payment_method_id
-      && !isExpiredCardMethod(m)
+      && !isExpiredCardMethod(normalizeLegacyExpiry(m))
       && !(isBankMethodType(m.method_type) && (
         (customer.ach_status && customer.ach_status !== 'active')
         || ['pending_verification', 'verification_failed'].includes(m.ach_status)
