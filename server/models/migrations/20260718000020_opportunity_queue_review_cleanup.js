@@ -65,6 +65,17 @@ exports.up = async function up(knex) {
         OR ar.reviewer_notes ILIKE '%no_previous_version_to_compare%'
         OR ar.reviewer_notes ILIKE '%load fail%'
         OR ar.reviewer_notes ILIKE '%named_competitor_disabled%'
+        -- Router-flagged human review: the old runner prioritized 'gate_fail'
+        -- as the skip reason even when the brief demanded human review, with
+        -- the router verdict recorded only as a "router: <reason>" note (and
+        -- structurally as content_briefs.human_review_required). Those are
+        -- genuine human decisions — keep them parked. (Prod check: both
+        -- predicates match the same 2 rows.)
+        OR ar.reviewer_notes ILIKE '%router:%'
+        OR EXISTS (
+          SELECT 1 FROM content_briefs cb
+          WHERE cb.id = ar.brief_id AND cb.human_review_required IS TRUE
+        )
       )`;
   // 'expired', NOT 'skipped': the miner's upsert keeps 'skipped' STICKY for
   // matching dedupe keys (operator dismissals must not resurrect), so a

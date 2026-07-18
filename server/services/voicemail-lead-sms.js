@@ -407,6 +407,20 @@ async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
       .first('id', 'to_phone');
     if (!row) return { handled: false, reason: 'not_quote_link' };
 
+    // Idempotency claim: Twilio retries status callbacks, and a second pass
+    // would re-pull a follow-up an operator may have deliberately moved
+    // later, plus duplicate the timeline note. One atomic conditional UPDATE
+    // stamping the sms_log row is the claim — zero rows = already handled.
+    // jsonb_exists(), not the ? operator (knex reads ? as a binding).
+    const claimed = await db('sms_log')
+      .where({ id: row.id })
+      .whereRaw("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'quote_link_bounce_handled_at')")
+      .update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quote_link_bounce_handled_at', to_jsonb(now()::text))"),
+        updated_at: new Date(),
+      });
+    if (!claimed) return { handled: false, reason: 'already_handled' };
+
     const phone = normalizePhoneE164(to || row.to_phone);
     if (!phone) return { handled: false, reason: 'no_phone' };
     // Correlate through the one-shot claim row (phone PK → the exact lead

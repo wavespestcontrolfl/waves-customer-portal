@@ -31,6 +31,7 @@ function chainFor(result) {
   const q = {
     _wheres: [],
     where: jest.fn(function (...args) { q._wheres.push(args); return q; }),
+    whereRaw: jest.fn(function (...args) { q._wheres.push(['raw', ...args]); return q; }),
     whereNull: jest.fn(function (...args) { q._wheres.push(['null', ...args]); return q; }),
     orderBy: jest.fn(() => q),
     first: jest.fn(() => Promise.resolve(result)),
@@ -93,6 +94,22 @@ describe('handleUndeliveredQuoteLink', () => {
     expect(activity.lead_id).toBe('lead1');
     expect(activity.description).toContain('landline');
     expect(activity.description).toContain('Call the lead');
+  });
+
+  test('a retried status callback for an already-handled sid is a no-op (idempotency claim)', async () => {
+    const smsChain = chainFor({ id: 'sms1', to_phone: '+19412268022' });
+    smsChain.update = jest.fn(() => Promise.resolve(0)); // claim already taken
+    const leadChain = chainFor({ id: 'lead1', next_follow_up_at: null });
+    db.mockImplementation((table) => {
+      if (table === 'sms_log') return smsChain;
+      if (table === 'leads') return leadChain;
+      return chainFor(null);
+    });
+
+    const result = await handleUndeliveredQuoteLink({ sid: 'SMabc', status: 'undelivered', errorCode: '30006', to: '+19412268022' });
+
+    expect(result).toMatchObject({ handled: false, reason: 'already_handled' });
+    expect(leadChain.update).not.toHaveBeenCalled();
   });
 
   test('a non-quote-link sid is ignored', async () => {
