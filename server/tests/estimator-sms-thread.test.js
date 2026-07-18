@@ -173,10 +173,13 @@ describe('startSmsThreadDraft', () => {
 });
 
 describe('_private.threadQuoteSignal', () => {
-  test('prefilter passes quote-flavored text to the FAST policy', async () => {
+  test('prefilter passes quote-flavored text to the FAST policy with a webhook-safe timeout', async () => {
     await _private.threadQuoteSignal('how much for mosquito treatment?');
     expect(mockDispatch).toHaveBeenCalledWith('fast-structured-policy', expect.objectContaining({
       jsonMode: true,
+      // The Twilio handler awaits this classifier — the dispatcher's
+      // default multi-minute budget must never hold the webhook open.
+      timeoutMs: 3500,
     }));
   });
 

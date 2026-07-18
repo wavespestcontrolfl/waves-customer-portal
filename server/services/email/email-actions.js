@@ -94,14 +94,28 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
       fullAddress: String(extracted.address || '').trim() || null,
     },
   };
-  const readiness = evaluateLeadEstimateAutomationReadiness({
+  // Same global kill switch as the form-lead path: GATE_LEAD_ESTIMATE_AUTOMATION
+  // off must stop EVERY automated lead draft, email-originated included.
+  // Lazy route require (load-order), fail-closed: no gate helper ⇒ no draft.
+  let applyGate;
+  try {
+    ({ applyLeadEstimateAutomationGate: applyGate } = require('../../routes/lead-webhook'));
+  } catch (e) {
+    logger.warn(`[email-actions] automation gate unavailable — not drafting: ${e.message}`);
+    return { created: false, skipped: 'automation_gate_unavailable' };
+  }
+  const readiness = applyGate(evaluateLeadEstimateAutomationReadiness({
     intake,
     customer: {},
     phone,
     serviceInterest: intake.serviceInterest,
-  });
+  }));
   if (!readiness.ready) {
-    return { created: false, skipped: 'not_ready', missing: readiness.missing };
+    return {
+      created: false,
+      skipped: readiness.disabled ? 'automation_disabled' : 'not_ready',
+      missing: readiness.missing,
+    };
   }
 
   let outcome = { created: false };

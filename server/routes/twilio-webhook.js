@@ -352,21 +352,6 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
-    // ESTIMATOR SMS DRAFTS (GATE_ESTIMATOR_SMS_DRAFTS, default OFF): a
-    // quote-flavored inbound text runs the estimator engine against the
-    // thread — priced DRAFT + one phone-scoped bell, never a send. The
-    // AWAITED part is cheap and bounded (regex prefilter → FAST classifier
-    // → one durable owed-quote bell); the DEEP composer detaches inside
-    // startSmsThreadDraft AFTER that bell exists, so a restart mid-compose
-    // leaves the manual task instead of a silent loss. Intake-machine
-    // replies return above and draft through lead-intake's own handoff.
-    try {
-      const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
-      if (smsThreadDraftsEnabled() && Body && String(Body).trim()) {
-        await startSmsThreadDraft({ phone: From, triggerBody: Body });
-      }
-    } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
-
     // DOMAIN TRACKING — new lead from a domain-specific number
     if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {
       const leadSource = TWILIO_NUMBERS.getLeadSourceFromNumber(To);
@@ -413,6 +398,25 @@ router.post('/sms', async (req, res) => {
         });
       } catch (e) { logger.error(`Domain lead creation failed: ${e.message}`); }
     }
+
+    // ESTIMATOR SMS DRAFTS (GATE_ESTIMATOR_SMS_DRAFTS, default OFF): a
+    // quote-flavored inbound text runs the estimator engine against the
+    // thread — priced DRAFT + one phone-scoped bell, never a send. Runs
+    // AFTER the domain/van tracking branch so a first-contact text to a
+    // tracking number has its customer row before the context builds (an
+    // earlier placement drafted unlinked). The AWAITED part is cheap and
+    // bounded (regex prefilter → FAST classifier with a webhook-safe
+    // timeout → one durable owed-quote bell); the DEEP composer detaches
+    // inside startSmsThreadDraft AFTER that bell exists, so a restart
+    // mid-compose leaves the manual task instead of a silent loss.
+    // Intake-machine replies return above and draft through lead-intake's
+    // own handoff.
+    try {
+      const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
+      if (smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+        await startSmsThreadDraft({ phone: From, triggerBody: Body });
+      }
+    } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
 
     // Log inbound message
     const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'

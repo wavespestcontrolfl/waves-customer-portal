@@ -72,6 +72,11 @@ Return ONLY JSON: {"quote_request":true|false,"confidence":0.0-1.0}`;
       text: prompt,
       jsonMode: true,
       maxTokens: 60,
+      // Webhook-safe ceiling: the Twilio handler AWAITS this classifier
+      // before returning TwiML, and without it the dispatcher's default
+      // multi-minute fallback budget could hold the webhook past Twilio's
+      // retry window. Timeout ⇒ fail-closed "not a quote request".
+      timeoutMs: 3500,
     });
     if (!response.ok || !response.json) return { quoteRequest: false, method: 'ai_failed' };
     const quoteRequest = response.json.quote_request === true

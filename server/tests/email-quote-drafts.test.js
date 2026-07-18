@@ -47,6 +47,11 @@ jest.mock('../services/lead-estimate-automation', () => ({
   buildAutomatedLeadDraftEstimate: (...args) => mockBuilder(...args),
 }));
 
+const mockGate = jest.fn((readiness) => readiness);
+jest.mock('../routes/lead-webhook', () => ({
+  applyLeadEstimateAutomationGate: (readiness) => mockGate(readiness),
+}));
+
 const mockDuplicate = jest.fn();
 jest.mock('../services/estimate-automation-duplicates', () => ({
   blockIfAutomatedEstimateDuplicate: (...args) => mockDuplicate(...args),
@@ -132,6 +137,16 @@ describe('maybeDraftEstimateFromEmailLead', () => {
     mockReadiness.mockReturnValue({ ready: false, missing: ['phone'] });
     const result = await maybeDraftEstimateFromEmailLead({ email: EMAIL, extracted: EXTRACTED, lead: LEAD });
     expect(result).toEqual({ created: false, skipped: 'not_ready', missing: ['phone'] });
+    expect(mockState.inserts).toHaveLength(0);
+  });
+
+  test('the global GATE_LEAD_ESTIMATE_AUTOMATION kill switch stops email drafts too', async () => {
+    mockGate.mockImplementationOnce((readiness) => ({
+      ...readiness, ready: false, disabled: true, status: 'disabled',
+    }));
+    const result = await maybeDraftEstimateFromEmailLead({ email: EMAIL, extracted: EXTRACTED, lead: LEAD });
+    expect(result.created).toBe(false);
+    expect(result.skipped).toBe('automation_disabled');
     expect(mockState.inserts).toHaveLength(0);
   });
 
