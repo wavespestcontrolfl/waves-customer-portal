@@ -69,7 +69,12 @@ exports.up = async function up(knex) {
       closeout_requirements_source: 'inferred_v1',
     });
   } else if (existing.is_active === false || existing.is_archived === true) {
-    console.warn(`[tree-shrub-quarterly] services row for ${SERVICE_KEY} exists but is inactive/archived — leaving it alone (admin decision)`);
+    // Admin-owned deactivation: leave the service AND skip the profile seed —
+    // an active typed profile pointing at a deactivated service would let
+    // future Light accepts link it and run the typed flow anyway (the
+    // converter's catalog lookup doesn't filter is_active; codex P2 r1).
+    console.warn(`[tree-shrub-quarterly] services row for ${SERVICE_KEY} exists but is inactive/archived — leaving it AND its profile alone (admin decision)`);
+    return;
   }
 
   if (!(await knex.schema.hasTable('service_completion_profiles'))) {

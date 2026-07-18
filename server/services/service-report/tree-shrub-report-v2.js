@@ -37,6 +37,11 @@ function classifyProduct(app = {}) {
   let fallback = 'applied as part of today’s tree and shrub program';
   if (/fung|azoxy|propiconazole|thiophanate|mancozeb|chlorothalonil/.test(hay)) { kind = 'fungicide'; tag = 'disease protection'; fallback = 'helps protect foliage where leaf-spot or disease pressure calls for it'; }
   else if (/mite|abamectin|bifenazate|spiromesifen/.test(hay)) { kind = 'miticide'; tag = 'mite control'; fallback = 'targets mites that stipple and bronze the foliage'; }
+  // Herbicides classify BEFORE the insect-systemics branch: a "systemic
+  // weed preventer" would otherwise land in the 'systemic' bucket, which
+  // the pest diagnosis/insight gates read as an insect treatment — the
+  // exact overclaim the treatment gates exist to prevent (codex P2 r1).
+  else if (/herbicide|pre[\s-]?emergent|post[\s-]?emergent|weed|glyphosate|prodiamine|dithiopyr|isoxaben|indaziflam|pendimethalin|oxadiazon|barricade|dimension|gallery|ronstar|specticle|marengo|snapshot|sedgehammer/.test(hay)) { kind = 'herbicide'; tag = 'weed prevention'; fallback = 'keeps bed weeds from establishing in the treated areas'; }
   else if (/imidacloprid|dinotefuran|acephate|insect|bifenthrin|systemic|merit|safari/.test(hay)) { kind = /imidacloprid|dinotefuran|systemic|merit|safari/.test(hay) ? 'systemic' : 'insecticide'; tag = 'pest protection'; fallback = 'protects the plants from foliage-feeding pests'; }
   else if (/iron|micro|biostim|humic|kelp|seaweed|chelat/.test(hay)) { kind = 'supplement'; tag = 'color support'; fallback = 'supports leaf color and stress tolerance'; }
   else if (/fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/.test(hay)) { kind = 'fertilizer'; tag = 'color & growth'; fallback = 'feeds the plants to support color, density, and new growth'; }

@@ -8357,6 +8357,25 @@ router.put('/:token/accept', async (req, res, next) => {
               trx,
             });
             reservationCommitted = true;
+            // T&S tier accepts: commitReservation canonicalizes the row to
+            // the generic reservation service text with no service_id, so
+            // the typed-profile resolver and the WaveGuard plan sync would
+            // misread a Light (4x) accept as the bimonthly program (codex
+            // P2 r1). Stamp the accepted tier's catalog identity in the
+            // same trx; seeded follow-ups copy service_id from the parent.
+            if (selectedFrequency?.serviceCategory === 'tree_shrub' && committedAppointment?.id) {
+              const tierMeta = treeShrubTierRuntimeMeta(selectedFrequency.key);
+              if (tierMeta) {
+                const tierStamp = { service_type: tierMeta.name };
+                const tierCatalogRow = await trx('services')
+                  .where({ service_key: tierMeta.serviceKey })
+                  .first('id')
+                  .catch(() => null);
+                if (tierCatalogRow) tierStamp.service_id = tierCatalogRow.id;
+                await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
+                Object.assign(committedAppointment, tierStamp);
+              }
+            }
             if (committedAppointment?.id) {
               acceptedAppointmentsToRegister.push(committedAppointment);
             }
@@ -8382,6 +8401,25 @@ router.put('/:token/accept', async (req, res, next) => {
           };
           if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
             updates.estimated_price = Number(visitEstimatedPrice);
+          }
+          // Reserved-slot T&S accepts adopt the reservation row, which
+          // commitReservation labels with the generic 'Tree & Shrub' text
+          // and no service_id — the converter's scheduleUnits catalog
+          // plumbing never runs for adopted rows, so typed-profile
+          // resolution and the WaveGuard plan sync misread a Light (4x)
+          // accept as the bimonthly program (codex P2 r1). Stamp the
+          // accepted tier's catalog identity on the row; seeded follow-ups
+          // copy service_id from the parent.
+          if (selectedFrequency?.serviceCategory === 'tree_shrub') {
+            const tierMeta = treeShrubTierRuntimeMeta(selectedFrequency.key);
+            if (tierMeta) {
+              updates.service_type = tierMeta.name;
+              const tierCatalogRow = await trx('services')
+                .where({ service_key: tierMeta.serviceKey })
+                .first('id')
+                .catch(() => null);
+              if (tierCatalogRow) updates.service_id = tierCatalogRow.id;
+            }
           }
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
@@ -11027,10 +11065,21 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
 function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
   if (!estDataLike || typeof estDataLike !== 'object') return false;
   const { recurringSvcList } = acceptanceServiceLists(estDataLike);
+  const { normalizeRecurringPattern } = require('../services/recurring-appointment-seeder');
   return (recurringSvcList || []).some((svc) => {
     if (recurringServiceKey(svc) !== 'tree_shrub') return false;
     const key = String(svc?.serviceKey || svc?.service_key || '').trim();
     if (key === 'tree_shrub_6week') return true;
+    // Explicit cadence FIELDS first — the converter reads these before any
+    // visit count or display text (explicitServiceCadence), so a crafted
+    // row like { frequency: 'monthly' } with no visit count would schedule
+    // the retired 12x Premium cadence while passing the checks below
+    // (codex P2 r1). Only the two live tiers' patterns are acceptable;
+    // field-less legacy rows fall through to the visit/text checks.
+    const fieldPattern = [svc?.frequency, svc?.frequencyKey, svc?.frequency_key, svc?.recurringPattern, svc?.recurring_pattern]
+      .map((value) => normalizeRecurringPattern(value))
+      .find(Boolean) || null;
+    if (fieldPattern && !['bimonthly', 'quarterly'].includes(fieldPattern)) return true;
     const visits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.v);
     if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6;
     const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
@@ -13423,8 +13472,11 @@ function rewriteTreeShrubRecurringServices(services = [], frequency = {}) {
     // isTreeShrubServiceName includes palm_injection (deliberate for the
     // grouping helper), but a PALM recurring row is its own program — the
     // tier rewrite must never replace it with the selected T&S tier row
-    // (audit 2026-07-18 P2).
-    if (/\bpalm\b/i.test(String(name || ''))) return svc;
+    // (audit 2026-07-18 P2). Substring match, not \bpalm\b: '_' is a word
+    // character, so a key-only row carrying 'palm_injection' would slip a
+    // word-boundary test (codex P2 r1); 'palmetto'-named rows are pest
+    // rows that should never be tier-rewritten either.
+    if (/palm/i.test(String(name || ''))) return svc;
     changed = true;
     return selectedTreeShrubServiceRow(svc, frequency);
   });
@@ -16401,6 +16453,7 @@ module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.recurringLawnRowAtRetiredCadence = recurringLawnRowAtRetiredCadence;
 module.exports.recurringTreeShrubRowAtRetiredCadence = recurringTreeShrubRowAtRetiredCadence;
+module.exports.rewriteTreeShrubRecurringServices = rewriteTreeShrubRecurringServices;
 module.exports.storedLawnRowBelowProgramFloor = storedLawnRowBelowProgramFloor;
 module.exports.applySelectedMosquitoTierToEstimateData = applySelectedMosquitoTierToEstimateData;
 module.exports.buildRenderFlags = buildRenderFlags;

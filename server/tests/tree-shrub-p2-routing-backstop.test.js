@@ -16,7 +16,7 @@
 
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { detectServiceCategory } = require('../utils/service-normalizer');
-const { recurringTreeShrubRowAtRetiredCadence } = require('../routes/estimate-public');
+const { recurringTreeShrubRowAtRetiredCadence, rewriteTreeShrubRecurringServices } = require('../routes/estimate-public');
 const { remainingUnitCatalogKey } = require('../services/estimate-converter');
 
 describe('service-line routing — tree/shrub tokens beat fertil/weed', () => {
@@ -87,6 +87,39 @@ describe('recurringTreeShrubRowAtRetiredCadence — v4.5 six-visit mandate backs
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Quarterly Pest Control', visitsPerYear: 4 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Palm Injection Service', visitsPerYear: 2 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(null)).toBe(false);
+  });
+
+  test('explicit cadence FIELDS are checked — a crafted monthly/custom row cannot slip through (codex P2 r1)', () => {
+    // frequency/frequencyKey/recurringPattern are the FIRST fields the
+    // converter reads; a count-less, text-less row could encode the retired
+    // 12x Premium cadence there.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', frequency: 'monthly' }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', recurringPattern: 'custom' }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', frequencyKey: 'semiannual' }))).toBe(true);
+    // The two live tiers' field cadences still pass.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Bi-Monthly Tree & Shrub Care Service', frequency: 'bi_monthly', visitsPerYear: 6 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Quarterly Tree & Shrub Care Service', frequency: 'quarterly', visitsPerYear: 4 }))).toBe(false);
+  });
+});
+
+describe('rewriteTreeShrubRecurringServices — palm rows are never tier-rewritten', () => {
+  const frequency = { key: 'standard', monthly: 51.75, annual: 621, perTreatment: 103.5, visitsPerYear: 6, billingFrequencyKey: 'monthly' };
+
+  test('key-only palm_injection rows survive (underscore defeats \\bpalm\\b — codex P2 r1)', () => {
+    const palmRow = { serviceKey: 'palm_injection', mo: 45 };
+    const { services, changed } = rewriteTreeShrubRecurringServices([palmRow], frequency);
+    expect(services[0]).toBe(palmRow);
+    expect(changed).toBe(false);
+  });
+
+  test('named palm rows survive; real T&S rows are restamped', () => {
+    const palmRow = { name: 'Palm Injection Service', mo: 45 };
+    const tsRow = { name: 'Tree & Shrub Care', mo: 40 };
+    const { services, changed } = rewriteTreeShrubRecurringServices([palmRow, tsRow], frequency);
+    expect(services[0]).toBe(palmRow);
+    expect(services[1].serviceKey).toBe('tree_shrub_program');
+    expect(services[1].name).toBe('Bi-Monthly Tree & Shrub Care Service');
+    expect(changed).toBe(true);
   });
 });
 
