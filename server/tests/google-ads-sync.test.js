@@ -39,11 +39,18 @@ jest.mock('google-ads-api', () => ({
       REMOVED: 4,
     },
   },
-}), { virtual: true });
+}));
+// google-ads-api and uuid are REAL installed packages — these mocks must NOT
+// be `virtual: true`. A virtual mock is registered under a synthesized name
+// key instead of the resolved module path, and in a shared jest worker whose
+// caches were warmed by an earlier suite the service's require can resolve
+// straight to the real library, bypassing the mock — which is how this suite
+// went red only in CI (syncCampaigns made a live OAuth call and swallowed
+// "invalid_client", so every configured-path test saw [] / null).
 
 jest.mock('uuid', () => ({
   v4: jest.fn(() => 'uuid-1'),
-}), { virtual: true });
+}));
 
 const GoogleAds = require('../services/ads/google-ads');
 
