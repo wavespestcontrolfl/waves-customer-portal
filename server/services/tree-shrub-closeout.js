@@ -247,7 +247,12 @@ function isHerbicideLikeProduct(productRef = {}) {
 
 function productNeedsIracFracLog(productRef = {}) {
   const catalog = productRef.catalog || productRef;
-  return !!catalog.irac_group || !!catalog.frac_group || isInsectLikeProduct(productRef) || isFungicideLikeProduct(productRef);
+  // Herbicides carry rotation history too (HRAC — pre-emergent resistance
+  // rotation): now that the herbicide chips require a matching product, the
+  // rotation-log confirmation must gate those applications like the
+  // IRAC/FRAC ones (codex P2 r3).
+  return !!catalog.irac_group || !!catalog.frac_group || !!catalog.hrac_group
+    || isInsectLikeProduct(productRef) || isFungicideLikeProduct(productRef) || isHerbicideLikeProduct(productRef);
 }
 
 function buildProductRefs(products = [], productRows = []) {

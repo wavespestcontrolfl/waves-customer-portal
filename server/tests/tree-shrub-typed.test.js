@@ -339,6 +339,19 @@ describe('ported closeout compliance (typed path)', () => {
       completionPhotos: photos,
     });
     expect(withHerbicide.blocks.map((b) => b.code)).not.toContain('tree_shrub_products_required');
+    // Herbicides carry rotation history too (HRAC): the rotation-log
+    // confirmation gates the application like IRAC/FRAC ones (codex P2 r3).
+    expect(withHerbicide.blocks.map((b) => b.code)).toContain('tree_shrub_irac_frac_required');
+    const withHerbicideLogged = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Pre-emergent bed treatment', irac_frac_logged: 'Yes' },
+      products: [product('p9', 'Barricade 4FL Pre-Emergent')],
+      productRows: [row('p9', 'Barricade 4FL Pre-Emergent')],
+      completionPhotos: photos,
+    });
+    expect(withHerbicideLogged.blocks.map((b) => b.code)).not.toContain('tree_shrub_irac_frac_required');
+    expect(withHerbicideLogged.blocks.map((b) => b.code)).not.toContain('tree_shrub_products_required');
   });
 
   test('N/P fertilizer blocked in summer blackout window, allowed outside it', () => {
