@@ -9,7 +9,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
-const { isBankMethodType } = require('../services/autopay-eligibility');
+const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 
 router.use(authenticate);
 
@@ -726,18 +726,20 @@ router.put('/cards/:id/default', async (req, res, next) => {
     // An expired card can't take the default role either: this route CARRIES
     // Auto Pay onto the new default, and pointing collection at an expired
     // card guarantees the next charge declines while the UI shows Active.
-    if (card.exp_month && card.exp_year) {
-      const expMonth = parseInt(card.exp_month, 10);
-      let expYear = parseInt(card.exp_year, 10);
-      if (Number.isFinite(expYear) && expYear < 100) expYear += 2000;
-      if (Number.isFinite(expMonth) && Number.isFinite(expYear)) {
-        // A card is valid through the END of its expiry month.
-        const now = new Date();
-        const expired = expYear < now.getUTCFullYear()
-          || (expYear === now.getUTCFullYear() && expMonth < now.getUTCMonth() + 1);
-        if (expired) {
-          return res.status(400).json({ error: 'That card has expired — update it or choose a current card before making it your default.' });
-        }
+    // Same ET-calendar predicate as collection (autopay-eligibility): the
+    // old inline UTC math flipped a card expired hours early at the ET month
+    // boundary and silently allowed malformed expiry values through. Legacy
+    // rows carry 2-digit years — normalize BEFORE the check so a valid
+    // '12/32' card isn't read as year 32 (isExpiredCardMethod fails closed
+    // on anything non-sensible).
+    if (!isBankMethodType(card.method_type)) {
+      const rawYear = parseInt(card.exp_year, 10);
+      const normalizedCard = {
+        ...card,
+        exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : card.exp_year,
+      };
+      if (isExpiredCardMethod(normalizedCard)) {
+        return res.status(400).json({ error: 'That card has expired — update it or choose a current card before making it your default.' });
       }
     }
 
