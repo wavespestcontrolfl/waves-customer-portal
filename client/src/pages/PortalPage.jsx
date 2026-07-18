@@ -12478,7 +12478,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
     </button>
   );
   return (
-    <nav aria-label="Main" data-glass="" data-glass-fixed="" style={{
+    <nav aria-label="Main" data-glass="" style={{
       position: 'fixed', bottom: 8, left: 10, right: 10, zIndex: 98,
       background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
@@ -13239,7 +13239,7 @@ export default function PortalPage() {
           sticky header (styles in index.css). */}
       <a href="#portal-main" className="waves-skip-link">Skip to content</a>
       {/* Header */}
-      <div data-glass="soft" data-glass-fixed="" style={{
+      <div data-glass="soft" style={{
         background: PORTAL_SHELL.surface,
         borderBottom: `1px solid ${PORTAL_SHELL.border}`,
         boxShadow: 'none',
@@ -13656,7 +13656,7 @@ export default function PortalPage() {
             instead of inside the sticky top bar. Desktop only; the mobile
             shell keeps its bottom nav. data-glass is inert without glass. */}
         {!isMobileShell && (
-          <nav aria-label="Customer portal" data-glass="card" data-glass-fixed="" style={{
+          <nav aria-label="Customer portal" data-glass="card" style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             gap: 3, overflowX: 'auto', scrollbarWidth: 'none',
             background: PORTAL_SHELL.soft,

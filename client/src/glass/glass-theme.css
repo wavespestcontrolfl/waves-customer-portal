@@ -404,48 +404,25 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
     opacity 0.6s ease, border-color 0.3s ease !important;
 }
 
-/* ---------- mobile: frosted look without backdrop-filter (owner ask
-   2026-07-18; supersedes the 2026-07-10 solid-card ruling) ----------
-   backdrop-filter re-composites the scene behind each card on every scroll
-   frame — that smear was the original mobile artifact, so it stays OFF
-   here. The scene behind the cards is soft gradients and orbs, though, so
-   plain translucency reads as frosting without any per-frame sampling:
-   cards keep see-through depth over a higher white base than desktop
-   (there is no blur to homogenize what shows through under text). The
-   static ::after sheen scrolls with its card (no artifact) and comes back;
-   the pointer-tracked ::before specular is hover-only — dead weight on
-   touch — and stays off, as do the hover/active lift transforms (touch
-   fires :hover mid-scroll). Modals + scrim keep the real glass: the page
-   can't scroll under an open dialog, so they never show the artifact. */
+/* ---------- mobile: full glass material, pop-out off (owner ruling
+   2026-07-18; supersedes the 2026-07-10 solid-card entry) ----------
+   The owner's 07-10 complaint was the POP-OUT — touch fires the desktop
+   :hover/:active lift mid-scroll, so cards jump under the finger — but the
+   fix of the day also stripped the frosted material. Ruling now: the
+   July-8-era material comes back exactly (blur tuned down from desktop's
+   32px for mobile GPUs, as it was then); only the lift transforms stay
+   suppressed. */
 @media (max-width: 640px) {
-  html[data-glass-theme] [data-glass]:not([data-glass="modal"]) {
-    background: linear-gradient(135deg, rgba(255, 255, 255, 0.46), rgba(255, 255, 255, 0.22)),
-      rgba(255, 255, 255, 0.5) !important;
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
+  html[data-glass-theme] {
+    --glass-blur: 20px;
   }
-  html[data-glass-theme] [data-glass]:not([data-glass="modal"])::before {
-    display: none;
-  }
-  /* Fixed/sticky chrome (portal header + bottom docks, tagged
-     data-glass-fixed) never scrolls against the scene, so the per-frame
-     smear can't occur there — while page text scrolling UNDER a translucent
-     bar would ghost through sharply without blur. These keep the real
-     frosted material: the standard platform dock treatment. */
-  html[data-glass-theme] [data-glass][data-glass-fixed] {
-    background: linear-gradient(135deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.08)),
-      var(--glass-bg) !important;
-    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) !important;
-    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)) !important;
-  }
-  html[data-glass-theme] [data-glass-accent] {
-    background: linear-gradient(135deg, rgba(255, 222, 120, 0.62), rgba(244, 176, 20, 0.48)),
-      rgba(240, 165, 0, 0.82) !important;
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
+  html[data-glass-theme] [data-glass="soft"],
+  html[data-glass-theme] [data-glass="chip"] {
+    backdrop-filter: blur(14px) saturate(165%) !important;
+    -webkit-backdrop-filter: blur(14px) saturate(165%) !important;
   }
   /* touch fires :hover/:active mid-scroll — the lift/scale reads as cards
-     jumping under the finger */
+     jumping under the finger (the "pop-out") */
   html[data-glass-theme] [data-glass="card"]:hover,
   html[data-glass-theme] [data-glass="card"]:active,
   html[data-glass-theme] [data-glass="chip"]:hover {
