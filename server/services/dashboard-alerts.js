@@ -207,7 +207,7 @@ async function computeDashboardAlertsUncached() {
         id: 'inventory_unit_review',
         severity: 'warn',
         count,
-        label: `${count} inventory product${count === 1 ? '' : 's'} need unit review`,
+        label: `${count} inventory product${count === 1 ? '' : 's'} need${count === 1 ? 's' : ''} unit review`,
         href: '/admin/inventory?tab=unit-review',
       });
     }

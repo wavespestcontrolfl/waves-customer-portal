@@ -479,7 +479,12 @@ router.post('/sms', async (req, res) => {
     setImmediate(() => { void (async () => {
      try {
     const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
-    const shouldNotifyKnownInbound = numberConfig.type === 'location' || isTrackingLeadInbound;
+    // gbp_tracking is deliberately in this list: a known customer who replies
+    // to a GBP tracking number (the number Google shows them) used to skip the
+    // sms_reply thread bell entirely and surface only as the legacy
+    // "📩 New SMS" dashboard forward — the thread in /admin/communications
+    // never rang (observed 2026-07-17, customer texting three Waves numbers).
+    const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || isTrackingLeadInbound;
 
     // In-app + push notification for inbound SMS from known customers.
     // knownInboundNotified records whether this modern bell/push actually
@@ -873,6 +878,23 @@ router.post('/status', async (req, res) => {
           }).catch((e) => logger.error(`[twilio-status] landline suppression failed: ${e.message}`));
         } catch (e) {
           logger.error(`[twilio-status] landline suppression dispatch failed: ${e.message}`);
+        }
+
+        // Voicemail text-back bounce: the quote link never arrived (30006
+        // landline is the common case), so the lead has had NO first contact
+        // and nothing else surfaces that. Pull its follow-up to now and leave
+        // a call-instead breadcrumb on the lead timeline. Best-effort, off
+        // the 200 response path.
+        try {
+          const VoicemailLeadSms = require('../services/voicemail-lead-sms');
+          void VoicemailLeadSms.handleUndeliveredQuoteLink({
+            sid: MessageSid,
+            status: MessageStatus,
+            errorCode: ErrorCode,
+            to: To,
+          }).catch((e) => logger.error(`[twilio-status] voicemail quote-link bounce handling failed: ${e.message}`));
+        } catch (e) {
+          logger.error(`[twilio-status] voicemail quote-link bounce dispatch failed: ${e.message}`);
         }
       }
     }
