@@ -13005,11 +13005,25 @@ export default function PortalPage() {
   // leaving the app.
   const location = useLocation();
   const navigate = useNavigate();
+  // Canonical view token for a URL search string — legacy spellings collapse
+  // to the view they render (?tab=schedule and plain ?tab=visits are both
+  // visits:upcoming; a plan service param is row focus, not a different
+  // view), so equivalent URLs never stack duplicate history entries.
+  const searchView = (search) => {
+    const params = new URLSearchParams(search);
+    const t = params.get('tab');
+    if (t === 'schedule') return 'visits:upcoming';
+    if (t === 'services') return 'visits:completed';
+    const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
+    const tab = t && allowed.includes(t) ? t : 'dashboard';
+    return tab === 'visits' ? 'visits:upcoming' : tab;
+  };
   // urlId is the deep-link token, which may be a LEGACY value ('schedule',
   // 'services') the initial parser understands — writing it verbatim keeps
   // a refreshed or shared URL restoring the exact Visits sub-tab.
   const syncTabUrl = (urlId) => {
     const target = urlId === 'dashboard' ? '/' : `/?tab=${urlId}`;
+    if (searchView(window.location.search) === searchView(urlId === 'dashboard' ? '' : `?tab=${urlId}`)) return;
     if (window.location.pathname + window.location.search !== target) navigate(target);
   };
   // Back/forward: adopt what the URL names — tab, legacy Visits sub-tab,
@@ -13149,7 +13163,10 @@ export default function PortalPage() {
     setSwitchingPropertyId(null);
     if (switched) {
       setActiveTab('dashboard');
-      syncTabUrl('dashboard');
+      // Replace, not push: the prior tab history belongs to the PREVIOUS
+      // property's session — Back must not restore a stale tab context
+      // against the newly selected property.
+      if (window.location.pathname + window.location.search !== '/') navigate('/', { replace: true });
       setVisitsSubTab('upcoming');
       setShowMenu(false);
       setShowMoreSheet(false);

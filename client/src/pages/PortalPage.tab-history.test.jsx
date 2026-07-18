@@ -134,6 +134,31 @@ describe('portal tab history sync', () => {
     expect(await screen.findByText(/no completed visits yet/i)).toBeInTheDocument();
   });
 
+  it('treats legacy visits spellings as the active view on re-click', async () => {
+    window.history.replaceState({}, '', '/?tab=schedule');
+    render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    await screen.findByText(/no upcoming services scheduled/i);
+    const depth = window.history.length;
+
+    // ?tab=schedule IS visits:upcoming — the Visits nav re-click must not
+    // rewrite it to ?tab=visits or stack an identical entry.
+    fireEvent.click(screen.getAllByRole('button', { name: 'Visits' })[0]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(window.location.search).toBe('?tab=schedule');
+    expect(window.history.length).toBe(depth);
+  });
+
+  it('keeps the plan service param when the active Plan tab is re-clicked', async () => {
+    window.history.replaceState({}, '', '/?tab=plan&service=lawn_care');
+    render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    expect(await screen.findByRole('button', { name: /lawn care program/i, expanded: true })).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Plan' })[0]);
+    await new Promise((r) => setTimeout(r, 50));
+    // URL still describes what is on screen: the focused row.
+    expect(window.location.search).toBe('?tab=plan&service=lawn_care');
+  });
+
   it('re-clicking the active tab does not stack duplicate history entries', async () => {
     render(<BrowserRouter><PortalPage /></BrowserRouter>);
     await screen.findByText(/hello pat/i);
