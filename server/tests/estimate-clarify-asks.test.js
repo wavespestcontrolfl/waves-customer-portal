@@ -11,15 +11,17 @@
 
 let mockState;
 jest.mock('../models/db', () => {
-  const makeBuilder = () => {
+  const makeBuilder = (table) => {
     const builder = {
       where() { return builder; },
       whereIn() { return builder; },
       whereNull() { return builder; },
+      whereNotNull() { return builder; },
       orWhere() { return builder; },
+      orderBy() { return builder; },
       first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
       update: async (payload) => {
-        mockState.updates.push(payload);
+        mockState.updates.push({ table, payload });
         return 1;
       },
       insert: (payload) => ({
@@ -32,7 +34,7 @@ jest.mock('../models/db', () => {
     };
     return builder;
   };
-  return jest.fn(() => makeBuilder());
+  return jest.fn((table) => makeBuilder(table));
 });
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -51,8 +53,16 @@ jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...args) => mockNotifyAdmin(...args),
 }));
 
+const mockStartSmsThreadDraft = jest.fn();
+const mockSmsThreadDraftsEnabled = jest.fn();
+jest.mock('../services/estimator-engine/sms-thread', () => ({
+  smsThreadDraftsEnabled: () => mockSmsThreadDraftsEnabled(),
+  startSmsThreadDraft: (...args) => mockStartSmsThreadDraft(...args),
+}));
+
 const {
   parkClarifyAsk,
+  handleClarifyReply,
   clarifyAsksEnabled,
   _private,
 } = require('../services/estimate-clarify-asks');
@@ -137,7 +147,7 @@ describe('parkClarifyAsk', () => {
     };
     const result = await parkClarifyAsk({ ...BASE, channelProvenance: 'sms' });
     expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0' });
-    const flags = JSON.parse(mockState.updates[0].flags);
+    const flags = JSON.parse(mockState.updates[0].payload.flags);
     expect(flags.missing).toEqual(['street_address']);
     expect(flags.lead_id).toBe('lead-1');
     expect(flags.channel_provenance).toBe('sms');
@@ -153,7 +163,7 @@ describe('parkClarifyAsk', () => {
     }];
     const result = await parkClarifyAsk(BASE);
     expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'winner-1' });
-    const flags = JSON.parse(mockState.updates[0].flags);
+    const flags = JSON.parse(mockState.updates[0].payload.flags);
     expect(flags.missing.sort()).toEqual(['specific_service', 'street_address']);
     expect(flags.lead_id).toBe('lead-1');
   });
@@ -169,7 +179,7 @@ describe('parkClarifyAsk', () => {
     const result = await parkClarifyAsk({ ...BASE, channelProvenance: 'voice' });
     expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0' });
     expect(mockState.inserts).toHaveLength(0);
-    const update = mockState.updates[0];
+    const update = mockState.updates[0].payload;
     const flags = JSON.parse(update.flags);
     expect(flags.missing.sort()).toEqual(['specific_service', 'street_address']);
     // The newest request owns the linkage the approval guard judges by.
@@ -221,6 +231,73 @@ describe('parkClarifyAsk', () => {
     const result = await parkClarifyAsk(BASE);
     expect(result.parked).toBe(true);
     expect(mockState.inserts).toHaveLength(1);
+  });
+});
+
+describe('handleClarifyReply', () => {
+  const AWAITING = (missing, extra = {}) => ({
+    id: 'sent-1',
+    customer_id: null,
+    sent_at: '2026-07-18T12:00:00Z',
+    flags: JSON.stringify({ missing, lead_id: 'lead-1', ...extra }),
+  });
+
+  beforeEach(() => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+  });
+
+  test('no awaiting clarify — not handled, nothing touched', async () => {
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '123 Main St' });
+    expect(result.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+    expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
+  });
+
+  test('an address-only reply records onto the lead and resumes with gate + cooldown bypassed', async () => {
+    mockState.existingDraft = AWAITING(['street_address']);
+    const result = await handleClarifyReply({ phone: '+19415550142', body: "It's 123 Main St, Sarasota" });
+    expect(result.handled).toBe(true);
+    const leadUpdate = mockState.updates.find((u) => u.table === 'leads');
+    expect(leadUpdate.payload.address).toBe('123 Main St, Sarasota');
+    const bookkeeping = mockState.updates.find((u) => u.table === 'message_drafts');
+    expect(JSON.parse(bookkeeping.payload.flags).answer_recorded).toEqual(['street_address']);
+    expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({
+      skipIntentGate: true,
+      skipCooldown: true,
+    }));
+  });
+
+  test('a combined reply to a both-items ask records address AND service', async () => {
+    mockState.existingDraft = AWAITING(['street_address', 'specific_service']);
+    const result = await handleClarifyReply({ phone: '9415550142', body: 'Quarterly pest control, 123 Main St, Sarasota' });
+    expect(result.handled).toBe(true);
+    const leadUpdates = mockState.updates.filter((u) => u.table === 'leads');
+    expect(leadUpdates.some((u) => u.payload.address === '123 Main St, Sarasota')).toBe(true);
+    expect(leadUpdates.some((u) => u.payload.service_interest === 'Quarterly pest control')).toBe(true);
+  });
+
+  test('an unrecognizable reply is not handled — the normal inbox flow owns it', async () => {
+    mockState.existingDraft = AWAITING(['street_address']);
+    const result = await handleClarifyReply({ phone: '9415550142', body: 'ok thanks' });
+    expect(result.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('SMS engine lane off: the answer is still recorded, no resume fires', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(false);
+    mockState.existingDraft = AWAITING(['street_address']);
+    const result = await handleClarifyReply({ phone: '9415550142', body: '123 Main St, Sarasota' });
+    expect(result.handled).toBe(true);
+    expect(mockState.updates.find((u) => u.table === 'leads')).toBeTruthy();
+    expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
+  });
+
+  test('clarify gate off — replies flow through untouched', async () => {
+    mockIsEnabled.mockReturnValue(false);
+    mockState.existingDraft = AWAITING(['street_address']);
+    const result = await handleClarifyReply({ phone: '9415550142', body: '123 Main St' });
+    expect(result.handled).toBe(false);
   });
 });
 

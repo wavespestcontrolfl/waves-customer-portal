@@ -230,8 +230,135 @@ async function parkClarifyAsk({
   }
 }
 
+// Local address heuristics (mirrors lead-intake's leniency; duplicated
+// because lead-intake requires THIS module — importing back would cycle).
+const CLARIFY_STREET_SUFFIX_RE = /\b(st|street|ave|avenue|blvd|boulevard|rd|road|dr|drive|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|trl|trail|hwy|highway|loop)\b/i;
+function extractAddressReply(body) {
+  const text = String(body || '').trim();
+  if (!text) return null;
+  // Whole-body address reply ("123 Main St, Sarasota 34239").
+  if (/^\s*\d{1,6}\s+[A-Za-z]/.test(text) && text.length <= 160) {
+    const cut = text.split(/[.;!?\n]/)[0].trim();
+    if (cut.length >= 6) return cut;
+  }
+  // Embedded ("it's 123 Main St, Sarasota") — suffix required, latest wins.
+  let best = null;
+  for (const match of text.matchAll(/\d{1,6}\s+[A-Za-z]/g)) {
+    const candidate = text.slice(match.index).split(/[.;!?\n]/)[0].trim();
+    if (candidate.length >= 6 && candidate.length <= 160 && CLARIFY_STREET_SUFFIX_RE.test(candidate)) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+/**
+ * Inbound reply routing for engine/email-originated asks (the intake state
+ * machine routes its own replies). A text from a phone with a
+ * recently-SENT clarify records the answered fields onto the linked
+ * lead/customer rows — which is exactly what the approval-time staleness
+ * guard re-derives from, so a stale re-send becomes impossible — and
+ * resumes drafting through the SMS-thread engine with the intent gate and
+ * cooldown bypassed (the thread now contains the answer). Never sends
+ * anything itself; never blocks the webhook's normal handling (the message
+ * still flows to the human inbox).
+ *
+ * Returns { handled } — handled=true means the reply answered a clarify
+ * and the caller should skip its own general estimator trigger.
+ */
+async function handleClarifyReply({ phone, body }) {
+  try {
+    if (!clarifyAsksEnabled()) return { handled: false };
+    const allDigits = String(phone || '').replace(/\D/g, '');
+    const digits = allDigits.length === 10
+      ? allDigits
+      : (allDigits.length === 11 && allDigits.startsWith('1') ? allDigits.slice(1) : null);
+    if (!digits || !String(body || '').trim()) return { handled: false };
+
+    const awaiting = await db('message_drafts')
+      .where({ intent: 'estimate_clarify', source_ref: `clarify:${digits}` })
+      .whereNotNull('sent_at')
+      .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS))
+      .orderBy('sent_at', 'desc')
+      .first();
+    if (!awaiting) return { handled: false };
+
+    let flags = {};
+    try {
+      flags = typeof awaiting.flags === 'string' ? JSON.parse(awaiting.flags) : (awaiting.flags || {});
+    } catch { flags = {}; }
+    const missing = Array.isArray(flags.missing) ? flags.missing : [];
+    if (!missing.length) return { handled: false };
+
+    const text = String(body).trim();
+    const recorded = [];
+    let capturedAddress = null;
+    if (missing.includes('street_address')) {
+      capturedAddress = extractAddressReply(text);
+      if (capturedAddress) {
+        if (flags.lead_id) {
+          await db('leads').where({ id: flags.lead_id }).whereNull('deleted_at')
+            .update({ address: capturedAddress });
+        }
+        if (awaiting.customer_id) {
+          await db('customers').where({ id: awaiting.customer_id })
+            .update({ address_line1: capturedAddress });
+        }
+        recorded.push('street_address');
+      }
+    }
+    if (missing.includes('specific_service')) {
+      // Whatever isn't the address is the service answer — raw, bounded;
+      // the composer and readiness gate judge concreteness downstream.
+      let serviceText = capturedAddress ? text.replace(capturedAddress, ' ') : text;
+      serviceText = serviceText.replace(/\s+/g, ' ').replace(/^[\s,\-–—:]+|[\s,\-–—:]+$/g, '').trim();
+      if (serviceText.length >= 3 && serviceText.length <= 80) {
+        if (flags.lead_id) {
+          await db('leads').where({ id: flags.lead_id }).whereNull('deleted_at')
+            .update({ service_interest: serviceText });
+        }
+        recorded.push('specific_service');
+      }
+    }
+    if (!recorded.length) return { handled: false };
+
+    // Answer bookkeeping so operators see WHY the draft resolved.
+    await db('message_drafts').where({ id: awaiting.id }).update({
+      flags: JSON.stringify({
+        ...flags,
+        answered_at: new Date().toISOString(),
+        answer_recorded: recorded,
+      }),
+    });
+
+    // Resume drafting when the SMS engine lane is armed — the thread now
+    // carries the answer, so the composer gets everything in one pass. The
+    // engine's own duplicate guard and bell dedupe absorb re-runs.
+    try {
+      const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
+      if (smsThreadDraftsEnabled()) {
+        await startSmsThreadDraft({
+          phone,
+          triggerBody: body,
+          skipIntentGate: true,
+          skipCooldown: true,
+        });
+      }
+    } catch (resumeErr) {
+      logger.warn(`[estimate-clarify] resume failed (answer recorded): ${resumeErr.message}`);
+    }
+
+    logger.info('[estimate-clarify] clarify reply recorded', { draftId: awaiting.id, recorded });
+    return { handled: true };
+  } catch (err) {
+    logger.warn(`[estimate-clarify] reply handling failed: ${err.message}`);
+    return { handled: false };
+  }
+}
+
 module.exports = {
   clarifyAsksEnabled,
   parkClarifyAsk,
-  _private: { composeClarifyBody, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
+  handleClarifyReply,
+  _private: { composeClarifyBody, extractAddressReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };

@@ -412,8 +412,18 @@ router.post('/sms', async (req, res) => {
     // Intake-machine replies return above and draft through lead-intake's
     // own handoff.
     try {
+      // Clarify-reply routing first: a text answering a recently sent
+      // clarifying question records the supplied fields onto the linked
+      // lead/customer and resumes drafting itself (intent gate + cooldown
+      // bypassed — the reply IS the new information). Only unanswered
+      // texts fall through to the general quote-intent trigger. The
+      // message continues into normal inbox handling either way.
+      const { handleClarifyReply } = require('../services/estimate-clarify-asks');
+      const clarifyReply = Body && String(Body).trim()
+        ? await handleClarifyReply({ phone: From, body: Body })
+        : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
-      if (smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+      if (!clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
         await startSmsThreadDraft({ phone: From, triggerBody: Body });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
