@@ -117,6 +117,22 @@ describe('callAnthropic prompt caching', () => {
     await callAnthropic({ model: FLAGSHIP, text: 'inspect', temperature: 0.2 });
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].temperature).toBe(0.2);
   });
+
+  // The SDK's per-request timeout applies to EACH attempt and its default
+  // retry policy is 2 retries, so without maxRetries:0 a stalled provider can
+  // hold a budgeted caller (fact-check publish lock: 60s ceiling) for ~3x its
+  // timeout. A timeoutMs budget must be a true wall-clock ceiling.
+  test('a timeoutMs budget disables SDK retries (maxRetries: 0)', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: FLAGSHIP, text: 'hi', timeoutMs: 60000 });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: 60000, maxRetries: 0 });
+  });
+
+  test('no timeoutMs → no per-request options (SDK default timeout + retries apply)', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: FLAGSHIP, text: 'hi' });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toBeUndefined();
+  });
 });
 
 // jsonMode is the mechanism the knowledge-bridge fallback relies on: invalid JSON
@@ -150,6 +166,36 @@ describe('callOpenAI jsonMode parsing', () => {
     expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: false })).toEqual({ ok: false, reason: 'openai_incomplete' });
     const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
     expect(body.reasoning).toEqual({ effort: 'low' });
+  });
+
+  // These lanes route customer PII (inbound email sender/subject/body, call
+  // transcripts, names/addresses) through OpenAI — the Responses API retains
+  // application state unless storage is explicitly disabled, so EVERY request
+  // built by the shared adapter must carry store:false.
+  test('every Responses request disables storage (store: false)', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+    await callOpenAI({ model: OPENAI_BEST, text: 'customer email body', jsonMode: true });
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.store).toBe(false);
+  });
+
+  // Without a bounded default, an OpenAI primary that accepts the connection
+  // and stalls would hang forever and the Anthropic fallback would never run.
+  // The default mirrors the Anthropic SDK's built-in 10-minute request timeout
+  // that bounded these lanes before the failover PR.
+  test('applies a 10-minute default abort timeout when the caller passes none', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout');
+    await callOpenAI({ model: OPENAI_BEST, text: 'hi' });
+    expect(timeoutSpy).toHaveBeenCalledWith(10 * 60 * 1000);
+    expect(global.fetch.mock.calls.at(-1)[1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test('an explicit timeoutMs overrides the default abort timeout', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout');
+    await callOpenAI({ model: OPENAI_BEST, text: 'hi', timeoutMs: 1234 });
+    expect(timeoutSpy).toHaveBeenCalledWith(1234);
   });
 });
 
@@ -203,7 +249,9 @@ describe('dispatchWithFallback', () => {
       fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
     }, { text: 'write', jsonMode: false, timeoutMs: 1000 });
     expect(result.ok).toBe(true);
-    expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: 700 });
+    // The remaining budget rides to the fallback with SDK retries disabled, so
+    // the shared deadline is a true ceiling (retries would run ~3x past it).
+    expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: 700, maxRetries: 0 });
   });
 
   test('rejects a same-provider fallback policy', async () => {

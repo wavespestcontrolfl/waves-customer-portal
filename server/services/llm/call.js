@@ -26,6 +26,13 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
+
+// Default per-request ceiling when a caller supplies no timeoutMs. Mirrors the
+// Anthropic SDK's built-in 10-minute default (which bounded these lanes before
+// the cross-provider failover), so a fetch-based primary that accepts the
+// connection and then stalls can never hang forever — it aborts and the
+// dispatcher moves to the backup provider.
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const geminiKey = () => process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const geminiUrl = (model, key) =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
@@ -66,12 +73,15 @@ const toAnthropicImage = (img) => ({ type: 'image', source: { type: 'base64', me
  * OpenAI Responses API. System is prepended into the user text (the proven #1834
  * pattern — no separate system role). jsonMode parses the reply via parseLooseJson.
  */
-async function callOpenAI({ model, system, text, images = [], jsonMode = true, maxTokens, timeoutMs, reasoningEffort = 'low' } = {}) {
+async function callOpenAI({ model, system, text, images = [], jsonMode = true, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low' } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
   try {
     const promptText = system ? `${system}\n\n${text || ''}` : (text || '');
     const content = [{ type: 'input_text', text: promptText }, ...images.map(toOpenAIImage)];
-    const body = { model, input: [{ role: 'user', content }] };
+    // store:false on EVERY request through this adapter — the Responses API
+    // retains application state by default, and these lanes carry customer PII
+    // (inbound email sender/subject/body, call transcripts, names/addresses).
+    const body = { model, input: [{ role: 'user', content }], store: false };
     if (maxTokens) body.max_output_tokens = maxTokens;
     if (/^gpt-5(?:\.|-|$)/i.test(String(model || ''))) body.reasoning = { effort: reasoningEffort };
     const resp = await fetch(OPENAI_RESPONSES_API, {
@@ -144,8 +154,14 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
     if (tools) req.tools = tools;
     if (Number.isFinite(temperature)) req.temperature = temperature;
+    // maxRetries:0 whenever a budget is supplied — the SDK's per-request
+    // timeout applies to EACH attempt, so its default retry policy (2 retries)
+    // could hold a caller for ~3x its ceiling. Callers with a timeoutMs budget
+    // (e.g. the fact-check publish lock, dispatchWithFallback's shared
+    // deadline) need it to be a true wall-clock ceiling; the pre-failover
+    // fact-check client was constructed with maxRetries:0 for the same reason.
     const resp = timeoutMs
-      ? await client.messages.create(req, { timeout: timeoutMs })
+      ? await client.messages.create(req, { timeout: timeoutMs, maxRetries: 0 })
       : await client.messages.create(req);
     // Older SDK/test adapters may omit the explicit block type while still
     // returning a valid text field; accept both shapes.
