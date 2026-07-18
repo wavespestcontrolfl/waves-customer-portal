@@ -96,10 +96,36 @@
         "type": "string"
       },
       "spoke_links": {
-        "maxItems": 20,
+        "maxItems": 1,
         "type": "array",
         "items": {
-          "type": "string"
+          "type": "object",
+          "properties": {
+            "domain": {
+              "type": "string",
+              "minLength": 1
+            },
+            "anchor": {
+              "type": "string",
+              "minLength": 1
+            },
+            "placement": {
+              "type": "string",
+              "enum": [
+                "in_body",
+                "cta",
+                "both"
+              ]
+            },
+            "vertical": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "domain",
+            "anchor"
+          ],
+          "additionalProperties": false
         }
       },
       "author": {
@@ -116,11 +142,6 @@
           "fdacs_license": {
             "type": "string",
             "pattern": "^JB\\d{4,}$"
-          },
-          "years_swfl": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
           },
           "bio_url": {
             "type": "string",
@@ -318,32 +339,19 @@
       ]
     },
     "diagnostic": {
-      "required": [
-        "AnnotatedDiagnosticPhoto",
-        "PestDiagnosticTree"
-      ],
-      "recommended": [
-        "CaseStudy"
-      ]
+      "required": []
     },
     "seasonal": {
-      "required": [
-        "SeasonalCalendar",
-        "ContentUpgrade"
-      ]
+      "required": []
     },
     "protocol": {
-      "required": [
-        "DataCallout"
-      ],
+      "required": [],
       "recommended": [
         "HonestRejection"
       ]
     },
     "cost": {
       "required": [
-        "WaveGuardLadder",
-        "DisclosureBlock",
         "ComparisonTable"
       ]
     },
@@ -354,17 +362,13 @@
       ]
     },
     "case-study": {
-      "required": [
-        "CaseStudy"
-      ]
+      "required": []
     },
     "location": {
       "required": []
     },
     "by-grass-type": {
-      "required": [
-        "GrassTypeSection"
-      ]
+      "required": []
     }
   }
 }

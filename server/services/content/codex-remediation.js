@@ -100,8 +100,174 @@ function parseCodexFindings(reviewComments = [], headSha = null) {
       path: c.path || null,
       line: c.line ?? c.original_line ?? null,
       body: String(c.body || '').trim(),
+      created_at: c.created_at || c.createdAt || null,
     }))
     .filter((f) => f.body);
+}
+
+// A body "matches" the head when it embeds the full SHA or an abbreviated
+// (>=7 hex char) prefix of it — Codex's completion summary prints a 10-char
+// "Reviewed commit" SHA (same posture as astro-publisher.bodyMatchesHead,
+// where demanding more chars stalled astro PR #357 at codex_review_pending).
+function bodyMatchesHead(body, headSha) {
+  const head = String(headSha || '').trim().toLowerCase();
+  if (!head) return false;
+  const text = String(body || '');
+  if (text.toLowerCase().includes(head)) return true;
+  const runs = text.match(/\b[0-9a-f]{7,40}\b/gi) || [];
+  return runs.some((run) => head.startsWith(run.toLowerCase()));
+}
+
+/**
+ * Evidence that the Codex review round for `headSha` COMPLETED — as opposed
+ * to inline findings still streaming in. Exactly two artifacts prove
+ * completion (mirroring astro-publisher.codexReviewStatus):
+ *   1. a SUBMITTED (non-PENDING) Codex review object pinned to the head, or
+ *   2. Codex's top-level summary issue comment embedding the head SHA.
+ * A usage-limit bounce is a FAILED round, never completion. When a review
+ * request timestamp exists the artifact must be STRICTLY after it — a
+ * same-second tie is ambiguous and fails closed, matching the finding
+ * filter in p2OnlyMergeEligible.
+ */
+// A usage-limit bounce is a FAILED round, never completion — regardless of
+// which artifact carries it. Codex posts the bounce either as a top-level
+// issue comment or (round-10, Codex P1) as the BODY of a submitted review
+// object: a partial round can emit one inline P2, then submit the review
+// with the bounce in its body, and treating that review as completion
+// evidence would let the P2-only bar merge before the round's P0/P1s ever
+// surfaced. One regex, applied to BOTH artifact kinds, so they can't drift.
+const USAGE_LIMIT_BODY_RE = /usage limits|reached your Codex usage limits/i;
+
+function codexRoundCompleted({ reviews = [], issueComments = [], headSha = null, requestedAt = 0 } = {}) {
+  const head = shortSha(headSha);
+  if (!head) return false;
+  const afterRequest = (ts) => {
+    if (!(requestedAt > 0)) return true; // no request timestamp — head match is the only anchor
+    return (Date.parse(ts || 0) || 0) > requestedAt;
+  };
+  const submittedReview = (Array.isArray(reviews) ? reviews : []).some((r) => {
+    if (!isCodexAuthor(r && (r.user?.login || r.author?.login))) return false;
+    if (String(r?.state || '').toUpperCase() === 'PENDING') return false;
+    if (shortSha(r?.commit_id || r?.commit?.oid) !== head) return false;
+    // Round-10 (Codex P1): a submitted review whose body is the usage-limit
+    // bounce is the round's failure artifact, not its completion — mirror
+    // the issue-comment rejection below BEFORE this path can return true.
+    if (USAGE_LIMIT_BODY_RE.test(String(r?.body || ''))) return false;
+    return afterRequest(r?.submitted_at || r?.submittedAt);
+  });
+  if (submittedReview) return true;
+  return (Array.isArray(issueComments) ? issueComments : []).some((c) => {
+    if (!isCodexAuthor(c && (c.user?.login || c.author?.login))) return false;
+    const body = String(c?.body || '');
+    if (USAGE_LIMIT_BODY_RE.test(body)) return false;
+    if (!bodyMatchesHead(body, headSha)) return false;
+    return afterRequest(c?.created_at || c?.createdAt);
+  });
+}
+
+// ── P2-only merge bar (autonomous blog lane) ───────────────────────────────
+// A fresh Codex review can ALWAYS surface new P2s on a long post (observed
+// on astro #383 and the 07-04 backlog: every re-review goes deeper), so a
+// "completely clean" merge bar generates unbounded fix rounds and the lane
+// never converges without a human. Owner directive 2026-07-16 ("no gates on
+// the auto blog"): P0/P1 findings always block; once remediation has spent
+// at least one round improving the PR, a review that leaves ONLY P2 findings
+// for the current head stops blocking the merge. The P2s are logged on the
+// run for the admin UI. Kill switch: AUTONOMOUS_CODEX_P2_MERGE=false.
+function p2MergeEnabled() {
+  return String(process.env.AUTONOMOUS_CODEX_P2_MERGE || '').trim().toLowerCase() !== 'false';
+}
+
+const SEVERITY_BADGE_RE = /!\[P([012])\s+Badge\]/i;
+
+function findingSeverity(body) {
+  const m = String(body || '').match(SEVERITY_BADGE_RE);
+  // Unbadged findings fail CLOSED as P1 — an unparseable severity must never
+  // downgrade into a mergeable P2.
+  return m ? `P${m[1]}` : 'P1';
+}
+
+/**
+ * p2OnlyMergeEligible(prNumber, headSha) → { eligible, p2Count?, rounds?, reason? }
+ * eligible=true means: Codex HAS reviewed this exact head (findings tied to
+ * it exist), every current-head finding is a P2, and codex_remediation_state
+ * records BOTH >= 1 remediation round spent AND that the current head IS the
+ * remediation commit this loop last pushed (last_push_sha). Callers still
+ * run their own merge guards (deploy-green, hub-only, sha-pinned merge,
+ * queue re-checks).
+ */
+async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
+  if (!p2MergeEnabled()) return { eligible: false, reason: 'disabled (AUTONOMOUS_CODEX_P2_MERGE=false)' };
+  if (!prNumber || !headSha) return { eligible: false, reason: 'missing pr/head' };
+  const db = deps.db || dbDefault;
+  const gh = deps.gh || ghDefault;
+  const state = await getState(db, prNumber);
+  if ((state.rounds || 0) < 1) return { eligible: false, reason: 'no remediation round spent yet' };
+  // Round-9 (Codex P2): rounds counts ATTEMPTS — the no-valid-fix retry
+  // path increments it with nothing pushed, so an outage/truncation streak
+  // must not read as "remediation improved the PR". Improvement means the
+  // head under review IS a remediation commit this loop pushed: require the
+  // SHA the successful push path records (last_push_sha — failed attempts
+  // never write it) to EQUAL the current head. Presence alone is not
+  // enough — a park re-arm resets rounds but keeps last_push_sha as
+  // history, so a stale SHA from a pre-park era plus a failed-attempt
+  // round would otherwise open the bar on a head remediation never
+  // touched.
+  const lastPush = String(state.last_push_sha || '').trim().toLowerCase();
+  if (!lastPush) {
+    return { eligible: false, reason: 'no pushed remediation commit recorded (spent rounds may be failed attempts)' };
+  }
+  if (lastPush !== String(headSha).trim().toLowerCase()) {
+    return { eligible: false, reason: `current head ${shortSha(headSha)} is not the last pushed remediation commit ${shortSha(state.last_push_sha)}` };
+  }
+  const reviewComments = await gh.listPrReviewComments(prNumber);
+  const findings = parseCodexFindings(reviewComments, headSha);
+  // No findings tied to this head = either review still pending or truly
+  // clean — both are the normal path's business, never this bar's.
+  if (findings.length === 0) return { eligible: false, reason: 'no findings for current head' };
+  // A review request can be RE-POSTED for the SAME head (usage-limit bounce
+  // recovery). Mirror assertCodexReviewClear's request-timestamp posture:
+  // only findings POSTED AFTER the latest current-head request count as its
+  // RESPONSE, and a request with no response yet is a pending review, not
+  // an eligible one. Round-9 (Codex P1): that response filter gates ONLY
+  // the pending check — severity blocking below considers EVERY
+  // current-head finding, because the head hasn't changed: a P0/P1 posted
+  // before a same-head re-request is still an unresolved blocker even when
+  // the re-review adds only P2s or doesn't repeat old comments.
+  const h = shortSha(headSha);
+  const issueComments = await gh.listIssueComments(prNumber);
+  const latestRequestAt = (Array.isArray(issueComments) ? issueComments : [])
+    .filter((c) => /@codex\s+review/i.test(String(c && c.body || '')) && (!h || String(c.body || '').includes(h)))
+    .map((c) => Date.parse(c.created_at || c.createdAt || 0) || 0)
+    .reduce((a, b) => Math.max(a, b), 0);
+  if (latestRequestAt > 0) {
+    // STRICTLY after: GitHub timestamps have second precision, so a finding
+    // stamped in the same second as the re-request is ambiguous — it could
+    // be the previous review's output. Fail closed (pending) on ties.
+    const response = findings.filter((f) => (Date.parse(f.created_at || 0) || 0) > latestRequestAt);
+    if (response.length === 0) {
+      return { eligible: false, reason: 'latest same-head review request has no response yet (pending)' };
+    }
+  }
+  const severities = findings.map((f) => findingSeverity(f.body));
+  if (severities.some((s) => s === 'P0' || s === 'P1')) {
+    return { eligible: false, reason: `blocking findings present (${severities.join(', ')})` };
+  }
+  // Round-8 (Codex P1): inline comments can stream in INCREMENTALLY while a
+  // review round is in flight — a lone current-head P2 posted after the
+  // request is NOT proof the round finished, and merging on it races a
+  // P0/P1 that may still be generating. The P2 bar only arms on evidence of
+  // a COMPLETED round: a submitted Codex review pinned to this head, or
+  // Codex's top-level completion summary embedding this head's SHA, each
+  // strictly after the latest same-head request. No artifact = pending.
+  if (typeof gh.listPrReviews !== 'function') {
+    return { eligible: false, reason: 'cannot verify codex round completion (review lookup unavailable)' };
+  }
+  const reviews = await gh.listPrReviews(prNumber);
+  if (!codexRoundCompleted({ reviews, issueComments, headSha, requestedAt: latestRequestAt })) {
+    return { eligible: false, reason: 'codex review round not completed for current head (inline findings may be partial)' };
+  }
+  return { eligible: true, p2Count: findings.length, rounds: state.rounds };
 }
 
 /**
@@ -1157,7 +1323,10 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     }
   }
 
-  await saveState(db, prNumber, { rounds: round, last_findings: JSON.stringify(findings) });
+  // last_push_sha is the P2-only merge bar's proof that a remediation round
+  // actually PUSHED (round 9) — only this success path may write it; the
+  // no-valid-fix retry path spends rounds without it.
+  await saveState(db, prNumber, { rounds: round, last_push_sha: newHead || null, last_findings: JSON.stringify(findings) });
   await gh.createIssueComment(prNumber, buildReviewRequestBody(newHead));
 
   logger.info(`[codex-remediation] round ${round} pushed for PR #${prNumber}: ${findings.length} finding(s) → ${shortSha(newHead)}`);
@@ -1382,5 +1551,8 @@ module.exports = {
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,
+  p2MergeEnabled,
+  p2OnlyMergeEligible,
+  findingSeverity,
   MAX_ROUNDS,
 };
