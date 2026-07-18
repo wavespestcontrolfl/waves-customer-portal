@@ -124,6 +124,9 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
           firstName: lead.first_name,
           leadId: lead.id,
           source: 'email_inquiry_not_ready',
+          // Phone was extracted from an email body — the approve route
+          // asserts NO consent for it; the messaging validator decides.
+          channelProvenance: 'email',
         });
       } catch (e) {
         logger.warn(`[email-actions] clarify ask failed: ${e.message}`);

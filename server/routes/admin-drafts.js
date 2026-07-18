@@ -117,18 +117,24 @@ function sendPolicyForDraft(draft, recipient) {
   }
   if (draft.intent === 'estimate_clarify') {
     // Clarify asks answer the contact's OWN quote request, so they ride the
-    // transactional estimate rails, never the conversational fallthrough —
-    // that shape's anonymous-lead allowance exists for people texting IN,
-    // and a clarify recipient may have arrived by email or web form. The
-    // lead-only consentBasis records that provenance (flags.source).
+    // transactional estimate rails, never the conversational fallthrough.
+    // Consent is only ASSERTED when the phone's recorded provenance
+    // supports SMS contact — they texted us, called us, or self-submitted
+    // the number on our quote form (the basis the form's SMS auto-reply
+    // already sends under). An email-extracted phone asserts nothing:
+    // consentBasis stays undefined and the messaging validator's
+    // fail-closed path owns the verdict. Draft creation is never itself
+    // consent evidence.
     const flags = parseFlags(draft.flags);
+    const provenance = flags.channel_provenance || null;
+    const smsProvenance = ['sms', 'voice', 'web_form'].includes(provenance);
     return {
       audience: recipient.customerId ? 'customer' : 'lead',
       purpose: 'estimate_followup',
       estimateId: flags.estimate_id || undefined,
-      consentBasis: recipient.customerId ? undefined : {
+      consentBasis: (recipient.customerId || !smsProvenance) ? undefined : {
         status: 'transactional_allowed',
-        source: `estimate_clarify_${flags.source || 'unknown'}`,
+        source: `estimate_clarify_${provenance}`,
         capturedAt: draft.created_at || new Date().toISOString(),
       },
     };

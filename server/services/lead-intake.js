@@ -56,6 +56,24 @@ function looksLikeAddress(body) {
   return false;
 }
 
+// Combined replies ("Pest control — 123 Main St, Sarasota") carry the
+// address in the SAME message the service classifier consumes. Capture the
+// street-shaped tail: among every digit-run start, the LATEST whose tail
+// carries a street suffix (latest wins so "I have 2 dogs, ... 123 Main St"
+// captures the street, not the dogs). Conservative — no suffix, no capture;
+// the awaiting_address state still handles a follow-up reply.
+function extractAddressCandidate(body) {
+  const text = String(body || '');
+  let best = null;
+  for (const match of text.matchAll(/\d{1,6}\s+[A-Za-z]/g)) {
+    const candidate = text.slice(match.index).trim();
+    if (candidate.length >= 6 && candidate.length <= 300 && STREET_SUFFIX_RE.test(candidate)) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
 async function createOrUpdateDraftEstimate(customer, interest) {
   const existingDraft = await db('estimates')
     .where({ customer_id: customer.id, status: 'draft' })
@@ -187,7 +205,18 @@ async function handleIntakeReply(customer, body) {
     });
     customer.lead_service_interest = cls.interest;
 
-    const hasAddress = !!(customer.address_line1 && String(customer.address_line1).trim());
+    let hasAddress = !!(customer.address_line1 && String(customer.address_line1).trim());
+    if (!hasAddress) {
+      // Combined-reply capture: without it the machine advances to
+      // awaiting_address, DROPS the address it was just given, and the
+      // clarify cooldown suppresses the re-ask — the quote strands.
+      const combinedAddress = extractAddressCandidate(body);
+      if (combinedAddress) {
+        await db('customers').where({ id: customer.id }).update({ address_line1: combinedAddress });
+        customer.address_line1 = combinedAddress;
+        hasAddress = true;
+      }
+    }
     if (hasAddress) {
       // Address already on file — create draft + notify immediately.
       if (await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
@@ -221,6 +250,8 @@ async function handleIntakeReply(customer, body) {
         firstName: customer.first_name,
         customerId: customer.id,
         source: 'lead_intake_awaiting_address',
+        // Mid-SMS-conversation — the contact is texting this number now.
+        channelProvenance: 'sms',
       });
     } catch (e) {
       logger.error(`[lead-intake] clarify ask failed: ${e.message}`);

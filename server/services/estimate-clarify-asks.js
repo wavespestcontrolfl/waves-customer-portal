@@ -72,6 +72,12 @@ function composeClarifyBody({ missing, firstName }) {
  *   estimateId     — draft estimate id when one exists
  *   source         — producer tag ('estimator_engine_red' | 'lead_intake' |
  *                    'lead_webhook_blocked' | 'email_inquiry_not_ready')
+ *   channelProvenance — how Waves got this phone ('sms' | 'voice' |
+ *                    'web_form' | 'email'). The approve route only asserts
+ *                    a transactional consentBasis for sms/voice/web_form;
+ *                    an email-extracted phone asserts nothing and the
+ *                    messaging validator's fail-closed path owns the
+ *                    verdict.
  *   contextSummary — operator-facing "why this draft exists" line
  */
 async function parkClarifyAsk({
@@ -82,6 +88,7 @@ async function parkClarifyAsk({
   leadId = null,
   estimateId = null,
   source = 'unknown',
+  channelProvenance = null,
   contextSummary = null,
 }) {
   try {
@@ -134,6 +141,7 @@ async function parkClarifyAsk({
             lead_id: leadId || null,
             estimate_id: estimateId || null,
             source,
+            channel_provenance: channelProvenance || null,
           }),
         })
         .returning(['id']);

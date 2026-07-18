@@ -835,6 +835,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           leadId: leadRecord?.id || null,
           estimateId: createdEstimateId,
           source: 'lead_webhook_blocked',
+          // Self-submitted on Waves' quote form — the same basis the form's
+          // own SMS auto-reply already sends under.
+          channelProvenance: 'web_form',
         });
         // Address-only ask alignment: the webhook seeded
         // lead_intake_status='awaiting_service' above, but this form already

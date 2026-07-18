@@ -553,6 +553,8 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                 customerId: (!context.customerPhoneAmbiguous && context.customer?.id) || null,
                 leadId: (context.leadIsForThisCall && context.lead?.id) || null,
                 source: origin.channel === 'sms_thread' ? 'estimator_engine_sms_red' : 'estimator_engine_red',
+                // They texted or called Waves from this number themselves.
+                channelProvenance: origin.channel === 'sms_thread' ? 'sms' : 'voice',
               });
             }
           } catch (askErr) {
