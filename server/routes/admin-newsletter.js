@@ -285,10 +285,16 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
     // so stale drafts from previous cycles don't resurface in Compose.
     const type = req.query.type === 'pest-insider-monthly'
       ? 'pest-insider-monthly'
-      : 'local-weekly-fresh-events';
+      : req.query.type === 'reengagement'
+        ? 'reengagement'
+        : 'local-weekly-fresh-events';
 
     let windowStart;
-    if (type === 'pest-insider-monthly') {
+    if (type === 'reengagement') {
+      // As-needed lane (newsletter-sunset.js stages it and re-stages weekly
+      // when missing) — a parked win-back stays loadable until sent.
+      windowStart = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    } else if (type === 'pest-insider-monthly') {
       // Current ET month.
       const mm = String(nowET.month).padStart(2, '0');
       windowStart = parseETDateTime(`${nowET.year}-${mm}-01T00:00:00`);

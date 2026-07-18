@@ -9,13 +9,19 @@
  * edits and fires through the existing send flow. Four phases, in order:
  *
  *   A. RECOVER — flagged subscribers who engaged since flagging lose the
- *      'reengagement_due' tag (any open / click / quiz answer).
+ *      'reengagement_due' tag (any open / click / quiz answer). Sunset
+ *      ('inactive') subscribers with engagement AFTER deactivation — e.g. a
+ *      late click on the win-back CTA — reactivate, honoring the copy's
+ *      "one click keeps you on the list" promise.
  *   B. FLAG — active subscribers with ≥MIN_DELIVERED_SENDS delivered
  *      campaigns, the earliest ≥INACTIVITY_DAYS old, and zero engagement
  *      inside INACTIVITY_DAYS get tagged + stamped. A safety valve pauses
- *      the whole run (alert, no writes) when the eligible cohort is an
- *      implausibly large share of the list — a tracking outage or criteria
- *      bug reads as "everyone went quiet" and must not mass-flag.
+ *      the whole run (alert, no writes) when the FLAG + SUNSET cohorts
+ *      together are an implausibly large share of the list — a tracking
+ *      outage or criteria bug reads as "everyone went quiet" and must not
+ *      mass-flag OR mass-suppress (an outage that starts after the win-back
+ *      delivers would otherwise valve at 0 flag candidates while the whole
+ *      flagged cohort sails into sunset).
  *   C. STAGE — if flagged subscribers are still awaiting a win-back and no
  *      reengagement-type send is open, insert ONE parked draft targeting the
  *      tag (segment_filter { tags: [REENGAGEMENT_TAG] }).
@@ -63,19 +69,24 @@ function safetyValveTripped(candidateCount, activeCount) {
 }
 
 // Correlated EXISTS body: this subscriber has an engagement signal newer than
-// `after`. Pass a Date to compare against a fixed instant, or the literal
-// string 'flagged_at' to compare against the subscriber's OWN
-// reengagement_flagged_at column (recover + sunset phases).
+// `after`. Pass a Date to compare against a fixed instant, or one of the
+// literal strings 'flagged_at' / 'deactivated_at' to compare against the
+// subscriber's OWN reengagement_flagged_at / deactivated_at column.
+const AFTER_COLUMNS = {
+  flagged_at: 'newsletter_subscribers.reengagement_flagged_at',
+  deactivated_at: 'newsletter_subscribers.deactivated_at',
+};
 function engagementSubquery(after) {
   return function () {
     this.select(db.raw('1'))
       .from('newsletter_send_deliveries as eng')
       .whereRaw('eng.subscriber_id = newsletter_subscribers.id')
       .where(function () {
-        if (after === 'flagged_at') {
-          this.whereRaw('eng.opened_at > newsletter_subscribers.reengagement_flagged_at')
-            .orWhereRaw('eng.clicked_at > newsletter_subscribers.reengagement_flagged_at')
-            .orWhereRaw('eng.quiz_answered_at > newsletter_subscribers.reengagement_flagged_at');
+        const col = AFTER_COLUMNS[after];
+        if (col) {
+          this.whereRaw(`eng.opened_at > ${col}`)
+            .orWhereRaw(`eng.clicked_at > ${col}`)
+            .orWhereRaw(`eng.quiz_answered_at > ${col}`);
         } else {
           this.where('eng.opened_at', '>', after)
             .orWhere('eng.clicked_at', '>', after)
@@ -100,6 +111,34 @@ async function recoverEngagedFlagged(now) {
     reengagement_flagged_at: null,
     updated_at: now,
   });
+  return ids.length;
+}
+
+// Phase A (comeback half) — sunset subscribers with engagement AFTER their
+// deactivation (a late win-back open/click, a quiz answer) come back to
+// 'active' with the hygiene markers cleared. The copy promises "one click
+// keeps you on the list"; a click on day 35 must honor it even though the
+// grace job already ran. Safe to run unconditionally: reactivation requires a
+// PRESENT signal, so a tracking outage (missing signals) can't mass-fire it.
+async function reactivateSunsetComebacks(now) {
+  const ids = (
+    await db('newsletter_subscribers')
+      .where({ status: 'inactive', deactivated_reason: SUNSET_REASON })
+      .whereNotNull('deactivated_at')
+      .whereExists(engagementSubquery('deactivated_at'))
+      .select('id')
+  ).map((r) => r.id);
+  if (!ids.length) return 0;
+  await db('newsletter_subscribers')
+    .whereIn('id', ids)
+    .where({ status: 'inactive', deactivated_reason: SUNSET_REASON })
+    .update({
+      status: 'active',
+      deactivated_at: null,
+      deactivated_reason: null,
+      reengagement_flagged_at: null,
+      updated_at: now,
+    });
   return ids.length;
 }
 
@@ -132,7 +171,9 @@ async function findFlagCandidates(now) {
 
 async function applyFlags(ids, now) {
   if (!ids.length) return 0;
-  await db('newsletter_subscribers').whereIn('id', ids).update({
+  // status guard: a subscriber who unsubscribed between the candidate SELECT
+  // and this UPDATE must not get re-touched.
+  await db('newsletter_subscribers').whereIn('id', ids).where({ status: 'active' }).update({
     // remove-then-append = idempotent tag add without duplicates.
     tags: db.raw("(COALESCE(tags, '[]'::jsonb) - ?) || ?::jsonb", [REENGAGEMENT_TAG, JSON.stringify([REENGAGEMENT_TAG])]),
     reengagement_flagged_at: now,
@@ -184,8 +225,11 @@ function buildWinbackDraftRow() {
     // slug stays null — the public archive falls back to send.id, and the
     // owner usually rewords the subject before sending anyway.
     created_by: null,
-    // List hygiene, not content — never auto-share a win-back to social.
+    // List hygiene, not content — never auto-share a win-back to social, and
+    // keep it out of search engines if its archive URL ever leaks (the public
+    // feed/archive/RSS surfaces also exclude the type entirely).
     auto_share_social: false,
+    indexability: 'noindex',
     event_ids: JSON.stringify([]),
   };
 }
@@ -221,38 +265,48 @@ async function ensureWinbackDraft(cohort) {
   return { created: true, openSendId: row?.id ?? row };
 }
 
-// Phase D — flagged, win-back DELIVERED (not just accepted) after the flag
-// date and ≥GRACE_DAYS ago, still zero engagement since flagging → suppress.
-async function sunsetNonResponders(now) {
+// Phase D candidates — flagged, win-back DELIVERED (not just accepted) after
+// the flag date and ≥GRACE_DAYS ago, still zero engagement since flagging.
+// SELECT and UPDATE are split so the safety valve can weigh this cohort
+// BEFORE any status flips.
+async function findSunsetCandidates(now) {
   const graceCutoff = new Date(now.getTime() - GRACE_DAYS * DAY_MS);
-  const ids = (
-    await db('newsletter_subscribers')
-      .where({ status: 'active' })
-      .whereNotNull('reengagement_flagged_at')
-      .whereExists(function () {
-        this.select(db.raw('1'))
-          .from('newsletter_send_deliveries as wd')
-          .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
-          .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
-          .where('ws.newsletter_type', REENGAGEMENT_TYPE)
-          .whereNotNull('wd.delivered_at')
-          .whereRaw('wd.delivered_at >= newsletter_subscribers.reengagement_flagged_at')
-          .where('wd.delivered_at', '<=', graceCutoff);
-      })
-      .whereNotExists(engagementSubquery('flagged_at'))
-      .select('id')
-  ).map((r) => r.id);
+  const rows = await db('newsletter_subscribers')
+    .where({ status: 'active' })
+    .whereNotNull('reengagement_flagged_at')
+    .whereExists(function () {
+      this.select(db.raw('1'))
+        .from('newsletter_send_deliveries as wd')
+        .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
+        .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
+        .where('ws.newsletter_type', REENGAGEMENT_TYPE)
+        .whereNotNull('wd.delivered_at')
+        .whereRaw('wd.delivered_at >= newsletter_subscribers.reengagement_flagged_at')
+        .where('wd.delivered_at', '<=', graceCutoff);
+    })
+    .whereNotExists(engagementSubquery('flagged_at'))
+    .select('id');
+  return rows.map((r) => r.id);
+}
+
+async function applySunset(ids, now) {
   if (!ids.length) return 0;
-  await db('newsletter_subscribers').whereIn('id', ids).update({
-    status: 'inactive',
-    deactivated_at: now,
-    deactivated_reason: SUNSET_REASON,
-    tags: db.raw("COALESCE(tags, '[]'::jsonb) - ?", [REENGAGEMENT_TAG]),
-    // reengagement_flagged_at intentionally kept — audit trail of the episode
-    // that led here; subscribeOrResubscribe clears it on a comeback.
-    updated_at: now,
-  });
-  return ids.length;
+  // status guard: an unsubscribe (public route or SendGrid webhook) landing
+  // between the SELECT and this UPDATE is the subscriber's own choice and
+  // outranks list hygiene — never overwrite it with 'inactive'.
+  const updated = await db('newsletter_subscribers')
+    .whereIn('id', ids)
+    .where({ status: 'active' })
+    .update({
+      status: 'inactive',
+      deactivated_at: now,
+      deactivated_reason: SUNSET_REASON,
+      tags: db.raw("COALESCE(tags, '[]'::jsonb) - ?", [REENGAGEMENT_TAG]),
+      // reengagement_flagged_at intentionally kept — audit trail of the episode
+      // that led here; comeback/resubscribe paths clear it.
+      updated_at: now,
+    });
+  return updated;
 }
 
 // One dedupe-keyed admin_alerts row for the whole lane (≤1 bell). Open while
@@ -285,12 +339,14 @@ async function syncAlert(summary, now) {
     source_record_type: ALERT_TYPE,
     source_record_id: ALERT_DEDUPE_KEY,
     title: summary.valveTripped
-      ? `Newsletter sunset paused: ${summary.candidates} of ${summary.activeCount} active look inactive`
+      ? `Newsletter sunset paused: ${summary.candidates + summary.sunsetCandidates} of ${summary.activeCount} active look inactive`
       : `Newsletter win-back waiting: ${summary.cohortAwaiting} inactive subscriber${summary.cohortAwaiting === 1 ? '' : 's'} flagged`,
     description: summary.valveTripped
-      ? `Safety valve: ${summary.candidates}/${summary.activeCount} active subscribers matched the ${INACTIVITY_DAYS}-day inactivity criteria (> ${Math.round(MAX_FLAG_FRACTION * 100)}%). That usually means an open/click tracking outage or a criteria bug, not a real mass lapse — nothing was flagged. Review before re-running.`
+      ? `Safety valve: ${summary.candidates} flag + ${summary.sunsetCandidates} sunset candidates out of ${summary.activeCount} active subscribers matched the ${INACTIVITY_DAYS}-day inactivity criteria (> ${Math.round(MAX_FLAG_FRACTION * 100)}%). That usually means an open/click tracking outage or a criteria bug, not a real mass lapse — nothing was flagged or suppressed. Review before re-running.`
     : `${summary.cohortAwaiting} subscriber(s) have ${INACTIVITY_DAYS}+ days of zero opens/clicks across ${MIN_DELIVERED_SENDS}+ delivered campaigns. A re-engagement draft is parked in /admin/newsletter — review, edit, and send it; non-responders auto-suppress ${GRACE_DAYS} days after delivery.`,
-    href: '/admin/newsletter',
+    // Deep-link straight into the parked draft: Compose hydrates the lane
+    // named by ?autopilotType= (same mechanism as the Pest Insider bell).
+    href: '/admin/newsletter?autopilotType=reengagement',
     detected_at: now,
     last_seen_at: now,
     created_by_rule: 'newsletter_sunset_weekly',
@@ -317,10 +373,16 @@ async function runNewsletterSunset(now = new Date()) {
   if (!gateEnabled()) return { skipped: 'gate_off' };
 
   const recovered = await recoverEngagedFlagged(now);
+  const reactivated = await reactivateSunsetComebacks(now);
   const candidateIds = await findFlagCandidates(now);
+  const sunsetIds = await findSunsetCandidates(now);
   const activeRow = await db('newsletter_subscribers').where({ status: 'active' }).count('* as c').first();
   const activeCount = Number(activeRow?.c || 0);
-  const valveTripped = safetyValveTripped(candidateIds.length, activeCount);
+  // Valve over the COMBINED cohorts: a tracking outage that starts after the
+  // win-back delivers shows up as sunset candidates (flag candidates may be
+  // 0), and one that starts earlier shows up as flag candidates — either way
+  // the run must pause instead of mass-writing.
+  const valveTripped = safetyValveTripped(candidateIds.length + sunsetIds.length, activeCount);
 
   let flagged = 0;
   let cohortAwaiting = 0;
@@ -330,14 +392,16 @@ async function runNewsletterSunset(now = new Date()) {
     flagged = await applyFlags(candidateIds, now);
     // Sunset BEFORE staging: this week's non-responders leave the cohort
     // first, so the draft decision sees only people still owed a win-back.
-    sunset = await sunsetNonResponders(now);
+    sunset = await applySunset(sunsetIds, now);
     cohortAwaiting = await cohortAwaitingWinback();
     draft = await ensureWinbackDraft(cohortAwaiting);
   }
 
   const summary = {
     recovered,
+    reactivated,
     candidates: candidateIds.length,
+    sunsetCandidates: sunsetIds.length,
     activeCount,
     valveTripped,
     flagged,

@@ -491,7 +491,12 @@ router.get('/posts/:id', async (req, res) => {
   try {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id);
     if (!isUuid) return res.status(404).json({ error: 'not found' });
-    const row = await db('newsletter_sends').where({ id: req.params.id, status: 'sent' }).first();
+    const row = await db('newsletter_sends')
+      .where({ id: req.params.id, status: 'sent' })
+      // Win-backs are list hygiene, never public content (mirrors the
+      // getPublishedPosts exclusion); IS DISTINCT FROM keeps legacy NULL types.
+      .whereRaw("newsletter_type IS DISTINCT FROM 'reengagement'")
+      .first();
     if (!row) return res.status(404).json({ error: 'not found' });
     res.json({
       id: row.id,

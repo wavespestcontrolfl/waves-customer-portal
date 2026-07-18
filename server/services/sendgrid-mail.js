@@ -240,7 +240,13 @@ async function sendBatch({ recipients, fromEmail, fromName, subject, html, text,
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
     tracking_settings: {
-      click_tracking: { enable: true, enable_text: false },
+      // enable_text: true — batch sends are newsletter broadcasts (the only
+      // live caller is sendBroadcast), and the sunset lane reads clicked_at as
+      // an engagement/recovery signal. Without text tracking, a text-part
+      // reader following the win-back CTA would be invisible and get
+      // suppressed despite engaging. Cost: URLs in the text part render as
+      // SendGrid tracking links.
+      click_tracking: { enable: true, enable_text: true },
       open_tracking: { enable: true },
       subscription_tracking: { enable: false },
     },

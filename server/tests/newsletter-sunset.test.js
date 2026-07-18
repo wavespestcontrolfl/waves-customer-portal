@@ -72,6 +72,7 @@ describe('win-back draft row', () => {
     expect(row.newsletter_type).toBe(REENGAGEMENT_TYPE);
     expect(row.auto_share_social).toBe(false);
     expect(row.created_by).toBeNull();
+    expect(row.indexability).toBe('noindex');
   });
 
   test('targets exactly the reengagement tag', () => {

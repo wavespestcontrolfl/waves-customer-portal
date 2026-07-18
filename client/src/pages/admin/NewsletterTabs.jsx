@@ -411,6 +411,11 @@ export function ComposeView({
   // AI Draft modal). Plumbed into /draft-ai so AI drafts land in the
   // selected template's structure + voice.
   const [selectedTemplate, setSelectedTemplate] = useState(null);
+  // newsletter_type of a loaded draft that has NO template card (e.g. the
+  // sunset job's 'reengagement' win-back). While set, it is what saveDraft
+  // persists — so editing the draft can't relabel it to a template lane.
+  // Cleared when the operator explicitly applies a template.
+  const [loadedNewsletterType, setLoadedNewsletterType] = useState(null);
   // Initial prompt seed for the AI Draft modal. Set when an event was
   // handed off from DashboardView's "Draft newsletter" click; cleared
   // after the modal opens (so reopening from the regular button isn't
@@ -430,7 +435,6 @@ export function ComposeView({
     setAiInitialPrompt(buildEventPrompt(pendingEvent));
     setAiOpen(true);
     if (onPendingEventConsumed) onPendingEventConsumed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingEvent]);
 
   // Auto-select the flagship template for brand-new composes so the
@@ -445,7 +449,6 @@ export function ComposeView({
         setSelectedTemplate('weekend');
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const segmentFilter = useMemo(() => {
@@ -532,12 +535,14 @@ export function ComposeView({
   useEffect(() => {
     if (draftId || pendingEventRef.current) return; // already editing a draft or event-seeded
     let cancelled = false;
-    // ?autopilotType= comes from autopilot notifications (e.g. the monthly
-    // Pest Insider) so the click lands on THAT lane's draft instead of the
-    // weekly default.
+    // ?autopilotType= comes from autopilot/sunset notifications (e.g. the
+    // monthly Pest Insider, or the newsletter-sunset win-back bell) so the
+    // click lands on THAT lane's draft instead of the weekly default.
     const laneParam = autopilotTypeParam === "pest-insider-monthly"
       ? "?type=pest-insider-monthly"
-      : "";
+      : autopilotTypeParam === "reengagement"
+        ? "?type=reengagement"
+        : "";
     adminFetch(`/admin/newsletter/sends/latest-autopilot${laneParam}`)
       .then((d) => {
         if (cancelled || pendingEventRef.current || userHasEdited.current) return;
@@ -550,12 +555,22 @@ export function ComposeView({
         setTextBody(ap.text_body || "");
         setAutoShareSocial(ap.auto_share_social !== false);
         const tplForType = TEMPLATES.find((t) => t.newsletterType === ap.newsletter_type);
-        setSelectedTemplate(tplForType?.key || "weekend");
+        if (tplForType) {
+          setSelectedTemplate(tplForType.key);
+        } else if (ap.newsletter_type) {
+          // A draft whose type has no template card (e.g. 'reengagement' from
+          // the sunset job): keep ITS type authoritative so saving the draft
+          // doesn't relabel it to a template lane — a rewrite would break the
+          // sunset job's newsletter_type join and leak it into other lanes.
+          setSelectedTemplate(null);
+          setLoadedNewsletterType(ap.newsletter_type);
+        } else {
+          setSelectedTemplate("weekend");
+        }
         setAutopilotBanner(true);
       })
       .catch(() => { /* no autopilot draft — nothing to do */ });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Recalculate segment match count when the filter changes.
@@ -577,6 +592,9 @@ export function ComposeView({
   }, [segmentFilter]);
 
   const activeNewsletterType = (() => {
+    // A loaded draft whose type has no template card (e.g. 'reengagement')
+    // keeps its own type until the user explicitly picks a template.
+    if (loadedNewsletterType) return loadedNewsletterType;
     const key = selectedTemplate || "blank";
     const t = TEMPLATES.find((x) => x.key === key);
     return t?.newsletterType || null;
@@ -593,6 +611,8 @@ export function ComposeView({
     userHasEdited.current = true;
     setHtmlBody(t.html);
     setSelectedTemplate(key === "blank" ? null : key);
+    // Explicit template choice overrides a loaded draft's off-template type.
+    setLoadedNewsletterType(null);
     // A hand-picked template body isn't anchored to AI-locked events — clear the
     // ids and mark dirty so the save writes the empty set (the prior AI events
     // no longer match this body).

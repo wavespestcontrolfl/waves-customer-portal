@@ -22,6 +22,7 @@ jest.mock('../models/db', () => {
   const builder = {
     where() { return builder; },
     whereNotNull() { return builder; },
+    whereRaw() { return builder; },
     orderBy() { return builder; },
     limit() { return Promise.resolve(mockRows); },
     first() { return Promise.resolve(mockRows[0] || null); },
