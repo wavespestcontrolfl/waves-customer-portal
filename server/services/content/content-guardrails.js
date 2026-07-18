@@ -659,8 +659,17 @@ function productClaimFinding(text) {
   const POST_BRAND_CLAIM_SRC = [
     'is\\s+what', 'which\\s+is\\s+what', 'pro\\s+choice', 'go-?to', 'top\\s+pick', 'favorite',
     'best\\s+(?:bait|gel|product|option|choice)',
-    // efficacy claims
-    'works?\\b', 'kills?\\b', 'knocks?\\s+(?:out|down)', 'wipes?\\s+out', 'eliminates?', 'eradicates?', 'outperforms?',
+    // efficacy claims. 'works' is EFFICACY-QUALIFIED (round-10, Codex P2):
+    // bare "How Sentricon works in Southwest Florida" / "Sentricon works by
+    // intercepting foragers" is the product-as-TOPIC informational copy the
+    // carve-out above explicitly allows (and evaluate() scans title/meta, so
+    // an unqualified 'works' blocked legitimate topic pages before a PR ever
+    // opened). It only counts as a claim with efficacy/comparative/guarantee
+    // wording ("works better/best/guaranteed/wonders/every time") or an
+    // endorsing intensifier before it ("really/actually works").
+    'works?\\s+(?:best|better|faster|great|wonders|guaranteed|perfectly|flawlessly|reliably|so\\s+well|every\\s+time|like\\s+a\\s+charm|instantly|overnight|on\\s+contact)',
+    '(?:really|actually|truly|always|just|simply)\\s+works?\\b',
+    'kills?\\b', 'knocks?\\s+(?:out|down)', 'wipes?\\s+out', 'eliminates?', 'eradicates?', 'outperforms?',
     'is\\s+(?:the\\s+)?(?:best|most\\s+effective|effective|strongest|stronger)',
     // passive usage — present AND past tense
     '(?:is|are|was|were|gets?|got)\\s+(?:applied|used|placed|sprayed|injected|installed|put\\s+(?:down|out))',
@@ -774,6 +783,32 @@ const DIRECT_NEGATION_BEFORE_RE = /(?:\bnot|\bnever|\bno|\bcannot|\bwon['’]?t|
 // inversions stay flaggable ("Nothing" is deliberately not "no <subject>").
 const NEGATED_SUBJECT_BEFORE_RE = /\bno\s+(?!matter\b)(?:[\w'’]+\s+){1,3}$/i;
 
+// Round-10 (Codex P2): educational question/how-to framing makes prevention
+// the TOPIC, not a promise — "How to prevent ants from coming back",
+// "Can pest control prevent ants from coming back?" are exactly the
+// search-intent titles the writer is supposed to produce. Two narrow
+// shapes, and BOTH additionally require the matched verb to be BARE
+// (uninflected): infinitives and fronted auxiliaries govern a bare verb,
+// while embedded declarative promises stay inflected ("Did you know our
+// treatment prevents ants…" keeps flagging) or carry a long subject.
+//  - how-to / advice-noun infinitives: "how to (…) prevent", "steps to
+//    keep", "ways to stop", plus a sentence-INITIAL bare "To prevent …".
+//    Mid-sentence infinitives get NO exemption — "designed/guaranteed to
+//    prevent ants from coming back" are capability promises and still flag.
+//  - fronted-question inversion: optional wh-word + auxiliary + a SHORT
+//    subject (1-3 words) directly before the verb — "Can pest control
+//    prevent…", "Will a quarterly treatment stop…". Affirmative subjects
+//    never match (no fronted auxiliary), so "Our service prevents…" /
+//    "We prevent…" keep flagging, and "Nothing stops ants…" hype is
+//    untouched (no auxiliary at all).
+const HOWTO_INFINITIVE_BEFORE_RE = /(?:\bhow\s+to|\b(?:ways?|steps?|tips?|tricks?|methods?|habits?|strategies)\s+to)\s+(?:[\w'’]+\s+){0,2}$|^[^\w]*to\s+$/i;
+const QUESTION_INVERSION_BEFORE_RE = /^[^\w]*(?:(?:how|what|why|where|when|who)\s+)?(?:can|could|will|would|do|does|did|should|shall|may|might)\s+(?:[\w'’]+\s+){1,3}$/i;
+// The bare (uninflected) leading verbs of the verb-anchored promise
+// patterns — the only forms an infinitive or fronted auxiliary can govern.
+// Inflected matches ("prevents", "keeps", "gets rid of") never qualify:
+// \b fails inside the trailing "s".
+const BARE_LEADING_VERB_RE = /^(?:prevent|keep|stop|eliminate|eradicate|exterminate|remove|clear|get|wipe)\b/i;
+
 function preventionPromiseFinding(text) {
   const s = String(text || '');
   for (const src of PREVENTION_PROMISE_SRCS) {
@@ -797,6 +832,13 @@ function preventionPromiseFinding(text) {
       // "cannot prevent every ant" — round 8) or negated-subject disclaimer
       // ("No service prevents all ants" — round 9): exempt.
       if (DIRECT_NEGATION_BEFORE_RE.test(sameSentence) || NEGATED_SUBJECT_BEFORE_RE.test(sameSentence)) {
+        if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
+        continue;
+      }
+      // Question / how-to framing (round 10): only when the governing
+      // context sits in the same sentence AND the matched verb is bare —
+      // see the RE definitions above for the shapes and their limits.
+      if ((HOWTO_INFINITIVE_BEFORE_RE.test(sameSentence) || QUESTION_INVERSION_BEFORE_RE.test(sameSentence)) && BARE_LEADING_VERB_RE.test(m[0])) {
         if (m.index === re.lastIndex) re.lastIndex += 1; // zero-width safety
         continue;
       }

@@ -129,6 +129,15 @@ function bodyMatchesHead(body, headSha) {
  * same-second tie is ambiguous and fails closed, matching the finding
  * filter in p2OnlyMergeEligible.
  */
+// A usage-limit bounce is a FAILED round, never completion — regardless of
+// which artifact carries it. Codex posts the bounce either as a top-level
+// issue comment or (round-10, Codex P1) as the BODY of a submitted review
+// object: a partial round can emit one inline P2, then submit the review
+// with the bounce in its body, and treating that review as completion
+// evidence would let the P2-only bar merge before the round's P0/P1s ever
+// surfaced. One regex, applied to BOTH artifact kinds, so they can't drift.
+const USAGE_LIMIT_BODY_RE = /usage limits|reached your Codex usage limits/i;
+
 function codexRoundCompleted({ reviews = [], issueComments = [], headSha = null, requestedAt = 0 } = {}) {
   const head = shortSha(headSha);
   if (!head) return false;
@@ -140,13 +149,17 @@ function codexRoundCompleted({ reviews = [], issueComments = [], headSha = null,
     if (!isCodexAuthor(r && (r.user?.login || r.author?.login))) return false;
     if (String(r?.state || '').toUpperCase() === 'PENDING') return false;
     if (shortSha(r?.commit_id || r?.commit?.oid) !== head) return false;
+    // Round-10 (Codex P1): a submitted review whose body is the usage-limit
+    // bounce is the round's failure artifact, not its completion — mirror
+    // the issue-comment rejection below BEFORE this path can return true.
+    if (USAGE_LIMIT_BODY_RE.test(String(r?.body || ''))) return false;
     return afterRequest(r?.submitted_at || r?.submittedAt);
   });
   if (submittedReview) return true;
   return (Array.isArray(issueComments) ? issueComments : []).some((c) => {
     if (!isCodexAuthor(c && (c.user?.login || c.author?.login))) return false;
     const body = String(c?.body || '');
-    if (/usage limits|reached your Codex usage limits/i.test(body)) return false;
+    if (USAGE_LIMIT_BODY_RE.test(body)) return false;
     if (!bodyMatchesHead(body, headSha)) return false;
     return afterRequest(c?.created_at || c?.createdAt);
   });

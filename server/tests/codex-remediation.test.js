@@ -2066,3 +2066,74 @@ describe('p2OnlyMergeEligible — round-9 hardening (Codex findings)', () => {
     expect(r.reason).toMatch(/not the last pushed remediation commit/);
   });
 });
+
+// Round-10 (Codex P1): Codex can submit the round's REVIEW OBJECT with a
+// usage-limit bounce in its body after an inline P2 already streamed in.
+// That review is the round's failure artifact — treating it as completion
+// evidence would let a partial round merge before its P0/P1s surfaced. The
+// usage-limit rejection must cover review bodies exactly like issue-comment
+// bodies.
+describe('p2OnlyMergeEligible — usage-limit review bodies (Codex round-10 P1)', () => {
+  const p2At = (title, created_at) => finding({
+    body: `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${title}**\n\ndetail`,
+    created_at,
+  });
+  const REQUEST = { body: `@codex review \`${HEAD}\``, created_at: '2026-07-17T02:00:00Z' };
+  const armedDb = () => makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD }] });
+
+  test('a submitted head-pinned review whose body is the usage-limit bounce is NOT completion evidence', async () => {
+    const gh = makeGh({
+      reviewComments: [p2At('partial-round P2', '2026-07-17T02:10:00Z')],
+      issueComments: [REQUEST],
+      reviews: [codexReview({ body: "You've reached your Codex usage limits.", submitted_at: '2026-07-17T02:12:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: armedDb(), gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/not completed/);
+  });
+
+  test('the long-form bounce phrasing is rejected too', async () => {
+    const gh = makeGh({
+      reviewComments: [p2At('partial-round P2', '2026-07-17T02:10:00Z')],
+      issueComments: [REQUEST],
+      reviews: [codexReview({ body: `You've reached your Codex usage limits. Reviewed commit: ${HEAD.slice(0, 10)}`, submitted_at: '2026-07-17T02:12:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: armedDb(), gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/not completed/);
+  });
+
+  test('a normal submitted review body still completes the round (no over-rejection)', async () => {
+    const gh = makeGh({
+      reviewComments: [p2At('finding', '2026-07-17T02:10:00Z')],
+      issueComments: [REQUEST],
+      reviews: [codexReview({ body: 'Codex Review: two inline notes, nothing blocking.', submitted_at: '2026-07-17T02:12:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: armedDb(), gh });
+    expect(r.eligible).toBe(true);
+    expect(r.p2Count).toBe(1);
+  });
+
+  test('an empty-body submitted review still completes (round-8 default shape intact)', async () => {
+    const gh = makeGh({
+      reviewComments: [p2At('finding', '2026-07-17T02:10:00Z')],
+      issueComments: [REQUEST],
+      reviews: [codexReview({ submitted_at: '2026-07-17T02:12:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: armedDb(), gh });
+    expect(r.eligible).toBe(true);
+  });
+
+  test('a later clean completion summary recovers a usage-limit review round', async () => {
+    const gh = makeGh({
+      reviewComments: [p2At('finding', '2026-07-17T02:10:00Z')],
+      issueComments: [
+        REQUEST,
+        { user: { login: CODEX }, body: `Codex Review complete. Reviewed commit: ${HEAD.slice(0, 10)}`, created_at: '2026-07-17T02:20:00Z' },
+      ],
+      reviews: [codexReview({ body: "You've reached your Codex usage limits.", submitted_at: '2026-07-17T02:12:00Z' })],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: armedDb(), gh });
+    expect(r.eligible).toBe(true);
+  });
+});

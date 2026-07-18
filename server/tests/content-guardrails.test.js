@@ -1098,3 +1098,82 @@ describe('product/prevention guards — round-9 hardening (Codex findings)', () 
     expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
   });
 });
+
+// Round 10 (Codex P2 x2): product-as-topic "how <product> works" copy and
+// educational question/how-to prevention titles are the writer's bread and
+// butter — they must pass, while efficacy claims and affirmative promises
+// keep flagging exactly as every prior round pinned them.
+describe('product/prevention guards — round-10 hardening (Codex findings)', () => {
+  test('"How Sentricon works" product-as-topic copy passes (title AND body)', () => {
+    const viaTitle = guardrails.evaluate({
+      body: 'Bait stations target the colony itself.',
+      frontmatter: { title: 'How Sentricon works in Southwest Florida', meta_description: 'What a monitored termite bait program actually does in SWFL sandy soil, and how a colony-level approach differs from liquid treatments for area homeowners.' },
+    }, {});
+    expect(viaTitle.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+    const viaBody = guardrails.evaluate({ body: 'Sentricon works by intercepting foraging termites before they reach the slab.' }, {});
+    expect(viaBody.findings.some((f) => f.code === 'PRODUCT_CLAIM')).toBe(false);
+  });
+
+  test('efficacy "works" claims still flag after the topic carve-out', () => {
+    for (const body of [
+      'Termidor works better than anything else on the market.',
+      'Sentricon works guaranteed.',
+      'Advion works best for ants in Florida kitchens.',
+      'Advion really works on sweet-feeding ants.',
+      'Termidor works every time along the slab.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PRODUCT_CLAIM' && f.severity === 'P1')).toBe(true);
+    }
+  });
+
+  test('educational how-to prevention titles pass', () => {
+    for (const body of [
+      'How to prevent ants from coming back',
+      'Steps to keep ants from coming back after treatment.',
+      'To prevent ants from getting in, seal the weep holes and fix the moisture first.',
+      'How to keep your kitchen pest-free between visits.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('prevention QUESTIONS pass (fronted-auxiliary inversion)', () => {
+    for (const body of [
+      'Can pest control prevent ants from coming back?',
+      'Will a quarterly treatment stop ants from returning?',
+      'How do exterminators keep roaches from coming back?',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(false);
+    }
+  });
+
+  test('affirmative promises still flag after the question/how-to carve-out', () => {
+    for (const body of [
+      'Our service prevents ants from coming back.',
+      'We prevent ants from coming back.',
+      'Our treatment is designed to prevent ants from coming back.',
+      'This program is guaranteed to keep ants from coming back.',
+      // question WRAPPER around an inflected embedded promise is still a promise
+      'Did you know our treatment prevents ants from coming back?',
+      'This is how our treatment prevents ants from coming back.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE' && f.severity === 'P1')).toBe(true);
+    }
+  });
+
+  test('every prior round\'s pinned bypass shape still flags', () => {
+    for (const body of [
+      'Sealing the slab gap keeps the ants from coming back next month.', // round 1
+      'No honest company will promise you will never see another ant, but our service eliminates ants.', // round 4
+      'This treatment not only prevents ants, it starves the colony.', // round 8
+      'Nothing stops ants from coming back like our quarterly program.', // rounds 8+9
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'PREVENTION_PROMISE')).toBe(true);
+    }
+  });
+});

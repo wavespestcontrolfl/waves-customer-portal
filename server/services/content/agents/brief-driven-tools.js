@@ -234,6 +234,20 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
             qb.whereRaw("LOWER(draft_payload->'frontmatter'->>'title') LIKE ?", [`%${keyword.toLowerCase()}%`])
               .orWhereRaw("LOWER(draft_payload->'frontmatter'->>'primary_keyword') LIKE ?", [`%${keyword.toLowerCase()}%`]);
           };
+          // Round-10 (Codex P2): the legacy blog_posts query above is
+          // city-scoped, but these autonomous lookups were not — on a broad
+          // keyword ("ant control") a pending/published Sarasota draft
+          // suppressed every OTHER city's brief, because the writer prompt
+          // treats any returned in-flight draft as same-intent. Frontmatter
+          // city lives in service_areas_tag (required, minItems 1 — see
+          // packages/blog-schema/schema.json), so a city-scoped call only
+          // returns runs tagged for that city; multi-city drafts still match
+          // every city they cover. No city → global dedupe, unchanged.
+          const cityFilter = (qb) => {
+            if (city) {
+              qb.whereRaw("draft_payload->'frontmatter'->'service_areas_tag' @> ?::jsonb", [JSON.stringify([String(city)])]);
+            }
+          };
           const runColumns = [
             'autonomous_runs.id',
             'autonomous_runs.action_type',
@@ -255,6 +269,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
             .where('oq.status', 'pending_review')
             .where('oq.skip_reason', 'astro_pr_pending_merge')
             .where(kwFilter)
+            .modify(cityFilter)
             .select(runColumns)
             .limit(20);
           // LIVE autonomous pages: they never get a blog_posts row either,
@@ -263,6 +278,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           const published = await db('autonomous_runs')
             .where({ 'autonomous_runs.outcome': 'completed_published' })
             .where(kwFilter)
+            .modify(cityFilter)
             .select(runColumns)
             .limit(20);
           // Future/live route: the publisher normalizes flat slugs into
