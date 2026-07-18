@@ -188,6 +188,62 @@ describe('session epoch guards', () => {
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
   });
 
+  it('DOES supersede when an incoming sessionId-less token replaces a durable session', async () => {
+    const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const durableTok = `${b64u({ alg: 'none' })}.${b64u({ customerId: 'cust-a', sessionId: 'sess-1' })}.x`;
+    const incomingLegacyTok = `${b64u({ alg: 'none' })}.${b64u({ customerId: 'cust-a' })}.x`;
+    const store = { waves_token: durableTok, waves_refresh_token: 'ref-a' };
+    stubLocalStorage(store);
+    api.getMe.mockResolvedValueOnce({ id: 'cust-a' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+
+    const slowSwitch = deferred();
+    api.selectAuthProperty.mockReturnValueOnce(slowSwitch.promise);
+    api.getMe.mockResolvedValue({ id: 'cust-a' });
+
+    let switchResult;
+    await act(async () => {
+      const pending = authApi.switchProperty('cust-b');
+      // Only the OLD side wildcards (api.js asymmetry): a sessionId-less
+      // replacement of a durable session is a DIFFERENT family.
+      store.waves_token = incomingLegacyTok;
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token', newValue: incomingLegacyTok }));
+      slowSwitch.resolve({ token: 'tok-b', refreshToken: 'ref-b', properties: [] });
+      switchResult = await pending;
+    });
+
+    expect(switchResult).toBe(false);
+    expect(api.setTokens).not.toHaveBeenCalledWith('tok-b', 'ref-b');
+  });
+
+  it('bumps the epoch on an auth rejection so concurrent flows are discarded', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    const slowMe = deferred();
+    api.getMe.mockReturnValueOnce(slowMe.promise);
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+
+    const slowSwitch = deferred();
+    api.selectAuthProperty.mockReturnValueOnce(slowSwitch.promise);
+
+    let switchResult;
+    await act(async () => {
+      const pending = authApi.switchProperty('cust-b');
+      // The mount-time /auth/me rejects the session outright...
+      const authErr = new Error('Invalid token');
+      authErr.status = 401;
+      slowMe.reject(authErr);
+      await Promise.resolve();
+      // ...so the switch response arriving afterwards must be discarded,
+      // not adopted over the sign-out.
+      slowSwitch.resolve({ token: 'tok-b', refreshToken: 'ref-b', properties: [] });
+      switchResult = await pending;
+    });
+
+    expect(switchResult).toBe(false);
+    expect(api.setTokens).not.toHaveBeenCalledWith('tok-b', 'ref-b');
+    expect(screen.getByTestId('authed').textContent).toBe('false');
+  });
+
   it('DOES supersede on a same-customer NEW-session login from another tab (family change)', async () => {
     const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     const tokenFor = (customerId, sessionId) => `${b64u({ alg: 'none' })}.${b64u({ customerId, sessionId })}.x`;

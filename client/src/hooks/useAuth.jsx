@@ -43,15 +43,16 @@ function tokenSessionIdentity(token) {
   }
 }
 
-// Same asymmetric semantics as api.js sameRequestSession: a legacy token
-// with no sessionId matches ANY session of the same customer — its first
-// routine refresh upgrades it into a durable family, and that upgrade (from
-// this or another tab) is NOT a new login, so it must not supersede
-// in-flight work.
+// Same ASYMMETRIC semantics as api.js sameRequestSession: only the OLD
+// (current) side wildcards — a legacy token with no sessionId upgrading
+// into a durable family via its first routine refresh is the same session,
+// but an INCOMING sessionId-less token replacing a durable session is a
+// different family (it can only come from a re-login on an old deploy /
+// stale bundle, and old-family responses must not stay valid under it).
 function sameSessionFamily(a, b) {
   return !!a && !!b
     && a.customerId === b.customerId
-    && (a.sessionId === null || b.sessionId === null || a.sessionId === b.sessionId);
+    && (a.sessionId === null || a.sessionId === b.sessionId);
 }
 
 function authErrorCopy(err) {
@@ -148,6 +149,11 @@ export function AuthProvider({ children }) {
       // Only a real auth rejection invalidates the session — a network drop
       // or server 5xx on launch must not wipe a valid 30-day login.
       if (err?.status === 401 || err?.status === 403 || err?.sessionExpired) {
+        // The session is DEAD — every other in-flight auth response
+        // (a concurrent property switch, another load) must be discarded
+        // too, or its later success would adopt tokens / repaint the
+        // customer and undo this sign-out.
+        sessionEpochRef.current += 1;
         api.clearTokens();
         customerRef.current = null;
         setCustomer(null);
