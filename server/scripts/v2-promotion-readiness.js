@@ -34,9 +34,16 @@ const AGREEMENT_THRESHOLD = 0.95;
 // extractor that 100% schema-failed) would otherwise dilute the metrics and
 // let a stale ≥95% sample green-light a freshly-changed extractor. Mirror the
 // processor's route resolution; override via env if those change.
-const CURRENT_MODEL = process.env.CALL_EXTRACTION_MODEL
+const CURRENT_PRIMARY = process.env.CALL_EXTRACTION_MODEL
   || ({ openai: 'gpt-5.6-sol', anthropic: MODELS.CALL_EXTRACTION_ANTHROPIC, gemini: process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro' })[process.env.CALL_EXTRACTION_PROVIDER || 'openai']
   || 'gpt-5.6-sol';
+// The gate must cover the WHOLE route: fallback-produced rows stamp the
+// fallback model, and production routes from those too — excluding them
+// would let an unassessed fallback cohort bias the metrics.
+const CURRENT_ROUTE_MODELS = [...new Set([
+  CURRENT_PRIMARY,
+  (process.env.CALL_EXTRACTION_PROVIDER || 'openai') === 'anthropic' ? 'gpt-5.6-sol' : MODELS.CALL_EXTRACTION_ANTHROPIC,
+])];
 const CURRENT_PROMPT_VERSION = PROMPT_HASH;
 
 function dbConn() {
@@ -81,12 +88,12 @@ async function main() {
   const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
   const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
   const rows = await baseQuery()
-    .where('ai_extraction_model', CURRENT_MODEL)
+    .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
     .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction');
 
   const staleExcluded = totalAttempted - rows.length;
-  console.log(`Current extractor: model=${CURRENT_MODEL} prompt=${CURRENT_PROMPT_VERSION}`);
+  console.log(`Current extractor route: models=${CURRENT_ROUTE_MODELS.join(', ')} prompt=${CURRENT_PROMPT_VERSION}`);
   if (staleExcluded > 0) {
     console.log(`Excluded ${staleExcluded} shadow row(s) from older extractor versions (not counted toward the gate).`);
   }

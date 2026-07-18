@@ -3748,7 +3748,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
       : { status: 'parse_failed', extraction: null, errors: [{ message: res.reason || 'dispatch_failed' }] };
   }
 
-  return finalizeV2Extraction(res.text, {
+  // Serialize the object the dispatcher VALIDATED, not the raw text: the
+  // dispatcher's loose parser repairs preambles/trailing commas, so a
+  // repaired schema-valid response must not re-fail finalize's strict parse.
+  return finalizeV2Extraction(JSON.stringify(res.json), {
     callId: opts.callId || null,
     extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
     // The catalog block is part of the rendered prompt, so the stamped
