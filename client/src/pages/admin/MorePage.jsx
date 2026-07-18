@@ -42,7 +42,7 @@ export default function MorePage() {
           <div className="px-4 py-2 text-[10px] font-medium uppercase tracking-label text-zinc-500">
             {section}
           </div>{" "}
-          <ul className="bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
+          <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
             {items
               .filter((item) => !item.adminOnly || currentRole === "admin")
               .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
@@ -51,7 +51,7 @@ export default function MorePage() {
                 {" "}
                 <Link
                   to={path}
-                  className="flex items-center gap-3 px-4 h-14 active:bg-zinc-50 text-zinc-900"
+                  className="flex items-center gap-3 px-4 h-14 active:bg-zinc-50 text-zinc-900 no-underline"
                 >
                   {" "}
                   <Icon
@@ -69,13 +69,13 @@ export default function MorePage() {
       ))}
       <section className="mt-6">
         {" "}
-        <ul className="bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
+        <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
           {" "}
           <li>
             {" "}
             <Link
               to="/"
-              className="flex items-center gap-3 px-4 h-14 active:bg-zinc-50 text-zinc-600"
+              className="flex items-center gap-3 px-4 h-14 active:bg-zinc-50 text-zinc-600 no-underline"
             >
               {" "}
               <ExternalLink
