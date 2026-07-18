@@ -148,11 +148,14 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, m
     if (system) body.instructions = system;
     // Gate reasoning by cap — see OPENAI_REASONING_FLOOR_TOKENS. Big lanes
     // keep the caller's cap and the standard effort (default 'low') exactly
-    // as before; tiny structured lanes drop to minimal effort with a widened
-    // wire cap so reasoning can never starve the visible output.
+    // as before; tiny sub-floor lanes drop to minimal effort. The wire-cap
+    // widening is JSON lanes ONLY: free-text routes use the caller cap as
+    // their last length guard (/api/review-gate 256-token review body, SMS
+    // drafts), so widening there would let the OpenAI leg bypass route-level
+    // size limits.
     const isGpt5 = /^gpt-5(?:\.|-|$)/i.test(String(model || ''));
     const tinyCap = isGpt5 && Number.isFinite(maxTokens) && maxTokens > 0 && maxTokens < OPENAI_REASONING_FLOOR_TOKENS;
-    if (maxTokens) body.max_output_tokens = tinyCap ? OPENAI_REASONING_FLOOR_TOKENS : maxTokens;
+    if (maxTokens) body.max_output_tokens = tinyCap && jsonMode ? OPENAI_REASONING_FLOOR_TOKENS : maxTokens;
     if (isGpt5) body.reasoning = { effort: tinyCap ? 'minimal' : reasoningEffort };
     const resp = await fetch(OPENAI_RESPONSES_API, {
       method: 'POST',

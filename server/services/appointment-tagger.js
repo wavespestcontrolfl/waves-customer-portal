@@ -127,9 +127,11 @@ class AppointmentTagger {
         return null;
       });
 
-      // Generate brief (simplified — uses template if no Claude API key)
+      // Generate brief — AI when EITHER provider key exists
+      // (dispatchWithFallback handles a per-provider no_key miss);
+      // deterministic template only when no provider is configured.
       let brief;
-      if (process.env.ANTHROPIC_API_KEY) {
+      if (process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY) {
         brief = await this.generateWDOBriefAI(service, propertyData);
       } else {
         brief = this.generateWDOBriefTemplate(service, propertyData);
