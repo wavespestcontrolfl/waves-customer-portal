@@ -233,28 +233,28 @@ describe('callOpenAI jsonMode parsing', () => {
 
   // OpenAI bills reasoning tokens against max_output_tokens: a 60-token
   // classifier cap can be consumed entirely by reasoning, returning
-  // status:"incomplete" with no visible JSON. Tiny caps must drop to minimal
+  // status:"incomplete" with no visible JSON. Tiny caps must drop to effort 'none'
   // effort with a widened wire cap; big lanes stay exactly as before.
-  test('tiny maxTokens → minimal reasoning effort and widened wire cap', async () => {
+  test('tiny maxTokens → reasoning effort none and widened wire cap', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"interest":"pest"}' }) });
     const r = await callOpenAI({ model: 'gpt-5.6-luna', text: 'classify', jsonMode: true, maxTokens: 60 });
     expect(r.ok).toBe(true);
     const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
-    expect(body.reasoning).toEqual({ effort: 'minimal' });
+    expect(body.reasoning).toEqual({ effort: 'none' });
     expect(body.max_output_tokens).toBe(1024);
   });
 
   // Free-text lanes use the caller cap as their LAST length guard
   // (/api/review-gate 256-token review body, SMS drafts) — the wire-cap
   // widening is JSON lanes only, so provider failover can never bypass
-  // route-level size limits. Sub-floor free-text still gets minimal effort.
-  test('free-text (jsonMode:false) sub-floor cap is preserved — no widening, minimal effort', async () => {
+  // route-level size limits. Sub-floor free-text still gets effort 'none'.
+  test('free-text (jsonMode:false) sub-floor cap is preserved — no widening, effort none', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: 'Short review reply.' }) });
     const r = await callOpenAI({ model: 'gpt-5.6-luna', text: 'draft a short reply', jsonMode: false, maxTokens: 256 });
     expect(r.ok).toBe(true);
     const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
     expect(body.max_output_tokens).toBe(256);
-    expect(body.reasoning).toEqual({ effort: 'minimal' });
+    expect(body.reasoning).toEqual({ effort: 'none' });
   });
 
   test('at/above the reasoning floor the caller cap and effort pass through unchanged', async () => {

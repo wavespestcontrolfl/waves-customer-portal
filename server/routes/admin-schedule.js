@@ -6324,6 +6324,9 @@ function reportCopyRejection(report) {
 // one retry only when it returned copy that was empty or failed the customer-copy
 // safety gate. Transport/auth/overload failures move straight to the next
 // provider because the shared LLM adapters already handle their own retries.
+const REPORT_CHAIN_BUDGET_MS = 120 * 1000;
+const REPORT_CALL_TIMEOUT_MS = 60 * 1000;
+
 async function generateReportCopyWithFallback({
   systemPrompt,
   userMessage,
@@ -6342,6 +6345,13 @@ async function generateReportCopyWithFallback({
 } = {}) {
   const failures = [];
   let lastRejection = null;
+  // Shared wall-clock budget for the whole chain (2 providers × ≤2 attempts).
+  // These direct adapter calls previously carried NO timeout, so a stalled
+  // primary sat on callOpenAI's 10-minute default and the admin request died
+  // before the backup ever ran. 120s total keeps the request inside proxy
+  // windows; the 60s per-call cap guarantees a stalled primary leaves the
+  // backup provider real budget.
+  const deadline = Date.now() + REPORT_CHAIN_BUDGET_MS;
 
   for (const provider of providers) {
     if (!provider?.model || typeof provider.call !== 'function') {
@@ -6350,6 +6360,11 @@ async function generateReportCopyWithFallback({
     }
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        failures.push({ provider: provider.name, reason: 'timeout_budget_exhausted' });
+        break;
+      }
       let result;
       try {
         result = await provider.call({
@@ -6358,6 +6373,7 @@ async function generateReportCopyWithFallback({
           text: userMessage,
           jsonMode: false,
           maxTokens: 800,
+          timeoutMs: Math.min(remainingMs, REPORT_CALL_TIMEOUT_MS),
         });
       } catch (err) {
         result = { ok: false, reason: 'error' };

@@ -166,7 +166,9 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, m
     const isGpt5 = /^gpt-5(?:\.|-|$)/i.test(String(model || ''));
     const tinyCap = isGpt5 && Number.isFinite(maxTokens) && maxTokens > 0 && maxTokens < OPENAI_REASONING_FLOOR_TOKENS;
     if (maxTokens) body.max_output_tokens = tinyCap && jsonMode ? OPENAI_REASONING_FLOOR_TOKENS : maxTokens;
-    if (isGpt5) body.reasoning = { effort: tinyCap ? 'minimal' : reasoningEffort };
+    // 'none' — the GPT-5.6 line's supported efforts are none/low/medium/
+    // high/xhigh/max ('minimal' 400s); tiny caps want zero reasoning tokens.
+    if (isGpt5) body.reasoning = { effort: tinyCap ? 'none' : reasoningEffort };
     const resp = await fetch(OPENAI_RESPONSES_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },

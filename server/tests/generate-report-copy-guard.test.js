@@ -74,6 +74,25 @@ describe('generate-report provider fallback', () => {
     expect(anthropic.call).toHaveBeenCalledTimes(1);
   });
 
+  // Codex round 8: this bespoke chain previously carried NO timeout — a
+  // stalled primary sat on callOpenAI's 10-minute default and the admin
+  // request died before the backup provider ever ran. Every call now
+  // carries a bounded shared budget (≤60s per call within a 120s chain).
+  test('every chain call carries a bounded shared timeout budget', async () => {
+    const openai = provider('openai', [{ ok: false, reason: 'openai_529' }]);
+    const anthropic = provider('anthropic', [{ ok: true, text: cleanReport }]);
+
+    await generateReportCopyWithFallback({
+      systemPrompt: 'system', userMessage: 'visit', providers: [openai, anthropic],
+    });
+
+    for (const fn of [openai.call, anthropic.call]) {
+      const { timeoutMs } = fn.mock.calls[0][0];
+      expect(timeoutMs).toBeGreaterThan(0);
+      expect(timeoutMs).toBeLessThanOrEqual(60000);
+    }
+  });
+
   test('retries rejected copy, then uses the backup provider', async () => {
     const unsafe = { ok: true, text: 'Your home is guaranteed pest-free.' };
     const openai = provider('openai', [unsafe, unsafe]);
