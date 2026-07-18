@@ -242,6 +242,14 @@ export default function TechTreatmentZoneModal({
     ? `Barrier set — ${Math.round(totalFeet)} linear ft treated`
     : `Applying perimeter barrier — ${Math.round(status.pct * 100)}%`;
 
+  // Every close path locks while the upload is in flight (same reason
+  // Back/Replay/Done do): closing lets the tech reopen and re-save, and the
+  // OLDER in-flight POST could land last and overwrite the newer perimeter.
+  const saving = saveState === 'saving';
+  const guardedClose = () => {
+    if (!saving) onClose();
+  };
+
   const mapFrame = (children, extraStyle) => (
     <div
       ref={traceRef}
@@ -269,7 +277,7 @@ export default function TechTreatmentZoneModal({
 
   return (
     <div
-      onClick={onClose}
+      onClick={guardedClose}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
@@ -292,10 +300,15 @@ export default function TechTreatmentZoneModal({
           }}>
             Treatment Zone
           </h2>
-          <button onClick={onClose} style={{
-            background: 'transparent', border: 'none', color: DARK.muted,
-            fontSize: 24, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
-          }}>×</button>
+          <button
+            onClick={guardedClose}
+            disabled={saving}
+            style={{
+              background: 'transparent', border: 'none', color: DARK.muted,
+              fontSize: 24, cursor: saving ? 'wait' : 'pointer',
+              opacity: saving ? 0.4 : 1, padding: '0 4px', lineHeight: 1,
+            }}
+          >×</button>
         </div>
         {customerName && (
           <p style={{ margin: '0 0 12px', fontSize: 13, color: DARK.muted }}>{customerName}</p>

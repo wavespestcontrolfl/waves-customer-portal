@@ -3720,8 +3720,11 @@ function ServiceCoverageCard({
 
   const showSummary = covEnabled && coverage.settings?.showSummaryCounts !== false;
   const showList = covEnabled && coverage.settings?.showList !== false && items.length > 0;
-  const showMap = coverage?.settings?.showMap !== false
-    && (showTraced || (covEnabled && coverage.map?.available));
+  // settings.showMap exists to suppress the GENERIC map when no
+  // technician-marked data would render — a traced satellite snapshot IS
+  // technician-marked data, so it bypasses that toggle.
+  const showMap = showTraced
+    || (covEnabled && coverage.settings?.showMap !== false && coverage.map?.available);
   const activeId = activeItemId || initialActiveId;
   const meta = [
     coverage?.address,
