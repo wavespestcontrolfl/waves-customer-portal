@@ -15,6 +15,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { mapCall, mapVisit } = require('./resolution-mapper');
 const { preferredRouteDecisionForFeedback } = require('../call-route-decisions');
+const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 
 const DEFAULT_BATCH = 500;
 const PAGE_SIZE = 200;
@@ -154,6 +155,11 @@ async function refreshCallArtifacts() {
           .where(function () {
             this.whereNull('c.ai_extraction_enriched').orWhereRaw('c.updated_at > ra.updated_at');
           });
+      }).orWhereNotExists(function () {
+        // Spam-marked calls get their call_log row DELETED — the orphan
+        // artifact must retire with it.
+        this.select(db.raw('1')).from('call_log as c')
+          .whereRaw('c.id = ra.source_id');
       });
     })
     .limit(REFRESH_BATCH)
@@ -163,13 +169,23 @@ async function refreshCallArtifacts() {
   const calls = await db('call_log as c')
     .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
     .whereIn('c.id', stale.map((r) => r.source_id))
-    .select('c.id', 'c.customer_id', 'c.created_at', 'c.call_summary', 'c.disposition', 'c.ai_extraction_enriched',
+    .select('c.id', 'c.customer_id', 'c.created_at', 'c.call_summary', 'c.disposition', 'c.v2_extraction_status', 'c.ai_extraction_enriched',
       'cu.first_name', 'cu.last_name', 'cu.phone');
+  // Deleted call rows (spam purge) orphan their artifacts — retire them.
+  const fetchedCallIds = new Set(calls.map((c) => c.id));
+  for (const row of stale) {
+    if (fetchedCallIds.has(row.source_id)) continue;
+    await db('resolution_artifacts').where({ source: 'call', source_id: row.source_id }).del();
+    stats.retired += 1;
+  }
   const { triageByCall, actionByCall } = await loadCallSideData(calls.map((c) => c.id));
   for (const call of calls) {
+    // Fail closed on invalid V2 payloads (schema_failed/parse_failed persist
+    // for audit but must not drive behavior) — null extraction retires.
+    const extractionValid = call.v2_extraction_status === 'valid' || call.v2_extraction_status == null;
     const artifact = mapCall({
       call,
-      extraction: call.ai_extraction_enriched,
+      extraction: extractionValid ? call.ai_extraction_enriched : null,
       triageNotes: triageByCall.get(call.id) || [],
       finalAction: actionByCall.get(call.id) || null,
       context: { first_name: call.first_name, last_name: call.last_name, phone: call.phone },
@@ -234,12 +250,18 @@ async function loadVisitSideData(recordIds) {
   }
   // Writer stores 'fallback' or 'hidden'; table default is 'generated' —
   // there is no 'ready'. Admit everything except hidden.
+  // Corrected reports leave several non-hidden summaries per visit — order
+  // newest-first and keep the first seen per record (deterministic).
   const summaries = await db('service_report_ai_summaries')
     .whereIn('service_record_id', recordIds)
     .whereNotIn('status', ['hidden'])
+    .orderBy('updated_at', 'desc')
     .select('service_record_id', 'summary_json')
     .catch(() => []);
-  const summaryByRecord = new Map(summaries.map((s) => [s.service_record_id, parseJsonbMaybe(s.summary_json)]));
+  const summaryByRecord = new Map();
+  for (const s of summaries) {
+    if (!summaryByRecord.has(s.service_record_id)) summaryByRecord.set(s.service_record_id, parseJsonbMaybe(s.summary_json));
+  }
   return { findingsByRecord, summaryByRecord };
 }
 
@@ -269,8 +291,10 @@ async function syncVisitArtifacts({ limit = DEFAULT_BATCH } = {}) {
     let query = db('service_records as sr')
       .leftJoin('customers as cu', 'cu.id', 'sr.customer_id')
       // Same scope every service-history reader uses — an incomplete or
-      // office-handoff visit is not a resolved past visit.
+      // office-handoff visit is not a resolved past visit, and internal-only
+      // completions (typedReportDelivery frozen non-auto_send) stay hidden.
       .where('sr.status', 'completed')
+      .modify((qb) => applyCustomerVisibleServiceRecordFilter(qb, { alias: 'sr' }))
       .where(visitRecommendationPredicate)
       .whereNotExists(function () {
         this.select(db.raw('1')).from('resolution_artifacts as ra')
@@ -327,6 +351,7 @@ async function refreshVisitArtifacts() {
     .leftJoin('customers as cu', 'cu.id', 'sr.customer_id')
     .whereIn('sr.id', stale.map((r) => r.source_id))
     .where('sr.status', 'completed')
+    .modify((qb) => applyCustomerVisibleServiceRecordFilter(qb, { alias: 'sr' }))
     .select(...VISIT_SELECT);
   // Stale artifacts whose record fell out of 'completed' scope retire too.
   const fetchedIds = new Set(records.map((r) => r.id));

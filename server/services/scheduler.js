@@ -446,9 +446,14 @@ function initScheduledJobs() {
     if (!isEnabled('hybridKnowledge')) return;
     try {
       await runExclusive('knowledge-index-sync', async () => {
-        // Map fresh call/visit resolutions first so the same night's
-        // corpus sync chunks + embeds them.
-        await require('./knowledge-index/resolution-sync').syncResolutionArtifacts();
+        // Map fresh call/visit resolutions first so the same night's corpus
+        // sync chunks + embeds them. Isolated: a resolution-sweep failure
+        // must not cost the curated corpora their nightly sync/embeds.
+        try {
+          await require('./knowledge-index/resolution-sync').syncResolutionArtifacts();
+        } catch (err) {
+          logger.error(`[knowledge-index] resolution sweep failed (corpus sync continues): ${err.message}`);
+        }
         await require('./knowledge-index/ingest').syncKnowledgeIndex();
       });
     } catch (err) {

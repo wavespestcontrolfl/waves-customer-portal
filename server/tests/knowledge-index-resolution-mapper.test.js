@@ -30,7 +30,7 @@ describe('resolution mapper — calls', () => {
   });
 
   test('booked call maps with redacted customer name', () => {
-    const a = mapCall({ call: CALL, extraction: extraction(), context: CONTEXT });
+    const a = mapCall({ call: { ...CALL, disposition: 'booked' }, extraction: extraction(), context: CONTEXT });
     expect(a).not.toBeNull();
     expect(a.source).toBe('call');
     expect(a.sourceId).toBe('c1');
@@ -70,7 +70,7 @@ describe('resolution mapper — calls', () => {
 
   test('extracted caller names redact prospect calls with no customer row (codex r3 P1)', () => {
     const a = mapCall({
-      call: { ...CALL, customer_id: null },
+      call: { ...CALL, customer_id: null, disposition: 'booked' },
       extraction: extraction({
         caller: { first_name: 'Rosalind', last_name: 'Quimby' },
         meta: { call_summary: 'Rosalind asked about quarterly pest control; Quimby residence on the island.', is_spam: false },
@@ -101,7 +101,7 @@ describe('resolution mapper — calls', () => {
 
   test('V2 object-shaped pests render names, never [object Object] (codex P2)', () => {
     const a = mapCall({
-      call: CALL,
+      call: { ...CALL, disposition: 'booked' },
       extraction: extraction({
         service_request: { primary_service_category: 'pest_control', pests_observed: [{ pest_type: 'german roach', severity_signal: 'high' }, 'silverfish'] },
       }),
@@ -121,11 +121,40 @@ describe('resolution mapper — calls', () => {
       finalAction: 'booked',
       context: CONTEXT,
     });
-    expect(a.resolution).toContain('Created a callback task');
+    expect(a.resolution).not.toContain('Created a callback task'); // model suggestion never renders as a resolution (codex r4)
     expect(a.resolution).toContain('Action taken: booked');
     expect(a.resolution).toContain('address_unverified');
     expect(a.resolution).not.toMatch(/Doe/);
     expect(a.outcome.triageReasonCodes).toEqual(['address_unverified']);
+  });
+});
+
+describe('resolution mapper — r4 semantics', () => {
+  test('unstamped call with only a model recommendation maps to null (codex r4 P1)', () => {
+    expect(mapCall({ call: CALL, extraction: extraction({ recommended_disposition: 'booked' }) })).toBeNull();
+  });
+
+  test('secondary-contact names are redacted (codex r4 P1)', () => {
+    const a = mapCall({
+      call: { ...CALL, disposition: 'booked' },
+      extraction: extraction({
+        secondary_contact: { first_name: 'Mortimer', last_name: 'Ashgrove' },
+        meta: { call_summary: 'Tenant Mortimer reported roaches; Ashgrove approved the retreat.', is_spam: false },
+      }),
+      context: CONTEXT,
+    });
+    expect(a.situation).not.toMatch(/Mortimer|Ashgrove/);
+  });
+
+  test('severity ranks ordinally, not alphabetically (codex r4 P3)', () => {
+    const a = mapVisit({
+      record: { id: 'v9', customer_id: null, service_date: new Date('2026-06-01'), service_type: 'pest_control' },
+      findings: [
+        { category: 'a', severity: 'medium', title: 't', detail: 'd', recommendation: 'r1' },
+        { category: 'b', severity: 'high', title: 't', detail: 'd', recommendation: 'r2' },
+      ],
+    });
+    expect(a.outcome.maxSeverity).toBe('high');
   });
 });
 

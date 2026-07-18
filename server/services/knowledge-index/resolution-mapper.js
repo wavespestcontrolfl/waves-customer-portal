@@ -32,6 +32,21 @@ const SKIP_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', '
 
 const clean = (v) => String(v || '').trim();
 
+// Severity is an ordered scale, not alphabetical ('medium' > 'high' in a
+// string sort). Unknown labels rank lowest.
+const SEVERITY_RANK = ['info', 'low', 'minor', 'moderate', 'medium', 'high', 'severe', 'critical'];
+function maxSeverityOf(findings) {
+  let best = null;
+  let bestRank = -1;
+  for (const f of findings) {
+    const sev = clean(f.severity).toLowerCase();
+    if (!sev) continue;
+    const rank = SEVERITY_RANK.indexOf(sev);
+    if (rank > bestRank || (best === null && rank === -1)) { best = sev; bestRank = rank; }
+  }
+  return best;
+}
+
 function redact(text, contexts = []) {
   const value = clean(text);
   if (!value) return '';
@@ -101,21 +116,28 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
     if (SKIP_NATURES.has(clean(extraction.call_nature))) return null;
     if (SKIP_DISPOSITIONS.has(recommended)) return null;
   }
-  const disposition = terminal || recommended;
 
   // Prospect calls often have no linked customers row — the extraction's own
   // caller name is then the only redaction context available.
   const caller = extraction.caller || {};
-  const nameContexts = [context, { first_name: caller.first_name, last_name: caller.last_name }]
-    .filter((c) => c && (clean(c.first_name) || clean(c.last_name)));
+  const secondaries = [extraction.secondary_contact, ...(Array.isArray(extraction.secondary_contacts) ? extraction.secondary_contacts : [])]
+    .filter(Boolean)
+    .map((sc) => ({ first_name: sc.first_name, last_name: sc.last_name, customer_name: sc.name }));
+  const nameContexts = [context, { first_name: caller.first_name, last_name: caller.last_name }, ...secondaries]
+    .filter((c) => c && (clean(c.first_name) || clean(c.last_name) || clean(c.customer_name)));
 
   const summary = clean(extraction.meta?.call_summary || call.call_summary);
   if (!summary) return null;
 
+  // Only PRODUCTION signals resolve: the terminal disposition stamp, the
+  // route decision's action actually taken, and closed triage notes. The
+  // model's recommended_disposition is a suggestion — it rides outcome
+  // metadata but never renders as something Waves did.
   const resolutionParts = [];
-  if (DISPOSITION_TEXT[disposition]) resolutionParts.push(DISPOSITION_TEXT[disposition]);
-  else if (disposition) resolutionParts.push(`Outcome: ${disposition.replace(/_/g, ' ')}`);
-  if (finalAction && finalAction !== disposition) resolutionParts.push(`Action taken: ${clean(finalAction).replace(/_/g, ' ')}`);
+  if (terminal) {
+    resolutionParts.push(DISPOSITION_TEXT[terminal] || `Outcome: ${terminal.replace(/_/g, ' ')}`);
+  }
+  if (finalAction && finalAction !== terminal) resolutionParts.push(`Action taken: ${clean(finalAction).replace(/_/g, ' ')}`);
   for (const note of triageNotes) {
     if (clean(note.resolution_note)) resolutionParts.push(`Triage (${note.reason_code}): ${redact(note.resolution_note, nameContexts)}`);
   }
@@ -137,7 +159,7 @@ function mapCall({ call, extraction: rawExtraction, triageNotes = [], finalActio
     situation: redact(summary, nameContexts),
     resolution: resolutionParts.join('. '),
     outcome: {
-      disposition: disposition || null,
+      disposition: terminal || null,
       recommendedDisposition: recommended || null,
       finalAction: finalAction || null,
       triageReasonCodes: triageNotes.map((n) => n.reason_code).filter(Boolean),
@@ -190,7 +212,7 @@ function mapVisit({ record, findings = [], structuredRecommendations = [], aiSum
     resolution: recommendations.join('\n'),
     outcome: {
       findingCategories: [...new Set(findings.map((f) => clean(f.category)).filter(Boolean))],
-      maxSeverity: findings.map((f) => clean(f.severity)).filter(Boolean).sort().pop() || null,
+      maxSeverity: maxSeverityOf(findings),
     },
     systems: [...new Set([serviceType, ...findings.map((f) => clean(f.category))].filter(Boolean))],
     occurredAt: record.service_date || record.created_at,
