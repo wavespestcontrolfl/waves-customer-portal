@@ -110,10 +110,24 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
   });
 
-  test('payer-billed and prepaid visits short-circuit every lane', () => {
+  test('per-application honors always-free service types (Codex r1)', () => {
+    const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
+    expect(predictCompletionBilling({ ...perApp, serviceType: 'Pest Control Re-Service' }))
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perApp, serviceType: 'Quarterly Pest Control Service' }).kind)
+      .toBe('auto_charge');
+  });
+
+  test('payer-billed visits short-circuit every lane', () => {
     expect(predictCompletionBilling({ ...memberBase, payerBilled: true }).kind).toBe('payer');
-    expect(predictCompletionBilling({ ...memberBase, prepaidAmount: 120 }))
+  });
+
+  test('prepaid suppresses only when it covers the WHOLE amount; a partial nets the invoice (Codex r1)', () => {
+    const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null, estimatedPrice: 100 };
+    expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 120 }))
       .toEqual({ kind: 'prepaid', amount: 120, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 50 }))
+      .toEqual({ kind: 'invoice', amount: 50, conflictStampedPrice: false });
   });
 
   test('annual prepay lane reads as covered', () => {

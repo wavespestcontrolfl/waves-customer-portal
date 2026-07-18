@@ -114,6 +114,26 @@ describe('MobileAppointmentDetailSheet billing-lane card', () => {
     expect(screen.queryByText(/stamp will be ignored/i)).not.toBeInTheDocument();
   });
 
+  it('shows the red BILLING HOLD banner when service is paused', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          billingLane: {
+            mode: 'monthly_membership',
+            source: 'explicit',
+            monthlyRate: 33.33,
+            autopayActive: true,
+            servicePausedAt: '2026-07-10T12:00:00Z',
+            prediction: { kind: 'covered_membership', amount: null, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText(/BILLING HOLD — service is paused/i)).toBeInTheDocument();
+  });
+
   it('renders nothing extra when the payload has no billingLane (older cached payloads)', () => {
     render(<MobileAppointmentDetailSheet service={BASE_SERVICE} onClose={() => {}} />);
     expect(screen.queryByText(/Monthly membership/)).not.toBeInTheDocument();

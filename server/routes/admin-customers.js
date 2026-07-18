@@ -2348,8 +2348,35 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     }
     if (req.body.billingMode !== undefined && req.body.billingMode !== null && req.body.billingMode !== '') {
       const { BILLING_MODES } = require('../services/billing-lane');
-      if (!BILLING_MODES.includes(req.body.billingMode)) {
+      const mode = req.body.billingMode;
+      if (!BILLING_MODES.includes(mode)) {
         return res.status(400).json({ error: 'Invalid billing mode' });
+      }
+      // Lane prerequisites — a profile save must not move a customer into a
+      // lane whose visits then complete unbilled (Codex r1): membership
+      // needs a dues rate, per-application needs the acceptance fee, and
+      // annual prepay needs a live (paid or pending) coverage term.
+      const beforeRow = await db('customers').where({ id: req.params.id }).first('monthly_rate', 'per_application_fee');
+      const effectiveRate = req.body.monthlyRate !== undefined
+        ? parseFloat(req.body.monthlyRate) || 0
+        : parseFloat(beforeRow?.monthly_rate) || 0;
+      if (mode === 'monthly_membership' && !(effectiveRate > 0)) {
+        return res.status(400).json({ error: 'Set a monthly rate before selecting Monthly membership — dues cannot collect at $0' });
+      }
+      if (mode === 'per_application' && !(parseFloat(beforeRow?.per_application_fee) > 0)) {
+        return res.status(400).json({ error: 'Set a per-application fee before selecting Per application — visits would complete unbilled' });
+      }
+      if (mode === 'annual_prepay') {
+        let liveTerm = null;
+        try {
+          liveTerm = await db('annual_prepay_terms')
+            .where({ customer_id: req.params.id })
+            .whereIn('status', ['payment_pending', 'active', 'renewal_pending'])
+            .first('id');
+        } catch { /* table absent — treat as no live term */ }
+        if (!liveTerm) {
+          return res.status(400).json({ error: 'No live annual-prepay term on file — create/accept the annual prepay first' });
+        }
       }
     }
     const updates = {};

@@ -61,7 +61,7 @@ function targetsQuery({ locationId = null, excludeCustomerIds = [] } = {}) {
     // monthly billing cron even when a monthly_rate is on file, so a
     // "per month" price notice would misstate their billing.
     .where(function monthlyBilledOnly() {
-      this.whereNull('billing_mode').orWhereNotIn('billing_mode', ['per_application', 'annual_prepay']);
+      this.whereNull('billing_mode').orWhere('billing_mode', 'monthly_membership');
     });
   if (excludeCustomerIds.length) q = q.whereNotIn('id', excludeCustomerIds);
   if (locationId) {

@@ -43,7 +43,7 @@ async function sendPreChargeReminders() {
   try {
     if (await db.schema.hasColumn('customers', 'billing_mode')) {
       customersQuery = customersQuery.where(function () {
-        this.whereNull('billing_mode').orWhereNotIn('billing_mode', ['per_application', 'annual_prepay']);
+        this.whereNull('billing_mode').orWhere('billing_mode', 'monthly_membership');
       });
     }
   } catch { /* billing_mode column absent — keep legacy selection */ }

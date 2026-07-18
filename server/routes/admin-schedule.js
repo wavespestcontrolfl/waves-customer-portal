@@ -1420,6 +1420,7 @@ router.get('/', async (req, res, next) => {
         'customers.autopay_payment_method_id',
         'customers.ach_status',
         'customers.billing_mode', 'customers.per_application_fee',
+        'customers.service_paused_at',
         'technicians.name as tech_name'
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
@@ -1520,6 +1521,9 @@ router.get('/', async (req, res, next) => {
         const inv = await db('invoices')
           .where({ customer_id: s.customer_id })
           .whereIn('status', ['sent', 'viewed', 'overdue'])
+          // Payer-billed invoices are the third party's AR — never the
+          // homeowner's balance (Codex r1).
+          .whereNull('payer_id')
           .first(
             db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
             db.raw('COUNT(*)::int as count'),
@@ -1540,6 +1544,7 @@ router.get('/', async (req, res, next) => {
         openInvoiceCount: openInvoices.count,
         hasOverdue: openInvoices.overdue,
         duesPaidThisMonth,
+        servicePausedAt: s.service_paused_at || null,
         prediction: predictCompletionBilling({
           lane: lane.mode,
           billingMode: s.billing_mode || null,
@@ -1549,6 +1554,7 @@ router.get('/', async (req, res, next) => {
           perApplicationFee: s.per_application_fee,
           isRecurring: !!s.is_recurring,
           isCallback: !!s.is_callback,
+          serviceType: s.service_type,
           payerBilled: !!s.billed_to_payer_id,
           prepaidAmount: s.prepaid_amount,
         }),
@@ -1760,6 +1766,7 @@ router.get('/week', async (req, res, next) => {
           'customers.autopay_payment_method_id',
           'customers.ach_status',
           'customers.billing_mode', 'customers.per_application_fee',
+          'customers.service_paused_at',
           'technicians.name as tech_name')
         .orderByRaw('COALESCE(route_order, 999)');
 
@@ -1814,6 +1821,9 @@ router.get('/week', async (req, res, next) => {
           const inv = await db('invoices')
             .where({ customer_id: s.customer_id })
             .whereIn('status', ['sent', 'viewed', 'overdue'])
+            // Payer-billed invoices are the third party's AR — never the
+            // homeowner's balance (Codex r1).
+            .whereNull('payer_id')
             .first(
               db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0)::float as balance'),
               db.raw('COUNT(*)::int as count'),
@@ -1834,6 +1844,7 @@ router.get('/week', async (req, res, next) => {
           openInvoiceCount: openInvoices.count,
           hasOverdue: openInvoices.overdue,
           duesPaidThisMonth,
+          servicePausedAt: s.service_paused_at || null,
           prediction: predictCompletionBilling({
             lane: lane.mode,
             billingMode: s.billing_mode || null,
@@ -1843,6 +1854,7 @@ router.get('/week', async (req, res, next) => {
             perApplicationFee: s.per_application_fee,
             isRecurring: !!s.is_recurring,
             isCallback: !!s.is_callback,
+            serviceType: s.service_type,
             payerBilled: !!s.billed_to_payer_id,
             prepaidAmount: s.prepaid_amount,
           }),
@@ -2390,9 +2402,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // create-invoice default — those stamps are exactly how members got
     // double-billed (completion honors an explicit price on one-off visits
     // only). A one-off (non-recurring) booking for a member keeps its price
-    // and bills normally. prepay_annual bookings resolve to the
-    // annual_prepay lane, so their forced create-invoice above is preserved.
-    const memberSeriesCovered = resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
+    // and bills normally. A prepay_annual BOOKING is excluded outright
+    // (checked on the booking term, not the resolved lane): the customer's
+    // CURRENT lane may still read monthly_membership while the annual
+    // acceptance is in flight, and the pending-prepay path depends on the
+    // forced create_invoice_on_complete + price stamps to bill completions
+    // that land before the annual invoice is paid (Codex r1 P1).
+    const memberSeriesCovered = bookingBillingTermEffective !== 'prepay_annual'
+      && resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
     const createInvoiceStamp = memberSeriesCovered ? false : createInvoiceEffective;
 
     const zone = getZone(customer?.city, customer?.zip);

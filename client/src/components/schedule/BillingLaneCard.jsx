@@ -10,6 +10,9 @@
 
 const NEUTRAL = { bg: '#F8FAFC', border: '#E2E8F0', ink: '#0F172A' };
 const WARN = { bg: '#FFFBEB', border: '#FDE68A', ink: '#92400E' };
+// Genuine alert red (billing hold = service is paused; running the visit
+// anyway is a real mistake) — distinct from the amber operational notes.
+const HOLD = { bg: '#FEF2F2', border: '#FECACA', ink: '#B91C1C' };
 const GREEN = '#166534';
 const MUTED = '#64748B';
 
@@ -70,9 +73,28 @@ export default function BillingLaneCard({ billingLane, style }) {
   const invoiceCount = Number(billingLane.openInvoiceCount);
   const showBalance = Number.isFinite(balance) && balance > 0 && invoiceCount > 0;
 
+  const onHold = !!billingLane.servicePausedAt;
+
   return (
     <div style={style}>
       <div style={{ background: NEUTRAL.bg, border: `1px solid ${NEUTRAL.border}`, borderRadius: 4, padding: '10px 12px' }}>
+        {onHold && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 8,
+              background: HOLD.bg,
+              border: `1px solid ${HOLD.border}`,
+              borderRadius: 4,
+              padding: '8px 10px',
+              fontSize: 13,
+              fontWeight: 600,
+              color: HOLD.ink,
+            }}
+          >
+            BILLING HOLD — service is paused after failed dues collection. Resolve billing before running this visit.
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED, whiteSpace: 'nowrap' }}>
             Billing

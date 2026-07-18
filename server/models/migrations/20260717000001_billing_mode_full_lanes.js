@@ -50,8 +50,23 @@ exports.down = async function down(knex) {
 
   // The new lane values must be cleared before the narrower CHECK can be
   // re-added; backfilled memberships revert to NULL (legacy inference gives
-  // them identical behavior).
+  // them identical behavior). The membership reversal uses the same
+  // evidence predicate as the backfill, so exactly the rows up() stamped
+  // (or hand-set rows that match the identical evidence — for which NULL
+  // behaves identically) return to legacy inference (Codex r1).
   await knex('customers').whereIn('billing_mode', ['per_visit', 'one_time']).update({ billing_mode: null });
+  const hasPayments = await knex.schema.hasTable('payments');
+  if (hasPayments) {
+    await knex.raw(`
+      UPDATE customers SET billing_mode = NULL
+      WHERE billing_mode = 'monthly_membership'
+        AND id IN (
+          SELECT DISTINCT customer_id FROM payments
+          WHERE status IN ('paid', 'processing')
+            AND description LIKE '%WaveGuard Monthly%'
+        )
+    `);
+  }
   await knex.raw('ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_billing_mode_check');
   await knex.raw(`
     ALTER TABLE customers

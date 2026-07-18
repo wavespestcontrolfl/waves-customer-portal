@@ -46,6 +46,11 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: 'Gold', invoiceAmount: 49 })).toBe(true);
   });
 
+  test('an explicit tier-less member whose coverage failed still invoices (Codex r1)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: null, explicitMembership: true, invoiceAmount: 33.33 })).toBe(true);
+    expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: null, explicitMembership: false, invoiceAmount: 33.33 })).toBe(false);
+  });
+
   test('GATE OFF: priced self-pay visit still does NOT invoice (behaviour unchanged)', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: false })).toBe(false);
   });

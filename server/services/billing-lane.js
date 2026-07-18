@@ -11,6 +11,8 @@
  * membership double-billing incident).
  */
 
+const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+
 const BILLING_MODES = [
   'monthly_membership', // dues on the 1st cover recurring plan visits
   'per_visit', // invoice-on-complete for each visit
@@ -117,23 +119,35 @@ function predictCompletionBilling({
   perApplicationFee,
   isRecurring,
   isCallback,
+  serviceType,
   payerBilled,
   prepaidAmount,
   billingMode,
 }) {
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
+  const none = { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
   if (payerBilled) return { kind: 'payer', amount: hasVisitPrice ? Number(estimatedPrice) : null, conflictStampedPrice: false };
-  if (prepaidAmount != null && Number(prepaidAmount) > 0) {
-    return { kind: 'prepaid', amount: Number(prepaidAmount), conflictStampedPrice: false };
-  }
+  // Annual-prepay coverage is validated by the term link, not the per-visit
+  // amount (discounted plans stamp visits LESS than list) — so the lane
+  // reads covered before any prepaid-amount math (Codex r1).
   if (lane === 'annual_prepay') return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
+  const prepaid = prepaidAmount != null ? Number(prepaidAmount) : 0;
   if (lane === 'per_application') {
-    if (isCallback) return { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
+    // Mirrors the completion gate: per-application bills performed
+    // applications only — never a callback or an always-free type
+    // (estimate / re-service / follow-up), even when a fee is on file
+    // (Codex r1).
+    if (isCallback || isAlwaysFreeServiceType(serviceType)) return none;
     const amount = completionInvoiceAmount({
       estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate,
     });
-    if (!(amount > 0)) return { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
-    return { kind: autopayActive ? 'auto_charge' : 'invoice', amount, conflictStampedPrice: false };
+    if (!(amount > 0)) return none;
+    // Completion only suppresses when the prepayment covers the WHOLE
+    // amount; a partial prepay is applied as credit and the remainder
+    // still collects (Codex r1).
+    if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+    const due = Math.max(0, amount - prepaid);
+    return { kind: autopayActive ? 'auto_charge' : 'invoice', amount: due, conflictStampedPrice: false };
   }
   const covered = membershipDuesCoverVisit({
     visitIsPayerBilled: false,
@@ -152,8 +166,9 @@ function predictCompletionBilling({
   const amount = completionInvoiceAmount({
     estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate,
   });
-  if (!(amount > 0)) return { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
-  return { kind: 'invoice', amount, conflictStampedPrice: false };
+  if (!(amount > 0)) return none;
+  if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+  return { kind: 'invoice', amount: Math.max(0, amount - prepaid), conflictStampedPrice: false };
 }
 
 // Has THIS ET month's membership dues payment been collected (paid or

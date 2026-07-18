@@ -364,6 +364,36 @@ async function sendCancellationReceived({
   });
 }
 
+// Pre-visit late-balance reminder (owner directive 2026-07-17) — the email
+// half of the previsit-balance-reminder sweep. Eligibility (recurring visit
+// + recurring-lane late balance only) lives entirely in that service; this
+// just renders and sends.
+async function sendPrevisitBalanceReminder({
+  customerId,
+  amount,
+  serviceType,
+  visitDate,
+  billingUrl,
+  idempotencyKey,
+} = {}) {
+  const customer = await loadCustomer(customerId);
+  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  return sendTemplate({
+    customerId,
+    templateKey: 'billing.previsit_balance',
+    eventType: 'billing.previsit_balance',
+    payload: {
+      amount: clean(amount),
+      service_type: clean(serviceType) || 'service',
+      visit_date: clean(visitDate),
+      billing_url: clean(billingUrl),
+    },
+    idempotencyKey,
+    categories: ['previsit_balance_reminder'],
+    metadata: { amount: clean(amount), visit_date: clean(visitDate) },
+  });
+}
+
 async function sendRequestUpdated({
   customerId,
   request,
@@ -624,6 +654,7 @@ module.exports = {
   sendMembershipCanceled,
   sendMembershipPaused,
   sendMembershipReactivated,
+  sendPrevisitBalanceReminder,
   _private: {
     hashValue,
     itemSummary,
