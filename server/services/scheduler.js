@@ -426,7 +426,8 @@ function initScheduledJobs() {
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
   // bookings confirm across a whole window (the July slot_sig outage ran 8
   // days unnoticed exactly because this signal had no alarm). Dark until
-  // GATE_BOOKING_FUNNEL_CANARY=1; read-only on booking_intents.
+  // GATE_BOOKING_FUNNEL_CANARY=true (feature-gates registry); read-only on
+  // booking_intents.
   const bookingFunnelCanaryTick = async () => {
     try {
       await runExclusive('booking-funnel-canary', () => require('./booking-funnel-canary').runBookingFunnelCanary());

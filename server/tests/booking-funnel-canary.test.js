@@ -28,6 +28,10 @@ jest.mock('../models/db', () => {
   return fn;
 });
 
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
+}));
+
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })),
 }));
@@ -37,6 +41,7 @@ jest.mock('../services/twilio', () => ({
 }));
 
 const db = require('../models/db');
+const { isEnabled } = require('../config/feature-gates');
 const NotificationService = require('../services/notification-service');
 const TwilioService = require('../services/twilio');
 const { runBookingFunnelCanary, _test } = require('../services/booking-funnel-canary');
@@ -55,14 +60,15 @@ beforeEach(() => {
   TwilioService.sendSMS.mockClear();
   _test.state.alerting = null;
   _test.state.lastAlertAt = 0;
-  process.env.GATE_BOOKING_FUNNEL_CANARY = '1';
+  isEnabled.mockReturnValue(true);
   process.env.ADAM_PHONE = '+19415550001';
 });
 
-test('no-ops while the gate is unset', async () => {
-  delete process.env.GATE_BOOKING_FUNNEL_CANARY;
+test('no-ops while the gate is off (standard feature-gate registry)', async () => {
+  isEnabled.mockReturnValue(false);
   const result = await runBookingFunnelCanary();
   expect(result).toEqual({ skipped: true });
+  expect(isEnabled).toHaveBeenCalledWith('bookingFunnelCanary');
   expect(db).not.toHaveBeenCalled();
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
 });
