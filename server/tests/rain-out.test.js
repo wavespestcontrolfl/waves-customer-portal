@@ -12,6 +12,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 }));
 jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlook: jest.fn().mockResolvedValue(null),
+  getHourlyRainOutlook: jest.fn().mockResolvedValue(null),
   forecastLinkForZip: jest.fn((zip) => (zip ? `https://forecast.weather.gov/zipcity.php?inputstring=${zip}` : null)),
 }));
 jest.mock('../services/reschedule-link', () => ({
@@ -25,7 +26,7 @@ const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { getDailyRainOutlook } = require('../services/weather-forecast');
+const { getDailyRainOutlook, getHourlyRainOutlook } = require('../services/weather-forecast');
 const { buildRescheduleLink } = require('../services/reschedule-link');
 const { etDateString } = require('../utils/datetime-et');
 const RainOut = require('../services/rain-out');
@@ -145,6 +146,52 @@ describe('rain-out service', () => {
       expect(clause({ ...base, isSameDay: true, todayChance: 85, newChance: 10 })).toBe('');
       expect(clause({ ...base, reasonCode: 'weather_heat', todayChance: 85, newChance: 10 })).toBe('');
     });
+
+    test('hourly window chance upgrades the claim to morning/afternoon specificity', () => {
+      expect(clause({ ...base, todayChance: 85, windowChance: 10, windowStart: '08:00' }))
+        .toBe(' Saturday morning looks a lot better — just a 10% chance of rain around your new time.');
+      expect(clause({ ...base, todayChance: 85, windowChance: 35, windowStart: '13:00' }))
+        .toBe(' Saturday afternoon looks better — a 35% chance of rain around your new time.');
+      expect(clause({ ...base, chosenDate: '2026-06-12', todayChance: 85, windowChance: 15, windowStart: '15:00' }))
+        .toBe(' Tomorrow afternoon looks a lot better — just a 15% chance of rain around your new time.');
+    });
+
+    test('same-day push can promise later today, with a tighter cap', () => {
+      const sameDay = { ...base, isSameDay: true, chosenDate: '2026-06-11' };
+      expect(clause({ ...sameDay, todayChance: 85, windowChance: 15, windowStart: '15:00' }))
+        .toBe(' Later today looks a lot better — just a 15% chance of rain around your new time.');
+      // Same storm system: window claims over 30% stay silent on same-day moves.
+      expect(clause({ ...sameDay, todayChance: 85, windowChance: 35, windowStart: '15:00' })).toBe('');
+    });
+
+    test('window claims still respect the today-delta rule and fall back to day-level without hourly data', () => {
+      expect(clause({ ...base, todayChance: 45, windowChance: 30, windowStart: '08:00' })).toBe(''); // delta < 20
+      expect(clause({ ...base, todayChance: 85, windowChance: null, newChance: 20 }))
+        .toBe(' Saturday looks a lot better — just a 20% chance of rain.'); // day-level fallback
+    });
+  });
+
+  describe('windowRainChance', () => {
+    const windowChance = RainOut._test.windowRainChance;
+    const HOURS = [
+      { startTime: '2026-06-13T07:00:00-04:00', rainChance: 60 },
+      { startTime: '2026-06-13T08:00:00-04:00', rainChance: 10 },
+      { startTime: '2026-06-13T09:00:00-04:00', rainChance: 25 },
+      { startTime: '2026-06-13T10:00:00-04:00', rainChance: 70 },
+      { startTime: '2026-06-14T08:00:00-04:00', rainChance: 5 },
+    ];
+
+    test('takes the max over the 2-hour arrival window on the right date', () => {
+      expect(windowChance(HOURS, '2026-06-13', '08:00')).toBe(25); // hours 8+9
+      expect(windowChance(HOURS, '2026-06-13', '09:00')).toBe(70); // hours 9+10
+      expect(windowChance(HOURS, '2026-06-14', '08:00')).toBe(5);  // other date's periods ignored
+    });
+
+    test('null on missing coverage or bad input', () => {
+      expect(windowChance(HOURS, '2026-06-13', '14:00')).toBeNull(); // no periods for that window
+      expect(windowChance(null, '2026-06-13', '08:00')).toBeNull();
+      expect(windowChance(HOURS, '2026-06-13', 'garbage')).toBeNull();
+    });
   });
 
   describe('efficacy clause (GATE_RAINOUT_EFFICACY_NOTE)', () => {
@@ -211,11 +258,16 @@ describe('rain-out service', () => {
     test('books the tight 1-hour slot but texts the 2-hour arrival window, passes allowLive, reschedule + forecast links', async () => {
       wireSingle();
       // Day move (2026-06-11 is not the real today): the lead should quote
-      // today's chance and the better-day clause should sell the new day.
+      // today's chance and the better-day clause should sell the booked
+      // window specifically (hourly beats the day-level 20%).
       getDailyRainOutlook.mockResolvedValueOnce({
         [etDateString()]: { rainChance: 85, shortForecast: 'Thunderstorms' },
         '2026-06-11': { rainChance: 20, shortForecast: 'Mostly Sunny' },
       });
+      getHourlyRainOutlook.mockResolvedValueOnce([
+        { startTime: '2026-06-11T13:00:00-04:00', rainChance: 10 },
+        { startTime: '2026-06-11T14:00:00-04:00', rainChance: 5 },
+      ]);
 
       const result = await RainOut.commit({
         serviceId: 'svc-1',
@@ -241,9 +293,10 @@ describe('rain-out service', () => {
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.weather_phrase).toBe('heavy rain'); // legacy compat var still sent
       expect(vars.weather_lead).toBe('storms are likely today (85% chance)');
-      expect(vars.better_day_clause).toBe(' Thursday looks a lot better — just a 20% chance of rain.');
+      expect(vars.better_day_clause).toBe(' Thursday afternoon looks a lot better — just a 10% chance of rain around your new time.');
       expect(vars.efficacy_clause).toBe(''); // gate dark
       expect(getDailyRainOutlook).toHaveBeenCalledWith(27.4, -82.4);
+      expect(getHourlyRainOutlook).toHaveBeenCalledWith(27.4, -82.4);
       expect(vars.new_option).toContain('1:00 PM - 3:00 PM');
       // Moved-first: nothing to confirm by reply — the message carries only
       // the same tokenized self-serve link the 72h/24h reminders send.

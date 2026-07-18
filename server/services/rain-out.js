@@ -24,7 +24,7 @@ const SmartRebooker = require('./rebooker');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { buildRescheduleLink } = require('./reschedule-link');
-const { getDailyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
+const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 
@@ -68,12 +68,57 @@ function dayLabel(dateStr, todayStr) {
   return WEEKDAY_NAMES[chosen.getUTCDay()];
 }
 
-// " Tomorrow looks a lot better — just a 20% chance of rain." Only claims
-// what the forecast supports: never on same-day pushes, never above a 40%
-// chance, and only when today is meaningfully worse (or unknown). Always
+function partOfDay(hour) {
+  return hour < 12 ? 'morning' : (hour < 17 ? 'afternoon' : 'evening');
+}
+
+// Max precip chance across the customer-facing 2-hour arrival window
+// (start hour + the hour after) from NWS hourly periods. Null when the
+// hourly feed has no coverage for those hours — callers fall back to
+// the day-level number.
+function windowRainChance(hours, dateStr, windowStartHHMM) {
+  if (!Array.isArray(hours)) return null;
+  const startMinutes = hhmmToMinutes(windowStartHHMM);
+  if (startMinutes == null) return null;
+  const startHour = Math.floor(startMinutes / 60);
+  const wanted = [startHour, startHour + 1];
+  let max = null;
+  for (const period of hours) {
+    const start = String(period?.startTime || '');
+    if (start.slice(0, 10) !== String(dateStr)) continue;
+    const hour = parseInt(start.slice(11, 13), 10);
+    if (!wanted.includes(hour) || period.rainChance == null) continue;
+    if (max == null || period.rainChance > max) max = period.rainChance;
+  }
+  return max;
+}
+
+// " Tomorrow morning looks a lot better — just a 10% chance of rain around
+// your new time." Only claims what the forecast supports. Preferred source
+// is the HOURLY chance scored on the actual booked arrival window (that's
+// what lets us say morning vs afternoon, and lets a same-day push say
+// "later today"); day-level chance is the fallback. Thresholds: window
+// claims need ≤40% (≤30% same-day — same storm system, be conservative)
+// and, when today's number is known, today ≥20 points worse. Always
 // "looks better", never a dry-weather promise.
-function composeBetterDayClause({ reasonCode, isSameDay, chosenDate, todayStr, todayChance, newChance }) {
+function composeBetterDayClause({
+  reasonCode, isSameDay, chosenDate, todayStr, todayChance, newChance, windowChance, windowStart,
+}) {
   if (reasonCode !== 'weather_rain' && reasonCode !== 'weather_lightning') return '';
+
+  if (windowChance != null) {
+    const cap = isSameDay ? 30 : 40;
+    if (windowChance > cap) return '';
+    if (todayChance != null && todayChance - windowChance < 20) return '';
+    const day = isSameDay ? null : dayLabel(chosenDate, todayStr);
+    if (!isSameDay && !day) return '';
+    const startHour = Math.floor((hhmmToMinutes(windowStart) ?? 0) / 60);
+    const label = isSameDay ? 'Later today' : `${day} ${partOfDay(startHour)}`;
+    return windowChance <= 20
+      ? ` ${label} looks a lot better — just a ${windowChance}% chance of rain around your new time.`
+      : ` ${label} looks better — a ${windowChance}% chance of rain around your new time.`;
+  }
+
   if (isSameDay || newChance == null || newChance > 40) return '';
   if (todayChance != null && todayChance - newChance < 20) return '';
   const label = dayLabel(chosenDate, todayStr);
@@ -342,14 +387,22 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId }) {
 
   // Forecast decoration is fail-open (same rule as the options sheet):
   // any NWS problem renders the generic lead, never blocks the SMS.
+  // Daily gives the lead its today-number; hourly scores the actual
+  // booked arrival window so the better-day clause can say morning vs
+  // afternoon. Fetched in parallel to cap NWS-outage latency.
   const todayStr = etDateString();
   const isSameDay = String(chosen.date) === todayStr;
   let outlook = null;
+  let hourly = null;
   if (customer.latitude != null && customer.longitude != null) {
-    outlook = await getDailyRainOutlook(customer.latitude, customer.longitude).catch(() => null);
+    [outlook, hourly] = await Promise.all([
+      getDailyRainOutlook(customer.latitude, customer.longitude).catch(() => null),
+      getHourlyRainOutlook(customer.latitude, customer.longitude).catch(() => null),
+    ]);
   }
   const todayChance = outlook?.[todayStr]?.rainChance ?? null;
   const newChance = outlook?.[String(chosen.date)]?.rainChance ?? null;
+  const windowChance = windowRainChance(hourly, String(chosen.date), chosen.window?.start);
 
   const body = await renderSmsTemplate('rain_out_moved', {
     first_name: customer.first_name || 'there',
@@ -359,6 +412,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId }) {
     weather_lead: composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance }),
     better_day_clause: composeBetterDayClause({
       reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
+      windowChance, windowStart: chosen.window?.start,
     }),
     efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
     service_type: (job.service_type || 'service').toLowerCase(),
@@ -523,6 +577,6 @@ module.exports = {
   commit,
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
-    composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel,
+    composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
   },
 };
