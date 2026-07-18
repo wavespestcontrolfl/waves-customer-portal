@@ -1298,7 +1298,7 @@ function RainOutSheet({ service, onClose, onDone }) {
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: DARK.text, marginBottom: 16, cursor: 'pointer' }}>
               <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
-              Text customer{scope === 'route' ? 's' : ''} (reply 1 confirms; includes reschedule + local forecast links)
+              Text customer{scope === 'route' ? 's' : ''} (includes reschedule + local forecast links)
             </label>
 
             <button
