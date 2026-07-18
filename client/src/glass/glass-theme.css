@@ -421,11 +421,19 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
     backdrop-filter: blur(14px) saturate(165%) !important;
     -webkit-backdrop-filter: blur(14px) saturate(165%) !important;
   }
-  /* touch fires :hover/:active mid-scroll — the lift/scale reads as cards
-     jumping under the finger (the "pop-out") */
+  /* touch fires :hover/:active mid-scroll — lifts and scales read as
+     elements jumping under the finger (the "pop-out"). Suppressed for
+     EVERY glass-theme element uniformly (owner 2026-07-18: same treatment
+     on all customer-facing templates): cards, chips, gold accents, and
+     themed buttons. Press feedback survives through the non-spatial
+     hover/active styles (shadow, background). */
   html[data-glass-theme] [data-glass="card"]:hover,
   html[data-glass-theme] [data-glass="card"]:active,
-  html[data-glass-theme] [data-glass="chip"]:hover {
+  html[data-glass-theme] [data-glass="chip"]:hover,
+  html[data-glass-theme] [data-glass="chip"]:active,
+  html[data-glass-theme] [data-glass-accent]:hover,
+  html[data-glass-theme] [data-glass-accent]:active,
+  html[data-glass-theme] button:not([data-glass]):not([data-glass-accent]):hover {
     transform: none;
   }
 }
