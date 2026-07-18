@@ -18,7 +18,6 @@ import {
   MAP_WIDTH,
   MAP_HEIGHT,
   composeSnapshot,
-  geocodeAddress,
   loadMapImage,
   pathLengthPx,
   pixelToLatLng,
@@ -106,7 +105,19 @@ export default function TechTreatmentZoneModal({
         let center = Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))
           ? { lat: Number(lat), lng: Number(lng) }
           : null;
-        if (!center && address) center = await geocodeAddress(address, MAPS_KEY);
+        if (!center) {
+          // Coordless visit (divergent stamp): geocode server-side — the
+          // Geocoding web service rejects referer-restricted browser keys.
+          const geoRes = await fetch(`${API}/api/tech/services/${serviceId}/geocode`, {
+            headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
+          });
+          if (geoRes.ok) {
+            const geo = await geoRes.json();
+            if (Number.isFinite(geo.lat) && Number.isFinite(geo.lng)) {
+              center = { lat: geo.lat, lng: geo.lng };
+            }
+          }
+        }
         if (!center) throw new Error('No location on file for this visit.');
         let zoom = DEFAULT_ZOOM;
         let url = staticMapUrl(center.lat, center.lng, zoom, MAPS_KEY);

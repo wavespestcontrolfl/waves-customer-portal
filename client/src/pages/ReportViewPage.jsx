@@ -8011,6 +8011,24 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <AppliedProductsSection data={data} mode={mode} />
         )}
 
+        {/* V2 lead layouts (lawn/tree-shrub reportV2) skip the lower coverage
+            mount entirely, so a technician-traced map gets its own mount here —
+            otherwise saved traces would silently vanish from these reports.
+            Mutually exclusive with the !isV2LeadLayout mount below, so the
+            #map id never duplicates. */}
+        {isV2LeadLayout && data.treatmentMap?.traced?.snapshotUrl && (
+          <div id="map">
+            <ServiceCoverageCard
+              coverage={serviceCoverage}
+              evidenceLevel={data.evidenceLevel}
+              mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
+              mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
+              tracedMap={data.treatmentMap?.traced || null}
+              applications={data.applications || []}
+            />
+          </div>
+        )}
+
         <TypedFindingsCard typedReport={data.typedReport} />
 
         <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />

@@ -39,23 +39,6 @@ export function loadMapImage(url) {
   });
 }
 
-export async function geocodeAddress(address, apiKey) {
-  const res = await fetch(
-    `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`
-  );
-  if (!res.ok) throw new Error('Address lookup failed. Try again in a moment.');
-  const body = await res.json();
-  if (body.status !== 'OK') {
-    throw new Error(
-      body.status === 'ZERO_RESULTS'
-        ? "Couldn't find this address on the map."
-        : `Address lookup failed (${body.status || 'unknown'}).`
-    );
-  }
-  const top = body.results[0];
-  return { lat: top.geometry.location.lat, lng: top.geometry.location.lng };
-}
-
 /** Meters per physical image pixel at this latitude/zoom (scale-2 imagery). */
 export function metersPerPixel(lat, zoom) {
   return (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom) / MAP_SCALE;

@@ -678,6 +678,51 @@ router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, n
   }
 });
 
+// GET /api/tech/services/:id/geocode — server-side geocode of the visit's
+// stamped/customer address for the treatment-zone mapper. The Geocoding web
+// service rejects referer-restricted keys, so once the client key is locked
+// to prod origins a browser-side fallback would break; the fallback runs here
+// with the server key instead. Only called when the schedule row has no
+// coordinates (divergent stamp with no lat/lng).
+router.get('/:id/geocode', async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const svc = await db('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .where('scheduled_services.id', req.params.id)
+      .first(
+        'scheduled_services.id',
+        'scheduled_services.technician_id',
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as line1'),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip')
+      );
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    const apiKey = process.env.GOOGLE_STATIC_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
+    if (!apiKey) return res.status(503).json({ error: 'Geocoding is not configured' });
+    const address = [svc.line1, svc.city, svc.state, svc.zip].filter(Boolean).join(', ');
+    if (!address) return res.status(422).json({ error: 'No address on file for this visit' });
+    const resp = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`
+    );
+    const body = await resp.json().catch(() => ({}));
+    if (body.status !== 'OK' || !body.results?.length) {
+      return res.status(422).json({ error: 'Could not locate this address on the map' });
+    }
+    const loc = body.results[0].geometry.location;
+    return res.json({ lat: loc.lat, lng: loc.lng });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone geocode failed: ${err.message}`);
+    return next(err);
+  }
+});
+
 router.get('/:id/treatment-zone', async (req, res, next) => {
   try {
     // Read stays 200 with enabled:false when the gate is off so the modal
