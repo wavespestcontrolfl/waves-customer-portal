@@ -8090,9 +8090,23 @@ router.put('/:token/accept', async (req, res, next) => {
       const perApplication = visits > 0 ? Math.round((recurringAnnual / visits) * 100) / 100 : 0;
       return { label, recurringAnnual, perApplication };
     })();
+    // Tier accepts bill per visit at the plan's true per-application price —
+    // the cadence amount is the MONTHLY display rate for tier plans
+    // (billingFrequencyKey 'monthly' with visits != 12), and stamping it as
+    // the row price undercollects every completion (T&S audit 2026-07-18 P1).
+    // Mirrors the converter's perApplicationAmount so the reserved-slot row
+    // and converter-inserted rows carry the identical per-visit charge.
+    const selectedTierPerApplicationPrice = selectedServiceTierBillsMonthly
+      ? BillingCadence.perApplicationChargeAmount({
+          billingCadence: effectiveBillingCadence,
+          annualRate: effectiveAnnualTotal,
+          monthlyRate: effectiveMonthlyTotal,
+          visitsPerYear: Number(selectedFrequency?.visitsPerYear) || null,
+        })
+      : null;
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
-      : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || effectiveBillingCadence?.amount));
+      : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || selectedTierPerApplicationPrice || effectiveBillingCadence?.amount));
     const acceptedOneTimeServiceLabel = treatAsOneTime
       ? buildOneTimeInvoiceServiceLabel({
           estimate,

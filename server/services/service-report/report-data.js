@@ -1255,15 +1255,26 @@ function buildProtocolPayload(record) {
   };
 }
 
-function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
-  const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
-  const concernText = String(
+// Customer concern as captured at completion. The completion flow persists
+// the tech's concern text as structured_notes.customerConcernText
+// (admin-dispatch buildServiceRecordInsert); older/manual rows may carry the
+// other spellings. Every reader goes through this helper — the V2 builders
+// read `customerConcern` alone for a month, so the "what you flagged"
+// concern card never rendered on any lawn or tree & shrub report
+// (T&S audit 2026-07-18 P1).
+function structuredCustomerConcern(structured = {}) {
+  return String(
     structured.customerConcernText
     || structured.customer_concern_text
     || structured.customerConcern
     || structured.customer_concern
     || '',
   ).trim();
+}
+
+function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
+  const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
+  const concernText = structuredCustomerConcern(structured);
   return visitOutcome === 'completed'
     && !(protocol.observations || []).length
     && !(protocol.recommendations || []).length
@@ -2540,7 +2551,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         mowingHeight,
         applications,
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
-        customerConcern: structured.customerConcern || structured.customer_concern || '',
+        customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,
         waterGapHistory,
         mowingTrendFallback,
@@ -2629,7 +2640,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         reportV2 = await applyLawnReportNarrative(reportV2, {
           grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
           observations: lawnAssessment?.observations || '',
-          customerConcern: structured.customerConcern || structured.customer_concern || '',
+          customerConcern: structuredCustomerConcern(structured),
         }).catch(() => reportV2);
       }
     } catch {
@@ -2653,7 +2664,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           treeShrubAssessment,
           applications,
           actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
-          customerConcern: structured.customerConcern || structured.customer_concern || '',
+          customerConcern: structuredCustomerConcern(structured),
           waterSnapshot: null, // Phase 3: landscape water calibration
         });
         // Next scheduled tree & shrub visit — confident date from a real upcoming
@@ -2946,6 +2957,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
 module.exports = {
   buildReportV1Data,
+  structuredCustomerConcern,
   calculateLawnOverallScore,
   lawnScoreDelta,
   lawnScoreValue,

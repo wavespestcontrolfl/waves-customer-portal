@@ -74,6 +74,39 @@ function intervalPriceFromAnnual(annualAmount, frequencyKey) {
   return roundMoney((Number(annualAmount || 0) * billingIntervalMonthsForFrequencyKey(frequencyKey)) / 12);
 }
 
+/**
+ * Per-application (per-visit) charge for a plan billed per completed
+ * application. The billing-cadence amount equals the visit charge only when
+ * the billing interval matches the visit cadence (quarterly pest: four
+ * charges, four visits). Service-tier plans PRESENT a monthly price but
+ * deliver a different visit count (tree & shrub 6x standard / 4x light, the
+ * lawn ladders, mosquito seasonal) — their true per-application price is the
+ * plan's exact annual divided by its visits. Stamping the monthly display
+ * rate instead undercollects on every calendar month without a visit
+ * (tree & shrub audit 2026-07-18: six completions x annual/12 collects half
+ * the accepted annual). Falls back to the cadence amount whenever the visit
+ * count is unknown, so cadence-matched plans are byte-identical.
+ */
+function perApplicationChargeAmount({
+  billingCadence = null,
+  annualRate,
+  monthlyRate,
+  visitsPerYear,
+} = {}) {
+  const cadenceAmount = roundMoney(billingCadence?.amount);
+  const visits = Number(visitsPerYear);
+  if (!Number.isFinite(visits) || visits <= 0) return cadenceAmount;
+  const annual = Number(annualRate || 0);
+  const monthly = Number(monthlyRate ?? billingCadence?.monthlyRate ?? 0);
+  // Same correspondence guard as resolveBillingCadence: an annual that
+  // diverges from monthly x 12 is not this plan's recurring annual — derive
+  // from the monthly instead. An annual with no monthly at all is trusted.
+  const annualCorresponds = annual > 0 && monthly > 0 && Math.abs(annual - monthly * 12) <= 0.5;
+  const planAnnual = (annualCorresponds || (annual > 0 && !(monthly > 0))) ? annual : monthly * 12;
+  if (!(planAnnual > 0)) return cadenceAmount;
+  return roundMoney(planAnnual / visits);
+}
+
 function parseEstimateData(value) {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -246,6 +279,7 @@ module.exports = {
   intervalPriceFromMonthly,
   normalizeFrequencyKey,
   parseEstimateData,
+  perApplicationChargeAmount,
   resolveBillingCadence,
   roundMoney,
 };
