@@ -249,25 +249,6 @@ class AutonomousRunner {
       }
     }
 
-    // 1a.3 Publish-cap pre-check. When the day/week cap for this action type
-    // is already exhausted, drafting is pure waste (the publish guard at step
-    // 7 would block anyway) and the old disposition — park the finished draft
-    // as pending_review — turned a rate limit into human review work. Defer
-    // the opportunity to the next cap window instead: no draft, no review
-    // item; claimNext() re-serves it when the window reopens and it publishes
-    // autonomously then. The step-7 guard remains as the race backstop.
-    // Shadow runs are exempt: they exist to exercise drafting and never
-    // publish, so the cap doesn't constrain them.
-    const capDeferral = run.shadow_mode ? null : await this._capDeferralFor(opp.action_type);
-    if (capDeferral) {
-      const finalized = await finalize(run, t0, {
-        outcome: 'deferred_publish_cap',
-        skip_reason: capDeferral.reason,
-        reviewer_notes: capDeferral.notes,
-      });
-      await this._deferClaimOrThrow(queue, opp.id, capDeferral.availableAt, { claimToken });
-      return finalized;
-    }
 
     // (Facts-sufficiency runs AFTER brief composition — the decision-router can
     // change the final action_type, so the gate must key on brief.action_type,
@@ -364,6 +345,29 @@ class AutonomousRunner {
         skip_reason: brief.human_review_reason || 'router_do_not_publish',
       });
       await this._skipClaimOrThrow(queue, opp.id, brief.human_review_reason || 'router_do_not_publish', { claimToken });
+      return finalized;
+    }
+
+    // 2c. Publish-cap pre-check — AFTER brief composition so it keys on the
+    // FINAL (router-decided) action type, not the miner's provisional one
+    // (the router can retarget an opportunity mid-composition). When the
+    // day/week cap for this action is already exhausted, dispatching the
+    // writer is pure waste (the step-7 publish guard would block anyway)
+    // and the old disposition — park the finished draft as pending_review —
+    // turned a rate limit into human review work. Defer the opportunity to
+    // the next cap window instead: no drafting spend, no review item;
+    // claimNext() re-serves it when the window reopens and it publishes
+    // autonomously then. The step-7 guard remains as the race backstop.
+    // Shadow runs are exempt: they exist to exercise drafting and never
+    // publish, so the cap doesn't constrain them.
+    const capDeferral = run.shadow_mode ? null : await this._capDeferralFor(run.action_type);
+    if (capDeferral) {
+      const finalized = await finalize(run, t0, {
+        outcome: 'deferred_publish_cap',
+        skip_reason: capDeferral.reason,
+        reviewer_notes: capDeferral.notes,
+      });
+      await this._deferClaimOrThrow(queue, opp.id, capDeferral.availableAt, { claimToken });
       return finalized;
     }
 

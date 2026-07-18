@@ -67,19 +67,27 @@ afterEach(() => {
 });
 
 describe('publish-cap pre-check (step 1a.3)', () => {
-  test('a full weekly cap defers WITHOUT drafting — no brief, no review item', async () => {
+  test('a full weekly cap defers AFTER brief composition (final action type) but BEFORE drafting — no writer spend, no review item', async () => {
     process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
     process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK = '7';
     const queue = makeQueue({ id: 'opp_cap', action_type: 'new_supporting_blog', claimed_at: claimedAt });
-    const briefBuilder = { compose: jest.fn() };
-    const { runner } = loadRunner({ queue, briefBuilder });
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_cap', action_type: 'new_supporting_blog', page_type: 'supporting-blog', human_review_required: false,
+      }),
+    };
+    const dispatcher = { runWithBrief: jest.fn() };
+    const { runner } = loadRunner({ queue, briefBuilder, dispatcher });
     runner._countPublishedSince = jest.fn().mockResolvedValue(7);
 
     const result = await runner.runNext();
 
     expect(result.outcome).toBe('deferred_publish_cap');
     expect(result.skip_reason).toBe('canary_weekly_publish_cap');
-    expect(briefBuilder.compose).not.toHaveBeenCalled();
+    // The brief IS composed (the router can retarget the action type — the
+    // cap must key on the FINAL action), but the writer never dispatches.
+    expect(briefBuilder.compose).toHaveBeenCalled();
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
     expect(queue.pendingReview).not.toHaveBeenCalled();
     expect(queue.defer).toHaveBeenCalledTimes(1);
     const [oppId, availableAt, payload] = queue.defer.mock.calls[0];
