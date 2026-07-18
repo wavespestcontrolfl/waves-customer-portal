@@ -406,75 +406,95 @@ async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
       .where({ twilio_sid: sid, message_type: MESSAGE_TYPE, direction: 'outbound' })
       .first('id', 'to_phone');
     if (!row) return { handled: false, reason: 'not_quote_link' };
-
-    // Idempotency claim: Twilio retries status callbacks, and a second pass
-    // would re-pull a follow-up an operator may have deliberately moved
-    // later, plus duplicate the timeline note. One atomic conditional UPDATE
-    // stamping the sms_log row is the claim — zero rows = already handled.
-    // jsonb_exists(), not the ? operator (knex reads ? as a binding).
-    const claimed = await db('sms_log')
-      .where({ id: row.id })
-      .whereRaw("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'quote_link_bounce_handled_at')")
-      .update({
-        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quote_link_bounce_handled_at', to_jsonb(now()::text))"),
-        updated_at: new Date(),
-      });
-    if (!claimed) return { handled: false, reason: 'already_handled' };
-
     const phone = normalizePhoneE164(to || row.to_phone);
     if (!phone) return { handled: false, reason: 'no_phone' };
-    // Correlate through the one-shot claim row (phone PK → the exact lead
-    // this text went to), not phone+recency — duplicate/reopened leads can
-    // share a number and the newest 'new' lead may not be the originator
-    // (Codex pre-push P1). The claim row persists on consumed outcomes
-    // (sent/scheduled), which are the only ones that can bounce.
-    const claim = await db('voicemail_sms_claims').where({ phone }).first('lead_id');
-    let lead = null;
-    if (claim) {
-      // The claim names the exact lead this text went to. If that lead is no
-      // longer open (contacted/converted/deleted before a delayed bounce
-      // arrived), STOP — falling back to phone+recency here could stamp an
-      // unrelated newer lead sharing the number.
-      if (!claim.lead_id) return { handled: false, reason: 'claim_without_lead' };
-      lead = await db('leads')
-        .where('id', claim.lead_id)
-        .where('status', 'new')
-        .whereNull('deleted_at')
-        .first('id', 'next_follow_up_at');
-      if (!lead) return { handled: false, reason: 'claimed_lead_not_open' };
-    } else {
-      // No claim row at all (pre-claims-table sends) — newest still-new
-      // recent lead on this phone as the fallback.
-      lead = await db('leads')
-        .where('phone', phone)
-        .where('status', 'new')
-        .whereNull('deleted_at')
-        .where('created_at', '>=', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000))
-        .orderBy('created_at', 'desc')
-        .first('id', 'next_follow_up_at');
-      if (!lead) return { handled: false, reason: 'no_open_lead' };
-    }
 
-    const now = new Date();
-    // Single guarded UPDATE, not read-then-write: only pull the follow-up in
-    // when none exists or the existing one is LATER — a concurrent operator
-    // edit to an earlier date must never be pushed back to now. Zero updated
-    // rows just means it's already earlier.
-    await db('leads')
-      .where({ id: lead.id })
-      .where(function followUpMissingOrLater() {
-        this.whereNull('next_follow_up_at').orWhere('next_follow_up_at', '>', now);
-      })
-      .update({ next_follow_up_at: now, updated_at: now });
-    await stampStatus(lead.id, 'undelivered');
-    const codeText = String(errorCode || '') === '30006'
-      ? 'error 30006 — landline, this number cannot receive SMS'
-      : `status ${status}${errorCode ? `, error ${errorCode}` : ''}`;
-    await logActivity(lead.id, 'note',
-      `Quote-link text-back never arrived (${codeText}). Call the lead instead.`,
-      { message_type: MESSAGE_TYPE, delivery_status: status || null, error_code: errorCode || null });
-    logger.info(`[voicemail-sms] Undelivered quote link for lead ${lead.id} (${maskPhone(phone)}) — follow-up pulled to now`);
-    return { handled: true, leadId: lead.id };
+    // ONE transaction for the idempotency claim + every remediation write:
+    // a transient failure mid-remediation rolls the claim back too, so the
+    // Twilio callback retry re-processes instead of short-circuiting on a
+    // burned claim with the lead never touched. Deterministic no-op outcomes
+    // (no open lead to stamp) COMMIT the claim — a retry can't change them.
+    return await db.transaction(async (trx) => {
+      // Idempotency claim: Twilio retries status callbacks, and a second
+      // pass would re-pull a follow-up an operator may have deliberately
+      // moved later, plus duplicate the timeline note. One atomic
+      // conditional UPDATE stamping the sms_log row is the claim — zero
+      // rows = already handled. jsonb_exists(), not the ? operator (knex
+      // reads ? as a binding).
+      const claimed = await trx('sms_log')
+        .where({ id: row.id })
+        .whereRaw("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'quote_link_bounce_handled_at')")
+        .update({
+          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('quote_link_bounce_handled_at', to_jsonb(now()::text))"),
+          updated_at: new Date(),
+        });
+      if (!claimed) return { handled: false, reason: 'already_handled' };
+
+      // Correlate through the one-shot claim row (phone PK → the exact lead
+      // this text went to), not phone+recency — duplicate/reopened leads can
+      // share a number and the newest 'new' lead may not be the originator
+      // (Codex pre-push P1). The claim row persists on consumed outcomes
+      // (sent/scheduled), which are the only ones that can bounce.
+      const claim = await trx('voicemail_sms_claims').where({ phone }).first('lead_id');
+      let lead = null;
+      if (claim) {
+        // The claim names the exact lead this text went to. If that lead is
+        // no longer open (contacted/converted/deleted before a delayed
+        // bounce arrived), STOP — falling back to phone+recency here could
+        // stamp an unrelated newer lead sharing the number.
+        if (!claim.lead_id) return { handled: false, reason: 'claim_without_lead' };
+        lead = await trx('leads')
+          .where('id', claim.lead_id)
+          .where('status', 'new')
+          .whereNull('deleted_at')
+          .first('id', 'next_follow_up_at');
+        if (!lead) return { handled: false, reason: 'claimed_lead_not_open' };
+      } else {
+        // No claim row at all (pre-claims-table sends) — newest still-new
+        // recent lead on this phone as the fallback.
+        lead = await trx('leads')
+          .where('phone', phone)
+          .where('status', 'new')
+          .whereNull('deleted_at')
+          .where('created_at', '>=', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000))
+          .orderBy('created_at', 'desc')
+          .first('id', 'next_follow_up_at');
+        if (!lead) return { handled: false, reason: 'no_open_lead' };
+      }
+
+      const now = new Date();
+      // Single guarded UPDATE, not read-then-write: only pull the follow-up
+      // in when none exists or the existing one is LATER — a concurrent
+      // operator edit to an earlier date must never be pushed back to now.
+      // Zero updated rows just means it's already earlier.
+      await trx('leads')
+        .where({ id: lead.id })
+        .where(function followUpMissingOrLater() {
+          this.whereNull('next_follow_up_at').orWhere('next_follow_up_at', '>', now);
+        })
+        .update({ next_follow_up_at: now, updated_at: now });
+      // Inline (trx-bound) versions of stampStatus/logActivity — the shared
+      // helpers write through the global db and would escape the rollback.
+      await trx('leads').where({ id: lead.id }).update({
+        extracted_data: trx.raw(
+          "jsonb_set(COALESCE(extracted_data, '{}'::jsonb), '{quote_link_sms_status}', to_jsonb(?::text))",
+          ['undelivered']
+        ),
+        updated_at: now,
+      });
+      const codeText = String(errorCode || '') === '30006'
+        ? 'error 30006 — landline, this number cannot receive SMS'
+        : `status ${status}${errorCode ? `, error ${errorCode}` : ''}`;
+      await trx('lead_activities').insert({
+        lead_id: lead.id,
+        activity_type: 'note',
+        description: `Quote-link text-back never arrived (${codeText}). Call the lead instead.`,
+        performed_by: 'AI Call Processor',
+        metadata: JSON.stringify({ message_type: MESSAGE_TYPE, delivery_status: status || null, error_code: errorCode || null }),
+      });
+      logger.info(`[voicemail-sms] Undelivered quote link for lead ${lead.id} (${maskPhone(phone)}) — follow-up pulled to now`);
+      return { handled: true, leadId: lead.id };
+    });
   } catch (e) {
     logger.warn(`[voicemail-sms] undelivered quote-link handling failed: ${e.message}`);
     return { handled: false, reason: 'error' };

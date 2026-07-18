@@ -27,6 +27,10 @@ jest.mock('../services/short-url', () => ({ createShortCode: jest.fn() }));
 const db = require('../models/db');
 const { handleUndeliveredQuoteLink } = require('../services/voicemail-lead-sms');
 
+// The handler wraps claim + remediation in one transaction so a mid-flight
+// failure rolls the idempotency claim back; in tests the trx IS the db mock.
+db.transaction = async (cb) => cb(db);
+
 function chainFor(result) {
   const q = {
     _wheres: [],
