@@ -147,12 +147,20 @@ async function main() {
   const phantomRisks = [];
   const triageReasonCounts = {};
 
-  for (const r of rows) {
-    statusCounts[r.v2_extraction_status || 'null'] = (statusCounts[r.v2_extraction_status || 'null'] || 0) + 1;
+  // Safety/semantic criteria (v1↔v2 agreement, SMS consent, phantom risk)
+  // run over valid outputs from the ENTIRE route — fallback-produced
+  // extractions are exactly what production routes from during primary
+  // failures, so they must clear the same checks. Reliability accounting
+  // (statusCounts / validCount / schema-pass) stays primary-scoped.
+  for (const r of allRouteRows) {
+    const isPrimaryRow = r.ai_extraction_model === CURRENT_PRIMARY;
+    if (isPrimaryRow) {
+      statusCounts[r.v2_extraction_status || 'null'] = (statusCounts[r.v2_extraction_status || 'null'] || 0) + 1;
+    }
 
     const v2 = parseJson(r.ai_extraction_enriched);
     if (!(r.v2_extraction_status === 'valid' && v2 && isV2Extraction(v2))) continue;
-    validCount++;
+    if (isPrimaryRow) validCount++;
 
     // Match production: pass the call's contact phone (ANI) so the
     // caller_phone_missing gate behaves the same as the live routing path.
