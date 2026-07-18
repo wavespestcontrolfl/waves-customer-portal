@@ -6,11 +6,11 @@
  * Design rule: the appointment NEVER goes unbooked. We move it first
  * (SmartRebooker.reschedule with allowLive — works from en_route /
  * on_site since PR #1555), then the SMS offers an adjustment:
- *   reply 1 → confirm (re-stamps the same slot)
- *   reply 2 → switch to the alternate option
- * Both replies are handled by the existing reschedule-sms webhook flow;
- * we feed it by writing option1/option2 into the reschedule_log row the
- * rebooker just created.
+ *   reply 1 → confirm (re-stamps the same slot; handled by the existing
+ *   reschedule-sms webhook flow, fed by writing option1 into the
+ *   reschedule_log row the rebooker just created)
+ *   any other time → the customer self-serves on the tokenized
+ *   /reschedule/:token page, via the same link the 72h/24h reminders send.
  *
  * Florida reality: storm cells roll in and roll back out, so the first
  * options offered are LATER TODAY (+2h / +4h), then SmartRebooker's
@@ -23,6 +23,7 @@ const logger = require('./logger');
 const SmartRebooker = require('./rebooker');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { buildRescheduleLink } = require('./reschedule-link');
 const { getDailyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
@@ -268,12 +269,17 @@ async function getOptions(serviceId) {
   };
 }
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId }) {
+async function sendMovedSms({ job, customer, reasonCode, chosen, confirmable, serviceId }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
-  const altClause = alt
-    ? ` Reply 1 to confirm, or 2 to switch to ${customerArrivalOption(alt.date, alt.window)}.`
-    : ' Reply to this message if you need a different time.';
+  // Self-serve adjustments go through the same tokenized /reschedule link
+  // the 72h/24h reminders send. Only the anchor stop offers reply-1 confirm
+  // (commit() attaches its option1 to the reschedule_log row).
+  const { url: rescheduleUrl } = await buildRescheduleLink(serviceId, { customerId: customer.id });
+  const confirmPart = confirmable ? ' Reply 1 to confirm.' : '';
+  const altClause = rescheduleUrl
+    ? `${confirmPart} Need a different time? Reschedule online: ${rescheduleUrl}`
+    : `${confirmPart} Need a different time? Reply to this message.`;
   const forecastLink = forecastLinkForZip(customer.zip);
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
 
@@ -312,8 +318,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, alt, serviceId 
 
 // Wire the reply path: the rebooker's reschedule() just inserted a
 // reschedule_log row for this move; write option1 (the chosen slot —
-// reply 1 re-confirms) and option2 (the alternate) into its notes so
-// the existing handleRescheduleReply webhook flow can act on 1/2.
+// reply 1 re-confirms) into its notes so the existing
+// handleRescheduleReply webhook flow can act on it. There is no
+// option2 anymore — other times self-serve via the /reschedule link —
+// but replies of "2" to older texts still resolve from their own rows.
 // Windows carry `display` because the reply confirmation SMS renders
 // selectedOption.window.display for its {time} variable. start/end are the tight
 // 1-hour internal slot the appointment is actually booked into — a reply re-books
@@ -327,7 +335,7 @@ function replyWindow(window) {
   return { start: window.start, end: window.end, display: customerArrivalLabel(window) };
 }
 
-async function attachReplyOptions(serviceJobId, chosen, alt) {
+async function attachReplyOptions(serviceJobId, chosen) {
   const latest = await db('reschedule_log')
     .where({ scheduled_service_id: serviceJobId })
     .orderBy('created_at', 'desc')
@@ -336,7 +344,6 @@ async function attachReplyOptions(serviceJobId, chosen, alt) {
   await db('reschedule_log').where({ id: latest.id }).update({
     notes: JSON.stringify({
       option1: { date: chosen.date, window: replyWindow(chosen.window) },
-      option2: alt ? { date: alt.date, window: replyWindow(alt.window) } : undefined,
     }),
   });
 }
@@ -353,13 +360,12 @@ async function attachReplyOptions(serviceJobId, chosen, alt) {
  *                                       this window (what the tech saw). On a same-day route push
  *                                       the siblings shift by the anchor's window delta so stop
  *                                       order survives; day moves keep each sibling's own window.
- * @param {object} [args.alt]           alternate option offered in the SMS ({ date, window })
  * @param {boolean} [args.notifyCustomer=true]
  * @param {string} [args.initiatedBy='tech']  actor recorded on each reschedule
  *                                            for the audit log — 'admin' from the
  *                                            dispatch board, 'tech' from the app.
  */
-async function commit({ serviceId, technicianId, reasonCode, scope, target, alt, notifyCustomer = true, initiatedBy = 'tech' }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, initiatedBy = 'tech' }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!WEATHER_PHRASES[reasonCode]) return { ok: false, reason: 'bad_reason' };
@@ -446,9 +452,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, alt,
         const customer = job.id === serviceId
           ? { id: service.cust_id || service.customer_id, phone: service.phone, first_name: service.first_name, zip: service.zip }
           : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip');
-        sms = await sendMovedSms({ job, customer, reasonCode, chosen, alt: job.id === serviceId ? alt : null, serviceId: job.id });
-        if (sms.sent && job.id === serviceId && alt) {
-          await attachReplyOptions(job.id, chosen, alt);
+        sms = await sendMovedSms({ job, customer, reasonCode, chosen, confirmable: job.id === serviceId, serviceId: job.id });
+        if (sms.sent && job.id === serviceId) {
+          await attachReplyOptions(job.id, chosen);
         }
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
