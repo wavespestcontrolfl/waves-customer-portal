@@ -74,6 +74,14 @@ const gates = {
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
 
+  // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
+  // IB's search_field_intelligence, plus the nightly knowledge-index sync
+  // that embeds corpus chunks (paid OpenAI embedding calls — pennies/run,
+  // but still spend). Opt-in in EVERY environment. Kill switch: unset —
+  // search instantly reverts to the lane-A1 FTS path, the nightly sync
+  // no-ops, and existing embeddings stay in place for a later re-enable.
+  hybridKnowledge: process.env.GATE_HYBRID_KNOWLEDGE === 'true',
+
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
 

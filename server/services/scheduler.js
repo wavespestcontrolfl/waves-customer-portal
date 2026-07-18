@@ -436,6 +436,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
+  // re-reads every corpus connector, upserts changed chunks, embeds pending
+  // ones (paid OpenAI embedding calls — pennies; gate-controlled). Gate off
+  // → no-op. Missing OPENAI_API_KEY → chunks sync for full-text and stay
+  // pending for embedding. runExclusive records job_health.
+  // =========================================================================
+  cron.schedule('40 2 * * *', async () => {
+    if (!isEnabled('hybridKnowledge')) return;
+    try {
+      await runExclusive('knowledge-index-sync', () => require('./knowledge-index/ingest').syncKnowledgeIndex());
+    } catch (err) {
+      logger.error(`[knowledge-index] nightly sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:15AM — Data Hygiene deterministic normalization scan
   // =========================================================================
   cron.schedule('15 3 * * *', async () => {

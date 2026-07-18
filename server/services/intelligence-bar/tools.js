@@ -1353,12 +1353,55 @@ async function draftSms(input) {
 // ── search_field_intelligence ───────────────────────────────────
 // Read-only. Trusted tiers only (review_status auto/approved) — the
 // exception-based review gate decides what agents may read.
+//
+// With GATE_HYBRID_KNOWLEDGE on, a vector+FTS+RRF pass (lane A2) runs
+// alongside the lane-A1 unified search: hybrid-discovered wiki/KB pages the
+// FTS lists missed (paraphrase recall) are merged in, and matches from the
+// wider operational corpus (services, protocols, product labels, county
+// rules, prep guides, ops rules) surface as operationalKnowledge. Gate off
+// or hybrid unavailable → exactly the A1 behavior.
 async function searchFieldIntelligence(input) {
   const query = String(input?.query || '').trim();
   if (!query) return { error: 'query is required' };
 
   const KnowledgeBridge = require('../knowledge-bridge');
   const { claudeopedia, wiki, bridged } = await KnowledgeBridge.unifiedSearch(query, { limit: 6, trustedOnly: true });
+
+  let hybrid = null;
+  const { isEnabled } = require('../../config/feature-gates');
+  if (isEnabled('hybridKnowledge')) {
+    try {
+      hybrid = await require('../knowledge-index/hybrid-search').hybridKnowledgeSearch(query, { limit: 12 });
+    } catch (err) {
+      logger.warn(`[intelligence-bar] hybrid knowledge search unavailable: ${err.message}`);
+    }
+  }
+
+  // Vector recall: hybrid can surface trusted wiki/KB pages whose vocabulary
+  // never matches the query tokens. Fetch the ones unifiedSearch missed so
+  // the sections below include them (trust gates re-applied here).
+  const hybridSlugs = (source) => (hybrid?.results || []).filter((r) => r.source === source).map((r) => r.sourceId);
+  const missingWikiSlugs = hybridSlugs('wiki').filter((slug) => !wiki.some((w) => w.slug === slug));
+  const missingKbSlugs = hybridSlugs('kb').filter((slug) => !claudeopedia.some((k) => k.slug === slug));
+  if (missingWikiSlugs.length) {
+    try {
+      const { TRUSTED_STATUSES } = require('../agronomic-wiki');
+      const extra = await db('knowledge_entries')
+        .whereIn('slug', missingWikiSlugs)
+        .whereIn('review_status', TRUSTED_STATUSES)
+        .select('id', 'slug', 'title', 'category', 'confidence', 'data_point_count', 'updated_at', 'kb_entry_id', 'review_tier', 'review_status');
+      wiki.push(...extra.map((e) => ({ ...e, source: 'agronomic_wiki' })));
+    } catch { /* vector recall is additive-only */ }
+  }
+  if (missingKbSlugs.length) {
+    try {
+      const extra = await db('knowledge_base')
+        .whereIn('slug', missingKbSlugs)
+        .where({ status: 'active' })
+        .select('id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id');
+      claudeopedia.push(...extra.map((e) => ({ ...e, source: 'claudeopedia' })));
+    } catch { /* vector recall is additive-only */ }
+  }
 
   // Attach summaries/snippets — unifiedSearch returns metadata only.
   let wikiRows = wiki || [];
@@ -1404,6 +1447,13 @@ async function searchFieldIntelligence(input) {
     }
   } catch { /* table may not exist */ }
 
+  // Operational corpus hits (hybrid only): services, protocols, product
+  // labels, county fertilizer rules, prep guides, ops rules.
+  const operationalKnowledge = (hybrid?.results || [])
+    .filter((r) => r.source !== 'wiki' && r.source !== 'kb')
+    .slice(0, 6)
+    .map((r) => ({ source: r.source, ref: r.sourceId, title: r.title, snippet: r.snippet }));
+
   return {
     query,
     fieldIntelligence: wikiRows.map((w) => ({
@@ -1422,9 +1472,11 @@ async function searchFieldIntelligence(input) {
       confidence: k.confidence,
       snippet: k.snippet,
     })),
+    ...(operationalKnowledge.length ? { operationalKnowledge } : {}),
+    ...(hybrid ? { searchMode: hybrid.usedVector ? 'hybrid' : 'hybrid_fts_only' } : {}),
     bridgedPairs: (bridged || []).length,
     openContradictions,
-    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge. Cite slugs, state confidence, and surface open contradictions.',
+    note: 'fieldIntelligence = AI-maintained outcome wiki (trusted tiers only, field intelligence not label authority); knowledgeBase = curated operational knowledge; operationalKnowledge (when present) = services/protocols/product-label/county-rule/prep-guide matches — cite source + ref. Cite slugs, state confidence, and surface open contradictions.',
   };
 }
 

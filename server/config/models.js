@@ -106,6 +106,18 @@ const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || 'gemini-3
 // discoverable in the central registry.
 const GEMINI_VISION_FALLBACK = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
 
+// Knowledge-index embedding model (hybrid knowledge search, lane A2).
+// SINGLE provider BY DESIGN — an embedding space is only comparable to
+// itself, so a cross-provider fallback here would return meaningless
+// similarity scores. This is a deliberate exception to the every-lane
+// Claude-fallback rule (Anthropic ships no embeddings API): if OpenAI
+// embeddings are unavailable, hybrid search degrades to full-text and
+// ingestion leaves rows pending for the next nightly run. Changing this
+// model requires re-embedding the whole corpus
+// (scripts/backfill-knowledge-embeddings.js after truncating embeddings).
+const OPENAI_EMBEDDING = process.env.MODEL_OPENAI_EMBEDDING || 'text-embedding-3-small';
+const EMBEDDING_DIMS = 1536; // must match knowledge_embeddings vector(1536)
+
 // SMS reply-drafting split (owner directive 2026-07-05):
 //   default auto-reply draft              → GPT-5.6 Luna (high-volume lane)
 //   tone rewrite + save-the-sale replies  → Claude Sonnet 5 (warm customer voice)
@@ -207,6 +219,8 @@ module.exports = {
   OPENAI_FAST,
   OPENAI_REPORT_WRITER,
   OPENAI_SMS_DRAFT,
+  OPENAI_EMBEDDING,
+  EMBEDDING_DIMS,
   SMS_SONNET,
   GEMINI_VISION_BEST,
   GEMINI_VISION_FALLBACK,
