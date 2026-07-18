@@ -166,3 +166,79 @@ describe('orchestrate.js — pressure_index mirror source-text regression guard 
     expect(src).toMatch(/persisted\s*&&\s*persisted\.displayed_score\s*!=\s*null/);
   });
 });
+
+describe('loadHistoryForCustomer — same-day sibling trim (audit 2026-07-16 P3)', () => {
+  const { loadHistoryForCustomer } = require('../services/pest-pressure/store');
+
+  // Store ships DESC by service_date; 202 is a LATER visit on the same day
+  // as this report's own row (201).
+  const rows = [
+    { service_record_id: 202, service_date: '2026-07-10', displayed_score: 4.1 },
+    { service_record_id: 201, service_date: '2026-07-10', displayed_score: 3.2 },
+    { service_record_id: 105, service_date: '2026-06-01', displayed_score: 2.8 },
+  ];
+
+  // knex() call order inside loadHistoryForCustomer: 1 = the windowed
+  // history query (select resolves rows); 2 = the fail-closed current-row
+  // lookup (select→chain, first resolves the stored row or undefined);
+  // 3 = the strictly-earlier-days query (select resolves earlierRows).
+  function historyKnex({ windowRows = rows, currentRow = undefined, earlierRows = [] } = {}) {
+    const mainChain = {};
+    mainChain.leftJoin = jest.fn(() => mainChain);
+    mainChain.where = jest.fn(() => mainChain);
+    mainChain.orderBy = jest.fn(() => mainChain);
+    mainChain.orderByRaw = jest.fn(() => mainChain);
+    mainChain.limit = jest.fn(() => mainChain);
+    mainChain.select = jest.fn(async () => [...windowRows]);
+    const lookupChain = {};
+    lookupChain.where = jest.fn(() => lookupChain);
+    lookupChain.select = jest.fn(() => lookupChain);
+    lookupChain.first = jest.fn(async () => currentRow);
+    const earlierChain = {};
+    earlierChain.leftJoin = jest.fn(() => earlierChain);
+    earlierChain.where = jest.fn(() => earlierChain);
+    earlierChain.orderBy = jest.fn(() => earlierChain);
+    earlierChain.orderByRaw = jest.fn(() => earlierChain);
+    earlierChain.limit = jest.fn(() => earlierChain);
+    earlierChain.select = jest.fn(async () => [...earlierRows]);
+    let calls = 0;
+    return jest.fn(() => { calls += 1; return calls === 1 ? mainChain : calls === 2 ? lookupChain : earlierChain; });
+  }
+
+  test('token-scoped history trims a later same-day sibling at the report own row', async () => {
+    const out = await loadHistoryForCustomer(historyKnex(), 9, {
+      limit: 8, beforeOrOnServiceDate: '2026-07-10', currentServiceRecordId: 201,
+    });
+    expect(out.map((r) => r.service_record_id)).toEqual([201, 105]);
+  });
+
+  test('legacy report with no stored row keeps the plain date bound', async () => {
+    const out = await loadHistoryForCustomer(historyKnex(), 9, {
+      limit: 8, beforeOrOnServiceDate: '2026-07-10', currentServiceRecordId: 999,
+    });
+    expect(out.map((r) => r.service_record_id)).toEqual([202, 201, 105]);
+  });
+
+  test('FAIL CLOSED when the stored current row falls outside the fetched window', async () => {
+    // ≥limit+8 later same-day siblings SATURATE the window (every fetched
+    // row is the tied day — modeling the real query cap), pushing the
+    // report's own row out entirely. The fallback must not return those
+    // later visits, and earlier days come from their own query since the
+    // saturated window can't contain any.
+    const windowRows = Array.from({ length: 16 }, (_, i) => (
+      { service_record_id: 300 + i, service_date: '2026-07-10', displayed_score: 4.0 }
+    ));
+    const currentRow = { service_record_id: 201, service_date: '2026-07-10', displayed_score: 3.2 };
+    const earlierRows = [{ service_record_id: 105, service_date: '2026-06-01', displayed_score: 2.8 }];
+    const out = await loadHistoryForCustomer(historyKnex({ windowRows, currentRow, earlierRows }), 9, {
+      limit: 8, beforeOrOnServiceDate: '2026-07-10', currentServiceRecordId: 201,
+    });
+    expect(out.map((r) => r.service_record_id)).toEqual([201, 105]);
+    expect(out.some((r) => r.service_record_id >= 300)).toBe(false);
+  });
+
+  test('admin callers without currentServiceRecordId are unchanged', async () => {
+    const out = await loadHistoryForCustomer(historyKnex(), 9, { limit: 8 });
+    expect(out).toHaveLength(3);
+  });
+});

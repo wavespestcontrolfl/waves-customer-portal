@@ -255,9 +255,64 @@ class SatelliteAnalyzer {
    */
   mergeResults(providerResults) {
     if (!providerResults.length) return { error: 'No results' };
+    const numericFields = ['lot_sqft', 'lawn_sqft', 'house_footprint_sqft', 'bed_area_sqft', 'driveway_sqft', 'palm_count', 'tree_count', 'perimeter_linear_ft'];
+    const boolFields = ['has_pool', 'has_pool_cage', 'has_large_driveway', 'near_water'];
+    const stringFields = ['shrub_density', 'tree_density', 'landscape_complexity', 'property_type', 'roof_condition'];
+    const explicitNonNegative = (analysis, field) => {
+      if (!analysis || !Object.prototype.hasOwnProperty.call(analysis, field)) return null;
+      if (analysis[field] === null || analysis[field] === '') return null;
+      const value = Number(analysis[field]);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    };
     if (providerResults.length === 1) {
       const only = providerResults[0];
-      return { ...only.analysis, confidence: 'single_model', source: only.provider, fieldVerify: Object.keys(only.analysis) };
+      const cleanedAnalysis = { ...only.analysis };
+      const confidenceDetails = {};
+      const fieldVerify = [];
+      for (const field of numericFields) {
+        const fieldWasProvided = Object.prototype.hasOwnProperty.call(only.analysis || {}, field);
+        const value = explicitNonNegative(only.analysis, field);
+        if (value === null) {
+          cleanedAnalysis[field] = null;
+          confidenceDetails[field] = { values: [], status: 'missing' };
+          // An invalid value must remain visible to the operator even though
+          // it is removed from the merged measurements. Truly omitted fields
+          // stay absent from Field Verify.
+          if (fieldWasProvided) fieldVerify.push(field);
+          continue;
+        }
+        confidenceDetails[field] = {
+          values: [{ provider: only.provider, value }],
+          status: 'single_source',
+        };
+        fieldVerify.push(field);
+      }
+      // Boolean and string facts (has_pool, near_water, property_type, …) are
+      // just as single-source as the numbers — leaving them out of fieldVerify
+      // hides them from the admin Field Verify list even though nothing
+      // corroborated them.
+      for (const field of boolFields) {
+        const value = only.analysis?.[field];
+        if (typeof value !== 'boolean') continue;
+        confidenceDetails[field] = { values: [{ provider: only.provider, value }], status: 'single_source' };
+        fieldVerify.push(field);
+      }
+      for (const field of stringFields) {
+        const value = only.analysis?.[field];
+        if (!value) continue;
+        confidenceDetails[field] = { values: [{ provider: only.provider, value }], status: 'single_source' };
+        fieldVerify.push(field);
+      }
+      return {
+        ...cleanedAnalysis,
+        confidence: 'single_model',
+        agreementPct: null,
+        confidenceDetails,
+        source: only.provider,
+        aiSources: [only.provider],
+        _sources: [only.provider],
+        fieldVerify,
+      };
     }
 
     const merged = {};
@@ -265,17 +320,31 @@ class SatelliteAnalyzer {
     const confidenceDetails = {};
 
     // Numeric fields — average if within 15%, flag if > 15% apart
-    const numericFields = ['lot_sqft', 'lawn_sqft', 'house_footprint_sqft', 'bed_area_sqft', 'driveway_sqft', 'palm_count', 'tree_count', 'perimeter_linear_ft'];
     for (const field of numericFields) {
-      const values = providerResults.map(({ provider, analysis }) => ({ provider, value: Number(analysis[field]) || 0 })).filter((v) => v.value > 0);
+      // Zero is a real observation for count/area fields (no palms, no lawn,
+      // vacant parcel). The previous `value > 0` filter erased it, turning a
+      // two-model 0/0 agreement into "missing" and a 0/4 disagreement into a
+      // falsely confident single-source 4.
+      const values = providerResults
+        .map(({ provider, analysis }) => ({ provider, value: explicitNonNegative(analysis, field) }))
+        .filter((v) => v.value !== null);
 
-      if (!values.length) { merged[field] = 0; continue; }
-      if (values.length === 1) { merged[field] = values[0].value; fieldVerify.push(field); continue; }
+      if (!values.length) {
+        merged[field] = 0;
+        confidenceDetails[field] = { values: [], status: 'missing' };
+        continue;
+      }
+      if (values.length === 1) {
+        merged[field] = values[0].value;
+        fieldVerify.push(field);
+        confidenceDetails[field] = { values, status: 'single_source' };
+        continue;
+      }
 
       const avg = Math.round(values.reduce((sum, v) => sum + v.value, 0) / values.length);
       const min = Math.min(...values.map((v) => v.value));
       const max = Math.max(...values.map((v) => v.value));
-      const pctDiff = (max - min) / max;
+      const pctDiff = max === 0 ? 0 : (max - min) / max;
 
       merged[field] = avg;
       if (pctDiff > 0.15) {
@@ -287,16 +356,22 @@ class SatelliteAnalyzer {
     }
 
     // Boolean fields — agree if same, flag if different
-    const boolFields = ['has_pool', 'has_pool_cage', 'has_large_driveway', 'near_water'];
     for (const field of boolFields) {
-      const values = providerResults.map(({ analysis }) => analysis[field]).filter((v) => typeof v === 'boolean');
-      const trueCount = values.filter(Boolean).length;
+      const values = providerResults
+        .map(({ provider, analysis }) => ({ provider, value: analysis[field] }))
+        .filter((entry) => typeof entry.value === 'boolean');
+      const trueCount = values.filter((entry) => entry.value).length;
       const falseCount = values.length - trueCount;
       if (!values.length) {
-        merged[field] = false;
+        merged[field] = null;
+        confidenceDetails[field] = { values: [], status: 'missing' };
+      } else if (values.length < providerResults.length) {
+        merged[field] = trueCount > 0;
+        fieldVerify.push(field);
+        confidenceDetails[field] = { values, status: 'single_source' };
       } else if (trueCount === 0 || falseCount === 0) {
         merged[field] = trueCount > 0;
-        confidenceDetails[field] = { status: 'agree' };
+        confidenceDetails[field] = { values, status: 'agree' };
       } else {
         merged[field] = true; // err on the side of true
         fieldVerify.push(field);
@@ -304,12 +379,26 @@ class SatelliteAnalyzer {
       }
     }
 
-    // String fields — prefer the first available provider result if they disagree
-    const stringFields = ['shrub_density', 'tree_density', 'landscape_complexity', 'property_type', 'roof_condition'];
+    // String fields — prefer the first available provider result if they
+    // disagree. Same single-source rule as the numeric/boolean paths: a
+    // categorical fact only one provider returned is uncorroborated, not
+    // settled — it must carry the verify flag and its provenance.
     for (const field of stringFields) {
-      const values = providerResults.map(({ analysis }) => analysis[field]).filter(Boolean);
-      merged[field] = values[0] || null;
-      if (new Set(values).size > 1) fieldVerify.push(field);
+      const values = providerResults
+        .map(({ provider, analysis }) => ({ provider, value: analysis[field] }))
+        .filter((entry) => Boolean(entry.value));
+      merged[field] = values[0]?.value || null;
+      if (!values.length) {
+        confidenceDetails[field] = { values: [], status: 'missing' };
+      } else if (values.length < providerResults.length) {
+        fieldVerify.push(field);
+        confidenceDetails[field] = { values, status: 'single_source' };
+      } else if (new Set(values.map((entry) => entry.value)).size > 1) {
+        fieldVerify.push(field);
+        confidenceDetails[field] = { values, status: 'disagree' };
+      } else {
+        confidenceDetails[field] = { values, status: 'agree' };
+      }
     }
 
     // Notes — combine both
@@ -317,8 +406,10 @@ class SatelliteAnalyzer {
     merged.notes = notes.join(' | ');
 
     // Overall confidence
-    const agreeCount = Object.values(confidenceDetails).filter(d => d.status === 'agree').length;
-    const totalChecked = Object.keys(confidenceDetails).length;
+    const checkedDetails = Object.values(confidenceDetails)
+      .filter((detail) => detail.status === 'agree' || detail.status === 'disagree');
+    const agreeCount = checkedDetails.filter(d => d.status === 'agree').length;
+    const totalChecked = checkedDetails.length;
     const agreePct = totalChecked > 0 ? Math.round(agreeCount / totalChecked * 100) : 0;
 
     merged.confidence = agreePct >= 80 ? 'high' : agreePct >= 60 ? 'medium' : 'low';

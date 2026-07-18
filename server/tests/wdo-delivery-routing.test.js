@@ -126,8 +126,11 @@ async function withServer(fn) {
 }
 
 // Mirror of wdoContentHash in routes/admin-projects.js (see
-// wdo-signature-binding.test.js for why it's deliberately duplicated).
+// wdo-signature-binding.test.js for why it's deliberately duplicated). The
+// hash covers the CUSTOMER-SAFE findings (internal-key strip + fee-cue
+// scrub) — the same representation the FDACS PDF renders (codex #2817).
 function expectedContentHash(findings, projectDate) {
+  const { stripInternalFindingKeys } = require('../services/project-types');
   const stable = (value) => {
     if (Array.isArray(value)) return value.map(stable);
     if (value && typeof value === 'object') {
@@ -138,7 +141,8 @@ function expectedContentHash(findings, projectDate) {
     }
     return value;
   };
-  const payload = JSON.stringify({ findings: stable(findings), project_date: projectDate });
+  const { projectRecordedFeeValues } = require('../services/project-types');
+  const payload = JSON.stringify({ findings: stable(stripInternalFindingKeys(findings, { redactValues: true, feeValues: projectRecordedFeeValues({ findings }), freeTextKeys: require('../services/project-types').projectTypeFreeTextKeys('wdo_inspection') }) || {}), project_date: projectDate });
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 

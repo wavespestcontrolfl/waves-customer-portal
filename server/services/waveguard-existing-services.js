@@ -60,34 +60,44 @@ async function isActivePlanCustomer(database, customerId) {
 // line label) to a WaveGuard qualifying service key. Scoped to the five
 // qualifiers — palm_injection and rodent_bait are explicitly NOT qualifiers,
 // and one-time treatments (one_time_pest etc.) never count toward the tier.
-function toQualifyingKey(raw) {
+function toQualifyingKeys(raw) {
   const s = String(raw || '').toLowerCase();
-  if (!s) return null;
-  if (s.includes('rodent') || s.includes('palm')) return null;
-  if (/one[\s_-]?time|onetime/.test(s)) return null;
+  if (!s) return [];
+  if (/one[\s_-]?time|onetime/.test(s)) return [];
   // Commercial auto-priced plans are FLAT and never count toward a WaveGuard
   // tier — otherwise an accepted "Commercial Turf Treatment Program" would feed
   // priorQualifyingServices and unlock WaveGuard discounts on future estimates.
-  if (s.includes('commercial')) return null;
-  if (s.includes('pest')) return 'pest_control';
-  if (s.includes('lawn') || s.includes('turf')) return 'lawn_care';
-  if (s.includes('tree') || s.includes('shrub') || s.includes('ornamental')) return 'tree_shrub';
-  if (s.includes('mosquito')) return 'mosquito';
-  if (s.includes('termite') && s.includes('bait')) return 'termite_bait';
-  return null;
+  if (s.includes('commercial')) return [];
+  const keys = new Set();
+  // Rodent-led names ("Rodent Pest Control" — rodent_general_one_time's
+  // canonical label) are rodent service rows, not pest coverage. Mirror
+  // detectServiceLine / recurring-appointment-seeder's serviceKeyFor: only a
+  // "pest ... rodent" combined name ("Pest & Rodent Control") is pest-primary.
+  const rodentService = /\b(rodent|rats?|mouse|mice)\b/.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+  if (s.includes('pest') && !rodentService) keys.add('pest_control');
+  if (s.includes('lawn') || s.includes('turf')) keys.add('lawn_care');
+  // A palm token ("Palm Tree Injections") names the non-qualifying palm
+  // service and beats tree/shrub wording, same as detectServiceLine.
+  // (\bpalms?\b never matches "palmetto", so palmetto-bug pest names pass.)
+  const palmService = /\bpalms?\b/.test(s);
+  if (!palmService && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) keys.add('tree_shrub');
+  if (s.includes('mosquito')) keys.add('mosquito');
+  if (s.includes('termite') && s.includes('bait')) keys.add('termite_bait');
+  return [...keys];
 }
 
-// Load the customer's active, recurring, qualifying scheduled_services rows.
-// Restricts to RECURRING rows (is_recurring true; recurring_parent_id is NOT
-// used because booster-month visits carry a parent but is_recurring:false and
-// would inflate coverage — see admin-schedule.js). Guarded on column existence
-// so schema drift degrades gracefully rather than throwing.
-async function loadExistingRecurringQualifyingRows(database, customerId) {
+function toQualifyingKey(raw) {
+  return toQualifyingKeys(raw)[0] || null;
+}
+
+// Load every active recurring service row for account recognition/spend. This
+// is intentionally broader than WaveGuard qualification: staff still need to
+// see a customer's palm/rodent/non-tier recurring work even though those rows
+// must never raise a membership tier.
+async function loadActiveRecurringServiceRows(database, customerId) {
   if (!database || !customerId) return [];
-  // Plan-gate: only customers who actually hold a WaveGuard plan have
-  // "existing" recurring coverage. A lead / one-time buyer with a stray
-  // scheduled visit is NOT a member, so they get the new-customer treatment.
-  if (!(await isActivePlanCustomer(database, customerId))) return [];
+  const customer = await database('customers').where({ id: customerId }).first();
+  if (!customer || customer.active === false) return [];
   const cols = await database('scheduled_services').columnInfo();
   const hasIsRecurring = !!cols.is_recurring;
   let query = database('scheduled_services')
@@ -99,16 +109,47 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   const selectCols = ['id', 'service_type', 'scheduled_date'];
   if (cols.estimated_price) selectCols.push('estimated_price');
   if (cols.annual_prepay_term_id) selectCols.push('annual_prepay_term_id');
+  const hasStampedAddress = !!cols.service_address_line1;
+  if (hasStampedAddress) {
+    selectCols.push('service_address_line1');
+    if (cols.service_address_line2) selectCols.push('service_address_line2');
+    if (cols.service_address_city) selectCols.push('service_address_city');
+    if (cols.service_address_zip) selectCols.push('service_address_zip');
+  }
   const rows = await query.select(selectCols);
-  return rows.filter((r) => toQualifyingKey(r.service_type) !== null);
+  // Carry each row's STAMPED service address so duplicate checks can scope an
+  // active service to its property — a multi-property customer's pest plan at
+  // one address must not block a quote for another address. An unstamped row
+  // stays null (UNKNOWN): substituting the customer's current primary address
+  // would let a legacy row that actually covers a secondary property look
+  // street-different and slip past the duplicate guard, so unknown rows keep
+  // the conservative account-wide block downstream.
+  return rows.map((row) => ({
+    ...row,
+    effective_service_address: (hasStampedAddress && row.service_address_line1)
+      ? [
+        [row.service_address_line1, row.service_address_line2].filter(Boolean).join(' '),
+        row.service_address_city,
+        row.service_address_zip,
+      ].filter(Boolean).join(', ')
+      : null,
+  }));
+}
+
+// Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
+// gate prevents a lead/one-time buyer with a stray recurring visit from
+// receiving membership pricing.
+async function loadExistingRecurringQualifyingRows(database, customerId) {
+  if (!(await isActivePlanCustomer(database, customerId))) return [];
+  const rows = await loadActiveRecurringServiceRows(database, customerId);
+  return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
 }
 
 // Distinct qualifying service keys from a set of rows.
 function qualifyingKeysFromRows(rows = []) {
   const keys = new Set();
   for (const r of rows) {
-    const key = toQualifyingKey(r.service_type);
-    if (key) keys.add(key);
+    toQualifyingKeys(r.service_type).forEach((key) => keys.add(key));
   }
   return [...keys];
 }
@@ -122,6 +163,8 @@ async function loadExistingQualifyingServiceKeys(database, customerId) {
 module.exports = {
   TERMINAL_STATUSES,
   toQualifyingKey,
+  toQualifyingKeys,
+  loadActiveRecurringServiceRows,
   loadExistingRecurringQualifyingRows,
   qualifyingKeysFromRows,
   loadExistingQualifyingServiceKeys,

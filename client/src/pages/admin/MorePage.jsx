@@ -30,8 +30,10 @@ import {
   Camera,
   Newspaper,
   Send,
+  Sparkles,
 } from "lucide-react";
 import { refetchFlags } from "../../hooks/useFeatureFlag";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 
 const SECTIONS = [
   {
@@ -122,6 +124,7 @@ export default function MorePage() {
   } catch {
     currentRole = null;
   }
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
 
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
@@ -167,6 +170,15 @@ export default function MorePage() {
                 </Link>{" "}
               </li>
             ))}
+            {section === "Agents" && agentEstimateEnabled && (
+              <li>
+                <Link to="/admin/agent-estimate" className="flex items-center gap-3 px-4 h-14 active:bg-zinc-50 text-zinc-900">
+                  <Sparkles size={20} strokeWidth={1.75} className="text-zinc-600 shrink-0" />
+                  <span className="flex-1 text-14">Agent Estimate</span>
+                  <ChevronRight size={16} className="text-zinc-400" />
+                </Link>
+              </li>
+            )}
           </ul>{" "}
         </section>
       ))}

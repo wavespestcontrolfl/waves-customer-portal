@@ -8,7 +8,12 @@ import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
-import { INTERNAL_FINDING_KEYS } from "../../lib/wdoReportFields";
+import {
+  INTERNAL_FINDING_KEYS,
+  redactInspectionFeeCues,
+  redactSpecificAmounts,
+  resolveFeeValuesForScrub,
+} from "../../lib/wdoReportFields";
 import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
@@ -135,6 +140,8 @@ const TYPE_LABELS = {
 };
 const WDO_TYPE = "wdo_inspection";
 const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
+const OFFICIAL_TERMITE_DOCUMENT_TYPES = new Set([WDO_TYPE, CERTIFICATE_TYPE]);
+const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
@@ -150,7 +157,6 @@ const PROJECT_TYPES_WITH_PREP_GUIDES = new Set([
   "rodent_exclusion",
   "rodent_trapping",
   "mosquito_event",
-  "pre_treatment_termite_certificate",
 ]);
 const BOOK_URL = "https://www.wavespestcontrol.com/book/";
 const REQUIRED_RECOMMENDATION_SECTION_HEADINGS = [
@@ -247,11 +253,22 @@ function formatProjectAppointmentTime(value) {
   return `${hour12}:${minute} ${suffix}`;
 }
 
+// The customer promise is ALWAYS windowStart + 2 hours — window_end is the
+// internal job-duration estimate and never customer-facing. The public
+// report page renders start+2h, so the staff preview must too.
+function projectAppointmentWindowEnd(windowStart) {
+  const raw = String(windowStart || "").trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (!match) return "";
+  const hour24 = (Number(match[1]) + 2) % 24;
+  return `${hour24}:${match[2]}`;
+}
+
 function formatProjectAppointmentWindow(appt) {
   if (!appt) return "";
   const date = formatProjectAppointmentDate(appt.scheduledDate);
   const start = formatProjectAppointmentTime(appt.windowStart);
-  const end = formatProjectAppointmentTime(appt.windowEnd);
+  const end = formatProjectAppointmentTime(projectAppointmentWindowEnd(appt.windowStart));
   const window = start && end ? `${start}-${end}` : start || end;
   return [date, window].filter(Boolean).join(" ");
 }
@@ -342,7 +359,7 @@ function closeoutBillingLabel(billing = {}) {
     if (billing.invoiceId) return `Invoice ready ${money(billing.amount)}`;
     return `Billing resolved ${money(billing.amount)}`;
   }
-  return `Billing required ${money(billing.amount)}`;
+  return `Invoice not sent ${money(billing.amount)}`;
 }
 
 function closeoutFollowupLabel(followup = {}) {
@@ -859,7 +876,6 @@ function CustomerProjectReportPreview({
   sentLink,
 }) {
   const typeLabel = typeCfg?.label || TYPE_LABELS[project.project_type] || "Inspection";
-  const reportTitle = String(title || "").trim() || typeLabel;
   // Same suppression rules as the customer-facing report page — the preview
   // staff approve must match what the customer actually sees: internal keys
   // filtered, and the raw findings hidden when the AI-drafted sectioned
@@ -867,8 +883,53 @@ function CustomerProjectReportPreview({
   // WDO keeps findings unless a filled FDACS filing is archived —
   // fdacs_pdf_available is computed by the detail endpoint with the same
   // rule as the public page (the raw archive index isn't served).
-  const aiNarrativeSections = recommendations
-    ? parseSections(String(recommendations))
+  // Preview == public: the sent link serves the fee-scrubbed narrative and
+  // finding values (server /data egress applies @waves/report-redaction), so
+  // the preview staff approve applies the SAME shared module — a legacy
+  // narrative with a baked-in fee must look redacted here too, or staff
+  // approve text the customer never sees (codex #2817). Type-gated to WDO,
+  // the only type carrying the internal fee field.
+  // Cue + recorded-value passes, matching the server /data serializer — the
+  // fee values are the live edit state (findings.inspection_fee) merged with
+  // the archived filing snapshot fees the detail endpoint derives (a
+  // previously filed report can quote an older fee than the current field),
+  // falling back to the shared flat default when blank, so staff approve
+  // exactly what the customer's token serves (codex #2817).
+  const previewFeeValues = project.project_type === WDO_TYPE
+    ? resolveFeeValuesForScrub([
+      findings?.inspection_fee ?? "",
+      ...(Array.isArray(project.wdo_archived_fee_values) ? project.wdo_archived_fee_values : []),
+    ])
+    : [];
+  const feeRedact = project.project_type === WDO_TYPE
+    ? (text) => (typeof text === "string"
+      ? redactSpecificAmounts(redactInspectionFeeCues(text), previewFeeValues)
+      : text)
+    : (text) => text;
+  // Cue-only variant for STRUCTURED finding fields — the server limits the
+  // value pass to free-prose (textarea) keys so "175 Main Street" with a
+  // $175 fee is never corrupted; the preview must match.
+  const feeRedactCueOnly = project.project_type === WDO_TYPE
+    ? (text) => (typeof text === "string" ? redactInspectionFeeCues(text) : text)
+    : (text) => text;
+  const previewFreeTextKeys = (() => {
+    const acc = new Set();
+    const walk = (fields) => (fields || []).forEach((f) => {
+      if (f.type === "textarea" && f.key) acc.add(f.key);
+      if (f.fields) walk(f.fields);
+    });
+    walk(typeCfg?.findingsFields);
+    walk(typeCfg?.fields);
+    return acc;
+  })();
+  const customerRecommendations = recommendations
+    ? feeRedact(String(recommendations))
+    : recommendations;
+  // Title and photo captions are free text on the same customer surface —
+  // same scrub, or staff approve a headline/label the customer never sees.
+  const reportTitle = feeRedact(String(title || "").trim()) || typeLabel;
+  const aiNarrativeSections = customerRecommendations
+    ? parseSections(String(customerRecommendations))
     : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (project.project_type !== WDO_TYPE || Boolean(project.fdacs_pdf_available));
@@ -884,7 +945,7 @@ function CustomerProjectReportPreview({
       .map(([key, label]) => [label, findings?.[key]])
       .filter(([, v]) => hasMeaningfulValue(formatProjectPreviewValue(v)))
     : [];
-  const visiblePhotos = (photos || []).slice(0, 4);
+  const visiblePhotos = (photos || []).slice(0, 4).map((p) => ({ ...p, caption: feeRedact(p.caption) }));
   const address = customerAddressLine(project);
   const metaRows = [
     projectDate ? `Inspection date: ${fmtDate(projectDate)}` : null,
@@ -1007,7 +1068,7 @@ function CustomerProjectReportPreview({
                       {projectFieldLabel(typeCfg, key)}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      {formatProjectPreviewValue(value)}
+                      {(previewFreeTextKeys.has(key) ? feeRedact : feeRedactCueOnly)(formatProjectPreviewValue(value))}
                     </div>
                   </div>
                 ))}
@@ -1044,7 +1105,7 @@ function CustomerProjectReportPreview({
                       {label}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      {formatProjectPreviewValue(value)}
+                      {feeRedactCueOnly(formatProjectPreviewValue(value))}
                     </div>
                   </div>
                 ))}
@@ -1052,9 +1113,9 @@ function CustomerProjectReportPreview({
             </div>
           )}
 
-          {recommendations ? (
+          {customerRecommendations ? (
             <ProjectPreviewRecommendationsBlock
-              text={recommendations}
+              text={customerRecommendations}
               upcomingAppointment={upcomingAppointment}
             />
           ) : null}
@@ -1569,8 +1630,8 @@ export function ProjectDetail({
   // WDO reports can't be sent until the licensee signature is captured.
   const wdoNeedsSignature =
     project?.project_type === WDO_TYPE && !project?.wdo_signature?.signed;
-  // Payment hold: server-computed availability (WDO + gate on + not sent)
-  // and the live held state driving the banner + manual-release hint.
+  // Payment hold: server-computed availability (official termite document +
+  // gate on + not sent) and the live state driving the release hint.
   const reportHoldAvailable = !!project?.report_payment_hold_available;
   const reportHeld = ["held", "releasing"].includes(
     String(project?.report_hold_status || ""),
@@ -2229,6 +2290,7 @@ export function ProjectDetail({
 
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
   const idPrefix = `project-${projectId}`;
+  const isOfficialTermiteDocument = OFFICIAL_TERMITE_DOCUMENT_TYPES.has(project.project_type);
   const fieldInputId = (key) => `${idPrefix}-finding-${key}`;
   const readiness = evaluateProjectReadiness({
     project: { ...project, title: editTitle },
@@ -2240,6 +2302,7 @@ export function ProjectDetail({
 
   return (
     <div
+      data-official-document-editor={isOfficialTermiteDocument ? project.project_type : undefined}
       style={{
         background: ESTIMATE_BG,
         border: `1px solid ${ESTIMATE_BORDER}`,
@@ -2248,8 +2311,12 @@ export function ProjectDetail({
         flexDirection: "column",
         overflow: "hidden",
         boxShadow: "0 10px 30px rgba(27, 44, 91, 0.08)",
+        fontFamily: isOfficialTermiteDocument ? ROBOTO_FONT : undefined,
       }}
     >
+      {isOfficialTermiteDocument && (
+        <style>{`[data-official-document-editor] *, [data-official-document-editor] input, [data-official-document-editor] select, [data-official-document-editor] textarea, [data-official-document-editor] button { font-family: ${ROBOTO_FONT} !important; }`}</style>
+      )}
       {/* Header */}
       <div
         style={{
@@ -2868,7 +2935,7 @@ export function ProjectDetail({
             </div>
             {billingBlocksClose && (
               <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
-                Resolve billing before closing. The project can stay in review until the invoice or prepaid coverage exists.
+                Use the completion action to charge an authorized card on file, or send the invoice and hold the customer&apos;s {project.project_type === CERTIFICATE_TYPE ? "certificate" : "report"} until payment.
               </div>
             )}
             {followupBlocksClose && (
@@ -2949,7 +3016,9 @@ export function ProjectDetail({
               cursor: "pointer",
               marginRight: "auto",
             }}
-            title="Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
+            title={project.project_type === WDO_TYPE
+              ? "Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
+              : "Send the invoice + pay link now; the pre-treatment certificate is delivered automatically once the invoice is paid"}
           >
             <input
               type="checkbox"
@@ -2960,7 +3029,7 @@ export function ProjectDetail({
             Hold report until invoice is paid
           </label>
         )}
-        {canAdminActions && (
+        {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
             onClick={handleSendPortalInvite}
@@ -2977,7 +3046,7 @@ export function ProjectDetail({
             Portal invite
           </button>
         )}
-        {canAdminActions && (
+        {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
             onClick={handleSendPrepGuide}
@@ -3002,7 +3071,7 @@ export function ProjectDetail({
             disabled={saving || closeoutBlocksClose}
             title={
               billingBlocksClose
-                ? "Resolve billing before closing"
+                ? "Send the invoice before closing"
                 : followupBlocksClose
                   ? "Resolve follow-up automation before closing"
                   : previewBlocksClose
@@ -3012,7 +3081,7 @@ export function ProjectDetail({
             style={{ ...btnSecondary, opacity: saving || closeoutBlocksClose ? 0.5 : 1 }}
           >
             {billingBlocksClose
-              ? "Resolve billing first"
+              ? "Send invoice first"
               : followupBlocksClose
                 ? "Resolve follow-up first"
                 : previewBlocksClose
@@ -3061,7 +3130,9 @@ export function ProjectDetail({
             </button>
           )}
         {canAdminActions &&
-          (project.project_type === WDO_TYPE || project.service_record_id) &&
+          (project.project_type === WDO_TYPE ||
+            project.project_type === CERTIFICATE_TYPE ||
+            project.service_record_id) &&
           project.status !== "closed" && (
             <button
               type="button"
@@ -3071,12 +3142,18 @@ export function ProjectDetail({
               title={
                 wdoNeedsSignature
                   ? "Capture the licensee signature first"
-                  : project.project_type === WDO_TYPE
-                    ? "Send the filled FDACS-13645 report and an invoice together via email + text"
+                  : reportHoldAvailable
+                    ? holdReportUntilPaid
+                      ? project.project_type === WDO_TYPE
+                        ? "Send the invoice and payment link now; release the FDACS-13645 report automatically after payment"
+                        : "Send the invoice and payment link now; release the pre-treatment certificate automatically after payment"
+                      : "Send the report and an invoice together via email + text"
                     : "Send the report and an invoice together via email + text"
               }
             >
-              Send report + invoice
+              {reportHoldAvailable && holdReportUntilPaid
+                ? "Send invoice & hold report"
+                : "Send report + invoice"}
             </button>
           )}
       </div>{" "}

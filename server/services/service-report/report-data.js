@@ -1323,7 +1323,9 @@ function calculateLawnOverallScore(row = {}) {
   // model (rows that have stress_damage). Legacy rows keep an overall from the
   // old five-signal weighting, so recompute them to match the four displayed
   // bars (Density/Weed/Color/Stress) instead of hidden fungus/thatch weights.
-  if (explicit != null && row.stress_damage != null) return explicit;
+  // lawnScoreValue (not a raw null-check): a legacy '' stress_damage is
+  // "not scored" and must recompute too.
+  if (explicit != null && lawnScoreValue(row.stress_damage) != null) return explicit;
   // Weighted average of the four displayed categories, null-aware: a category
   // that wasn't scored is excluded and the weights are renormalized over the
   // ones present, so a missing category doesn't count as 0 and drag the overall
@@ -2087,6 +2089,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           serviceLine: serviceLine || null,
           limit: 8,
           beforeOrOnServiceDate: service.service_date || null,
+          // Trim same-day sibling rows at this report's own score row so a
+          // later visit completed the same day can't chart on this token.
+          currentServiceRecordId: service.id || null,
         }).catch(() => [])
       : Promise.resolve([]),
     serviceCoverageConfigPromise,

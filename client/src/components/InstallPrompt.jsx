@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { FONTS } from '../theme-brand';
 
@@ -7,7 +6,6 @@ export default function InstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [show, setShow] = useState(false);
   const [mobileEligible, setMobileEligible] = useState(false);
-  const showTimerRef = useRef(null);
   const { pathname } = useLocation();
 
   useEffect(() => {
@@ -27,49 +25,29 @@ export default function InstallPrompt() {
       setDeferredPrompt(e);
       // Show after 30 seconds on login only; the authenticated portal has
       // fixed navigation and support actions at the bottom of the screen.
-      if (showTimerRef.current) clearTimeout(showTimerRef.current);
-      showTimerRef.current = setTimeout(() => {
-        showTimerRef.current = null;
-        if (pathname !== '/login') return;
+      setTimeout(() => {
+        if (window.location.pathname !== '/login') return;
         if (!window.matchMedia('(max-width: 900px)').matches) return;
         setShow(true);
       }, 30000);
     }
 
-    function handleInstalled() {
-      if (showTimerRef.current) clearTimeout(showTimerRef.current);
-      showTimerRef.current = null;
-      setShow(false);
-      setDeferredPrompt(null);
-      sessionStorage.setItem('pwaPromptDismissed', '1');
-    }
-
     window.addEventListener('beforeinstallprompt', handlePrompt);
-    window.addEventListener('appinstalled', handleInstalled);
-    return () => {
-      window.removeEventListener('beforeinstallprompt', handlePrompt);
-      window.removeEventListener('appinstalled', handleInstalled);
-      if (showTimerRef.current) clearTimeout(showTimerRef.current);
-      showTimerRef.current = null;
-    };
-  }, [pathname]);
+    return () => window.removeEventListener('beforeinstallprompt', handlePrompt);
+  }, []);
 
   useEffect(() => {
-    if (pathname !== '/login') {
-      setShow(false);
-      if (showTimerRef.current) clearTimeout(showTimerRef.current);
-      showTimerRef.current = null;
-    }
+    if (pathname !== '/login') setShow(false);
   }, [pathname]);
 
   async function handleInstall() {
     if (!deferredPrompt) return;
     deferredPrompt.prompt();
     await deferredPrompt.userChoice;
-    // beforeinstallprompt is single-use. Hide after either outcome so a
-    // decline never leaves a visible button backed by a consumed event.
+    // The captured beforeinstallprompt event is single-use: whether the
+    // customer accepted or dismissed, the Install button can never work
+    // again this session — leaving the banner up would offer a dead button.
     setShow(false);
-    sessionStorage.setItem('pwaPromptDismissed', '1');
     setDeferredPrompt(null);
   }
 
@@ -79,18 +57,16 @@ export default function InstallPrompt() {
   }
 
   if (!show || !mobileEligible || pathname !== '/login') return null;
-  const loginPanel = typeof document === 'undefined'
-    ? null
-    : document.querySelector('.portal-login-panel');
-  if (!loginPanel) return null;
 
-  return createPortal(
-    <div role="region" aria-label="Install Waves app" style={{
-      position: 'relative',
-      width: '100%',
-      boxSizing: 'border-box',
-      marginTop: 14,
-      paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 4px)',
+  return (
+    <div style={{
+      position: 'fixed',
+      bottom: 0,
+      left: 0,
+      right: 0,
+      zIndex: 9999,
+      padding: '0 12px 12px',
+      pointerEvents: 'none',
     }}>
       {/* Glass card (owner 2026-07-07: match the glass UI) — frosted white
           gradient + blur, gold accent CTA, navy text; same recipe as the
@@ -109,6 +85,7 @@ export default function InstallPrompt() {
         alignItems: 'center',
         gap: 12,
         boxShadow: '0 12px 32px rgba(4,57,94,0.18), inset 0 1px 0 rgba(255,255,255,0.5)',
+        pointerEvents: 'auto',
       }}>
         {/* Waves logo tile */}
         <div style={{
@@ -141,7 +118,6 @@ export default function InstallPrompt() {
           color: '#04395E',
           border: '1px solid rgba(255,238,180,0.92)',
           borderRadius: 999,
-          minHeight: 44,
           padding: '9px 16px',
           fontSize: 14,
           fontWeight: 800,
@@ -159,13 +135,10 @@ export default function InstallPrompt() {
           color: '#04395E',
           fontSize: 18,
           cursor: 'pointer',
-          padding: 0,
-          minWidth: 44,
-          minHeight: 44,
+          padding: '0 4px',
           lineHeight: 1,
         }}>&times;</button>
       </div>
-    </div>,
-    loginPanel,
+    </div>
   );
 }

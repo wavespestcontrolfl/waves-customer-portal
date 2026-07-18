@@ -465,6 +465,9 @@ export function VisualDiagnosisCards({ categories = [] }) {
                 <details open={print} style={{ borderTop: `1px solid ${BORDER}`, padding: '9px 14px' }}>
                   <summary style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: MUTED, listStyle: 'none' }}>
                     What this means
+                    {/* listStyle:none removes the native disclosure triangle —
+                        keep a visible expand affordance in its place. */}
+                    <span aria-hidden="true" style={{ marginLeft: 6, fontSize: 10 }}>▾</span>
                   </summary>
                   <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
                     {sawValue ? <InsightLine label="What we saw" value={sawValue} strong /> : null}
@@ -656,7 +659,17 @@ export function RainLast7DaysChart({ days = [], confidence = null }) {
           return (
             <div
               key={i}
+              role="button"
+              tabIndex={0}
+              aria-pressed={on}
+              aria-label={`${d.d}: ${inchLabel(v) || '0"'} of rain`}
               onMouseEnter={() => setActive(i)} onMouseLeave={() => setActive(null)} onClick={() => setActive((a) => (a === i ? null : i))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setActive((a) => (a === i ? null : i));
+                }
+              }}
               style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, cursor: 'pointer' }}
             >
               <div style={{ fontSize: 10.5, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{(on || v) ? inchLabel(v) || '0"' : ''}</div>
@@ -920,10 +933,26 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
       ) : (
         <div
           ref={ref}
+          role="slider"
+          tabIndex={0}
+          aria-label="First-visit vs now photo comparison divider"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(pos)}
           onPointerDown={onDown}
           onPointerMove={onMove}
           onPointerUp={onUp}
           onPointerLeave={onUp}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+              e.preventDefault();
+              setPos((p) => Math.max(0, Math.min(100, p + (e.key === 'ArrowLeft' ? -5 : 5))));
+            } else if (e.key === 'Home') {
+              e.preventDefault(); setPos(0);
+            } else if (e.key === 'End') {
+              e.preventDefault(); setPos(100);
+            }
+          }}
           style={{ position: 'relative', height: H, borderRadius: 12, overflow: 'hidden', border: `1px solid ${BORDER}`, cursor: 'ew-resize', touchAction: 'none', userSelect: 'none' }}
         >
           {/* AFTER (latest) is the base layer */}
@@ -996,7 +1025,10 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
     <Card style={compact ? { marginBottom: 0, padding: 16 } : undefined}>
       <CardTitle sub={compact ? undefined : sub}>{title}</CardTitle>
       {compact ? <div style={{ fontSize: 12, color: MUTED, marginTop: -8, marginBottom: 8 }}>{sub}</div> : null}
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label={`${title} trend`} onMouseLeave={() => setActive(null)} style={{ touchAction: 'pan-y' }}>
+      {/* role="group", NOT "img": an img role makes every descendant
+          presentational, which would strip the keyboard-focusable point
+          buttons back out of the accessibility tree (codex P2 #2824 r2). */}
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="group" aria-label={`${title} trend`} onMouseLeave={() => setActive(null)} style={{ touchAction: 'pan-y' }}>
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={accent} stopOpacity="0.28" />
@@ -1024,9 +1056,16 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
               fill={active === i || i === pts.length - 1 ? accent : CARD} stroke={accent} strokeWidth="2"
               style={{ transition: 'r 0.15s ease' }}
             />
-            {/* generous transparent hit target for hover/tap */}
+            {/* generous transparent hit target for hover/tap/keyboard */}
             <circle cx={x(i)} cy={y(p.value)} r="13" fill="transparent" style={{ cursor: 'pointer' }}
-              onMouseEnter={() => setActive(i)} onClick={() => setActive((a) => (a === i ? null : i))} />
+              role="button" tabIndex={0} aria-label={`${p.label}: ${fmt(p.value)}`}
+              onMouseEnter={() => setActive(i)} onClick={() => setActive((a) => (a === i ? null : i))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setActive((a) => (a === i ? null : i));
+                }
+              }} />
           </g>
         ))}
         {activePt ? (

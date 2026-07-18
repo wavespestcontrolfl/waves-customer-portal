@@ -345,7 +345,10 @@ const LAWN_PRICING_V2 = {
   // authoritative on save; this keeps the preview from under-quoting.
   programMinimumMonthly: 50,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
-  pricingVersion: 'LAWN_PRICING_V2_DENSE_35_FLOOR',
+  // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
+  // spot-treatment reserves (owner-approved) — estimates stamped with the
+  // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
+  pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,

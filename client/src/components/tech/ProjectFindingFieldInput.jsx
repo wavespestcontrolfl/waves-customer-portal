@@ -676,6 +676,11 @@ function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyl
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
               <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>
                 {itemLabel} {index + indexOffset}
+                {row._scheduled_service_label ? (
+                  <span style={{ marginLeft: 7, color: T.muted, fontSize: 11, fontWeight: 500 }}>
+                    Scheduled · {row._scheduled_service_label}
+                  </span>
+                ) : null}
               </div>
               <button
                 type="button"

@@ -228,10 +228,16 @@ async function getServiceLinePnl(period = 'month') {
 async function getAdAttribution(period = 'month') {
   const p = getPeriodDates(period);
 
-  // Get customers created in this period with lead source
+  // Get customers created in this period with lead source.
+  // customers.lifetime_revenue has NO writer (membership lane #2830) —
+  // compute the payments-derived net the customer list/detail endpoints
+  // use, so LTV-by-source answers match the rest of the portal.
   const customers = await db('customers')
     .whereBetween('created_at', [p.start, p.end + 'T23:59:59'])
-    .select('id', 'lead_source', 'monthly_rate', 'lifetime_revenue');
+    .select(
+      'id', 'lead_source', 'monthly_rate',
+      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
+    );
 
   // Get revenue from these customers
   const customerIds = customers.map(c => c.id);
@@ -255,7 +261,7 @@ async function getAdAttribution(period = 'month') {
     if (!bySource[src]) bySource[src] = { customers: 0, mrr: 0, ltv: 0 };
     bySource[src].customers++;
     bySource[src].mrr += parseFloat(c.monthly_rate || 0);
-    bySource[src].ltv += parseFloat(c.lifetime_revenue || 0);
+    bySource[src].ltv += parseFloat(c.lifetime_revenue_net || 0);
   });
 
   // Try to get ad spend data
@@ -366,12 +372,16 @@ async function getTopRevenueCustomers(input) {
     .leftJoin('customers', 'service_records.customer_id', 'customers.id')
     .select(
       'customers.id', 'customers.first_name', 'customers.last_name',
-      'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lifetime_revenue',
+      'customers.waveguard_tier', 'customers.monthly_rate',
+      // customers.lifetime_revenue has NO writer (#2830) — payments-derived
+      // net, same computation as the customer list/detail endpoints. Legal
+      // in the SELECT because customers.id (the PK) is grouped.
+      db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue_net"),
       db.raw('SUM(service_records.revenue) as period_revenue'),
       db.raw('COUNT(*) as services'),
     )
     .groupBy('customers.id', 'customers.first_name', 'customers.last_name',
-      'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lifetime_revenue')
+      'customers.waveguard_tier', 'customers.monthly_rate')
     .orderByRaw('SUM(service_records.revenue) DESC')
     .limit(lim);
 
@@ -382,7 +392,7 @@ async function getTopRevenueCustomers(input) {
       name: `${r.first_name} ${r.last_name}`,
       tier: r.waveguard_tier,
       period_revenue: Math.round(parseFloat(r.period_revenue || 0)),
-      lifetime_revenue: Math.round(parseFloat(r.lifetime_revenue || 0)),
+      lifetime_revenue: Math.round(parseFloat(r.lifetime_revenue_net || 0)),
       monthly_rate: Math.round(parseFloat(r.monthly_rate || 0)),
       services: parseInt(r.services),
       avg_per_service: parseInt(r.services) > 0 ? Math.round(parseFloat(r.period_revenue || 0) / parseInt(r.services)) : 0,

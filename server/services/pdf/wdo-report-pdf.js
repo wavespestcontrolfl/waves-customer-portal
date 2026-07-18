@@ -36,6 +36,30 @@ const {
   WAVES_SUPPORT_PHONE_DISPLAY,
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
+const {
+  stripInternalFindingKeys,
+  redactInspectionFeeCues,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeFreeTextKeys,
+} = require('../project-types');
+
+// The emailed/archived FDACS PDF is a customer deliverable — it gets the
+// same internal-key strip + fee-cue scrub as the public /data payload, or a
+// fee typed into the free-text comments prints into Section 5 even though
+// the web rendering hides it (codex #2817). WDO is the fee-carrying type, so
+// the value scrub is unconditional here. The FDACS-13645 form has no fee
+// field of its own, and the disclosure-of-interest statements in comments
+// don't carry amounts, so nothing the form REQUIRES is touched.
+function customerSafeFindings(rawFindings, feeValues = []) {
+  return stripInternalFindingKeys(asObject(rawFindings), {
+    redactValues: true,
+    feeValues,
+    // value pass on free-prose fields only — a structured address can
+    // legitimately contain the fee's digits ("175 Main Street")
+    freeTextKeys: projectTypeFreeTextKeys('wdo_inspection'),
+  }) || {};
+}
 
 const TEMPLATE_PATH = path.join(__dirname, '..', '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf');
 
@@ -491,7 +515,7 @@ function resolveApplicator({ project = {}, findings = {} }) {
  */
 async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride, signature, photos = [] } = {}) {
   if (!project) throw new Error('project required for WDO report PDF');
-  const findings = asObject(project.findings);
+  const findings = customerSafeFindings(project.findings, projectRecordedFeeValues(project));
   const resolved = resolveApplicator({ project, findings });
   const applicator = {
     name: clean(applicatorOverride?.name) || resolved.name,
@@ -558,6 +582,7 @@ async function buildWdoReportPDFBuffer({ project, customer, applicator: applicat
   if (Array.isArray(photos) && photos.length) {
     await appendPhotoAddendum(pdfDoc, {
       photos,
+      feeValues: projectRecordedFeeValues(project),
       propertyAddress: clean(textValues['Address of Property Inspected']),
     }).catch((err) => {
       logger.warn(`[wdo-pdf] photo addendum failed for project ${project.id}: ${err.message}`);
@@ -714,7 +739,7 @@ async function appendContinuationPages(pdfDoc, { entries, propertyAddress, inspe
  * "Photo N - {caption}" line, matching the supplied sample format.
  * @param {Array<{ buffer?:Buffer, image?:string, contentType?:string, caption?:string }>} photos
  */
-async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress }) {
+async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress, feeValues = [] }) {
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const PAGE_W = 612;
@@ -766,8 +791,13 @@ async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress }) {
         page.drawText(`[Photo ${photoNum} unavailable]`, { x: MARGIN, y: imgBottom + imgBoxH / 2, size: 10, font, color: gray });
       }
 
-      // Caption under the image
-      const captionText = `Photo ${photoNum} - ${photo.caption || ''}`.trim();
+      // Caption under the image — technician free text, so it gets the same
+      // cue+value scrub as the findings this PDF prints (codex #2817: this
+      // archive is stamped pdf_renderer, so it MUST actually be clean). WDO
+      // is the fee-carrying type and this builder is WDO-only.
+      let safeCaption = redactInspectionFeeCues(photo.caption || '');
+      if (feeValues.length) safeCaption = redactSpecificAmounts(safeCaption, feeValues);
+      const captionText = `Photo ${photoNum} - ${safeCaption}`.trim();
       const lines = wrapText(captionText, font, 9, contentW).slice(0, 2);
       let cy = imgBottom - 12;
       for (const ln of lines) {
@@ -785,6 +815,7 @@ module.exports = {
     splitCompanyAddress,
     resolveApplicator,
     buildTextValues,
+    customerSafeFindings,
     decodeImageInput,
     wrapText,
     sanitizeText,

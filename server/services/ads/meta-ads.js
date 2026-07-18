@@ -247,6 +247,9 @@ async function syncDailyPerformanceLocked(days = 7) {
 
 module.exports = {
   isConfigured,
+  // Read-only Graph access for the Intelligence Bar ops tools — mutations
+  // have no exported surface here at all.
+  graphGet,
   syncCampaigns,
   syncDailyPerformance,
   _private: {

@@ -948,6 +948,11 @@ function attachParcelMeta(merged, parcel) {
     // "Vacant Residential Platted" wording and the unassessed-vacant-parcel
     // detection loses its strongest signal.
     landUseDescription: parcel.landUseDescription ?? undefined,
+    // Recorded plat/subdivision name — same merge-drop problem as
+    // landUseDescription (the PAO facts record carries no subdivision). The
+    // estimator engine's new-construction dig keys the subdivision-median
+    // sqft query off this.
+    subdivision: parcel.subdivision ?? undefined,
     residentialUnits: parcel.residentialUnits,
     vintage: parcel.assessmentYear,
     // Stacked-parcel association aggregate extras (buildEnrichedProfile reads
