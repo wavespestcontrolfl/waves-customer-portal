@@ -12,6 +12,7 @@ const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+const { toE164, isLikelyE164 } = require('../utils/phone');
 
 router.use(authenticate);
 
@@ -35,16 +36,22 @@ const inviteLimiter = rateLimit({
   message: { error: 'Too many invites sent recently. Please try again later.' },
 });
 
+const referralPhone = Joi.string().trim().min(7).max(32).custom((value, helpers) => {
+  const normalized = toE164(value);
+  if (!isLikelyE164(normalized)) return helpers.message({ custom: 'Enter a valid phone number' });
+  return normalized;
+}, 'valid referral phone');
+
 const submitSchema = Joi.object({
   name: Joi.string().trim().min(1).max(100).required(),
-  phone: Joi.string().trim().min(7).max(32).required(),
+  phone: referralPhone.required(),
   email: Joi.string().trim().email().max(254).optional().allow(''),
   address: Joi.string().trim().max(300).optional().allow(''),
   notes: Joi.string().trim().max(500).optional().allow(''),
 });
 
 const inviteSchema = Joi.object({
-  phone: Joi.string().trim().min(7).max(32).required(),
+  phone: referralPhone.required(),
   friendName: Joi.string().trim().max(100).optional().allow(''),
 });
 

@@ -237,14 +237,20 @@ async function mineCallTranscripts({ since, skipped }) {
 
   const calls = await db('call_log')
     .where('direction', 'inbound')
-    .where('created_at', '>=', since)
+    // Recency = the call happened in the window OR its recording was just
+    // re-transcribed by the backfill (old calls upgraded to diarized
+    // transcripts would otherwise sit forever outside the mining window).
+    .where((q) => q.where('created_at', '>=', since).orWhere('retranscribed_at', '>=', since))
     .whereNotNull('transcription')
     // NULL call_outcome must stay eligible — NOT IN evaluates UNKNOWN on
     // NULL and would drop consented calls that simply haven't been
     // assigned an outcome yet (Codex P2).
     .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
+    // The live processor marks spam/voicemail on processing_status WITHOUT
+    // stamping call_outcome — those transcripts must not train the voice.
+    .where((q) => q.whereNull('processing_status').orWhereNotIn('processing_status', ['spam', 'voicemail']))
     .select('id', 'customer_id', 'transcription', 'call_outcome', 'created_at',
-      'call_recording_consent_disclaimer_played');
+      'retranscribed_at', 'call_recording_consent_disclaimer_played');
 
   const customerIds = [...new Set(calls.map((c) => c.customer_id).filter(Boolean))];
   const customers = customerIds.length
@@ -276,7 +282,12 @@ async function mineCallTranscripts({ since, skipped }) {
       reply_text: null,
       transcript_text: redactCorpusText(String(call.transcription).slice(0, MAX_TRANSCRIPT_CHARS), context),
       outcome: JSON.stringify({ callOutcome: call.call_outcome || null }),
-      occurred_at: call.created_at,
+      // Backfilled legacy calls surface as of their RE-transcription: the
+      // distiller samples the newest N by occurred_at, so keeping the
+      // original call date would let a full window of newer calls starve
+      // every backfilled transcript out of the prompt forever (its corpus
+      // row would still bump newCorpusRows and trigger runs — pure waste).
+      occurred_at: call.retranscribed_at || call.created_at,
       schema_version: SCHEMA_VERSION,
     });
   }
@@ -327,6 +338,9 @@ async function mineVoiceCorpus({ sinceDays = 3 } = {}) {
 module.exports = {
   mineVoiceCorpus,
   SCHEMA_VERSION,
+  // Production contract shared with the re-transcription backfill: a
+  // transcript only enters the corpus with BOTH speaker labels present.
+  hasAgentCallerLabels,
   _test: {
     pairRepliesWithInbound,
     isMinableReply,

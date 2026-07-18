@@ -1,11 +1,78 @@
-import React, { Component } from 'react';
+import React, { Component, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { GrowthBookProvider } from '@growthbook/growthbook-react';
 import { growthbook } from './lib/growthbook';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
+import { CUSTOMER_SURFACE } from './theme-customer';
 import { useGlassSurface } from './glass/glass-engine';
 import Icon from './components/Icon';
+import CustomerDialogHost from './components/brand/CustomerDialogHost';
+
+function CustomerFailureScreen({ title, message, onRetry }) {
+  useGlassSurface(true, 'full');
+  return (
+    <main style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 24,
+      fontFamily: FONTS.body,
+      boxSizing: 'border-box',
+    }}>
+      <section data-glass="modal" style={{
+        width: 'min(420px, 100%)',
+        position: 'relative',
+        background: 'rgba(255,255,255,0.90)',
+        border: `1px solid ${CUSTOMER_SURFACE.border}`,
+        borderRadius: 16,
+        padding: 26,
+        textAlign: 'center',
+        boxShadow: '0 24px 70px rgba(4,57,94,0.20)',
+      }}>
+        <div style={{
+          width: 48,
+          height: 48,
+          borderRadius: 14,
+          margin: '0 auto 15px',
+          background: CUSTOMER_SURFACE.soft,
+          color: COLORS.glassNavy,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}>
+          <Icon name="warning" size={22} strokeWidth={2} />
+        </div>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 850, color: CUSTOMER_SURFACE.text, fontFamily: FONTS.heading }}>
+          {title}
+        </h1>
+        <p style={{ margin: '9px 0 21px', fontSize: 14, color: CUSTOMER_SURFACE.body, lineHeight: 1.55 }}>
+          {message}
+        </p>
+        <button
+          type="button"
+          data-glass-accent=""
+          onClick={onRetry}
+          style={{
+            minHeight: 42,
+            padding: '0 19px',
+            background: COLORS.glassNavy,
+            color: '#fff',
+            border: '1px solid rgba(4,57,94,0.16)',
+            borderRadius: 10,
+            fontSize: 14,
+            fontWeight: 850,
+            fontFamily: FONTS.heading,
+            cursor: 'pointer',
+          }}
+        >
+          Try Again
+        </button>
+      </section>
+    </main>
+  );
+}
 
 class PageErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -13,6 +80,15 @@ class PageErrorBoundary extends Component {
   componentDidCatch(error, info) { console.error('[Page crash]', error, info.componentStack); }
   render() {
     if (this.state.error) {
+      if (this.props.customerGlass) {
+        return (
+          <CustomerFailureScreen
+            title="Something went wrong"
+            message={this.state.error.message || 'This page could not be displayed. Please try again.'}
+            onRetry={() => { this.setState({ error: null }); window.location.reload(); }}
+          />
+        );
+      }
       return (
         <div style={{
           minHeight: '100vh',
@@ -46,14 +122,14 @@ class PageErrorBoundary extends Component {
             }}>
               <Icon name="warning" size={22} strokeWidth={2} />
             </div>
-            <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.blueDeeper, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
+            <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
             <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
             {this.state.error.message}
             </div>
             <button onClick={() => { this.setState({ error: null }); window.location.reload(); }} style={{
               minHeight: 42,
               padding: '0 18px',
-              background: COLORS.blueDeeper,
+              background: COLORS.glassNavy,
               color: '#fff',
               border: 'none',
               borderRadius: 8,
@@ -75,6 +151,16 @@ function ScheduleRedirect() {
   const params = new URLSearchParams(location.search);
   params.set('tab', 'schedule');
   return <Navigate to={`/admin/dispatch?${params.toString()}`} replace />;
+}
+
+// Field photo-scoring flow is now the "Field Assessment" tab of the
+// consolidated Assessments hub. Old bookmarks/links to
+// /admin/lawn-assessment land on that tab.
+function LawnAssessmentRedirect() {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  params.set('tab', 'field');
+  return <Navigate to={`/admin/lawn-assessments?${params.toString()}`} replace />;
 }
 
 function FleetRedirect() {
@@ -104,26 +190,48 @@ function BookEstimateRedirect() {
   return <Navigate to={`/estimate/${estimateToken}`} replace />;
 }
 
-import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
+// The standalone recap player was retired 2026-07-09 — the tech-approved
+// "Your Visit, in Motion" clip renders inside the service report itself
+// (RecapVideoCard, pest reports only). Recap SMS links already texted to
+// customers keep working by redirecting to the report, anchored at the clip.
+function RecapLinkRedirect() {
+  const { token } = useParams();
+  return <Navigate to={`/report/${token}#visit-recap`} replace />;
+}
+
+// The portal-domain newsletter landing was retired 2026-07-09 — the astro
+// site's wavespestcontrol.com/newsletter is the single landing (owner call:
+// one page, not two mirrors). Already-shared portal links keep working via
+// this hard redirect; /newsletter/archive/:id stays (the Learn tab's reader).
+function NewsletterExternalRedirect() {
+  useEffect(() => {
+    window.location.replace('https://www.wavespestcontrol.com/newsletter/');
+  }, []);
+  return null;
+}
+
+function ExternalRedirect({ to }) {
+  useEffect(() => {
+    window.location.replace(`${to}${window.location.search}${window.location.hash}`);
+  }, [to]);
+  return null;
+}
+
+import {
+  ESTIMATE_MARKETING_REDIRECTS,
+  ESTIMATE_QUOTE_URL,
+} from './lib/estimateMarketingRedirects';
 import LoginPage from './pages/LoginPage';
-import PortalPage from './pages/PortalPage';
 import AdminLoginPage from './pages/AdminLoginPage';
+import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
+import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
+import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
 import { isNativeApp } from './native/platform';
-import AdminReviewsPage from './pages/admin/ReviewsPage';
-import AdminDispatchPage from './pages/admin/AdminDispatchPage';
-import AdminInventoryPage from './pages/admin/InventoryPage';
-import AdminRevenuePage from './pages/admin/RevenuePage';
-import AdminCommunicationsPage from './pages/admin/CommunicationsPageV2';
-import AdminCustomersPage from './pages/admin/CustomersPageV2';
-import AdminReferralsPage from './pages/admin/ReferralsPageV2';
-import ReportViewPage from './pages/ReportViewPage';
-import ProjectReportViewPage from './pages/ProjectReportViewPage';
-import RecapViewPage from './pages/RecapViewPage';
 import WavesShell from './components/brand/WavesShell';
 import { lazy, Suspense } from 'react';
 
@@ -144,6 +252,16 @@ function showReloadToast() {
 // Rendered when a lazy chunk still fails after the one automatic reload —
 // a friendly retry beats the blank screen the rethrow used to produce.
 function ChunkLoadFallback() {
+  const operatorPath = /^\/(admin|tech)(\/|$)/.test(window.location.pathname);
+  if (!operatorPath) {
+    return (
+      <CustomerFailureScreen
+        title="Couldn’t load this page"
+        message="Check your connection and try again."
+        onRetry={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
+      />
+    );
+  }
   return (
     <div style={{
       minHeight: '100vh', background: '#FAF8F3', display: 'flex', alignItems: 'center',
@@ -153,7 +271,7 @@ function ChunkLoadFallback() {
         width: 'min(420px, 100%)', background: '#fff', border: '1px solid #E7E2D7',
         borderRadius: 8, padding: 24, textAlign: 'center', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
       }}>
-        <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.blueDeeper, marginBottom: 8, fontFamily: FONTS.heading }}>
+        <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>
           Couldn&rsquo;t load this page
         </div>
         <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
@@ -162,7 +280,7 @@ function ChunkLoadFallback() {
         <button
           onClick={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
           style={{
-            minHeight: 42, padding: '0 18px', background: COLORS.blueDeeper, color: '#fff',
+            minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
             border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 850,
             fontFamily: FONTS.heading, cursor: 'pointer',
           }}
@@ -198,16 +316,30 @@ function lazyWithRetry(factory) {
     }
   });
 }
+// Perf (owner ask 2026-07-09): these were EAGER imports riding the entry
+// bundle — a customer opening an estimate/report link downloaded the whole
+// admin platform plus the 500KB+ PortalPage before first paint. Same
+// lazyWithRetry + per-route Suspense treatment as the rest of the pages;
+// no rendered-output change.
+const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
+const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
+const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));
+const AdminReviewsPage = lazyWithRetry(() => import('./pages/admin/ReviewsPage'));
+const AdminDispatchPage = lazyWithRetry(() => import('./pages/admin/AdminDispatchPage'));
+const AdminInventoryPage = lazyWithRetry(() => import('./pages/admin/InventoryPage'));
+const AdminCommunicationsPage = lazyWithRetry(() => import('./pages/admin/CommunicationsPageV2'));
+const AdminCustomersPage = lazyWithRetry(() => import('./pages/admin/CustomersPageV2'));
+const AdminReferralsPage = lazyWithRetry(() => import('./pages/admin/ReferralsPageV2'));
 const AdminDashboardPage = lazyWithRetry(() => import('./pages/admin/DashboardPageV2'));
 const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
+const AdminAgentEstimatePage = lazyWithRetry(() => import('./pages/admin/AgentEstimatePage'));
+const AdminCommercialProposalPage = lazyWithRetry(() => import('./pages/admin/CommercialProposalPage'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
-const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
-const AdminPhotoAssessmentsPage = lazyWithRetry(() => import('./pages/admin/PhotoAssessmentsPage'));
-const LawnReportV2Preview = lazyWithRetry(() => import('./pages/LawnReportV2Preview'));
+const AdminAssessmentsHubPage = lazyWithRetry(() => import('./pages/admin/AssessmentsHubPage'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
 const TechSocialPostPage = lazyWithRetry(() => import('./pages/tech/TechSocialPostPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
@@ -218,13 +350,14 @@ const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePa
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
 const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
+const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
 const AdminPricingPage = lazyWithRetry(() => import('./pages/admin/PricingStrategyPage'));
 const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealthPage'));
 const AdminAutoDispatchPage = lazyWithRetry(() => import('./pages/admin/AutoDispatchPage'));
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
-const AdminLawnAssessmentPage = lazyWithRetry(() => import('./pages/admin/LawnAssessmentPanel'));
+const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminEquipmentCalibrationPage = lazyWithRetry(() => import('./pages/admin/EquipmentCalibrationPanel'));
 const AdminLawnProtocolPage = lazyWithRetry(() => import('./pages/admin/LawnProtocolCommandCenterPage'));
@@ -240,8 +373,10 @@ const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
+const SecureAppointmentPage = lazyWithRetry(() => import('./pages/SecureAppointmentPage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
-const TrackPreviewPage = lazyWithRetry(() => import('./pages/TrackPreviewPage'));
+const PriceChangeNoticePage = lazyWithRetry(() => import('./pages/PriceChangeNoticePage'));
+const AdminPriceChangePage = lazyWithRetry(() => import('./pages/admin/AdminPriceChangePage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
 const CustomerHealthPage = lazyWithRetry(() => import('./pages/admin/CustomerHealthPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
@@ -258,30 +393,17 @@ const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
 const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
-const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
 const LawnCareIncludedPage = lazyWithRetry(() => import('./pages/LawnCareIncludedPage'));
 const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
-const NewsletterLandingPage = lazyWithRetry(() => import('./pages/NewsletterLandingPage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
-const ButtonExamples = lazyWithRetry(() => import('./pages/ButtonExamples'));
-
-function EstimatePublicGateway() {
-  const { token } = useParams();
-  const slug = String(token || '').toLowerCase();
-  if (SERVICE_ESTIMATE_SLUGS.has(slug)) {
-    return <QuotePage serviceSlug={slug} />;
-  }
-  // Tokened estimates get the standard shell chrome (owner 2026-07-06);
-  // the slug branch keeps the quote wizard's own hero.
-  return <WavesShell><EstimateViewPage /></WavesShell>;
-}
 
 // Route-tree error boundary: keyed on pathname so navigating away from a
 // crashed page automatically clears the fallback. Customer routes previously
 // had NO boundary — any render crash blanked the whole app.
 function RoutesErrorBoundary({ children }) {
   const location = useLocation();
-  return <PageErrorBoundary key={location.pathname}>{children}</PageErrorBoundary>;
+  const customerGlass = !/^\/(admin|tech)(\/|$)/.test(location.pathname);
+  return <PageErrorBoundary key={location.pathname} customerGlass={customerGlass}>{children}</PageErrorBoundary>;
 }
 
 function ProtectedRoute({ children }) {
@@ -310,7 +432,7 @@ function ProtectedRoute({ children }) {
           borderRadius: 16,
           padding: 28,
           textAlign: 'center',
-          color: COLORS.blueDeeper,
+          color: COLORS.glassNavy,
           boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
           position: 'relative',
         }}>
@@ -359,40 +481,51 @@ export default function App() {
           {/* WavesShell wraps (owner 2026-07-06): every customer page gets
               the standard top bar + trust footer. */}
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
-          <Route path="/report/project/:token" element={<WavesShell><ProjectReportViewPage /></WavesShell>} />
-          <Route path="/report/:token" element={<WavesShell><ReportViewPage /></WavesShell>} />
-          <Route path="/recap/:token" element={<WavesShell><RecapViewPage /></WavesShell>} />
-          {import.meta.env.DEV && <Route path="/report-v2-preview" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><LawnReportV2Preview /></Suspense>} />}
-          <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
-          <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
-          <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
-          <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#F8FAFB',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
+          {/* Digital business card — navy glass scene, so the fallback wash
+              matches the scene instead of the light doc wash. */}
+          <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><WavesShell><CardPage /></WavesShell></Suspense>} />
+          <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
+          <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
+          <Route path="/recap/:token" element={<RecapLinkRedirect />} />
+          <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
+          <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
+          <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
+          <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReschedulePage /></Suspense>} />
+          <Route path="/secure/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><SecureAppointmentPage /></Suspense>} />
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
-          <Route path="/track-preview" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPreviewPage /></Suspense>} />
-          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
+          <Route path="/price-change/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PriceChangeNoticePage /></Suspense>} />
+          {Object.entries(ESTIMATE_MARKETING_REDIRECTS).map(([slug, destination]) => (
+            <Route key={slug} path={`/estimate/${slug}`} element={<ExternalRedirect to={destination} />} />
+          ))}
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><EstimateViewPage /></WavesShell></Suspense>} />
           {/* #EDF4FA fallbacks = glass-adjacent wash, not the warm legacy
               #FAF8F3 — these pages all mount the glass scene, so a warm
               fallback reads as the old theme flashing before glass. The
-              /estimate quote wizard keeps #FAF8F3 (deliberately un-glassed),
-              /newsletter keeps its dark hero, /pay group keeps the pro wash. */}
+              /newsletter keeps its dark hero. The /pay group joined the full
+              scene 2026-07-09 (pro wash retired), so it uses the same wash. */}
           <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><LawnReportViewPage /></WavesShell></Suspense>} />
           <Route path="/pest-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><PestReportViewPage /></WavesShell></Suspense>} />
           <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />
           <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ServiceOutlinePage /></WavesShell></Suspense>} />
           <Route path="/review/:token" element={<ReviewLinkRedirect />} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
-          <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
-          <Route path="/quote" element={<Navigate to="/estimate" replace />} />
-          <Route path="/newsletter" element={<Suspense fallback={<div style={{background:'#1B2C5B',minHeight:'100vh'}}/>}><NewsletterLandingPage /></Suspense>} />
+          <Route path="/estimate" element={<ExternalRedirect to={ESTIMATE_QUOTE_URL} />} />
+          <Route path="/quote" element={<ExternalRedirect to={ESTIMATE_QUOTE_URL} />} />
+          <Route path="/newsletter" element={<NewsletterExternalRedirect />} />
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
-          <Route path="/button-examples" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><ButtonExamples /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />
           <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
+          <Route path="/admin/change-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminChangePasswordPage />} />
+          <Route path="/admin/forgot-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminForgotPasswordPage />} />
+          <Route path="/admin/reset-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminResetPasswordPage />} />
           <Route path="/tech" element={isNativeApp() ? <Navigate to="/" replace /> : <TechLayout />}>
             <Route index element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading...</div>}><TechHomePage /></Suspense>} />
-            <Route path="estimate" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><TechEstimatorPage /></Suspense>} />
+            {/* Field estimates use the canonical server-priced builder. The retired
+                tech-only calculator duplicated prices client-side and its SMS call
+                posted the wrong request shape, so it could show “sent” after a 400. */}
+            <Route path="estimate" element={<Navigate to="/admin/estimates?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading protocols...</div>}><TechProtocolsPage /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn diagnostic...</div>}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social post...</div>}><TechSocialPostPage /></Suspense>} />
@@ -400,19 +533,22 @@ export default function App() {
           <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
             <Route index element={<Navigate to="dashboard" />} />
             <Route path="dashboard" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dashboard...</div>}><AdminDashboardPage /></Suspense>} />
-            <Route path="customers" element={<AdminCustomersPage />} />
+            <Route path="customers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customers...</div>}><AdminCustomersPage /></Suspense>} />
+            <Route path="customers/duplicates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading duplicates...</div>}><AdminDuplicateCustomersPage /></Suspense>} />
             <Route path="pipeline" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><AdminPipelinePage /></Suspense>} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
+            <Route path="agent-estimate" element={<Suspense fallback={<div style={{color:'#71717a',padding:40}}>Loading Agent Estimate...</div>}><AdminAgentEstimatePage /></Suspense>} />
+            <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading proposal...</div>}><AdminCommercialProposalPage /></Suspense>} />
             {/* /admin/dispatch is now the canonical dispatcher surface
                 — Board tab (phase 2 v1) + Schedule tab (existing
                 DispatchPageV2). /admin/schedule still works (redirects
                 to the Schedule tab) so existing bookmarks and internal
                 links aren't broken. */}
-            <Route path="dispatch" element={<AdminDispatchPage />} />
+            <Route path="dispatch" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dispatch...</div>}><AdminDispatchPage /></Suspense>} />
             <Route path="schedule" element={<ScheduleRedirect />} />
             <Route path="revenue" element={<Navigate to="/admin/dashboard" replace />} />
-            <Route path="communications" element={<AdminCommunicationsPage />} />
-            <Route path="reviews" element={<AdminReviewsPage />} />
+            <Route path="communications" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading communications...</div>}><AdminCommunicationsPage /></Suspense>} />
+            <Route path="reviews" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading reviews...</div>}><AdminReviewsPage /></Suspense>} />
             <Route path="ads" element={<Navigate to="/admin/ppc" replace />} />
             <Route path="ppc" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading PPC...</div>}><AdminAdsPage /></Suspense>} />
             <Route path="seo" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading SEO...</div>}><AdminSEOPage /></Suspense>} />
@@ -424,12 +560,16 @@ export default function App() {
             <Route path="agent-decisions" element={<Navigate to="/admin/agents?tab=decisions" replace />} />
             <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />
             <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
-            <Route path="referrals" element={<AdminReferralsPage />} />
+            <Route path="referrals" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading referrals...</div>}><AdminReferralsPage /></Suspense>} />
             <Route path="social-media" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social media...</div>}><AdminSocialMediaPage /></Suspense>} />
             <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
             <Route path="pricing" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><AdminPricingPage /></Suspense>} />
-            <Route path="lawn-assessment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn assessment...</div>}><AdminLawnAssessmentPage /></Suspense>} />
-            <Route path="lawn-assessments" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading assessments...</div>}><AdminPhotoAssessmentsPage /></Suspense>} />
+            {/* /admin/lawn-assessments is the consolidated Assessments hub
+                (Lead Magnets tab + Field Assessment tab). The old standalone
+                /admin/lawn-assessment route redirects to the Field tab so
+                bookmarks and internal links keep working. */}
+            <Route path="lawn-assessment" element={<LawnAssessmentRedirect />} />
+            <Route path="lawn-assessments" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading assessments...</div>}><AdminAssessmentsHubPage /></Suspense>} />
             <Route path="lawn-protocol" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn protocol...</div>}><AdminLawnProtocolPage /></Suspense>} />
             <Route path="turf-height" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading turf height review...</div>}><AdminTurfHeightReviewPage /></Suspense>} />
             <Route path="equipment-calibration" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment calibration...</div>}><AdminEquipmentCalibrationPage /></Suspense>} />
@@ -438,7 +578,7 @@ export default function App() {
             <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
             <Route path="billing-recovery" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading billing recovery...</div>}><BillingRecoveryPage /></Suspense>} />
             <Route path="payers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading payers...</div>}><PayersPage /></Suspense>} />
-            <Route path="inventory" element={<AdminInventoryPage />} />
+            <Route path="inventory" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading inventory...</div>}><AdminInventoryPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading settings...</div>}><AdminSettingsPage /></Suspense>} />
             <Route path="settings/pest-pressure" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading Pest Pressure settings...</div>}><PestPressureSettingsPage /></Suspense>} />
             <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
@@ -463,6 +603,7 @@ export default function App() {
             <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
             <Route path="auto-dispatch" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading auto-dispatch...</div>}><AdminAutoDispatchPage /></Suspense>} />
             <Route path="price-match" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading price match...</div>}><AdminPriceMatchPage /></Suspense>} />
+            <Route path="price-change" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading price change...</div>}><AdminPriceChangePage /></Suspense>} />
             <Route path="more" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading…</div>}><AdminMorePage /></Suspense>} />
             <Route path="_design-system" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading design system...</div>}><DesignSystemPage /></Suspense>} />
             <Route path="_design-system/flags" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading flags...</div>}><DesignSystemFlagsPage /></Suspense>} />
@@ -471,12 +612,15 @@ export default function App() {
             path="/*"
             element={
               <ProtectedRoute>
-                <PortalPage />
+                <Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}>
+                  <PortalPage />
+                </Suspense>
               </ProtectedRoute>
             }
           />
         </Routes>
         </RoutesErrorBoundary>
+        <CustomerDialogHost />
         </BiometricGate>
       </BrowserRouter>
     </AuthProvider>

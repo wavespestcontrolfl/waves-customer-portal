@@ -953,9 +953,18 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
 
   test('summarizes a known caller for the extraction prompt', () => {
     expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won' }))
-      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer' });
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: false, addressLine1: null, addressLine2: null, addressCity: null, addressZip: null });
+    expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won', address_line1: '123 Main St', address_line2: 'Apt 4', city: 'Venice', zip: '34285' }))
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: true, addressLine1: '123 Main St', addressLine2: 'Apt 4', addressCity: 'Venice', addressZip: '34285' });
     expect(summarizeKnownCaller({ first_name: 'Jake', pipeline_stage: 'new_lead' }))
-      .toEqual({ name: 'Jake', accountType: 'open_lead' });
+      .toEqual({ name: 'Jake', accountType: 'open_lead', isExistingCustomer: false, hasAddress: false, addressLine1: null, addressLine2: null, addressCity: null, addressZip: null });
+    // Terminal/lapsed stages classify as established for the PROMPT but never
+    // earn fail-open trust (codex r10 P2): stale on-file data must not clear
+    // address/confidence blockers.
+    expect(summarizeKnownCaller({ first_name: 'Old', pipeline_stage: 'churned', address_line1: '9 Stale St' }))
+      .toEqual({ name: 'Old', accountType: 'established_customer', isExistingCustomer: false, hasAddress: true, addressLine1: '9 Stale St', addressLine2: null, addressCity: null, addressZip: null });
+    expect(summarizeKnownCaller({ first_name: 'Ann', pipeline_stage: 'active_customer' }).isExistingCustomer).toBe(true);
+    expect(summarizeKnownCaller({ first_name: 'Amy', pipeline_stage: 'at_risk' }).isExistingCustomer).toBe(true);
     expect(summarizeKnownCaller(null)).toBeNull();
   });
 
@@ -1212,24 +1221,41 @@ describe('findExistingCallAppointment (primary-appointment idempotency)', () => 
     };
   }
 
-  test('both lookups exclude linked follow-up child rows (parent_service_id IS NULL)', async () => {
+  test('all lookups exclude linked follow-up child rows (parent_service_id IS NULL)', async () => {
     const calls = [];
     const result = await findExistingCallAppointment({
       customerId: 'cust-1',
-      call: { twilio_call_sid: 'CA123', created_at: '2026-07-01T12:00:00Z' },
+      call: { id: 'call-1', twilio_call_sid: 'CA123', created_at: '2026-07-01T12:00:00Z' },
       scheduledDate: '2026-07-02',
       windowStart: '08:00',
       serviceType: 'Cockroach Control Service',
-      trx: fakeScheduledServicesConn([null, null], calls),
+      trx: fakeScheduledServicesConn([null, null, null], calls),
     });
     expect(result ?? null).toBeNull();
-    // Marker lookup + date/window fallback both ran, and each one filters out
-    // child rows — a pending visit-2 carries the same Call SID marker and
-    // booking_source, and must never be adopted as the primary appointment.
-    expect(calls).toHaveLength(2);
+    // Linked (source_call_log_id) lookup + marker lookup + date/window
+    // fallback all ran, and each one filters out child rows — a pending
+    // visit-2 carries the same Call SID marker, booking_source, AND
+    // source_call_log_id, and must never be adopted as the primary.
+    expect(calls).toHaveLength(3);
     for (const log of calls) {
       expect(log).toContainEqual(['whereNull', 'parent_service_id']);
     }
+  });
+
+  test('an ATTACHED booking is found via source_call_log_id on reprocess', async () => {
+    // Attached rows (a human's booking this call was linked to) carry no
+    // Call SID marker in notes and no phone_call booking_source — without
+    // the linked lookup a reprocess would re-book the visit.
+    const linked = { id: 'svc-9', parent_service_id: null };
+    const calls = [];
+    await expect(findExistingCallAppointment({
+      customerId: 'cust-1',
+      call: { id: 'call-7', twilio_call_sid: 'CA123' },
+      trx: fakeScheduledServicesConn([linked], calls),
+    })).resolves.toBe(linked);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContainEqual(['where', { customer_id: 'cust-1', source_call_log_id: 'call-7' }]);
+    expect(calls[0]).toContainEqual(['whereNotIn', 'status', ['cancelled', 'rescheduled']]);
   });
 
   test('marker lookup still returns a matched primary appointment', async () => {
@@ -1241,5 +1267,189 @@ describe('findExistingCallAppointment (primary-appointment idempotency)', () => 
       trx: fakeScheduledServicesConn([primary], calls),
     })).resolves.toBe(primary);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('findAttachableCallAppointment (attach to a human booking instead of inserting)', () => {
+  const { findAttachableCallAppointment } = CallRecordingProcessor._test;
+
+  // Chain-recording fake that resolves the AWAITED query to an array (this
+  // helper takes the full candidate list, no .first()).
+  function fakeAttachConn(rows, log) {
+    return () => {
+      const chain = {};
+      for (const method of ['where', 'whereNull', 'whereIn', 'whereNotIn', 'whereBetween', 'whereRaw', 'orderBy']) {
+        chain[method] = (...args) => {
+          log.push([method, ...args]);
+          return chain;
+        };
+      }
+      chain.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+      return chain;
+    };
+  }
+
+  const manualRow = { id: 'svc-m1', status: 'confirmed', service_type: 'Pest Control', booking_source: null };
+
+  test('exactly one live same-service row within the window → attach candidate', async () => {
+    const log = [];
+    const result = await findAttachableCallAppointment({
+      customerId: 'cust-1',
+      scheduledDate: '2026-07-20',
+      serviceType: 'Pest Control',
+      trx: fakeAttachConn([manualRow], log),
+    });
+    expect(result.row).toBe(manualRow);
+    expect(result.ambiguous).toHaveLength(0);
+    // The query only considers LIVE parent rows not already owned by a call:
+    expect(log).toContainEqual(['whereIn', 'status', ['pending', 'confirmed']]);
+    expect(log).toContainEqual(['whereNull', 'parent_service_id']);
+    expect(log).toContainEqual(['whereNull', 'source_call_log_id']);
+    // ±1 day around the extracted date:
+    expect(log).toContainEqual(['whereBetween', 'scheduled_date', ['2026-07-19', '2026-07-21']]);
+    // Same service line, normalized the same way as the primary-idempotency
+    // fallback lookup:
+    expect(log).toContainEqual(['whereRaw', 'LOWER(TRIM(service_type)) = LOWER(TRIM(?))', ['Pest Control']]);
+  });
+
+  test('phone_call-sourced rows are excluded (other calls keep their own dedup story)', async () => {
+    const log = [];
+    await findAttachableCallAppointment({
+      customerId: 'cust-1',
+      scheduledDate: '2026-07-20',
+      serviceType: 'Pest Control',
+      trx: fakeAttachConn([], log),
+    });
+    // The booking_source filter is a grouped where — replay it against a
+    // recorder to assert NULL-or-not-phone_call semantics.
+    const grouped = log.find(([method, arg]) => method === 'where' && typeof arg === 'function');
+    expect(grouped).toBeDefined();
+    const groupLog = [];
+    const recorder = {
+      whereNull: (...args) => { groupLog.push(['whereNull', ...args]); return recorder; },
+      orWhereNot: (...args) => { groupLog.push(['orWhereNot', ...args]); return recorder; },
+    };
+    grouped[1](recorder);
+    expect(groupLog).toEqual([
+      ['whereNull', 'booking_source'],
+      ['orWhereNot', 'booking_source', 'phone_call'],
+    ]);
+  });
+
+  test('multiple plausible rows → ambiguous (human review), never a silent pick', async () => {
+    const other = { ...manualRow, id: 'svc-m2' };
+    const result = await findAttachableCallAppointment({
+      customerId: 'cust-1',
+      scheduledDate: '2026-07-20',
+      serviceType: 'Pest Control',
+      trx: fakeAttachConn([manualRow, other], []),
+    });
+    expect(result.row).toBeNull();
+    expect(result.ambiguous).toEqual([manualRow, other]);
+  });
+
+  test('no candidates → empty result, and missing inputs never query', async () => {
+    const emptyLog = [];
+    await expect(findAttachableCallAppointment({
+      customerId: 'cust-1',
+      scheduledDate: '2026-07-20',
+      serviceType: 'Pest Control',
+      trx: fakeAttachConn([], emptyLog),
+    })).resolves.toEqual({ row: null, ambiguous: [] });
+    expect(emptyLog.length).toBeGreaterThan(0);
+
+    for (const args of [
+      { scheduledDate: '2026-07-20', serviceType: 'Pest Control' },      // no customer
+      { customerId: 'cust-1', serviceType: 'Pest Control' },             // no date
+      { customerId: 'cust-1', scheduledDate: '2026-07-20' },             // no service
+      { customerId: 'cust-1', scheduledDate: 'not-a-date', serviceType: 'Pest Control' },
+    ]) {
+      const log = [];
+      await expect(findAttachableCallAppointment({ ...args, trx: fakeAttachConn([manualRow], log) }))
+        .resolves.toEqual({ row: null, ambiguous: [] });
+      expect(log).toHaveLength(0);
+    }
+  });
+});
+
+describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
+  const { attachCandidateMatchesProperty } = CallRecordingProcessor._test;
+
+  test('matching property ids agree; differing ids refuse', () => {
+    expect(attachCandidateMatchesProperty({ property_id: 'prop-1' }, { propertyId: 'prop-1' })).toBe(true);
+    expect(attachCandidateMatchesProperty({ property_id: 'prop-1' }, { propertyId: 'prop-2' })).toBe(false);
+  });
+
+  test('matching service address line 1 agrees (case/whitespace-insensitive)', () => {
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123  Main St' },
+      { address: { line1: '123 main st' } },
+    )).toBe(true);
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St' },
+      { address: { line1: '456 Oak Ave' } },
+    )).toBe(false);
+  });
+
+  test('same street, different unit refuses — Apt A is not evidence for Apt B', () => {
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_line2: 'Apt A' },
+      { address: { line1: '123 Main St', line2: 'Apt B' } },
+    )).toBe(false);
+    // One-sided unit can't confirm the match either.
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St' },
+      { address: { line1: '123 Main St', line2: 'Apt B' } },
+    )).toBe(false);
+    // Matching units agree.
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_line2: 'apt b' },
+      { address: { line1: '123 Main St', line2: 'Apt B' } },
+    )).toBe(true);
+  });
+
+  test('same street line in a different city/ZIP refuses (multi-property, no unit)', () => {
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_city: 'Bradenton' },
+      { address: { line1: '123 Main St', city: 'Venice' } },
+    )).toBe(false);
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_zip: '34205' },
+      { address: { line1: '123 Main St', zip: '34293-1234' } },
+    )).toBe(false);
+    // ZIP+4 vs 5-digit of the SAME zip agrees; matching city agrees.
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_city: 'Venice', service_address_zip: '34293' },
+      { address: { line1: '123 Main St', city: 'venice', zip: '34293-1234' } },
+    )).toBe(true);
+    // City/ZIP missing on one side is unrecorded data, not a conflict.
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St' },
+      { address: { line1: '123 Main St', city: 'Venice' } },
+    )).toBe(true);
+  });
+
+  test('no evidence on either side = both resolve to the primary property', () => {
+    expect(attachCandidateMatchesProperty({}, { propertyId: null, address: null })).toBe(true);
+  });
+
+  test('slot evidence: attach only on same date + agreeing (or absent) window', () => {
+    const { attachCandidateSlotAgrees } = CallRecordingProcessor._test;
+    const req = { scheduledDate: '2026-07-20', windowStart: '09:00' };
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-20', window_start: '09:00:00' }, req)).toBe(true);
+    // Different time on the same date may be a SECOND visit — human decides.
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-20', window_start: '14:00:00' }, req)).toBe(false);
+    // Neighbor-day matches never auto-attach.
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-21', window_start: '09:00:00' }, req)).toBe(false);
+    // No usable time on either side → the same-date match stands.
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-20', window_start: null }, req)).toBe(true);
+    expect(attachCandidateSlotAgrees({ scheduled_date: '2026-07-20', window_start: '09:00:00' }, { scheduledDate: '2026-07-20', windowStart: null })).toBe(true);
+  });
+
+  test('one-sided evidence cannot confirm the match — never attach on it', () => {
+    // Call resolved the rental; candidate is a bare primary-property booking.
+    expect(attachCandidateMatchesProperty({}, { propertyId: 'prop-9', address: { line1: '9 Rental Rd' } })).toBe(false);
+    // Candidate carries an explicit property; the call resolved nothing.
+    expect(attachCandidateMatchesProperty({ property_id: 'prop-9' }, { propertyId: null, address: null })).toBe(false);
   });
 });

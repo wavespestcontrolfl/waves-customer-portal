@@ -25,14 +25,17 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { isLikelyE164 } = require('../utils/phone');
 const { resolveLocation } = require('../config/locations');
-const { parseETDateTime, formatETDate, formatETTime, etDateString } = require('../utils/datetime-et');
+const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
+const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
-const { buildExtractionPrompt, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
+const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
@@ -41,17 +44,52 @@ const CALL_EXTRACTION_V2_ENABLED = process.env.CALL_EXTRACTION_V2_ENABLED === 't
 const CALL_EXTRACTION_V2_DRIVES_ROUTING =
   process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING === 'true'
   || process.env.CALL_TRIAGE_ENFORCE_V2_GATES === 'true';
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS } = require('./call-triage-flags');
+// Boot-time flag audit — makes three silent operational traps visible:
+// (1) enforce mode is the OR of two env vars, so unsetting
+//     CALL_EXTRACTION_V2_DRIVES_ROUTING is a no-op while the legacy
+//     CALL_TRIAGE_ENFORCE_V2_GATES alias is still set;
+// (2) DRIVES_ROUTING without V2_ENABLED kills BOTH the enforce gate and the
+//     shadow bridge — bare legacy V1 routing, worse than either intended mode;
+// (3) enforce without ADDRESS_VALIDATION_ENABLED never suppresses the model's
+//     near-universal address_unverifiable flag → ~zero auto-routing.
+{
+  const aliasRaw = process.env.CALL_TRIAGE_ENFORCE_V2_GATES;
+  const drivesRaw = process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING;
+  console.log(`[call-proc] flags: v2Enabled=${CALL_EXTRACTION_V2_ENABLED} enforce=${CALL_EXTRACTION_V2_DRIVES_ROUTING} (DRIVES_ROUTING=${drivesRaw ?? 'unset'}, ENFORCE_V2_GATES alias=${aliasRaw ?? 'unset'}) av=${process.env.ADDRESS_VALIDATION_ENABLED ?? 'unset'}`);
+  if (aliasRaw === 'true' && drivesRaw !== 'true') {
+    console.warn('[call-proc] WARNING: enforce mode is pinned ON by the legacy CALL_TRIAGE_ENFORCE_V2_GATES alias — unsetting CALL_EXTRACTION_V2_DRIVES_ROUTING will NOT demote to shadow until the alias is also unset.');
+  }
+  if (CALL_EXTRACTION_V2_DRIVES_ROUTING && !CALL_EXTRACTION_V2_ENABLED) {
+    console.warn('[call-proc] WARNING: CALL_EXTRACTION_V2_DRIVES_ROUTING without CALL_EXTRACTION_V2_ENABLED — enforce gate AND shadow bridge are both dead; running bare legacy V1 routing.');
+  }
+  if (CALL_EXTRACTION_V2_DRIVES_ROUTING && process.env.ADDRESS_VALIDATION_ENABLED !== 'true') {
+    console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
+  }
+}
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
+// Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
+const { isEnabled } = require('../config/feature-gates');
+const { decideDisposition } = require('./call-disposition');
+const { classifyCall, recordVerdict } = require('./call-spam-classifier');
+const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
+const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
-const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam B.';
+// Prod technician row is named "Adam" (verified 2026-07-08) — the old
+// 'Adam B.' default never name-matched and assignment survived only on the
+// sole-active-technician fallback.
+const DEFAULT_CALL_BOOKING_TECHNICIAN_NAME = process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_NAME || 'Adam';
+// Owner directive 2026-07-08: call-booked visits default to a 60-minute
+// duration when the catalog doesn't specify one.
+const DEFAULT_CALL_BOOKING_DURATION_MINUTES = 60;
 const OPENAI_TRANSCRIPTIONS_API = 'https://api.openai.com/v1/audio/transcriptions';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe-diarize';
@@ -64,12 +102,249 @@ Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and prop
 Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
 When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
 Use punctuation and line breaks where helpful. Do not summarize, translate, or add commentary.`;
-const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-2.5-flash';
+// Default tracks the newest stable Flash: Google retired gemini-2.5-flash
+// (rolling 404 brown-outs starting 2026-07-09), so a dead default here means
+// the fallback transcriber fails exactly when OpenAI needs it.
+const GEMINI_TRANSCRIPTION_MODEL = process.env.GEMINI_TRANSCRIPTION_MODEL || 'gemini-3.5-flash';
 // v2 extraction uses Gemini 2.5 Pro — most capable model for the deeply-nested
 // v1.0.0 schema (better structured-output adherence + fewer hallucinations than
 // Flash), and unlike Claude Opus 4.7 it still supports temperature (extraction
-// pins temp 0.2 for determinism). Env-overridable for instant rollback.
+// pins temp 0 for determinism). Env-overridable for instant rollback.
+// NOTE: this var governs the V2 extractor ONLY — the dictation decoder and
+// street recovery have their own vars (GEMINI_CONTACT_DECODER_MODEL /
+// GEMINI_RECOVERY_MODEL) with literal defaults, so an extraction rollback no
+// longer silently degrades the mishear-recovery lanes.
 const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro';
+// V1 (legacy) extractor model — historically hardcoded in the request URL,
+// which made V1 the only lane without a zero-deploy rollback lever.
+// 2026-07-09: the old gemini-2.5-flash default 404'd (model retired by
+// Google) and six calls died unprocessed — keep this on a live model.
+const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'gemini-3.5-flash';
+
+// Transcription-hallucination guard (2026-07-10). The Gemini fallback
+// transcriber can invent a full conversation from a near-empty voicemail —
+// observed live: a 5-second recording produced 4,777 characters of a
+// fabricated "Amanda" pest-control call, which then minted a phantom
+// estimate_send lead and slipped past the spam classifier as legit content.
+// Human speech averages ~12-15 chars/sec; 25 is a hard ceiling no real
+// recording reaches, so a transcript whose length is physically impossible
+// for its recording duration is a hallucination. Applied only to transcripts
+// long enough to matter, and only when the recording duration is known.
+const MAX_TRANSCRIPT_CHARS_PER_SECOND = Number(process.env.CALL_MAX_TRANSCRIPT_CHARS_PER_SEC || 25);
+const MIN_TRANSCRIPT_CHARS_FOR_GUARD = 120;
+const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
+
+// PAN redaction guard (card-on-file spec Phase 0). One transcription pass
+// yields up to three artifacts carrying the same audio — the labeled
+// transcript string, the diarized segment array, and the dictation-focused
+// contact-pass string — so a blurted card number must be scrubbed from all
+// three together or it survives in transcript_structured / the dictation
+// decoder prompt. Returns new values plus the total mask count (for a
+// PAN-free log line); never throws (scrubPansDetailed passes non-strings
+// through untouched).
+function scrubTranscriptArtifacts({ transcription, contactPassTranscript, segments } = {}) {
+  let count = 0;
+  const main = scrubPansDetailed(transcription);
+  count += main.count;
+  const contactPass = scrubPansDetailed(contactPassTranscript);
+  count += contactPass.count;
+  const segScrub = scrubSegments(segments);
+  count += segScrub.count;
+  return {
+    transcription: main.text,
+    contactPassTranscript: contactPass.text,
+    segments: segScrub.segments,
+    count,
+  };
+}
+
+// Scrub a persisted transcript_structured JSON blob (segments +
+// contact_pass_transcript) — the fallback-heal path touches legacy rows
+// whose structured artifact may predate the PAN guard, and healing only
+// call_log.transcription would leave the raw card number stored in the
+// sibling column (Codex #2676 round-2 P1). Returns { json, count }; a
+// null/unparseable blob passes through untouched.
+function scrubStructuredTranscript(json) {
+  if (!json) return { json, count: 0 };
+  let parsed;
+  try {
+    parsed = typeof json === 'string' ? JSON.parse(json) : json;
+  } catch {
+    return { json, count: 0 };
+  }
+  if (!parsed || typeof parsed !== 'object') return { json, count: 0 };
+  let count = 0;
+  if (Array.isArray(parsed.segments)) {
+    const segScrub = scrubSegments(parsed.segments);
+    parsed.segments = segScrub.segments;
+    count += segScrub.count;
+  }
+  if (typeof parsed.contact_pass_transcript === 'string') {
+    const s = scrubPansDetailed(parsed.contact_pass_transcript);
+    count += s.count;
+    if (s.count) parsed.contact_pass_transcript = s.text;
+  }
+  return { json: count ? JSON.stringify(parsed) : json, count };
+}
+
+// ── PAN quarantine ── Spec invariant #1: card data may not persist in ANY
+// medium, including audio. When the scrub masks card data from a call's
+// transcript, the RECORDING still carries it and stays replayable from the
+// message thread — so the Twilio recording is deleted, our references are
+// stripped (call_log.recording_url + the voice message's media), and the
+// detection is stamped into transcription_metadata. Best-effort and
+// idempotent: a failed Twilio delete still strips local references, and the
+// office gets a heads-up either way (a quarantined recording is an
+// exception a human should know about, never a silent event).
+async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {}) {
+  if (!call?.id) return { quarantined: false };
+  const recordingUrl = call.recording_url || null;
+  const sid = call.recording_sid
+    || (recordingUrl && (recordingUrl.match(/\/Recordings\/(RE[a-f0-9]{32})/i) || [])[1])
+    || null;
+  let twilioDeleted = false;
+  if (sid) {
+    try {
+      const client = twilioClient();
+      if (client) {
+        await client.recordings(sid).remove();
+        twilioDeleted = true;
+      }
+    } catch (err) {
+      logger.error(`[call-proc] PAN quarantine: Twilio recording delete failed for ${maskSid(sid)}: ${err.message}`);
+    }
+  }
+  let alreadyQuarantined = false;
+  try {
+    const row = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+    // jsonb columns come back as OBJECTS from Postgres, strings from mocks/
+    // sqlite — handle both or a quarantine would clobber the provider/source
+    // metadata instead of merging (Codex #2676 round-4 P2).
+    const raw = row?.transcription_metadata;
+    let meta = {};
+    try {
+      meta = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
+    } catch { meta = {}; }
+    // pan_detected can now be stamped BEFORE the first quarantine call
+    // (same-write stamps in the webhook/fallback paths), so it no longer
+    // implies the office was alerted — pan_notified is the notify guard,
+    // and it is stamped ONLY AFTER the alert actually sends (round-17 P2:
+    // stamping it in this update meant a failed/interrupted notifyAdmin
+    // was never retried and the office never heard about the quarantine).
+    alreadyQuarantined = meta.pan_notified === true;
+    await db('call_log').where({ id: call.id }).update({
+      recording_url: null,
+      transcription_metadata: JSON.stringify({
+        ...meta,
+        pan_detected: true,
+        recording_quarantined: twilioDeleted || meta.recording_quarantined === true,
+        quarantine_source: meta.quarantine_source || source,
+        // A failed Twilio delete must not lose the only SID a later retry
+        // needs — recovery's incomplete-quarantine retry reads it back
+        // (round-13 P1). Cleared-URL rows otherwise have nothing to retry.
+        ...(sid && !twilioDeleted ? { quarantine_recording_sid: sid } : {}),
+      }),
+      updated_at: new Date(),
+    });
+  } catch (err) {
+    logger.error(`[call-proc] PAN quarantine: call_log strip failed for call ${call.id}: ${err.message}`);
+  }
+  // Clear the recording media already synced onto the unified voice message
+  // — recording_url null keeps the helper from re-adding it, and the
+  // explicit media:null patch removes what an earlier sync attached.
+  try {
+    await updateUnifiedVoiceMessage({ ...call, recording_url: null }, { media: null });
+  } catch { /* best-effort */ }
+  // One office heads-up per call, however many detection points re-run the
+  // quarantine (wrapper + choke + backfill are all idempotent on the strip).
+  if (!alreadyQuarantined) {
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'Card number heard on a recorded call',
+        'A card number was detected in a call transcript. The transcript was masked and the recording was quarantined — remind callers we never take card numbers by phone; text the secure link instead.',
+        { link: call.customer_id ? `/admin/customers/${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
+      );
+      // Alert DELIVERED — only now mark it, so a failed/interrupted send
+      // retries on the next quarantine/recovery touch (round-17 P2).
+      try {
+        const fresh = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+        const rawFresh = fresh?.transcription_metadata;
+        let freshMeta = {};
+        try { freshMeta = typeof rawFresh === 'string' ? JSON.parse(rawFresh) : (rawFresh && typeof rawFresh === 'object' ? rawFresh : {}); } catch { freshMeta = {}; }
+        await db('call_log').where({ id: call.id }).update({
+          transcription_metadata: JSON.stringify({ ...freshMeta, pan_notified: true }),
+          updated_at: new Date(),
+        });
+      } catch (stampErr) {
+        logger.warn(`[call-proc] pan_notified stamp failed (a duplicate alert may follow): ${stampErr.message}`);
+      }
+    } catch (e) { logger.warn(`[call-proc] PAN quarantine notify failed: ${e.message}`); }
+  }
+  return { quarantined: true, twilioDeleted, alreadyQuarantined };
+}
+
+// PAN-quarantine stamps are DURABLE (Codex #2676 round-9 P1): the recovery
+// sweep and the recording-status webhook key off
+// transcription_metadata.pan_detected, so any later metadata overwrite
+// (fallback provenance, the implausible-rejection sentinel) must carry the
+// stamps forward — a provider-return quarantine followed by a Twilio
+// fallback write would otherwise erase the stamp and let a delayed
+// callback reattach the card audio. Read-merge just before the write; on a
+// read failure the metadata is written as-is (quarantine re-runs are
+// idempotent and re-stamp on the next touch).
+async function withPanStamps(callId, metadata) {
+  const out = { ...(metadata || {}) };
+  try {
+    const row = await db('call_log').where({ id: callId }).first('transcription_metadata');
+    const raw = row?.transcription_metadata;
+    let prior = {};
+    try {
+      prior = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
+    } catch { prior = {}; }
+    if (prior.pan_detected === true) {
+      out.pan_detected = true;
+      if (prior.recording_quarantined === true) out.recording_quarantined = true;
+      if (prior.quarantine_source && !out.quarantine_source) out.quarantine_source = prior.quarantine_source;
+      if (prior.pan_count && !out.pan_count) out.pan_count = prior.pan_count;
+      // The retry SID and the notify marker are load-bearing (round-14 P1):
+      // dropping quarantine_recording_sid on a later provenance write
+      // leaves recovery with nothing to retry a failed Twilio delete
+      // against, and dropping pan_notified re-fires the office alert.
+      if (prior.quarantine_recording_sid && !out.quarantine_recording_sid) out.quarantine_recording_sid = prior.quarantine_recording_sid;
+      if (prior.pan_notified === true) out.pan_notified = true;
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] pan-stamp merge failed for call ${callId}: ${err.message}`);
+  }
+  return out;
+}
+
+// Spoken-content length only: strip diarization speaker labels and collapse
+// whitespace so a valid short diarized call's formatting overhead ("Agent:",
+// "Caller:", newlines) can't push it over the ceiling. Labels first (line-
+// anchored), then whitespace-collapse.
+function spokenCharCount(transcription) {
+  return String(transcription || '')
+    .replace(/^\s*(?:agent|caller|customer|speaker\s*\d+)\s*:/gim, '')
+    .replace(/\s+/g, ' ')
+    .trim().length;
+}
+
+function isImplausibleTranscript(transcription, recordingSeconds) {
+  const chars = spokenCharCount(transcription);
+  if (chars < MIN_TRANSCRIPT_CHARS_FOR_GUARD) return false;
+  // Unknown/zero duration → never reject (fail open; never drop a real transcript).
+  if (!recordingSeconds || recordingSeconds <= 0) return false;
+  return (chars / recordingSeconds) > MAX_TRANSCRIPT_CHARS_PER_SECOND;
+}
+
+// AI-extraction retry budget. A failure marks the row extraction_failed and
+// increments call_log.extraction_attempts; processAllPending re-runs it while
+// under this cap (≥10 min between attempts via the sweep's age gate), which
+// rides out transient provider errors. At the cap a blocking triage item is
+// filed so the call can't die silently.
+const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
 
 // Human-readable "confirm before dispatch" reasons surfaced by the address /
 // identity bridge below. Shown on the lead's AI-triage activity so Virginia
@@ -86,6 +361,7 @@ const CONFIRM_REASON_TEXT = {
   email_unverified: 'email was spelled out on the call — read it back to the caller before relying on it (spelled letters mishear)',
   email_invalid: 'captured email is not a valid address — re-collect it on the callback',
   email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
+  secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -166,31 +442,78 @@ function maskPhone(value) {
   return digits ? `***${digits.slice(-4)}` : 'unknown';
 }
 
+// Blocked/anonymous caller-ID presentations. Twilio substitutes digit
+// sentinels for suppressed caller IDs — +266696687 spells ANONYMOUS,
+// +7378742833 spells RESTRICTED — and carriers pass literal words through.
+// toE164 returns these raw, and they LOOK usable downstream: the first named
+// blocked caller used to mint a customer keyed on the sentinel, and every
+// later blocked caller single-matched onto that one phantom record (strangers'
+// addresses, emails, and bookings merging onto it).
+const PHONE_SENTINELS = new Set(['266696687', '7378742833', '86282452253']);
+const PHONE_SENTINEL_WORDS = /^(anonymous|restricted|unavailable|unknown|blocked)$/i;
+function isUsableContactPhone(value) {
+  const v = String(value || '').trim();
+  if (!v || PHONE_SENTINEL_WORDS.test(v)) return false;
+  if (!isLikelyE164(v)) return false;
+  const digits = v.replace(/\D/g, '');
+  return !PHONE_SENTINELS.has(digits) && !PHONE_SENTINELS.has(digits.replace(/^1/, ''));
+}
+
 // Return the first candidate that is a real EXTERNAL number — i.e. not one of our
 // own lines AND not a staff forward/CSR cell. An INTERNAL number appearing as the
 // caller/callee is a call-forwarding artifact (a DNI tracking number masking the
 // true caller, or the staff cell the inbound <Dial> forwarded to), never a real
 // customer; keying a lead/customer on it collapses many callers onto one phantom
 // record (or onto a CSR). Skipping internal candidates (and returning null when
-// every candidate is internal) stops that at the source.
+// every candidate is internal or an anonymous sentinel) stops that at the source.
 function firstExternalPhone(...candidates) {
   for (const c of candidates) {
     const v = c && String(c).trim();
-    if (v && !TWILIO_NUMBERS.isInternalNumber(v)) return v;
+    if (v && !TWILIO_NUMBERS.isInternalNumber(v) && isUsableContactPhone(v)) return v;
   }
   return null;
+}
+
+// Hamming distance over the last 7 digits when both numbers share length —
+// a spoken callback number ONE OR TWO digits off the ANI is almost always the
+// caller misreciting (or the transcriber mishearing) their OWN number, not a
+// genuinely different callback line. Genuine "reach me on my husband's cell"
+// numbers differ wholesale and never trip this.
+function phoneNearMissOfAni(extracted, ani) {
+  const a = phoneKey(extracted);
+  const b = phoneKey(ani);
+  if (!a || !b || a === b) return false;
+  if (a.length !== b.length || a.length < 10) return false;
+  const a7 = a.slice(-7);
+  const b7 = b.slice(-7);
+  let diff = a.slice(0, -7) === b.slice(0, -7) ? 0 : Infinity;
+  if (!Number.isFinite(diff)) return false;
+  for (let i = 0; i < 7; i += 1) if (a7[i] !== b7[i]) diff += 1;
+  return diff > 0 && diff <= 2;
 }
 
 function resolveCallContactPhone(call = {}, extractedPhone = null) {
   const extracted = String(extractedPhone || '').trim();
   if (isOutboundCall(call)) {
     if (extracted && !samePhone(extracted, call.from_phone)) {
+      if (phoneNearMissOfAni(extracted, call.to_phone)) {
+        logger.warn(`[call-proc] Extracted callback ${maskPhone(extracted)} is a near-miss of dialed ${maskPhone(call.to_phone)} — keeping the dialed number (likely mistranscribed digits)`);
+        return firstExternalPhone(call.to_phone, call.from_phone);
+      }
       return firstExternalPhone(extracted, call.to_phone, call.from_phone);
     }
     return firstExternalPhone(call.to_phone, extracted, call.from_phone);
   }
 
   if (extracted && !samePhone(extracted, call.to_phone)) {
+    // The verified ANI beats a spoken number that differs from it by only a
+    // digit or two — one misheard digit used to re-key the whole call
+    // (matching, the customer's stored phone, the confirmation SMS target)
+    // onto a stranger's number.
+    if (phoneNearMissOfAni(extracted, call.from_phone)) {
+      logger.warn(`[call-proc] Extracted callback ${maskPhone(extracted)} is a near-miss of ANI ${maskPhone(call.from_phone)} — keeping the ANI (likely mistranscribed digits)`);
+      return firstExternalPhone(call.from_phone, call.to_phone);
+    }
     return firstExternalPhone(extracted, call.from_phone, call.to_phone);
   }
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
@@ -200,11 +523,172 @@ function normalizeNamePart(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Common NANP nickname/diminutive groups — "Bob" calling from a line whose
+// record says "Robert" is the same person for phone-scoped matching (the
+// phone already narrows candidates to one household/office; last-name
+// agreement is still enforced where both are known).
+const NICKNAME_GROUPS = [
+  ['robert', 'rob', 'bob', 'bobby', 'robbie'],
+  ['william', 'will', 'bill', 'billy', 'willie', 'liam'],
+  ['michael', 'mike', 'mikey', 'mick'],
+  ['james', 'jim', 'jimmy', 'jamie'],
+  ['thomas', 'tom', 'tommy'],
+  ['david', 'dave', 'davey'],
+  ['daniel', 'dan', 'danny'],
+  ['christopher', 'chris', 'topher'],
+  ['christine', 'christina', 'chris', 'chrissy', 'tina'],
+  ['katherine', 'catherine', 'kate', 'kathy', 'cathy', 'katie', 'kat', 'kitty'],
+  ['elizabeth', 'liz', 'beth', 'lizzie', 'eliza', 'betsy'],
+  ['margaret', 'peggy', 'meg', 'maggie', 'marge'],
+  ['john', 'jack', 'johnny', 'jon'],
+  ['jonathan', 'jon', 'johnny'],
+  ['richard', 'rick', 'rich', 'dick', 'ricky'],
+  ['anthony', 'tony'],
+  ['steven', 'stephen', 'steve'],
+  ['joseph', 'joe', 'joey'],
+  ['samuel', 'sam', 'sammy'],
+  ['samantha', 'sam', 'sammy'],
+  ['alexander', 'alex', 'al'],
+  ['alexandra', 'alex', 'lexi', 'sandra'],
+  ['matthew', 'matt'],
+  ['andrew', 'andy', 'drew'],
+  ['gregory', 'greg'],
+  ['jeffrey', 'jeff'],
+  ['edward', 'ed', 'eddie', 'ted', 'ned'],
+  ['ronald', 'ron', 'ronnie'],
+  ['donald', 'don', 'donnie'],
+  ['kenneth', 'ken', 'kenny'],
+  ['lawrence', 'larry'],
+  ['gerald', 'jerry'],
+  ['terrence', 'terry'],
+  ['patrick', 'pat', 'paddy'],
+  ['patricia', 'pat', 'patty', 'trish', 'tricia'],
+  ['susan', 'sue', 'susie', 'suzy'],
+  ['deborah', 'debra', 'deb', 'debbie'],
+  ['barbara', 'barb', 'babs'],
+  ['jennifer', 'jen', 'jenny'],
+  ['jessica', 'jess', 'jessie'],
+  ['victoria', 'vicky', 'tori'],
+  ['nicholas', 'nick', 'nicky'],
+  ['timothy', 'tim', 'timmy'],
+  ['benjamin', 'ben', 'benny'],
+  ['charles', 'charlie', 'chuck', 'chas'],
+  ['frederick', 'fred', 'freddie'],
+  ['raymond', 'ray'],
+  ['walter', 'walt', 'wally'],
+  ['harold', 'hal', 'harry'],
+  ['henry', 'hank', 'harry'],
+  ['francis', 'frank', 'frankie'],
+  ['frances', 'fran', 'frannie'],
+  ['dorothy', 'dot', 'dottie'],
+  ['florence', 'flo'],
+  ['virginia', 'ginny', 'ginger'],
+  ['pamela', 'pam'],
+  ['cynthia', 'cindy'],
+  ['sandra', 'sandy'],
+  ['linda', 'lindy'],
+  ['rebecca', 'becky', 'becca'],
+  ['kimberly', 'kim'],
+  ['michelle', 'shelly'],
+  ['stephanie', 'steph'],
+  ['melissa', 'mel', 'missy'],
+  ['amanda', 'mandy'],
+  ['abigail', 'abby'],
+  ['gabriel', 'gabe'],
+  ['gabriella', 'gabby'],
+  ['isabella', 'izzy', 'bella'],
+  ['zachary', 'zach', 'zack'],
+  ['joshua', 'josh'],
+  ['nathaniel', 'nathan', 'nate', 'nat'],
+  ['leonard', 'leo', 'lenny'],
+  ['theodore', 'ted', 'theo', 'teddy'],
+  ['albert', 'al', 'bert'],
+  ['arthur', 'art', 'artie'],
+  ['eugene', 'gene'],
+  ['vincent', 'vince', 'vinny'],
+  ['peter', 'pete'],
+  ['philip', 'phil'],
+  ['douglas', 'doug'],
+  ['russell', 'russ', 'rusty'],
+  ['martin', 'marty'],
+  ['stanley', 'stan'],
+  ['norman', 'norm'],
+  ['dennis', 'denny'],
+  ['glenn', 'glen'],
+  ['carolyn', 'caroline', 'carol', 'carrie'],
+  ['eleanor', 'ellie', 'nora'],
+  ['emily', 'em', 'emmy'],
+  ['natalie', 'nat'],
+  ['angela', 'angie'],
+  ['brenda', 'bren'],
+  ['sharon', 'shari'],
+  ['diane', 'diana', 'di'],
+  ['janet', 'jan'],
+  ['janice', 'jan'],
+  ['judith', 'judy'],
+  ['carol', 'carole'],
+  ['ann', 'anne', 'annie', 'anna'],
+  ['mary', 'marie', 'maria', 'molly', 'polly'],
+  ['martha', 'marty', 'mattie'],
+  ['helen', 'nell', 'nellie'],
+  ['ruth', 'ruthie'],
+  ['gerald', 'gerry'],
+  ['gordon', 'gordy'],
+  ['leslie', 'les'],
+  ['wesley', 'wes'],
+  ['curtis', 'curt'],
+  ['calvin', 'cal'],
+  ['bernard', 'bernie'],
+  ['clifford', 'cliff'],
+  ['duane', 'dwayne'],
+  ['randall', 'randy'],
+  ['rodney', 'rod'],
+  ['roger', 'rodge'],
+  ['bradley', 'brad'],
+  ['brandon', 'bran'],
+  ['jacob', 'jake'],
+  ['lucas', 'luke'],
+  ['maxwell', 'max'],
+  ['oliver', 'ollie'],
+  ['sebastian', 'seb'],
+  ['veronica', 'ronnie'],
+  ['gwendolyn', 'gwen'],
+  ['jacqueline', 'jackie'],
+  ['josephine', 'jo', 'josie'],
+  ['kathleen', 'kathy', 'kate'],
+  ['lillian', 'lily'],
+  ['madeline', 'maddie'],
+  ['penelope', 'penny'],
+  ['priscilla', 'cilla'],
+  ['rosemary', 'rose', 'rosie'],
+  ['suzanne', 'sue', 'suzy'],
+  ['valerie', 'val'],
+  ['yvonne', 'vonnie'],
+];
+const NICKNAME_LOOKUP = new Map();
+for (const group of NICKNAME_GROUPS) {
+  for (const name of group) {
+    const set = NICKNAME_LOOKUP.get(name) || new Set();
+    for (const variant of group) set.add(variant);
+    NICKNAME_LOOKUP.set(name, set);
+  }
+}
+function firstNameVariants(normalizedFirst) {
+  const variants = NICKNAME_LOOKUP.get(normalizedFirst);
+  return variants ? [...variants] : [normalizedFirst];
+}
+function sameFirstName(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const variants = NICKNAME_LOOKUP.get(a);
+  return !!variants && variants.has(b);
+}
+
 function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const customerFirst = normalizeNamePart(customer.first_name);
   if (!extractedFirst || !customerFirst) return true;
-  if (extractedFirst !== customerFirst) return false;
+  if (!sameFirstName(extractedFirst, customerFirst)) return false;
 
   const extractedLast = normalizeNamePart(extracted.last_name);
   const customerLast = normalizeNamePart(customer.last_name);
@@ -255,6 +739,95 @@ function classifyCallerAccount(pipelineStage) {
   return LEAD_PIPELINE_STAGES.has(stage) ? 'open_lead' : 'established_customer';
 }
 
+// Stages whose on-file data fail-open booking may trust (see
+// summarizeKnownCaller.isExistingCustomer).
+const FAIL_OPEN_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
+
+// Cross-call threading: the most recent OTHER call from this number whose
+// extraction is worth handing to the model as continuation context. Callers
+// finish one arrangement across several calls (a realtor whose first call cut
+// off mid-dictation, three calls in one morning completing one WDO booking,
+// "my coworker called Monday") — without this, call 2's extraction restarts
+// from nothing. PII-light and compact by design; spam/voicemail priors are
+// excluded (robocall context would only mislead). Read-only; fails open null.
+const PRIOR_CALL_LOOKBACK_DAYS = 7;
+// Prior-call text is UNTRUSTED prompt data: it originated from a caller's
+// speech (via transcription + extraction), so it gets flattened (no newlines,
+// no backticks/quotes that could fake a delimiter) and hard-capped before it
+// is interpolated — and the prompt block labels it as data, never
+// instructions.
+function sanitizePriorText(value, max = 300) {
+  return String(value || '')
+    // The block's own data delimiters must never survive inside the data —
+    // a prior caller speaking the literal marker could close the boundary
+    // early and drop the rest of their text outside the NOT-instructions
+    // fence. Strip the token and any angle-bracket runs that could rebuild it.
+    .replace(/PRIOR_CALL_DATA/gi, ' ')
+    .replace(/[<>]{2,}/g, ' ')
+    .replace(/[\r\n`"]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+async function summarizePriorCall(contactPhone, currentCallId = null, conn = db, currentCallCreatedAt = null) {
+  try {
+    const digits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
+    if (digits.length < 10) return null;
+    // Both directions: an office CALLBACK stores the contact's number in
+    // to_phone (Waves line in from_phone) — that conversation is prior
+    // context for the contact's next inbound call too.
+    const q = conn('call_log')
+      .whereRaw(
+        "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
+        [digits, digits],
+      )
+      .whereNotNull('ai_extraction')
+      .whereNotIn('processing_status', ['spam', 'voicemail'])
+      .orderBy('created_at', 'desc');
+    // The 7-day window anchors to the CALL's own time when known (falls back
+    // to now()) — a force-reprocess or backfill days later must still find
+    // the continuation that happened minutes before the call.
+    if (currentCallCreatedAt) {
+      q.whereRaw(`created_at >= ?::timestamptz - interval '${PRIOR_CALL_LOOKBACK_DAYS} days'`, [currentCallCreatedAt]);
+    } else {
+      q.where('created_at', '>=', conn.raw(`now() - interval '${PRIOR_CALL_LOOKBACK_DAYS} days'`));
+    }
+    if (currentCallId) q.whereNot('id', currentCallId);
+    // "Prior" means STRICTLY EARLIER: a force-reprocess or out-of-order queue
+    // drain must never hand call 1 the extraction of call 2 as its past.
+    if (currentCallCreatedAt) q.where('created_at', '<', currentCallCreatedAt);
+    const row = await q.first('id', 'created_at', 'call_summary', 'ai_extraction');
+    if (!row) return null;
+    const v1 = typeof row.ai_extraction === 'string' ? JSON.parse(row.ai_extraction) : (row.ai_extraction || {});
+    if (v1.is_spam === true) return null;
+    const name = [v1.first_name, v1.last_name].map((s) => String(s || '').trim()).filter(Boolean).join(' ');
+    const address = [v1.address_line1, v1.city, v1.zip].map((s) => String(s || '').trim()).filter(Boolean).join(', ');
+    const sc = v1.secondary_contact && typeof v1.secondary_contact === 'object' ? v1.secondary_contact : null;
+    const scName = sc ? [sc.first_name, sc.last_name].map((s) => String(s || '').trim()).filter(Boolean).join(' ') : '';
+    // Age is relative to the CALL being processed, not to wall-clock — a
+    // reprocess/backfill days later must still describe "18h before this
+    // call", not "9 days ago".
+    const anchorMs = currentCallCreatedAt ? new Date(currentCallCreatedAt).getTime() : Date.now();
+    const hoursAgo = Math.max(1, Math.round((anchorMs - new Date(row.created_at).getTime()) / 3600000));
+    return {
+      hoursAgo,
+      summary: sanitizePriorText(row.call_summary || v1.call_summary) || null,
+      captured: {
+        name: sanitizePriorText(name, 80) || null,
+        phone: sanitizePriorText(v1.phone, 24) || null,
+        email: sanitizePriorText(v1.email, 120) || null,
+        address: sanitizePriorText(address, 160) || null,
+        requested_service: sanitizePriorText(v1.requested_service || v1.matched_service, 80) || null,
+        secondary_contact: scName ? sanitizePriorText(`${scName}${sc.role ? ` (${sc.role})` : ''}${sc.email ? `, ${sc.email}` : ''}${sc.phone ? `, ${sc.phone}` : ''}`, 200) : null,
+        appointment: (v1.appointment_confirmed && v1.preferred_date_time) ? sanitizePriorText(v1.preferred_date_time, 40) : null,
+      },
+    };
+  } catch (err) {
+    logger.warn(`[call-proc] prior-call lookup skipped: ${err.message}`);
+    return null;
+  }
+}
+
 // Short, PII-light caller hint for the extraction prompt. Returns null when the
 // inbound number doesn't map to a single known customer.
 function summarizeKnownCaller(customer) {
@@ -263,9 +836,71 @@ function summarizeKnownCaller(customer) {
     .map((s) => String(s || '').trim())
     .filter(Boolean)
     .join(' ');
+  const accountType = classifyCallerAccount(customer.pipeline_stage);
   return {
     name: name || null,
-    accountType: classifyCallerAccount(customer.pipeline_stage),
+    accountType,
+    // Fail-open booking inputs: an established customer with an address already
+    // on file (Google-verified at signup) shouldn't be re-blocked for not
+    // restating it on a familiar call. Fail-open trust is limited to stages we
+    // ACTIVELY serve — a terminal prospect (lost/disqualified/duplicate) also
+    // classifies as 'established_customer' for prompt purposes, but its stale
+    // on-file data must never clear address/confidence blockers; dormant/
+    // churned accounts likewise fall back to normal review.
+    isExistingCustomer: FAIL_OPEN_CUSTOMER_STAGES.has(String(customer.pipeline_stage || '').trim().toLowerCase()),
+    hasAddress: !!String(customer.address_line1 || '').trim(),
+    // The on-file address components, for the fail-open V1 conflict check: a
+    // legacy V1 address that conflicts with them (different street, unit,
+    // city, or ZIP) is a NEW address that must hold for review, never
+    // silently rebook to the primary.
+    addressLine1: String(customer.address_line1 || '').trim() || null,
+    addressLine2: String(customer.address_line2 || '').trim() || null,
+    addressCity: String(customer.city || '').trim() || null,
+    addressZip: String(customer.zip || '').trim() || null,
+  };
+}
+
+// Fail-open V1 address-conflict demotion, shared by the ENFORCE path and the
+// shadow/AUDIT recompute — the saved shadow decision must hold exactly where
+// enforce would hold, or rollout metrics overstate safe fail-open bookings.
+// When address flags failed open (V2 heard no address) but legacy V1 captured
+// ANY address component (street, unit — line2 or embedded, city, ZIP), the
+// booking demotes to the blocked path (address_review card) UNLESS the
+// evidence is a street-anchored echo of the on-file address (same street
+// key, no conflicting unit/city/ZIP) — that is a duplicate, not a new
+// address. Partial-only evidence (city/ZIP/unit with NO street) demotes even
+// when it matches: it cannot disambiguate a second property in the same
+// city/ZIP, mirroring the V2 rule that any partial component is a
+// new-address signal. Same normalization family as the property-linkage
+// exact match (customer-properties), so this guard can't disagree with the
+// stamp downstream. Returns the (possibly demoted) routing result; never
+// mutates.
+function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller) {
+  if (!routingResult?.allowed
+    || !(routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
+    return routingResult;
+  }
+  const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
+  const cityKey = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
+  const legacyV1Street = String(extracted?.address_line1 || '').trim();
+  const v1Unit = unitKey(extracted?.address_line2) || streetEmbeddedUnitKey(legacyV1Street);
+  const v1City = cityKey(extracted?.city);
+  const v1Zip = normalizeZip(extracted?.zip);
+  if (!legacyV1Street && !v1Unit && !v1City && !v1Zip) return routingResult;
+  const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
+  const onFileUnit = unitKey(knownCaller?.addressLine2) || streetEmbeddedUnitKey(onFileStreet);
+  const v1AddressConflicts = !legacyV1Street
+    || !onFileStreet
+    || streetKey(legacyV1Street) !== streetKey(onFileStreet)
+    || (v1Unit && v1Unit !== onFileUnit)
+    || (v1City && v1City !== cityKey(knownCaller?.addressCity))
+    || (v1Zip && v1Zip !== normalizeZip(knownCaller?.addressZip));
+  if (!v1AddressConflicts) return routingResult;
+  return {
+    allowed: false,
+    reason: 'v1_only_new_address',
+    flags: routingResult.flags,
+    appointmentBlockingFlags: ['address_unverified'],
   };
 }
 
@@ -336,6 +971,373 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
   };
 }
 
+// One quote-promised bell per call PER PATH. Reprocessing the same recording
+// (stale-lock reclaim, hung-fetch retry) re-enters both notify sites — one
+// real call has rung three bells, with the early runs on the no-lead path
+// because lead creation only succeeded on the final run.
+// Lane-aware on purpose: a stale no-lead bell ("no lead is tracking this
+// promise") must NOT suppress the corrected lead-linked bell a successful
+// retry produces — the lead path passes ignoreNoLead to dedupe only against
+// equivalent (lead-path) bells, while the no-lead path dedupes against any.
+// Fail-open: a dedupe-query error must cost a duplicate bell, never the bell.
+// Estimator engine gate (GATE_ESTIMATOR_ENGINE). The generic quote-promised
+// bells below always fire synchronously — they are the DURABLE owed-quote
+// guarantee (the engine runs as a floating promise and a restart mid-draft
+// must not lose the promise). When the engine finishes it UPGRADES that
+// same bell in place with the draft link, keeping one bell per call.
+function estimatorEngineOn() {
+  try {
+    return require('./estimator-engine').estimatorEngineEnabled();
+  } catch {
+    return false;
+  }
+}
+
+async function quotePromisedAlreadyNotified(callSid, { ignoreNoLead = false } = {}) {
+  if (!callSid) return false;
+  try {
+    let query = db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'callSid' = ?", [callSid])
+      .whereRaw("metadata->>'quote_promised' = 'true'");
+    if (ignoreNoLead) {
+      query = query.whereRaw("(metadata->>'no_lead') IS DISTINCT FROM 'true'");
+    }
+    const existing = await query.first('id');
+    return !!existing;
+  } catch (e) {
+    logger.warn(`[call-proc] quote-promised dedupe check failed (notifying anyway): ${e.message}`);
+    return false;
+  }
+}
+
+// Secondary contact from EITHER extractor (a realtor's home buyer, a landlord's
+// tenant, a spouse). Both sources were normalized upstream, so an object here
+// always carries at least a name, phone, or email. When BOTH extractors caught
+// the same person, merge field-wise (V1 wins where present, V2 fills gaps —
+// split parses where one extractor caught the phone/email the other missed);
+// when their identities conflict (different phone, email, or first name), the
+// V1 extraction wins unmerged — never chimera two different people.
+function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
+  const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const v1 = (extracted.secondary_contact && typeof extracted.secondary_contact === 'object')
+    ? extracted.secondary_contact
+    : null;
+  const v2 = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  if (!v1 || !v2) return v1 || v2;
+
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const conflicts = (v1.phone && v2.phone && last10(v1.phone) !== last10(v2.phone))
+    || (v1.email && v2.email && norm(v1.email) !== norm(v2.email))
+    || (v1.first_name && v2.first_name && norm(v1.first_name) !== norm(v2.first_name))
+    // Same first name is NOT the same person when the surnames disagree —
+    // without this, "Joe Smith" (V1) could inherit "Joe Jones"'s (V2) phone.
+    || (v1.last_name && v2.last_name && norm(v1.last_name) !== norm(v2.last_name));
+  if (conflicts) return v1;
+
+  return {
+    first_name: v1.first_name || v2.first_name,
+    last_name: v1.last_name || v2.last_name,
+    phone: v1.phone || v2.phone,
+    email: v1.email || v2.email,
+    role: (v1.role && v1.role !== 'unknown') ? v1.role : v2.role,
+    // OR, not V1-wins: either extractor observing the caller's direction
+    // ("send notifications to the buyer and myself") is enough.
+    wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
+    // Billing flag: V1's own flag always stands. A V2 flag is only inherited
+    // when V1 and V2 are POSITIVELY the same person — a shared email, phone, or
+    // full name. The identity-conflict check above can't see this gap: if V1
+    // extracted an email-only contact and V2 a name-only billing party, nothing
+    // conflicts, yet they may be different people — inheriting V2's flag would
+    // bill V1's inbox for V2's payer. Requiring a positive shared identifier
+    // keeps the legitimate gap-fill (same name, V2 adds the flag) while refusing
+    // to carry an "owner pays" flag onto an unrelated contact's email.
+    is_billing_party: v1.is_billing_party === true
+      || (v2.is_billing_party === true && (
+        (!!v1.email && !!v2.email && norm(v1.email) === norm(v2.email))
+        || (!!v1.phone && !!v2.phone && last10(v1.phone) === last10(v2.phone))
+        || (!!norm(v1.first_name) && norm(v1.first_name) === norm(v2.first_name)
+          && !!norm(v1.last_name) && norm(v1.last_name) === norm(v2.last_name))
+      )),
+    notes: v1.notes || v2.notes,
+  };
+}
+
+// Ordered, deduped list of ALL other parties on the call (up to 3, the slot
+// budget). Entry 1 = the single-contact V1/V2 resolution above (identity-
+// conflict rule intact); entries 2+ = the V2 array's additional people (V1
+// only ever emits one). Dedupe key: phone last-10, else email, else full name.
+function identityConflicts(a, b) {
+  if (!a || !b) return false;
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  return (a.phone && b.phone && last10(a.phone) !== last10(b.phone))
+    || (a.email && b.email && norm(a.email) !== norm(b.email))
+    || (a.first_name && b.first_name && norm(a.first_name) !== norm(b.first_name))
+    || (a.last_name && b.last_name && norm(a.last_name) !== norm(b.last_name));
+}
+
+function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
+  const { mapSecondaryContactsToLegacy, mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+  const primary = resolveCallSecondaryContact(extracted, v2Extraction);
+  let v2List = mapSecondaryContactsToLegacy(v2Extraction?.secondary_contacts);
+  // When the single-contact resolver rejected V2's person on an identity
+  // conflict (V1 wins unmerged), that same person is REQUIRED to lead the V2
+  // array as the mirror entry — appending it here would resurrect the
+  // rejected identity as an "additional" contact and fan notifications out
+  // to it (codex P1). Drop the conflicting mirror; genuinely-different
+  // extra parties (entries 2+) stay.
+  const v2Single = mapSecondaryContactToLegacy(v2Extraction?.secondary_contact);
+  if (primary && v2Single && identityConflicts(primary, v2Single)) {
+    const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+    const norm = (v) => String(v || '').trim().toLowerCase();
+    v2List = v2List.filter((c) => !(
+      (c.phone && v2Single.phone && last10(c.phone) === last10(v2Single.phone))
+      || (c.email && v2Single.email && norm(c.email) === norm(v2Single.email))
+      || (!c.phone && !c.email && norm(c.first_name) === norm(v2Single.first_name) && norm(c.last_name || '') === norm(v2Single.last_name || ''))
+    ));
+  }
+  // Dedup by ANY shared identifier, not a single priority key: the merged
+  // primary entry may carry a phone while V2's mirror of the same person has
+  // only an email/name — a one-key scheme gives them different keys and the
+  // duplicate burns one of the three slots, dropping a real third party
+  // (codex round-6 P2).
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const nameOf = (c) => [c.first_name, c.last_name].map(norm).filter(Boolean).join(' ');
+  const sameParty = (a, b) => (
+    (last10(a.phone) && last10(a.phone) === last10(b.phone))
+    || (norm(a.email) && norm(a.email) === norm(b.email))
+    || (nameOf(a) && nameOf(a) === nameOf(b))
+  );
+  const out = [];
+  for (const candidate of [primary, ...v2List]) {
+    if (!candidate) continue;
+    if (!last10(candidate.phone) && !norm(candidate.email) && !nameOf(candidate)) continue;
+    if (out.some((c) => sameParty(c, candidate))) continue;
+    out.push(candidate);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+// Third-party payer (Bill-To) linkage from a call (GATE_CALL_PAYER_LINKING):
+// when the caller named a DISTINCT paying party (is_billing_party) with a usable
+// AP email, find-or-create a `payers` Bill-To and return its id so it can be
+// stamped on the booking — the existing PayerService.resolveForInvoice()
+// precedence (scheduled_service.payer_id ?? customer.payer_id) then routes the
+// completion invoice to the payer's AP inbox with zero further changes. An AP
+// email is REQUIRED: a payer with no inbox can't be invoiced, so we skip (book
+// without a payer) rather than mint an unroutable Bill-To. Gated behind BOTH the
+// payer-linking gate AND secondary-contact capture (the payer IS a secondary
+// party). Never throws — a payer-lookup blip must not block the booking.
+async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, caller = null) {
+  if (!isEnabled('callPayerLinking') || process.env.GATE_CALL_SECONDARY_CONTACT !== 'true') return null;
+  const candidates = Array.isArray(secondaryContacts) ? [...secondaryContacts] : [];
+  // A V2-extracted billing party can be PRUNED from the merged list when its
+  // identity conflicts with V1's secondary contact (resolveCallSecondaryContacts
+  // drops the V2 mirror so notifications don't fan out to the rejected identity).
+  // But that party is the PAYER, billed at its OWN AP email — so also scan the
+  // raw V2 contacts here. Keying the payer on the party's own email keeps it the
+  // correct inbox regardless of the notification-routing decision.
+  if (v2Extraction) {
+    const { mapSecondaryContactToLegacy, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+    const v2Single = mapSecondaryContactToLegacy(v2Extraction.secondary_contact);
+    const v2Arr = mapSecondaryContactsToLegacy(v2Extraction.secondary_contacts);
+    for (const c of [v2Single, ...v2Arr]) if (c) candidates.push(c);
+  }
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  // Match against EVERY caller identifier — from BOTH extractors, since the
+  // helper scans raw V2 contacts and V2 may be the only side that captured the
+  // caller's email/alternate phone. The caller may be duplicated into a slot
+  // carrying only a callback number or a V2-only email.
+  const callerEmails = new Set(
+    [caller?.email, ...(Array.isArray(caller?.emails) ? caller.emails : [])]
+      .map((e) => norm(e)).filter(Boolean),
+  );
+  const callerPhone10s = new Set(
+    [caller?.phone, ...(Array.isArray(caller?.phones) ? caller.phones : [])]
+      .map((p) => last10(p)).filter((p) => p.length === 10),
+  );
+  // A billing party must be flagged, have its OWN usable email, AND be a DISTINCT
+  // third party — never the CALLER duplicated into a slot for a self-pay "I'll
+  // pay" call (that would turn a self-pay booking into a payer-billed invoice).
+  const flagged = candidates.filter((c) => c && c.is_billing_party === true
+    && EMAIL_RE.test(norm(c.email))
+    && !callerEmails.has(norm(c.email))
+    && !(last10(c.phone).length === 10 && callerPhone10s.has(last10(c.phone))));
+  // Fail closed on ambiguity: a call naming multiple DISTINCT billing parties
+  // (tenant+owner+manager, or a model duplicate) must NOT silently pick one —
+  // leave the booking unlinked (self-pay) for office review. (The same party can
+  // legitimately appear twice — merged list + raw V2 — so dedupe by email.)
+  const distinctEmails = [...new Set(flagged.map((c) => norm(c.email)))];
+  if (distinctEmails.length !== 1) {
+    if (distinctEmails.length > 1) {
+      logger.warn(`[call-proc] payer linkage: ${distinctEmails.length} distinct billing parties flagged — leaving booking unlinked for review`);
+    }
+    return null;
+  }
+  const party = flagged.find((c) => norm(c.email) === distinctEmails[0]);
+  if (!party) return null;
+  try {
+    const PayerService = require('./payer');
+    const { payer } = await PayerService.findOrCreatePayerByEmail({
+      apEmail: party.email,
+      displayName: [party.first_name, party.last_name].filter(Boolean).join(' ').trim() || null,
+      apPhone: party.phone || null,
+    });
+    return payer ? payer.id : null;
+  } catch (err) {
+    logger.warn(`[call-proc] payer linkage failed: ${err.message}`);
+    return null;
+  }
+}
+
+// Persist a call's secondary contact into the customer's first EMPTY
+// service-contact slot so the existing appointment fan-out
+// (customer-contact.js getAppointmentContacts: confirmation, en-route,
+// tech-arrived) starts including them. Only runs when the CALLER directed
+// notifications to this person (wants_notifications) — a merely-mentioned
+// person stays in the triage payload / lead extracted_data for the office to
+// decide on. Two guardrails:
+// - Never overwrite: only a fully empty slot is written; a phone/email already
+//   on the record (primary or any slot) makes this a no-op.
+// - Filling a slot silently REPLACES the primary in appointment texts
+//   (getAppointmentContacts drops the primary unless appointment_notify_primary
+//   is set) — so when this write adds the customer's FIRST service contact, it
+//   also sets appointment_notify_primary=true to keep the caller in the loop.
+//   A customer who already had service contacts keeps their existing
+//   notify-primary choice: that was an explicit admin decision.
+// Returns a short status string for logging/tests.
+async function persistCallSecondaryContact(customerId, contact) {
+  if (!customerId || !contact || contact.wants_notifications !== true) return 'skipped_no_intent';
+  if (!contact.phone && !contact.email) return 'skipped_no_contact_info';
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  const customer = await db('customers').where({ id: customerId }).first();
+  if (!customer) return 'skipped_no_customer';
+
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const lowerEmail = (v) => String(v || '').trim().toLowerCase();
+  const knownPhones = [customer.phone, ...SERVICE_CONTACT_SLOTS.map((s) => customer[s.phone])]
+    .map(last10).filter(Boolean);
+  const knownEmails = [customer.email, ...SERVICE_CONTACT_SLOTS.map((s) => customer[s.email])]
+    .map(lowerEmail).filter(Boolean);
+  // Role backfill on a known number: the person already sits in a slot
+  // (pre-migration write or admin-entered) whose role column is empty —
+  // record the relationship the call just identified, or future calls from
+  // that number can't pass the household-role matching gate unless the
+  // caller also repeats a matching first name (codex round-8 P2). The
+  // customer's OWN phone matches nothing here (no slot to backfill).
+  const backfillSlotRole = async () => {
+    const roleToRecord = String(contact.role || '').trim().toLowerCase();
+    if (!roleToRecord || roleToRecord === 'unknown') return false;
+    const matched = SERVICE_CONTACT_SLOTS.find((s) => (
+      (contact.phone && last10(customer[s.phone]) && last10(customer[s.phone]) === last10(contact.phone))
+      || (contact.email && lowerEmail(customer[s.email]) && lowerEmail(customer[s.email]) === lowerEmail(contact.email))
+    ));
+    if (!matched || String(customer[matched.roleCol] || '').trim()) return false;
+    const wrote = await db('customers')
+      .where({ id: customerId })
+      .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
+      .update({ [matched.roleCol]: roleToRecord.slice(0, 30) });
+    return !!wrote;
+  };
+  if (contact.phone && knownPhones.includes(last10(contact.phone))) {
+    if (await backfillSlotRole()) return 'skipped_phone_on_record_role_backfilled';
+    return 'skipped_phone_on_record';
+  }
+  // Cross-customer guard: a secondary phone that belongs to a DIFFERENT
+  // existing customer must never land in this customer's fan-out slots —
+  // customer B would start receiving customer A's appointment texts at
+  // service_contact_authorized trust. The call site escalates this to its own
+  // review flag so the office adjudicates the collision.
+  if (contact.phone) {
+    const otherCustomer = await db('customers')
+      .whereNull('deleted_at')
+      .whereNot('id', customerId)
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10(contact.phone)])
+      .first('id');
+    if (otherCustomer) return 'skipped_phone_belongs_to_other_customer';
+  }
+  // Email dedup runs INDEPENDENTLY of the phone: a contact with a new phone
+  // but an email already on the record (primary or any slot) keeps the phone
+  // and drops the duplicate email — otherwise the caller's own address gets
+  // re-filed under the buyer/tenant's name and future appointment emails
+  // reach it mislabeled. Email-only contacts with a known email are a no-op.
+  const emailOnRecord = contact.email && knownEmails.includes(lowerEmail(contact.email));
+  if (!contact.phone && emailOnRecord) {
+    if (await backfillSlotRole()) return 'skipped_email_on_record_role_backfilled';
+    return 'skipped_email_on_record';
+  }
+  const slotEmail = emailOnRecord ? null : (contact.email || null);
+
+  const slotHasContent = (s) => !!(String(customer[s.name] || '').trim()
+    || String(customer[s.phone] || '').trim() || String(customer[s.email] || '').trim());
+  // The two notify-primary prefs guard DIFFERENT channels, so "already had a
+  // service contact" is judged PER CHANNEL: appointment texts drop the primary
+  // on the first slot PHONE (getAppointmentContacts is phone-based), report
+  // emails drop the primary on the first slot EMAIL. A name-only placeholder
+  // slot never carried notifications on either channel. Slot SELECTION still
+  // avoids any slot with content, so a placeholder is never overwritten.
+  const hadSlotPhone = SERVICE_CONTACT_SLOTS.some((s) => !!String(customer[s.phone] || '').trim());
+  const hadSlotEmail = SERVICE_CONTACT_SLOTS.some((s) => !!String(customer[s.email] || '').trim());
+  const emptySlot = SERVICE_CONTACT_SLOTS.find((s) => !slotHasContent(s));
+  if (!emptySlot) return 'skipped_slots_full';
+
+  const fullName = [contact.first_name, contact.last_name]
+    .map((v) => String(v || '').trim()).filter(Boolean).join(' ') || null;
+  // Prefs FIRST, slot second: the moment a service-contact slot is populated,
+  // getAppointmentContacts / getServiceReportEmailRecipients drop the primary
+  // unless the notify-primary prefs are set — so the prefs write must land
+  // BEFORE the slot becomes visible, or a crash between the two silently cuts
+  // the caller out of the updates they explicitly asked for. The inverse
+  // failure (prefs set, slot write loses the race below) is benign: with no
+  // new contact the prefs are inert defaults-plus.
+  // Per channel: writing the customer's first slot PHONE flips
+  // appointment_notify_primary (texts); writing their first slot EMAIL flips
+  // service_report_notify_primary (report emails — the realtor who said "the
+  // buyer and myself" needs the WDO report too). A channel where a reachable
+  // slot already existed keeps its existing admin-configured choice.
+  const prefsToSet = {};
+  // Unconditional per-channel flip on the FIRST reachable slot contact:
+  // prefs rows default both notify-primary columns to FALSE (call-created
+  // customers insert one moments before this), so "preserve an existing
+  // false" would leave prefsToSet empty for virtually every first secondary
+  // contact and silently cut the caller out of the updates they asked for
+  // (codex P1). Tradeoff accepted: an admin's deliberate opt-out set while
+  // the customer had zero slot contacts can be re-enabled by a later call —
+  // rare, visible on the prefs UI, and strictly better than the inverse.
+  if (contact.phone && !hadSlotPhone) prefsToSet.appointment_notify_primary = true;
+  if (slotEmail && !hadSlotEmail) prefsToSet.service_report_notify_primary = true;
+  if (Object.keys(prefsToSet).length) {
+    await db('notification_prefs')
+      .insert({ customer_id: customerId, ...prefsToSet })
+      .onConflict('customer_id')
+      .merge(prefsToSet);
+  }
+  // Conditional write: the slot was chosen from a prior read, so re-assert its
+  // emptiness in the UPDATE's WHERE — a concurrent admin edit or reprocessed
+  // call filling it between read and write must make this a 0-row no-op, never
+  // an overwrite.
+  let write = db('customers').where({ id: customerId });
+  for (const col of [emptySlot.name, emptySlot.phone, emptySlot.email]) {
+    write = write.where((q) => q.whereNull(col).orWhere(col, ''));
+  }
+  const contactRole = String(contact.role || '').trim().toLowerCase();
+  const updated = await write.update({
+    [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
+    [emptySlot.phone]: contact.phone || null,
+    [emptySlot.email]: slotEmail,
+    // The extracted relationship (home_buyer/tenant/...) — recorded so
+    // role-aware recipient selection is possible later; 'unknown' stays null.
+    [emptySlot.roleCol]: (contactRole && contactRole !== 'unknown') ? contactRole.slice(0, 30) : null,
+  });
+  if (!updated) return 'skipped_slot_race';
+  return 'written';
+}
+
 // A lead is "qualified" only once we've actually captured the contact info the
 // office needs to work it: first + last name, a service street address, and an
 // email. Phone is implicit (caller ID). Evaluate against the MERGED record
@@ -377,17 +1379,93 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
   return hasServiceIntent && (hasReachback || voicemail === true);
 }
 
+// Phone columns consulted for inbound identity: the customer's own number
+// PLUS the three service-contact slot phones — the pipeline itself records
+// spouses/tenants into those slots, and matching that ignored them forked a
+// duplicate customer the next time that person called (audit #7/F1).
+const CONTACT_MATCH_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+// Slot roles that identify the HOUSEHOLD/account vs people who serve many
+// accounts and must never auto-link on a slot-phone hit alone. lender is
+// agent-type (schema 1.7.0): a loan officer/title coordinator arranges
+// inspections for MANY buyers — their next call is usually a different
+// customer, so a slot-phone hit alone must go to review, not auto-link.
+const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
+const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager', 'lender']);
+// Slot-only match gating: the number belongs to a person STORED ON this
+// account (tenant/spouse/buyer/agent). Household-type roles identify the
+// account; agent-type people (realtor, property manager) serve MANY accounts
+// — a realtor's next call is usually about a DIFFERENT buyer, so an
+// unconditional link would book the new visit on the old customer. Household
+// role or a first-name agreement with the slot's OWN name links.
+function slotOnlyLinkAllowed(customer, phone, extracted = {}) {
+  const slotEntry = matchedSlotEntry(customer, phone);
+  const slotRole = String(slotEntry?.contactRole || '').toLowerCase();
+  if (AGENT_TYPE_SLOT_ROLES.has(slotRole)) return false;
+  if (HOUSEHOLD_SLOT_ROLES.has(slotRole)) return true;
+  const extractedFirst = normalizeNamePart(extracted.first_name);
+  const slotFirst = normalizeNamePart(String(slotEntry?.name || '').split(/\s+/)[0]);
+  return !!extractedFirst && !!slotFirst && sameFirstName(extractedFirst, slotFirst);
+}
+
+function matchedSlotEntry(customer, phone) {
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  for (const slot of SERVICE_CONTACT_SLOTS) {
+    if (samePhone(phone, customer[slot.phone])) {
+      return { name: customer[slot.name] || null, contactRole: customer[slot.roleCol] || null };
+    }
+  }
+  return null;
+}
+
+// Disambiguation leg (b): an AV-DECISIVE call address that matches exactly
+// one candidate's mirror address or active property is a deterministic
+// second signal. Shared by the single-match branch (an agent-role slot hit
+// calling about the very property they're stored on must attach, not
+// duplicate the customer — codex round-9 P2) and the multi-match cascade.
+// Returns the owning candidate or null; never throws.
+async function avAddressUniqueOwner(matches, opts) {
+  if (!opts.avDecisive || !opts.callAddress?.address_line1) return null;
+  try {
+    const { addressKey } = require('./customer-properties');
+    const callKey = addressKey(opts.callAddress);
+    if (!callKey) return null;
+    const candidateIds = matches.map((m) => m.id);
+    const props = await db('customer_properties')
+      .whereIn('customer_id', candidateIds)
+      .where({ active: true })
+      .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip');
+    const owners = new Set();
+    for (const m of matches) {
+      if (addressKey(m) === callKey) owners.add(m.id);
+    }
+    for (const p of props) {
+      if (addressKey(p) === callKey) owners.add(p.customer_id);
+    }
+    if (owners.size !== 1) return null;
+    const ownerId = [...owners][0];
+    return matches.find((m) => m.id === ownerId) || null;
+  } catch (e) {
+    logger.warn(`[call-proc] address-based disambiguation failed: ${e.code || e.message}`);
+    return null;
+  }
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
 
+  const predicateFor = (col) => (contactKey.length === 10
+    ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
+    : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`);
   const base = () => {
     const query = db('customers').whereNull('deleted_at');
-    if (contactKey.length === 10) {
-      return query.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [contactKey]);
-    }
-    return query.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [contactKey]);
+    return query.where(function orPhones() {
+      for (const col of CONTACT_MATCH_PHONE_COLS) {
+        this.orWhereRaw(predicateFor(col), [contactKey]);
+      }
+    });
   };
+  const matchedViaPrimary = (c) => samePhone(phone, c.phone);
 
   if (opts.preferredCustomerId) {
     const preferred = await db('customers')
@@ -397,10 +1475,19 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     if (preferred && customerPhoneMatches(phone, preferred)) return preferred;
   }
 
+  // A name-agreeing slot match found by the fast path but deferred until the
+  // sole-primary-owner check can run (codex round-6 P2).
+  let deferredSlotNamed = null;
   const firstName = normalizeNamePart(extracted.first_name);
   if (firstName) {
+    // Nickname-tolerant: "Bob" matches a record filed as "Robert" — the phone
+    // already scopes candidates to one household/office, and the last-name
+    // ordering below still prefers a full-name agreement.
     let namedQuery = base()
-      .whereRaw("LOWER(regexp_replace(COALESCE(first_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ?", [firstName]);
+      .whereRaw(
+        `LOWER(regexp_replace(COALESCE(first_name, ''), '[^a-zA-Z0-9]', '', 'g')) = ANY(?)`,
+        [firstNameVariants(firstName)]
+      );
 
     const lastName = normalizeNamePart(extracted.last_name);
     if (lastName) {
@@ -411,7 +1498,18 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     }
 
     const [named] = await namedQuery.orderBy('updated_at', 'desc').limit(1);
-    if (named && extractedNameMatchesCustomer(extracted, named)) return named;
+    // The name fast path is only safe when the number is the customer's OWN
+    // phone. A slot-phone hit (base() searches those too) whose account
+    // first name happens to match the caller must still pass the slot-role
+    // gating below — a realtor stored on a same-named customer would
+    // otherwise link and book on the old account (codex round-2 P1). And
+    // even a role-passing slot match must not outrank the number's sole
+    // PRIMARY owner (cascade leg (a)) — defer it into the multi-match
+    // branch so the owner check runs first (codex round-6 P2).
+    if (named && extractedNameMatchesCustomer(extracted, named)) {
+      if (matchedViaPrimary(named)) return named;
+      if (slotOnlyLinkAllowed(named, phone, extracted)) deferredSlotNamed = named;
+    }
     // No name match — but the AI-extracted name is frequently wrong (it can pick
     // up the technician's name from the call audio, e.g. "Adam"). Returning null
     // here makes the caller spawn a NEW customer even when the phone already maps
@@ -421,10 +1519,77 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
     // active customer") and keeps the genuine shared-phone case (2+ matches) safe.
   }
 
-  const matches = await base().orderBy('updated_at', 'desc').limit(2);
-  if (matches.length === 1) return matches[0];
+  const matches = await base().orderBy('updated_at', 'desc').limit(25);
+  if (matches.length === 1) {
+    const only = matches[0];
+    if (matchedViaPrimary(only)) return only;
+    if (slotOnlyLinkAllowed(only, phone, extracted)) return only;
+    // The slot-role gate blocks agent-type roles because a realtor/property
+    // manager calls about MANY properties — but when the AV-decisive call
+    // address matches THIS customer's mirror or active property, the call is
+    // about this account and must attach rather than spawn a duplicate
+    // customer (codex round-9 P2). Same deterministic second signal as
+    // multi-match leg (b).
+    if (await avAddressUniqueOwner(matches, opts)) return only;
+    // Anything weaker falls through to the legacy create/lead path exactly
+    // as before slot matching existed.
+    return null;
+  }
   if (matches.length > 1) {
-    logger.warn(`[call-proc] ${matches.length} customers share call contact phone ${maskPhone(phone)}; not auto-linking without name match`);
+    // Exact population first: uniqueness decisions on a CAPPED sample would
+    // auto-link when the tie-breaking row sits beyond the cap (codex P2).
+    const shareCount = await Promise.resolve()
+      .then(() => base().count('* as n').first())
+      .then((r) => parseInt(r?.n || 0, 10) || matches.length)
+      .catch(() => matches.length);
+    const cascadeSound = shareCount === matches.length;
+    // ── Multi-match disambiguation cascade (audit #7) — each leg is a
+    // deterministic second signal; anything weaker stays ambiguous. Legs run
+    // only when the fetched set IS the full population. ──
+    if (cascadeSound) {
+    // (a) The number is exactly ONE candidate's own primary phone (the others
+    //     merely hold it in a service-contact slot): the primary owns it.
+    const primaryOwners = matches.filter(matchedViaPrimary);
+    if (primaryOwners.length === 1) return primaryOwners[0];
+    // (a2) No sole primary owner — a fast-path slot match whose account name
+    //      agrees with the caller AND whose slot role passes the household
+    //      gating is the next-strongest signal (deferred from above so leg
+    //      (a) could run first; codex round-6 P2).
+    if (deferredSlotNamed) return deferredSlotNamed;
+    // (A unique slot-only hit already returned at matches.length === 1 —
+    // the slot columns are part of base(). Two customers holding the same
+    // number in slots stays ambiguous on purpose: realtors/property managers
+    // sit in many customers' slots.)
+    // (b) AV-validated call address matches exactly one candidate (their
+    //     mirror address or one of their active properties). Gated on a
+    //     decisive AV verdict so a raw mis-transcribed street can't link.
+    {
+      const owner = await avAddressUniqueOwner(matches, opts);
+      if (owner) return owner;
+    }
+    // (c) All candidates share one address key — a household sharing a line;
+    //     any of them is the household, most-recently-active wins.
+    try {
+      const { addressKey } = require('./customer-properties');
+      const keys = new Set(matches.map((m) => addressKey(m)).filter(Boolean));
+      if (keys.size === 1 && matches.every((m) => addressKey(m))) {
+        logger.info(`[call-proc] Shared phone maps to one household (${matches.length} records); linking most recent`);
+        return matches[0];
+      }
+    } catch { /* fall through to ambiguous */ }
+    }
+
+    logger.warn(`[call-proc] ${shareCount} customers share call contact phone ${maskPhone(phone)}; not auto-linking without a second deterministic signal`);
+    // Surface the ambiguity to callers that can act on it (Step 3 suppresses
+    // the new-customer create and opens a review card) without changing the
+    // null contract for the ones that can't.
+    if (opts.multiMatchOut && typeof opts.multiMatchOut === 'object') {
+      opts.multiMatchOut.candidates = matches.map((m) => ({
+        id: m.id,
+        name: [m.first_name, m.last_name].filter(Boolean).join(' ') || null,
+      }));
+      opts.multiMatchOut.shareCount = shareCount;
+    }
   }
   return null;
 }
@@ -460,13 +1625,19 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
-async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead }) {
+async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead, unclaimedOnly }) {
   if (!phone) return null;
   let query = database('leads').where('phone', phone).whereNull('deleted_at');
   if (workableUnnamedLead) {
     query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
   }
-  if (customerId) {
+  if (unclaimedOnly) {
+    // Shared-phone ambiguity: the call could belong to ANY of the candidate
+    // customers, so it must never reuse (and enrich) a lead one of them owns
+    // — another caller's transcript would land on the wrong customer's lead
+    // while the office adjudicates (codex round-6 P2).
+    query = query.whereNull('customer_id');
+  } else if (customerId) {
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
   return query.orderBy('created_at', 'desc').first();
@@ -657,8 +1828,126 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
   };
 }
 
+// V2 emits confirmed_start_at / follow_up_start_at as ISO 8601 with an ET
+// offset. The legacy parser wants a bare ET wall clock ("YYYY-MM-DDTHH:MM"),
+// and the old `.slice(0, 16)` trusted the wall clock blindly — a model that
+// emitted UTC ("...T14:00:00Z" for a 10 AM ET booking) or a wrong-season
+// offset booked 4-5 hours off. When the string carries ANY zone suffix,
+// trust the encoded INSTANT and render its ET wall clock (identity for a
+// correct ET offset). Zone-less strings pass through as wall clock.
+function v2IsoToEtWallClock(value) {
+  const raw = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) return null;
+  // An ET offset (either season) means the model encoded the agreed LOCAL
+  // wall clock — that wall clock is what was agreed on the call, so keep it
+  // verbatim even when the seasonal offset is wrong (codex P1: converting a
+  // July "-05:00" as an instant shifted a real 10 AM booking to 11 AM).
+  if (/(?:-04:?00|-05:?00)$/.test(raw)) return raw.slice(0, 16);
+  // UTC "Z" or any non-ET offset: the wall clock is NOT ET — trust the
+  // encoded instant and render its ET wall clock.
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) {
+      const p = etParts(parsed);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}`;
+    }
+  }
+  return raw.slice(0, 16);
+}
+
+// Resolve the booked visit's OWN address (the call's post-AV service address)
+// and, when it exactly key-matches one of the customer's known properties,
+// that property's id. Exact addressKey match only — a booking must never be
+// GUESSED onto a property. Returns nulls when the call carried no address
+// (readers COALESCE back to the customer mirror, i.e. today's behavior).
+async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db) {
+  const clean = (v, max) => {
+    const s = String(v == null ? '' : v).trim();
+    return s ? s.slice(0, max) : null;
+  };
+  let address = {
+    line1: clean(extracted.address_line1, 200),
+    line2: clean(extracted.address_line2, 100),
+    city: clean(extracted.city, 50),
+    state: clean(extracted.state, 2),
+    zip: clean(extracted.zip, 10),
+  };
+  if (!address.line1) {
+    // The caller didn't state an address on this call (e.g. an existing
+    // customer confirming a re-service). Dispatch to their on-file,
+    // Google-verified address instead of leaving the visit address blank —
+    // never book a location-less appointment. Falls THROUGH to the exact
+    // property match below: the on-file address may itself be an active
+    // customer_properties row whose property_id + geocode the visit should
+    // carry (map pin), same as a caller-stated address.
+    let onFile = null;
+    try {
+      const cust = await trx('customers').where({ id: customerId })
+        .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+      if (cust && String(cust.address_line1 || '').trim()) {
+        onFile = {
+          line1: clean(cust.address_line1, 200),
+          line2: clean(cust.address_line2, 100),
+          city: clean(cust.city, 50),
+          state: clean(cust.state, 2),
+          zip: clean(cust.zip, 10),
+        };
+      }
+    } catch (e) {
+      logger.warn(`[call-proc] on-file address fallback failed for booking: ${e.code || e.message}`);
+    }
+    if (!onFile) return { propertyId: null, address: null, lat: null, lng: null };
+    address = onFile;
+  }
+  let propertyId = null;
+  let lat = null;
+  let lng = null;
+  try {
+    const { addressKey } = require('./customer-properties');
+    const callKey = addressKey({
+      address_line1: address.line1, address_line2: address.line2, city: address.city, zip: address.zip,
+    });
+    if (callKey) {
+      const props = await trx('customer_properties')
+        .where({ customer_id: customerId, active: true })
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude');
+      const matches = props.filter((p) => addressKey(p) === callKey);
+      if (matches.length === 1) {
+        propertyId = matches[0].id;
+        // The property's own geocode rides along — without it the visit's
+        // map pin would fall back to the customer's PRIMARY coordinates
+        // while the text shows the rental (codex P1).
+        if (matches[0].latitude != null && matches[0].longitude != null) {
+          lat = matches[0].latitude;
+          lng = matches[0].longitude;
+        }
+      }
+    }
+  } catch (e) {
+    logger.warn(`[call-proc] property-linkage resolution failed (booking proceeds unlinked): ${e.code || e.message}`);
+  }
+  return { propertyId, address, lat, lng };
+}
+
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
   if (!customerId) return null;
+
+  // An ATTACHED booking (a human's row this call was linked to — see
+  // findAttachableCallAppointment) carries no Call SID marker in notes and
+  // no phone_call booking_source, so a reprocess would miss it through both
+  // lookups below and re-book the visit. source_call_log_id is the durable
+  // this-call linkage (stamped on attach AND on fresh inserts), so it is
+  // checked first. Child rows stamp it too — same exclusion as below.
+  if (call.id) {
+    const linked = await trx('scheduled_services')
+      .where({ customer_id: customerId, source_call_log_id: call.id })
+      .whereNull('parent_service_id')
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .orderBy('created_at', 'asc')
+      .first();
+    if (linked) return linked;
+  }
 
   const marker = `Call SID: ${call.twilio_call_sid}`;
   // Both lookups answer "was the PRIMARY appointment for this call already
@@ -692,6 +1981,94 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   }
 
   return query.first();
+}
+
+// Card-on-file spec §3 Phase 5.5: the guard above only sees THIS call's own
+// rows. A visit booked by a HUMAN through another channel while the call was
+// still being processed (the office books it in the portal mid-call; the
+// customer self-books right after hanging up) is invisible to it, and the
+// pipeline would insert a duplicate. Find live parent visits for this
+// customer with the SAME service line within ±1 day of the extracted date:
+//  - exactly one match → the visit already exists; the caller ATTACHES the
+//    call to it (stamps source_call_log_id) instead of inserting.
+//  - multiple matches → ambiguous; the caller holds for human review.
+// phone_call-sourced rows and rows already linked to a call are excluded:
+// other calls' bookings keep their own dedup story (the same-day hold),
+// and re-attaching them would hijack that call's linkage.
+async function findAttachableCallAppointment({ customerId, scheduledDate, serviceType, trx = db }) {
+  const none = { row: null, ambiguous: [] };
+  if (!customerId || !scheduledDate || !serviceType) return none;
+  const anchor = new Date(`${scheduledDate}T00:00:00Z`);
+  if (Number.isNaN(anchor.getTime())) return none;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const windowFrom = new Date(anchor.getTime() - DAY_MS).toISOString().slice(0, 10);
+  const windowTo = new Date(anchor.getTime() + DAY_MS).toISOString().slice(0, 10);
+  const candidates = await trx('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNull('parent_service_id')
+    .whereIn('status', ['pending', 'confirmed'])
+    .whereNull('source_call_log_id')
+    .where((qb) => qb.whereNull('booking_source').orWhereNot('booking_source', 'phone_call'))
+    .whereBetween('scheduled_date', [windowFrom, windowTo])
+    .whereRaw('LOWER(TRIM(service_type)) = LOWER(TRIM(?))', [serviceType])
+    .orderBy('created_at', 'asc');
+  const rows = Array.isArray(candidates) ? candidates : [];
+  if (rows.length === 1) return { row: rows[0], ambiguous: [] };
+  if (rows.length > 1) return { row: null, ambiguous: rows };
+  return none;
+}
+
+// Attach evidence check (Codex #2771): same service line within ±1 day is
+// not enough for a multi-property customer — the call may discuss the
+// rental while the only nearby manual booking is for the primary home.
+// Attach only when the candidate's property evidence AGREES with the
+// call's resolved linkage: matching property ids, or matching service
+// address line 1, or no explicit evidence on either side (both resolve to
+// the customer's primary property). One-sided evidence can't confirm the
+// match — the caller falls through to the normal hold/insert path, since
+// a different property's visit is not a duplicate.
+// Slot evidence for the attach guard (Codex #2771 r9): property + service
+// + ±1 day alone can't distinguish "re-confirming the visit the office
+// just booked" from "adding a SECOND visit near an existing one" — and
+// attaching in the second case silently loses the requested booking.
+// Attach only when the candidate sits on the SAME date as the call's
+// extracted date AND the window agrees (or the call carried no usable
+// time); neighbor-day and different-time matches hold for human review.
+function attachCandidateSlotAgrees(candidate, { scheduledDate, windowStart } = {}) {
+  const candDate = callBookingDateOnly(candidate?.scheduled_date);
+  if (!candDate || !scheduledDate || candDate !== scheduledDate) return false;
+  const candStart = String(candidate?.window_start || '').slice(0, 5);
+  const reqStart = String(windowStart || '').slice(0, 5);
+  if (!candStart || !reqStart) return true;
+  return candStart === reqStart;
+}
+
+function attachCandidateMatchesProperty(candidate, linkage) {
+  const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const candProp = candidate?.property_id || null;
+  const linkProp = linkage?.propertyId || null;
+  if (candProp && linkProp) return String(candProp) === String(linkProp);
+  const candAddr = norm(candidate?.service_address_line1);
+  const linkAddr = norm(linkage?.address?.line1);
+  if (candAddr && linkAddr) {
+    if (candAddr !== linkAddr) return false;
+    // Same street ≠ same unit (Codex #2771 r2): a multi-unit address must
+    // agree on line2 too — Apt A's booking is not evidence for a call
+    // about Apt B, and a one-sided unit can't confirm the match.
+    if (norm(candidate?.service_address_line2) !== norm(linkage?.address?.line2)) return false;
+    // Same street name ≠ same property (Codex #2771 r3): "123 Main St"
+    // exists in Bradenton AND Venice — city and ZIP must agree wherever
+    // both sides carry them (both-empty passes; a conflict refuses).
+    const candCity = norm(candidate?.service_address_city);
+    const linkCity = norm(linkage?.address?.city);
+    if (candCity && linkCity && candCity !== linkCity) return false;
+    const zip5 = (v) => String(v || '').trim().slice(0, 5);
+    const candZip = zip5(candidate?.service_address_zip);
+    const linkZip = zip5(linkage?.address?.zip);
+    if (candZip && linkZip && candZip !== linkZip) return false;
+    return true;
+  }
+  return !candProp && !linkProp && !candAddr && !linkAddr;
 }
 
 const UNSUPPORTED_CALL_RE = /\b(seo|organic traffic|google ranking|search engine optimization|lead generation|contractor leads?)\b/i;
@@ -1123,11 +2500,32 @@ function hasUsablePhone(value) {
 }
 
 function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
+  // A service-contact slot email satisfies the email requirement: it is a
+  // deliverable account email (appointment-email's resolveRecipients includes
+  // slot emails). Load-bearing for the realtor-books-for-buyer flow — the
+  // secondary-contact scrub clears the buyer's email off the CALLER's fields,
+  // and the gated persistence writes it into a slot BEFORE this gate runs, so
+  // without the slot fallback the exact call this feature targets would be
+  // skipped as missing_required_customer_fields.
+  const slotEmail = customer.service_contact_email
+    || customer.service_contact2_email
+    || customer.service_contact3_email
+    || null;
+  // PERSISTED-OR-REVIEW: only emails actually STORED (customer.email or a
+  // service-contact slot) satisfy this gate — appointment-email's recipient
+  // resolver reads stored addresses only, so an email that exists solely in
+  // the extraction (slot write gated off, slots full, race, or a
+  // persistCallSecondaryContact skip) could never receive the confirmation.
+  // The gated persistence runs BEFORE this gate on a freshly re-read customer
+  // row, so a successfully stored secondary email passes via slotEmail; when
+  // it wasn't stored, the booking correctly holds as
+  // missing_required_customer_fields for the office instead of auto-creating
+  // an appointment whose named recipient is unreachable.
   const merged = {
     firstName: customer.first_name || extracted.first_name || null,
     lastName: customer.last_name || extracted.last_name || null,
     phone: customer.phone || extracted.phone || callerPhone || null,
-    email: customer.email || extracted.email || null,
+    email: customer.email || extracted.email || slotEmail || null,
     streetAddress: customer.address_line1 || extracted.address_line1 || null,
     city: customer.city || extracted.city || null,
     state: customer.state || extracted.state || null,
@@ -1168,6 +2566,32 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 // ── Download Twilio recording (authenticated) ──
+// ── Provider-fetch timeouts ─────────────────────────────────────────────
+//
+// A HUNG provider call (TCP black hole, provider incident) never throws, so
+// it never increments the extraction retry budget — the 10-min stale-lock
+// reclaim just re-runs it every cycle forever while the zombie runs pile up.
+// Bounding every provider fetch converts a hang into an ordinary thrown
+// TimeoutError that flows the EXISTING failure paths: extraction_attempts +
+// exhausted triage for extraction, the Gemini fallback / no_transcription
+// path for transcription, and the audit-log skip for the label pass.
+// Defaults are deliberately generous — these kill hangs, they must never
+// race a slow-but-working provider (a 9-minute recording transcribes slowly).
+// Env-tunable without deploy.
+function envMs(name, fallback) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+const PROVIDER_FETCH_TIMEOUTS_MS = {
+  recording_download: envMs('CALL_PROC_DOWNLOAD_TIMEOUT_MS', 120000),
+  transcription: envMs('CALL_PROC_TRANSCRIBE_TIMEOUT_MS', 300000),
+  transcript_label: envMs('CALL_PROC_LABEL_TIMEOUT_MS', 120000),
+  extraction: envMs('CALL_PROC_EXTRACT_TIMEOUT_MS', 180000),
+};
+function providerTimeoutSignal(kind) {
+  return AbortSignal.timeout(PROVIDER_FETCH_TIMEOUTS_MS[kind] || PROVIDER_FETCH_TIMEOUTS_MS.extraction);
+}
+
 async function downloadRecording(mp3Url) {
   const twilioAuth = Buffer.from(
     `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
@@ -1176,6 +2600,7 @@ async function downloadRecording(mp3Url) {
   const res = await fetch(mp3Url, {
     headers: { Authorization: `Basic ${twilioAuth}` },
     redirect: 'follow',
+    signal: providerTimeoutSignal('recording_download'),
   });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
@@ -1272,6 +2697,7 @@ async function labelTranscriptWithOpenAI(transcript, opts = {}) {
   try {
     const res = await fetch(OPENAI_RESPONSES_API, {
       method: 'POST',
+      signal: providerTimeoutSignal('transcript_label'),
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -1307,11 +2733,49 @@ ${text}`,
       logger.warn('[call-proc] OpenAI transcript labeling returned no Agent/Caller labels');
       return null;
     }
+    // The labeling pass re-emits the ENTIRE transcript, and both extractors
+    // read its output as evidence — a sampled word swap here ("do not want to
+    // cancel" losing its "not") corrupts every downstream decision. The model
+    // is only allowed to rewrite speaker prefixes, so after stripping the
+    // per-line "<label>:" prefix from both versions the spoken-word content
+    // must be identical. Any content drift → discard the labeled version and
+    // let callers fall back to the raw transcript (labels lost, words safe).
+    if (!labeledTranscriptPreservesWords(text, labeled)) {
+      logger.warn('[call-proc] OpenAI transcript labeling altered spoken words — discarding labeled version');
+      return null;
+    }
     return labeled;
   } catch (err) {
     logger.error(`[call-proc] OpenAI transcript labeling error: ${err.message}`);
     return null;
   }
+}
+
+// Content-integrity check for the labeling pass: strip each line's speaker
+// prefix ("Agent:", "Caller:", "Speaker 1:", ...) from both versions, then
+// compare the remaining spoken-word token multisets. Exact equality required —
+// a tolerance would mask exactly the single-word corruption (a dropped "not")
+// this exists to catch. Reflowed turns are fine (multiset, not sequence).
+function labeledTranscriptPreservesWords(original, labeled) {
+  const contentTokens = (transcript) => {
+    const tokens = [];
+    for (const line of String(transcript || '').split('\n')) {
+      const content = line.replace(/^\s*[^:\n]{1,30}:\s*/, '');
+      for (const tok of content.toLowerCase().split(/[^a-z0-9']+/)) {
+        if (tok) tokens.push(tok);
+      }
+    }
+    return tokens;
+  };
+  const counts = new Map();
+  for (const tok of contentTokens(original)) counts.set(tok, (counts.get(tok) || 0) + 1);
+  for (const tok of contentTokens(labeled)) {
+    const n = counts.get(tok);
+    if (!n) return false;
+    if (n === 1) counts.delete(tok);
+    else counts.set(tok, n - 1);
+  }
+  return counts.size === 0;
 }
 
 // ── Primary transcription via OpenAI (multipart upload) ──
@@ -1344,6 +2808,7 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
+      signal: providerTimeoutSignal('transcription'),
     });
 
     if (!res.ok) {
@@ -1356,12 +2821,33 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
     const data = contentType.includes('application/json') ? await res.json() : await res.text();
     const text = normalizeOpenAITranscript(data);
     if (!text) return null;
+    // PAN redaction guard — applied at the PROVIDER RETURN, before any other
+    // LLM sees the text: the labeling pass (labelTranscriptWithOpenAI)
+    // consumes this raw transcript, so scrubbing only at persistence would
+    // still embed a blurted card number in the labeling prompt (Codex #2676
+    // round-1 P1). The dictation contact-pass rides this same function, so
+    // it is covered here too.
+    const panScrub = scrubPansDetailed(text);
+    // scrubSegments bridges adjacent-segment splits — a readback the
+    // provider divided across two segments must not hide below the
+    // 13-digit floor on either side (Codex #2676 round-5 P1).
+    const segScrub = scrubSegments(normalizeOpenAISegments(data));
+    const segments = segScrub.segments;
+    const segScrubCount = segScrub.count;
+    if (panScrub.count + segScrubCount > 0) {
+      logger.warn(`[call-proc] PAN scrub masked ${panScrub.count + segScrubCount} card artifact(s) at OpenAI provider return`);
+    }
     return {
-      text,
-      segments: normalizeOpenAISegments(data),
+      text: panScrub.text,
+      segments,
       provider: 'openai',
       model,
       responseFormat: diarized ? 'diarized_json' : 'json',
+      // Carried up to processRecording's quarantine trigger — the provider
+      // scrub masks the text, so the later choke-point scrub sees a clean
+      // transcript and would otherwise never learn the AUDIO carries a card
+      // (Codex #2676 round-3 P1).
+      panCount: panScrub.count + segScrubCount,
     };
   } catch (err) {
     logger.error(`[call-proc] OpenAI transcription error: ${err.message}`);
@@ -1382,6 +2868,7 @@ async function transcribeWithGemini(audioBuffer, opts = {}) {
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
+        signal: providerTimeoutSignal('transcription'),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{
@@ -1414,7 +2901,11 @@ Rules:
     // Gemini 2.5 may return thinking parts — skip those
     const parts = data.candidates?.[0]?.content?.parts || [];
     const textPart = parts.find(p => p.text && !p.thought);
-    return (textPart?.text || parts[0]?.text || '').trim() || null;
+    const raw = (textPart?.text || parts[0]?.text || '').trim() || null;
+    if (!raw) return null;
+    // PAN redaction guard at the provider return (see the OpenAI twin above).
+    const panScrub = scrubPansDetailed(raw);
+    return { text: panScrub.text, panCount: panScrub.count };
   } catch (err) {
     logger.error(`[call-proc] Gemini fallback transcription error: ${err.message}`);
     return null;
@@ -1435,7 +2926,10 @@ async function transcribeRecording(mp3Url, opts = {}) {
       result?.transcription
       && bufferRef.buffer
       && process.env.CONTACT_DICTATION_ENABLED !== 'false'
-      && detectContactDictationSignals(result.transcription).any
+      // forceContactPass (bounce re-verify): the primary transcript may have
+      // normalized a misheard address into a shape that no longer trips the
+      // dictation signals — the caller knows an email was dictated.
+      && (opts.forceContactPass === true || detectContactDictationSignals(result.transcription).any)
     ) {
       const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
       const second = await transcribeWithOpenAI(bufferRef.buffer, {
@@ -1447,12 +2941,57 @@ async function transcribeRecording(mp3Url, opts = {}) {
         if (result.metadata) {
           result.metadata.contact_pass_model = second.model;
           result.metadata.contact_pass_chars = second.text.length;
+          // Same audio as the primary — max(), not sum, so one blurted card
+          // heard by both passes still counts once for the quarantine trigger.
+          result.metadata.pan_count = Math.max(result.metadata.pan_count || 0, second.panCount || 0);
         }
         logger.info(`[call-proc] contact-dictation pass complete: ${second.text.length} chars (${contactModel})`);
       }
     }
   } catch (err) {
     logger.warn(`[call-proc] contact-dictation pass skipped: ${err.message}`);
+  }
+  // Quarantine at the WRAPPER so every caller is covered — processRecording,
+  // the re-transcription backfill, and direct consumers like the bounce
+  // reverify's forceContactPass re-listen all flow through here, and the
+  // provider-return scrub means the detection only surfaces as
+  // metadata.pan_count (Codex #2676 round-4 P1). The quarantine stamps ride
+  // result.metadata so the caller's transcript write persists them instead
+  // of clobbering the flags with fresh provenance (round-4 P2).
+  try {
+    const panCount = Number(result?.metadata?.pan_count || 0);
+    // Quarantine is EXPLICITLY opt-in (opts.quarantine) — inferring it from
+    // opts.call flipped read-only callers into mutators (the extraction
+    // replay script) while silently skipping callers that pass no row (the
+    // bounce reverify) — Codex #2676 round-5 P1. Mutating pipelines
+    // (processRecording, the retranscription backfill, bounce reverify)
+    // pass quarantine: true; diagnostic/replay callers stay pure reads.
+    if (panCount > 0 && opts.quarantine === true && opts.call?.id) {
+      // Persist the MASKED transcript before the audio is stripped
+      // (round-18 P2): a crash between this quarantine and the caller's
+      // transcript write would otherwise leave pan_detected + no audio +
+      // no transcription — unrecoverable (the text existed only in
+      // memory) and invisible to the quarantined backstop. The caller's
+      // later provenance write overwrites this with the same content.
+      if (typeof result?.transcription === 'string' && result.transcription.length) {
+        try {
+          await db('call_log').where({ id: opts.call.id }).update({
+            transcription: result.transcription,
+            updated_at: new Date(),
+          });
+        } catch (preErr) {
+          logger.warn(`[call-proc] pre-quarantine transcript persist failed: ${preErr.message}`);
+        }
+      }
+      const q = await quarantineCardRecording(opts.call, { source: 'transcription' });
+      if (result.metadata) {
+        result.metadata.pan_detected = true;
+        result.metadata.recording_quarantined = q.twilioDeleted === true;
+      }
+      opts.call.recording_url = null;
+    }
+  } catch (err) {
+    logger.error(`[call-proc] PAN quarantine at transcribe wrapper failed: ${err.message}`);
   }
   return result;
 }
@@ -1492,16 +3031,17 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
             label_provider: 'openai',
             label_model: OPENAI_TRANSCRIPT_LABEL_MODEL,
             fallback_attempted: false,
+            pan_count: openai?.panCount || 0,
           },
         };
       }
       logger.warn('[call-proc] OpenAI transcript missing usable Agent/Caller labels; trying Gemini fallback');
     }
 
-    const geminiTranscript = await transcribeWithGemini(audioBuffer, opts);
-    if (geminiTranscript) {
+    const gemini = await transcribeWithGemini(audioBuffer, opts);
+    if (gemini?.text) {
       return {
-        transcription: geminiTranscript,
+        transcription: gemini.text,
         provider: 'gemini_fallback',
         model: GEMINI_TRANSCRIPTION_MODEL,
         structuredSegments: null,
@@ -1509,6 +3049,9 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
           audio_bytes: audioBuffer.length,
           fallback_reason: openaiTranscript ? 'openai_labeling_or_completeness' : 'openai_unavailable',
           openai_model: OPENAI_TRANSCRIPTION_MODEL,
+          // Same audio — the discarded OpenAI pass and the Gemini pass both
+          // detect the same card; max() avoids double-counting it.
+          pan_count: Math.max(openai?.panCount || 0, gemini.panCount || 0),
         },
       };
     }
@@ -1529,6 +3072,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
             fallback_attempted: true,
             fallback_provider: 'gemini',
             fallback_model: GEMINI_TRANSCRIPTION_MODEL,
+            pan_count: openai?.panCount || 0,
           },
         };
       }
@@ -1545,6 +3089,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
           fallback_attempted: true,
           fallback_provider: 'gemini',
           fallback_model: GEMINI_TRANSCRIPTION_MODEL,
+          pan_count: openai?.panCount || 0,
         },
       };
     }
@@ -1554,6 +3099,294 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
     logger.error(`[call-proc] Recording transcription download/setup error: ${err.message}`);
     return { transcription: null, provider: null };
   }
+}
+
+// ── Recurring-intent default for matched_service ──
+//
+// Owner rule (2026-07-11, the Detwiler call): a NEW-LEAD caller who voices
+// ANY recurring interest — a package, a membership, treatments "every X
+// months", quarterly/monthly — wants the recurring pest PROGRAM; the single
+// pest that prompted the call (a wasp nest, an ant trail) is the entry
+// point, not the service. The extraction prompt carries the same rule; this
+// deterministic pass backstops model drift. Scope is deliberately narrow:
+// general-pest singular services only (termite/rodent/WDO/lawn lanes have
+// their own recurring semantics), the caller's own words only (an agent's
+// ignored upsell must not flip the classification), and never when the
+// caller explicitly declines a plan.
+// Keys are suffix-normalized (trailing " Service" stripped): the model copies
+// names from the live catalog, and specialty rows have carried both suffixed
+// and unsuffixed forms across catalog renames. Generic one-time pest entries
+// only — the German/Native Roach KNOCKDOWN protocols are deliberately absent:
+// a heavy-infestation knockdown is the required first visit, not a coarse
+// mislabel, and collapsing it into the program would lose the protocol.
+const RECURRING_OVERRIDE_SOURCES = new Set([
+  'one-time pest control',
+  'pest control', // bare "Pest Control Service" — the scheduler's one-time fallback label
+  'bee / wasp nest removal',
+  'wasp nest removal',
+  'wasp control',
+  'yellow jacket control',
+  'hornet nest removal',
+  'mud dauber nest removal',
+  'fire ant treatment',
+  'general pest control',
+  'cockroach control',
+  'initial pest cleanout',
+]);
+// Strips the "Service" token at the end OR before a parenthetical, so both
+// "Quarterly Pest Control Service" and "General Pest Control Service
+// (Bi-Monthly)" normalize to comparable keys.
+const normalizeServiceKey = (v) => String(v || '').trim().toLowerCase().replace(/\s+service(?=\s*\(|$)/, '');
+// The recurring pest programs (suffix-normalized), including the seeded-DB
+// alias forms. The prod rows carry the "* Pest Control Service" names,
+// active + booking_enabled (verified in prod 2026-07-11). Also used to
+// RETARGET a model-picked cadence when the caller unambiguously chose a
+// different one.
+const RECURRING_PEST_PROGRAMS = new Set([
+  'monthly pest control',
+  'bi-monthly pest control',
+  'quarterly pest control',
+  'semiannual pest control',
+  'general pest control (monthly)',
+  'general pest control (bi-monthly)',
+  'general pest control (quarterly)',
+  'general pest control (semiannual)',
+]);
+// Program words that are unambiguous on their own. Bare cadence words —
+// including "quarterly"/"semiannual" — are NOT here: they only count with
+// the pest-pressure/history guard below ("we get ants every month" and
+// "I USED TO HAVE quarterly service" are not plan asks). Bare
+// "ongoing"/"year-round" are nowhere: as descriptions ("an ongoing ant
+// problem", "year-round bugs") they're pressure, and the genuine asks are
+// the service-anchored forms here (plus "keep … year-round").
+const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|keep[^.?!;]{0,40}\byear[- ]?round|(?:service|maintenance|pest|treatment) plans?|(?:a|any|your|the|what|which) plans?\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already|next|on|that|changed?|fell|got)\b|\s+(?:sun|mon|tues?|wednes|thurs?|fri|satur)day\b)|(?<!\bpayment )(?<!\bfinanc(?:e|ing) )(?<!\binstallment )plans\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already|next|on|that|changed?|fell|got)\b|\s+(?:sun|mon|tues?|wednes|thurs?|fri|satur)day\b)|(?<!\bpayment )packages?|memberships?)\b/i;
+const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bquarterly\b|\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:other )?(?:single )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?\b/gi;
+// "we get/see/have fire ants every month" describes pressure, not a plan
+// ask. "have" is pressure ONLY as possession — request idioms ("can I
+// have…", "want to have…") are excluded by lookbehind.
+const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|(?<!\b(?:can|could|may) (?:i|we) )(?<!\b(?:do|does|did) (?:you|they) )(?<!\byou guys )(?<!\b(?:want|need|like|love|prefer)(?:ed)? to )have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in)|(?:was|were|used to be) (?:on|with|getting|doing)|(?:i'?m|we'?re|am|are|currently|already|still) (?:on|with|using))\b[^.?!]{0,40}$/i;
+// ...but a request verb AFTER the pressure verb re-frames the clause as an
+// ask: "I HAVE ants and WANT monthly service".
+const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me| us)? up|set(?:ting)? up|start|get started|schedule|book|interested in|looking for|put (?:me|us) on)\b/i;
+// Declines: negated-want forms, bare opt-outs ("no package, only the nest"),
+// and "just a one-time" — the latter only when not itself negated ("NOT just
+// a one-time" / "I don't want just a one-time" are recurring requests).
+// NOTE: "contract"/"subscription" are deliberately NOT opt-out words — "no
+// contract" is month-to-month sales language ("can I do quarterly with no
+// contract?") and usually accompanies WANTING the plan.
+// The negated-want gap is clause-bounded (no ;) and must not cross another
+// "want/need" — "I don't want just a one-time; I want a package" pivots to a
+// request and is NOT a decline.
+const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|doesn'?t|does not|isn'?t|is not|won'?t|not) (?:want|need|interested in|looking for)\b(?:(?!\b(?:want|need)\b)[^.?!;]){0,50}\b(?:recurring|plans?|packages?|memberships?|ongoing|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:(?:service|maintenance|pest|treatment) )?(?:recurring|plans?|packages?|memberships?|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)\b|(?<!\b(?:not|than)\s)(?<!\b(?:don'?t|do not|doesn'?t|won'?t|didn'?t) (?:want|need) )\bjust (?:a |the )?one[- ]?time\b/i;
+// A decline whose object is ONLY a cadence ("no monthly", "don't want
+// quarterly") excludes that cadence, it does not decline recurring service —
+// the negated-cadence filter already keeps it from being chosen. Only a
+// decline naming the PROGRAM itself (plan/package/recurring/one-time…)
+// carries veto semantics.
+const PROGRAM_DECLINE_RE = /\b(?:recurring|plans?|packages?|memberships?|ongoing|one[- ]?time)\b/i;
+
+// A cadence word the caller is EXCLUDING ("but not monthly", "instead of
+// monthly") must not count as their chosen cadence.
+const NEGATED_CADENCE_BEFORE_RE = /(?:\b(?:not|no|never|without|rather than|instead of|(?:don'?t|do not|doesn'?t|does not|isn'?t|is not|can'?t|cannot|won'?t) (?:want|need|do|offer|provide|carry|interested in)|(?:not|never) (?:interested in|looking for|into)|no longer (?:want|need|on|interested in))\s+(?:the |a |any )?|\b(?:not|no|never|(?:don'?t|do not) want)\s+(?:the |a |any )?(?:(?:bi[- ]?)?monthly|quarterly|semi[- ]?annual(?:ly)?),? (?:or|nor|and) )$/i;
+// Billing cadence is not service cadence: "can I PAY MONTHLY for the one-time
+// treatment?" is a payment-terms question.
+const PAYMENT_CONTEXT_BEFORE_RE = /\b(?:pay(?:ing)?|billed?|billing|charged?|payments?|installments?|invoiced?)\b[^.?!]{0,15}$/i;
+
+// True when `re` (global) matches somewhere that reads as SERVICE cadence:
+// not negated, and not preceded by a pest-pressure verb in the same clause —
+// unless a request verb after the pressure verb turned the clause into an ask.
+function serviceCadenceMatch(re, text) {
+  const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let m;
+  while ((m = scan.exec(text))) {
+    const before = text.slice(Math.max(0, m.index - 60), m.index);
+    const after = text.slice(m.index + m[0].length, m.index + m[0].length + 20);
+    const billingNounAfter = /^\s{0,2}(?:payments?|installments?|billing|invoices?|price|pricing|cost)\b/i.test(after);
+    if (!billingNounAfter && !NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
+      const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
+      if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;
+    }
+    if (scan.lastIndex === m.index) scan.lastIndex++;
+  }
+  return false;
+}
+
+// Transcribers emit curly apostrophes; every guard regex here uses ASCII
+// ones — normalize before matching or "don’t want a recurring plan" slips
+// past the decline guard.
+const normalizeApostrophes = (s) => String(s || '').replace(/[‘’]/g, "'");
+
+// Speaker turns from a labelled transcript: a turn starts at a
+// "Speaker:" label (incl. raw diarized "Speaker 1:") and absorbs unlabelled
+// continuation lines (a diarized turn can wrap), so continuations inherit
+// their speaker.
+function speakerTurns(transcription) {
+  const lines = String(transcription || '').split('\n');
+  const turns = [];
+  for (const line of lines) {
+    const label = line.match(/^\s*([A-Za-z][A-Za-z0-9 ]{0,20}?)\s*:/);
+    if (label) {
+      turns.push({ speaker: /^(caller|customer)$/i.test(label[1].trim()) ? 'caller' : 'other', text: line });
+    } else if (turns.length) {
+      turns[turns.length - 1].text += `\n${line}`;
+    }
+  }
+  return turns;
+}
+
+// The caller's own turns when the transcript is caller-labelled. Two
+// distinct fallbacks: NO labels at all → whole transcript (fail-open —
+// better a rare agent-word trigger than losing the rule); labels present
+// but none identifiable as the caller (raw "Speaker 1:"/"Speaker 2:"
+// diarization) → EMPTY (fail-closed — scanning the whole text there would
+// let an agent's ignored upsell trigger the override).
+function callerOnlyText(transcription) {
+  const turns = speakerTurns(transcription);
+  if (!turns.length) return String(transcription || '');
+  const callerTurns = turns.filter((t) => t.speaker === 'caller');
+  return callerTurns.map((t) => t.text).join('\n');
+}
+
+// True when `re` matches somewhere NOT immediately preceded by negation —
+// an agent's "So just the nest, NOT quarterly service?" is a one-time
+// confirmation, not a plan offer.
+function nonNegatedMatch(re, text) {
+  const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let m;
+  while ((m = scan.exec(text))) {
+    const before = text.slice(Math.max(0, m.index - 60), m.index);
+    if (!NEGATED_CADENCE_BEFORE_RE.test(before)) return true;
+    if (scan.lastIndex === m.index) scan.lastIndex++;
+  }
+  return false;
+}
+
+// An agent plan offer the caller ACCEPTS is caller intent too ("we can put
+// you on quarterly service" → "yes, that works"). Returns the offer turn
+// ({ text, index }) or null; `afterIndex` scopes the scan so a counteroffer
+// accepted AFTER a decline can be found. The ignored-upsell guard survives:
+// an offer with no affirmative reply returns nothing.
+// Bare "ok(ay)" is deliberately absent — it's conversational acknowledgment
+// ("okay." while the agent pitches), not acceptance. A negation right after
+// the affirmation word ("definitely not", "yeah, no") is a REJECTION.
+const PLAN_AFFIRMATION_RE = /^\s*(?:caller|customer)\s*:\s*(?:(?:um|uh|well|hmm|so|oh|ok(?:ay)?)[,.\s]+){0,3}(?:yes|yeah|yep|yup|sure|sounds good|that works|that'?s fine|let'?s do (?:that|it)|perfect|please do|sign me up|absolutely|definitely)\b(?!\s*,?\s*(?:not|no|never|don'?t)\b)/i;
+function acceptedPlanOffer(turns, afterIndex = -1) {
+  for (let i = Math.max(0, afterIndex + 1); i + 1 < turns.length; i++) {
+    if (turns[i].speaker !== 'other' || turns[i + 1].speaker !== 'caller') continue;
+    const offer = turns[i].text;
+    if ((nonNegatedMatch(RECURRING_INTENT_STRONG_RE, offer) || serviceCadenceMatch(RECURRING_CADENCE_RE, offer))
+      && PLAN_AFFIRMATION_RE.test(turns[i + 1].text)) {
+      return { text: offer, index: i };
+    }
+  }
+  return null;
+}
+
+// The program name for a cadence, resolved from the LIVE bookable catalog
+// when it's available (booking exact-matches catalog names, and seeded
+// environments carry different row names than prod's, e.g. "General Pest
+// Control Service (Bi-Monthly)") — hardcoded prod names as fallback.
+function resolveProgramName(cadenceKey, fallback, catalogNames) {
+  const finders = {
+    monthly: (n) => /\bmonthly\b/i.test(n) && !/\bbi[- ]?monthly\b/i.test(n),
+    bimonthly: (n) => /\bbi[- ]?monthly\b/i.test(n),
+    semiannual: (n) => /semi[- ]?annual/i.test(n),
+    quarterly: (n) => /\bquarterly\b/i.test(n),
+  };
+  const fits = finders[cadenceKey];
+  const hit = (Array.isArray(catalogNames) ? catalogNames : [])
+    .find((n) => /pest control/i.test(n) && fits(String(n)));
+  return hit || fallback;
+}
+
+function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = []) {
+  if (!extracted || extracted.is_lead !== true) return extracted;
+  // specific_service_name outranks matched_service in catalog booking
+  // resolution (call-booking-catalog.js), so a singular value THERE would
+  // book the one-time service no matter what matched_service says — both
+  // fields get the rule.
+  const matchedKey = normalizeServiceKey(extracted.matched_service);
+  const specificKey = normalizeServiceKey(extracted.specific_service_name);
+  const matchedIsSingular = RECURRING_OVERRIDE_SOURCES.has(matchedKey);
+  const specificIsSingular = RECURRING_OVERRIDE_SOURCES.has(specificKey);
+  const matchedIsRecurring = RECURRING_PEST_PROGRAMS.has(matchedKey);
+  const specificIsRecurring = RECURRING_PEST_PROGRAMS.has(specificKey);
+  if (!matchedIsSingular && !specificIsSingular && !matchedIsRecurring && !specificIsRecurring) return extracted;
+
+  const normalized = normalizeApostrophes(transcription);
+  const turns = speakerTurns(normalized);
+  const callerText = callerOnlyText(normalized);
+  // A decline only vetoes when nothing recurring FOLLOWS it — a caller who
+  // rejects one option and chooses another ("I don't want the monthly plan;
+  // can we do quarterly instead?"), or who accepts the agent's COUNTEROFFER
+  // after declining ("I don't want a monthly plan" → Agent: "we can do
+  // quarterly" → "yes"), made a recurring request.
+  const decline = callerText.match(RECURRING_DECLINED_RE);
+  let postDeclineOffer = null;
+  if (decline && PROGRAM_DECLINE_RE.test(decline[0])) {
+    const afterDecline = callerText.slice(decline.index + decline[0].length);
+    const declineTurnIdx = turns.reduce(
+      (acc, t, i) => (t.speaker === 'caller' && RECURRING_DECLINED_RE.test(t.text) ? i : acc), -1
+    );
+    postDeclineOffer = acceptedPlanOffer(turns, declineTurnIdx);
+    // Negation-aware: a REPEATED opt-out after the first decline ("I don't
+    // want a package either") is not fresh intent.
+    if (!nonNegatedMatch(RECURRING_INTENT_STRONG_RE, afterDecline)
+      && !serviceCadenceMatch(RECURRING_CADENCE_RE, afterDecline)
+      && !postDeclineOffer) return extracted;
+  }
+  const callerVoiced = nonNegatedMatch(RECURRING_INTENT_STRONG_RE, callerText)
+    || serviceCadenceMatch(RECURRING_CADENCE_RE, callerText);
+  const acceptedOffer = postDeclineOffer || (callerVoiced ? null : acceptedPlanOffer(turns, -1));
+  if (!callerVoiced && !acceptedOffer) return extracted;
+  // Cadence: honor the ONE cadence the caller actually chose (from their own
+  // words, or from the agent offer they accepted); when they float several
+  // ("quarterly or every six months? I don't know") or name none, pest
+  // defaults to quarterly — same default as the estimate engine
+  // (estimate-converter.js). Family matches carry the same pest-pressure
+  // guard as intent detection.
+  const cadenceText = acceptedOffer ? acceptedOffer.text : callerText;
+  const families = [
+    { key: 'monthly', fallback: 'Monthly Pest Control Service', re: /\bmonthly\b|\bevery (?:single )?month\b/gi, veto: /\bbi[- ]?monthly\b|\bevery other month\b/i },
+    { key: 'bimonthly', fallback: 'Bi-Monthly Pest Control Service', re: /\bbi[- ]?monthly\b|\bevery other month\b|\bevery (?:two|2) months\b/gi },
+    { key: 'semiannual', fallback: 'Semiannual Pest Control Service', re: /\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:six|6) months\b/gi },
+    { key: 'quarterly', fallback: 'Quarterly Pest Control Service', re: /\bquarterly\b|\bevery (?:three|3) months\b/gi },
+  ];
+  // Vetoes are negation-aware too: "I want monthly, not bi-monthly" must
+  // not let the (negated) bi-monthly mention erase the monthly choice.
+  const hits = families.filter((f) => serviceCadenceMatch(f.re, cadenceText)
+    && !(f.veto && nonNegatedMatch(f.veto, cadenceText)));
+  // The default must never be a cadence the caller explicitly EXCLUDED ("a
+  // plan, but no quarterly"): walk the ladder to the first family whose
+  // tokens aren't negated in the text (mentioned somewhere but never
+  // positively — a positive hit already cleared it).
+  const negatedInText = (f) => new RegExp(f.re.source, 'i').test(cadenceText) && !serviceCadenceMatch(f.re, cadenceText);
+  const ladder = ['quarterly', 'bimonthly', 'semiannual', 'monthly']
+    .map((k) => families.find((f) => f.key === k));
+  const chosen = hits.length === 1 ? hits[0] : (ladder.find((f) => !negatedInText(f)) || ladder[0]);
+  const programName = (family) => resolveProgramName(family.key, family.fallback, bookableServiceNames);
+
+  const retarget = (isSingular, isRecurring, current) => {
+    if (isSingular) return programName(chosen);
+    // Already a recurring program: retarget ONLY on one unambiguous caller
+    // cadence (the model can default to quarterly over an explicit
+    // bi-monthly ask); ambiguity keeps the model's pick.
+    if (isRecurring && hits.length === 1) return programName(hits[0]);
+    return current;
+  };
+  const out = { ...extracted };
+  out.matched_service = retarget(matchedIsSingular, matchedIsRecurring, extracted.matched_service);
+  out.specific_service_name = retarget(specificIsSingular, specificIsRecurring, extracted.specific_service_name);
+  // When only specific_service_name carries the program (V2 can map a
+  // category to a null legacy matched_service), fill matched_service too —
+  // lead enrichment and the V2 backfill read matched_service for
+  // service_interest, and the pipeline label must match what books.
+  if (!out.matched_service && RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(out.specific_service_name))) {
+    out.matched_service = out.specific_service_name;
+  }
+  if (out.matched_service === extracted.matched_service && out.specific_service_name === extracted.specific_service_name) return extracted;
+  logger.info(`[call-proc] recurring-intent default: "${extracted.specific_service_name || extracted.matched_service}" -> "${out.specific_service_name || out.matched_service}"`);
+  return out;
 }
 
 // ── AI extraction via Gemini ──
@@ -1588,6 +3421,7 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
         knownCaller.accountType === 'established_customer' ? 'customer' : 'contact'
       }${knownCaller.name ? ` (${knownCaller.name})` : ''}. They are already in our system — treat coordination of an existing/scheduled visit, "are you coming today?", arrival check-ins, complaints about work already done, reschedules, and billing/invoice questions as NOT a new lead (is_lead=false). Only treat a brand-new service request they haven't bought yet as a lead.\n`
     : '';
+  const priorCallBlock = buildPriorCallBlock(opts.priorCall);
 
   const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida). Waves is an established company with many existing customers, so not every call is a new sales lead — some are existing customers coordinating service, complaints, or billing.
 
@@ -1595,7 +3429,7 @@ Waves only schedules pest control, lawn care, mosquito, termite, rodent, bed bug
 
 Caller phone: ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
-${knownCallerBlock}
+${knownCallerBlock}${priorCallBlock}
 Transcript:
 ${transcription}
 
@@ -1604,12 +3438,13 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "first_name": "string or null",
   "last_name": "string or null",
   "email": "string or null",
-  "phone": "string — use caller phone if not stated",
+  "phone": "string or null — the callback number the caller STATES on the call; null when none is stated (the server falls back to caller ID — do NOT echo the caller ID here)",
   "address_line1": "street address or null",
-  "city": "string or null — must be a Florida city",
+  "city": "string or null — the city as stated, even when outside Florida (out-of-area calls need the real city for triage)",
   "state": "FL",
   "zip": "string or null",
   "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
+  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, lender, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
@@ -1636,6 +3471,16 @@ IMPORTANT — multiple properties (address_line1 vs additional_properties):
 - When the caller says a second property has the "same" city/ZIP/community as the first ("same zip and everything"), RESOLVE it: copy the stated city/ZIP onto that entry.
 - is_rental: true when the caller says the property is a rental, investment property, tenant-occupied, or Airbnb/short-term rental.
 - additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home.
+
+IMPORTANT — secondary_contact (a SECOND person who is a party to the service):
+- Set secondary_contact when the caller names ANOTHER person as a party to the service being arranged AND gives at least their name or contact info — a realtor booking an inspection names the home buyer, a landlord names the tenant, a spouse names the account holder, an adult child books for a parent.
+- ARRANGER CALLS HAVE A SECONDARY CONTACT BY DEFAULT: a caller who identifies as a realtor/agent, lender or title/closing coordinator, property manager, or landlord is arranging service for someone else — real-estate/WDO-inspection calls almost always name the buyer (and often the seller/occupant providing access). If such a caller named anyone with a name or contact detail and you are about to return null, re-scan the transcript — you likely missed the party.
+- RELAYED DETAILS BELONG TO THE OTHER PERSON: a phone/email the caller dictates FOR another person ("the buyer is Joseph — his email is ...", "her phone number is ...") goes on secondary_contact, NEVER into the top-level email/phone, even though the caller is the one speaking it.
+- The CALLER's own identity always goes in the top-level first_name/last_name/phone/email fields. secondary_contact is ONLY the other person — never duplicate the caller into it, and never put the other person's phone/email into the caller's fields.
+- role describes the secondary person's relationship to the transaction (the BUYER a realtor is booking for is home_buyer, not real_estate_agent; a loan officer named as a party is lender).
+- wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — gets wants_notifications false.
+- When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
+- Apply the same spelled-out-input, correction, and do-not-invent rules as the caller's own contact fields. A person mentioned with no name AND no contact info: secondary_contact is null.
 
 IMPORTANT — quote_requested / quote_promised (drives the sales pipeline):
 - quote_requested: true when getting a QUOTE/estimate/pricing is a reason for the call — "can I get a quote", "what would it cost for...", "send me an estimate". A caller who only booked without asking for a quote: false.
@@ -1689,6 +3534,14 @@ IMPORTANT — appointment_confirmed rules:
 - Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.
 - If the caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, new-construction termite treatment, or treatment before a slab/concrete pour, matched_service must be "Pre-Slab Termidor" — not "Termite Inspection".
 
+IMPORTANT — matched_service: recurring interest beats the single presenting pest:
+- When the caller voices ANY interest in recurring/ongoing service — a "package", a "plan", a "membership", treatments "every X months/weeks", "quarterly", "monthly", "twice a year", keeping bugs away year-round, or asking what cadence you usually do — matched_service MUST be the recurring pest program, even when the visible complaint is a single pest (a wasp nest, an ant trail, one roach sighting). The single-pest service (Bee / Wasp Nest Removal Service, One-Time Pest Control Service, Fire Ant Treatment Service, …) is correct ONLY when no recurring interest is voiced.
+- Cadence: use the one the CALLER chose — "Monthly Pest Control Service", "Bi-Monthly Pest Control Service" (every other month), "Quarterly Pest Control Service", or "Semiannual Pest Control Service" (every six months / twice a year). When they float options without choosing ("quarterly or every six months? I don't know what you usually do") or name no cadence, use "Quarterly Pest Control Service" — pest defaults to quarterly.
+- A caller ACCEPTING the agent's plan offer ("we can put you on quarterly service" → "yes, that works") counts as voicing recurring interest.
+- This rule reads the CALLER's interest, not the agent's pitch: an agent offering a plan the caller ignores or declines does not trigger it. A caller who explicitly wants one-time only ("just the one treatment, no plan", "no package") keeps the single service.
+- Pest-frequency OBSERVATIONS are not plan interest: "we get fire ants every month in that corner" describes pressure, not a request for monthly service — do not classify it as recurring unless the caller also asks about ongoing treatment.
+- The specific pest still belongs in requested_service and pain_points — only matched_service defaults to the program.
+
 IMPORTANT — quoted_price and follow-up visit:
 - quoted_price: the TOTAL price in US dollars the agent quoted AND the caller accepted for the service being booked (agent: "that runs around 350 total", caller agrees -> 350). Use the total package price when quoted as a total across multiple treatments. null when no price was quoted, the caller didn't accept, or the amount is uncertain or a range. Never estimate or invent a price.
 - follow_up_visit_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks"). A generic "call us if it comes back" is NOT a follow-up visit.
@@ -1714,15 +3567,16 @@ IMPORTANT — customer contact rules:
 Return ONLY valid JSON.`;
 
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
     {
       method: 'POST',
+      signal: providerTimeoutSignal('extraction'),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           response_mime_type: 'application/json',
-          temperature: 0.2, // keep extraction deterministic
+          temperature: 0, // closed-enum structured extraction — greedy decode; 0.2 was pure routing-gate noise
         },
       }),
     }
@@ -1824,6 +3678,13 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   const callDateET = etDateString(opts.callStartedAt || new Date());
   const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
     bookableServiceNames: opts.bookableServiceNames,
+    // Existing-customer hint — V1 has had this since the non-lead veto work;
+    // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
+    // booking (the duplicate-appointment path).
+    knownCaller: opts.knownCaller,
+    // Cross-call threading: prior call from this number, so a continuation
+    // completes the earlier record instead of restarting from nothing.
+    priorCall: opts.priorCall,
   });
 
   let rawText;
@@ -1832,12 +3693,16 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
+        signal: providerTimeoutSignal('extraction'),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             response_mime_type: 'application/json',
-            temperature: 0.2,
+            // Greedy decode — this output feeds the routing gate directly;
+            // 0.2 sampling could flip a borderline scheduling.status between
+            // reprocesses of the same call.
+            temperature: 0,
           },
         }),
       }
@@ -1925,8 +3790,85 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
 
 // ══════════════════════════════════════════════════════════════
 // MAIN PROCESSOR
+// Retry budget exhausted — surface a blocking Needs Review card. Without it
+// the call dies with no route decision, no lead, no customer, and nothing in
+// any inbox (exactly how six calls were silently lost to a retired-model 404
+// on 2026-07-09). Shared by BOTH failure writers: the AI-extraction catch and
+// processRecording's outer guard — every path that stamps extraction_failed
+// counts against the same budget and surfaces the same card at the cap. The
+// partial unique index dedupes re-files while a card is already open.
+async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) {
+  if (attempts < CALL_EXTRACTION_MAX_ATTEMPTS) return;
+  try {
+    const failTriageItem = buildTriageItem({
+      callLogId,
+      flag: 'extraction_failed_permanent',
+      extraction: { meta: { call_summary: `Call processing failed ${attempts} time(s); automatic retries exhausted. Fix the cause, then use Reprocess on the call recording.` } },
+      extraPayload: { attempts, last_error: String(err?.message || err).slice(0, 500) },
+    });
+    await db('triage_items').insert(failTriageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+  } catch (triageErr) {
+    logger.warn(`[call-proc] extraction-failure triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
+  }
+}
+
+
+// ── Zero-triage layers (2026-07-10, all dark-gated; failures never fail the call) ──
+// Shared by the main completion path AND the spam/voicemail early exits —
+// the suspected-spam/voicemail population is exactly what the classifier's
+// live accrual must cover. The spam classifier records its verdict; the
+// disposition layer stamps the terminal enum on call_log.disposition; the
+// enrichment writer persists gate codes / pets / internal color. Order
+// matters: the classifier verdict feeds the disposition decision.
+async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null, transcript = null }) {
+  try {
+    const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
+    let spamVerdictResult = null;
+    if (isEnabled('callSpamClassifier')) {
+      const lineTypeRow = await db('phone_line_types')
+        .where({ phone: contactPhone }).first().catch(() => null);
+      spamVerdictResult = await classifyCall({
+        call, extraction: v2ForDisposition, legacy: extracted,
+        // Cache stores line TYPE only — omit caller_name entirely so the
+        // classifier treats CNAM as unknown (never as known-nameless) and
+        // falls back to the AddOns envelope.
+        lineType: lineTypeRow ? { type: lineTypeRow.line_type } : null,
+        // Raw transcript for the deterministic robocall-script signature —
+        // the independent second signal for script families whose rotating
+        // local numbers carry no vendor/line risk.
+        transcript,
+      });
+      await recordVerdict(call.id, spamVerdictResult);
+    }
+    if (isEnabled('callDispositionV1')) {
+      const { disposition, reason } = decideDisposition({
+        extraction: v2ForDisposition,
+        legacy: extracted,
+        spamVerdict: spamVerdictResult,
+        outcome: {
+          appointmentCreated: !!appointmentResult?.scheduledServiceId,
+          customerId: customerId || null,
+          isKnownCustomer: !!call.customer_id || !!customerId,
+        },
+      });
+      await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
+      logger.info(`[call-proc] Disposition for ${maskSid(callSid)}: ${disposition} (${reason})`);
+    }
+    if (customerId) {
+      await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
+    }
+  } catch (zeroTriageErr) {
+    logger.warn(`[call-proc] zero-triage layer error for ${maskSid(callSid)}: ${zeroTriageErr.message}`);
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 const CallRecordingProcessor = {
+  // Re-used by the bounce audio-reverify lane (email-bounce-reverify.js) —
+  // full pipeline incl. the letter-fidelity contact-dictation second pass,
+  // plus the same hallucination guard the live pipeline applies.
+  transcribeRecording,
+  isImplausibleTranscript,
   /**
    * Process a call recording end-to-end.
    * Called from recording-status webhook or manually from admin.
@@ -1974,6 +3916,21 @@ const CallRecordingProcessor = {
         .where(function () {
           this.whereRaw("processing_status IS DISTINCT FROM 'processing'")
             .orWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+        })
+        // Retryable-failure guard: the sweep's cap/backoff filter only
+        // protects sweep-originated runs — direct callers (the
+        // recording-status webhook's setTimeout, duplicate Twilio callbacks)
+        // land here too. Without this clause a burst of timers could re-claim
+        // a just-failed row back-to-back and burn the whole retry budget in
+        // seconds instead of the intended 10-minute spacing, or keep poking a
+        // row already at the cap. Enforce both atomically at claim time.
+        // Admin Reprocess (force=true) takes the other branch and is exempt.
+        .where(function () {
+          this.whereRaw("processing_status IS DISTINCT FROM 'extraction_failed'")
+            .orWhere(function () {
+              this.whereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+                .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+            });
         })
         .update({ processing_status: 'processing', processing_token: procToken, processing_started_at: new Date(), updated_at: new Date() });
       if (claimed === 0) {
@@ -2060,11 +4017,56 @@ const CallRecordingProcessor = {
     // Dictation-focused second-pass transcript (promptable model) — evidence
     // for the contact-field decoder below, never the displayed transcript.
     let contactPassTranscript = null;
+    // A hallucinated PRIMARY transcript (OpenAI/Gemini inventing dialogue over
+    // near-silence) is discarded here so the Twilio-builtin fallback below can
+    // supply a real transcript; the terminal rejection only fires if the
+    // fallback is also missing/implausible.
+    let primaryTranscriptRejected = false;
+    let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
 
     if (call.recording_url) {
-      const result = await transcribeRecording(call.recording_url, { call, contactPhone });
+      const result = await transcribeRecording(call.recording_url, { call, contactPhone, quarantine: true });
       transcription = result.transcription;
       contactPassTranscript = result.contactPassTranscript || null;
+      // PAN redaction guard (card-on-file spec Phase 0): a card number
+      // blurted on the recorded line must become a non-event — scrubbed
+      // BEFORE the plausibility gate, BEFORE persistence, and therefore
+      // before every LLM consumer (extraction, CSR coach, dictation decode
+      // read this variable; everything else re-reads the row written from
+      // it). Segments and the contact-pass stream carry the same audio, so
+      // all three artifacts are scrubbed together.
+      const scrubbed = scrubTranscriptArtifacts({
+        transcription,
+        contactPassTranscript,
+        segments: result.structuredSegments,
+      });
+      transcription = scrubbed.transcription;
+      contactPassTranscript = scrubbed.contactPassTranscript;
+      result.structuredSegments = scrubbed.segments;
+      // Provider-detected PANs are already quarantined inside
+      // transcribeRecording (which also nulled call.recording_url — same
+      // object). This branch covers CHOKE-NOVEL detections only: text some
+      // future/side path delivered unscrubbed. The flags ride
+      // result.metadata so the transcript write below persists them.
+      if (scrubbed.count > 0) {
+        logger.warn(`[call-proc] PAN scrub masked ${scrubbed.count} card number(s) at the choke point for ${maskSid(callSid)}`);
+        await quarantineCardRecording(call, { source: 'primary_transcription' });
+        call.recording_url = null;
+        if (result?.metadata) {
+          result.metadata.pan_detected = true;
+          result.metadata.pan_count = Number(result.metadata.pan_count || 0) + scrubbed.count;
+        }
+      }
+      // recordingSeconds is hoisted so the primary gate here and the terminal
+      // rejection below share one value.
+      const recordingSecondsForGate = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
+      if (transcription && isImplausibleTranscript(transcription, recordingSecondsForGate)) {
+        logger.warn(`[call-proc] Primary transcript implausible for ${maskSid(callSid)}: ${transcription.length} chars / ${recordingSecondsForGate}s — discarding, trying Twilio fallback`);
+        primaryTranscriptRejected = true;
+        rejectedPrimaryChars = transcription.length; // keep the metric before discarding
+        transcription = null;
+        contactPassTranscript = null;
+      }
       if (transcription) {
         transcriptionProvenance = {
           provider: result.provider || null,
@@ -2082,7 +4084,7 @@ const CallRecordingProcessor = {
           transcription_status: 'completed',
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: transcriptionProvenance.model,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
           updated_at: new Date(),
         };
         if (result.structuredSegments || contactPassTranscript) {
@@ -2104,11 +4106,22 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL
+    // Fallback: use Twilio's built-in transcription if OpenAI/Gemini failed or no recording URL.
+    // The rejection sentinel is NOT a usable transcript — on an admin
+    // force-reprocess of an already-rejected call it's what's stored in
+    // call_log.transcription, so treat it (and cached copies of it) as no fallback.
+    const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
     if (!transcription) {
-      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
-      if (freshCall?.transcription) {
-        transcription = freshCall.transcription;
+      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription', 'transcript_structured').first();
+      if (isUsableFallback(freshCall?.transcription)) {
+        // Rows written before the PAN guard deployed (or by an unscrubbed
+        // legacy path) re-enter the live pipeline here — scrub on read so
+        // the LLM consumers downstream never see a stored PAN, and heal the
+        // sibling transcript_structured artifact in the same touch (its
+        // segments/contact-pass may carry the same pre-guard PAN).
+        const fallbackScrub = scrubPansDetailed(freshCall.transcription);
+        const structuredScrub = scrubStructuredTranscript(freshCall.transcript_structured);
+        transcription = fallbackScrub.text;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
           model: null,
@@ -2120,14 +4133,33 @@ const CallRecordingProcessor = {
           },
         };
         await db('call_log').where({ id: call.id }).update({
+          // Persist the scrubbed text, not just the local copy — a legacy
+          // PAN-bearing row would otherwise stay exposed to every
+          // persisted-row consumer (Codex #2676 round-1 P1). Detection is
+          // stamped in this SAME update (round-12 P1): a crash before the
+          // quarantine below must not leave a masked transcript with no
+          // durable signal that the audio still needs deleting.
+          transcription,
+          ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, {
+            ...transcriptionProvenance.metadata,
+            ...(fallbackScrub.count + structuredScrub.count > 0
+              ? { pan_detected: true, pan_count: fallbackScrub.count + structuredScrub.count, quarantine_source: 'fallback_heal_pending' }
+              : {}),
+          })),
           updated_at: new Date(),
         });
+        if (fallbackScrub.count + structuredScrub.count > 0) {
+          await quarantineCardRecording(call, { source: 'fallback_heal' });
+          call.recording_url = null;
+        }
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
-      } else if (call.transcription) {
-        transcription = call.transcription;
+      } else if (isUsableFallback(call.transcription)) {
+        const cachedScrub = scrubPansDetailed(call.transcription);
+        const cachedStructuredScrub = scrubStructuredTranscript(call.transcript_structured);
+        transcription = cachedScrub.text;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
           model: null,
@@ -2139,14 +4171,115 @@ const CallRecordingProcessor = {
           },
         };
         await db('call_log').where({ id: call.id }).update({
+          transcription, // scrubbed — see the fresh-row twin above
+          ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, {
+            ...transcriptionProvenance.metadata,
+            ...(cachedScrub.count + cachedStructuredScrub.count > 0
+              ? { pan_detected: true, pan_count: cachedScrub.count + cachedStructuredScrub.count, quarantine_source: 'fallback_heal_pending' }
+              : {}),
+          })),
           updated_at: new Date(),
         });
+        if (cachedScrub.count + cachedStructuredScrub.count > 0) {
+          await quarantineCardRecording(call, { source: 'fallback_heal' });
+          call.recording_url = null;
+        }
         logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
+    // ── Transcription-hallucination guard ── run BEFORE the transcript is
+    // written to the message thread or handed to extraction, so a fabricated
+    // conversation never becomes a phantom lead / disposition / SMS. Recording
+    // duration (actual audio) preferred; call duration (incl. ring) is a safe
+    // looser fallback. Terminal 'voicemail' so the retry sweep won't re-run it
+    // (a re-transcribe would just hallucinate again).
+    const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
+    const fallbackImplausible = transcription && isImplausibleTranscript(transcription, recordingSeconds);
+    // Two terminal-rejection cases: (a) the Twilio fallback ALSO produced an
+    // implausible transcript; (b) the primary was implausible and no usable
+    // fallback exists. Both finalize as an empty voicemail — NOT no_transcription
+    // (which would retry and re-hallucinate). A plausible Twilio fallback after a
+    // rejected primary flows through normally.
+    if (fallbackImplausible || (!transcription && primaryTranscriptRejected)) {
+      // Provenance: for the primary-hallucinated path `transcription` was already
+      // nulled, so use the char count captured before discarding it.
+      const rawChars = transcription ? transcription.length : rejectedPrimaryChars;
+      const cps = recordingSeconds && rawChars
+        ? Math.round((fallbackImplausible ? spokenCharCount(transcription) : rawChars) / recordingSeconds)
+        : null;
+      logger.warn(`[call-proc] Rejecting implausible transcription for ${maskSid(callSid)}: ${fallbackImplausible ? `fallback ${rawChars} chars / ${recordingSeconds}s (~${cps} c/s)` : 'primary hallucinated, no usable fallback'} — empty voicemail, no extraction`);
+      let priorMeta = {};
+      try {
+        const rawPrior = call.transcription_metadata;
+        priorMeta = typeof rawPrior === 'string' ? JSON.parse(rawPrior) : (rawPrior && typeof rawPrior === 'object' ? rawPrior : {});
+      } catch { priorMeta = {}; }
+      // Fence on processing_token like the finalization write: if a peer
+      // reclaimed the stale lock, this matches 0 rows and we bail without
+      // overwriting the peer's state. Clear disposition + enriched extraction
+      // too — a force-reprocess of a previously-stamped row (e.g. a phantom
+      // estimate_send from the hallucination) must not leave stale artifacts.
+      const rejected = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: 'voicemail',
+          answered_by: 'voicemail',
+          call_outcome: 'voicemail',
+          transcription: TRANSCRIPTION_REJECTED_SENTINEL,
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, { ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps })),
+          ai_extraction: null,
+          ai_extraction_enriched: null,
+          v2_extraction_status: null,
+          disposition: null,
+          review_status: null,
+          // A prior hallucinated extraction (force-reprocess path) may have
+          // linked this empty voicemail to a phantom customer; the unified
+          // voice sync attaches messages whenever customer_id is set, so unlink.
+          customer_id: null,
+          processing_token: null,
+          processing_started_at: null,
+          updated_at: new Date(),
+        });
+      if (rejected === 0) {
+        logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
+      }
+      // Dismiss any open Needs Review cards a prior hallucinated extraction
+      // filed for this call — clearing review_status alone doesn't remove them
+      // (the inbox lists from triage_items.status), so they'd stay actionable.
+      try {
+        const dismissed = await db('triage_items')
+          .where({ call_log_id: call.id })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+        if (dismissed > 0) logger.info(`[call-proc] Dismissed ${dismissed} stale triage card(s) for ${maskSid(callSid)} after transcript rejection`);
+      } catch (trErr) {
+        logger.warn(`[call-proc] stale-triage dismissal skipped for ${maskSid(callSid)}: ${trErr.message}`);
+      }
+      // Retire phantom lead artifacts a PRIOR hallucinated extraction created
+      // (admin force-reprocess path): soft-delete unconverted leads keyed by
+      // this call SID so the phantom lead the guard neutralizes doesn't linger.
+      // Scoped tight — only leads sourced from THIS call, never won/converted.
+      try {
+        const retired = await db('leads')
+          .where({ twilio_call_sid: callSid })
+          .whereNull('deleted_at')
+          .whereNotIn('status', ['won', 'converted'])
+          .update({ deleted_at: new Date(), lost_reason: 'transcription_rejected_hallucination', updated_at: new Date() });
+        if (retired > 0) logger.info(`[call-proc] Retired ${retired} phantom call-sourced lead(s) for ${maskSid(callSid)} after transcript rejection`);
+      } catch (leadErr) {
+        logger.warn(`[call-proc] phantom-lead retire skipped for ${maskSid(callSid)}: ${leadErr.message}`);
+      }
+      await updateUnifiedVoiceMessage(
+        { ...call, transcription: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' },
+        { body: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' }
+      ).catch((e) => logger.warn(`[call-proc] unified message update skipped for ${maskSid(callSid)}: ${e.message}`));
+      return { success: true, skipped: true, reason: 'transcription_rejected_implausible' };
+    }
+
     if (transcription) {
       await updateUnifiedVoiceMessage(
         { ...call, transcription },
@@ -2178,6 +4311,11 @@ const CallRecordingProcessor = {
     } catch (e) {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
+    // Cross-call threading context: the latest other call from this number in
+    // the last week, so a continuation call completes the earlier record
+    // instead of restarting from nothing. Fail-open — extraction proceeds
+    // without it.
+    const priorCall = await summarizePriorCall(contactPhone, call.id, db, call.created_at);
 
     // Bookable service catalog: fed to both extraction prompts (so the model
     // can name a specific bookable service) and to the booking block below
@@ -2190,17 +4328,32 @@ const CallRecordingProcessor = {
 
     let extracted;
     try {
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
-      await db('call_log').where({ id: call.id }).update({
+      // Increment in SQL, not from the in-memory row: the stale-reclaim path
+      // means `call` can predate another run's failed attempt.
+      const [failedRow] = await db('call_log').where({ id: call.id }).update({
         processing_status: 'extraction_failed',
+        extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
         processing_token: null,
         processing_started_at: null,
         updated_at: new Date(),
-      });
+      }).returning(['extraction_attempts']);
+      const attempts = Number(failedRow?.extraction_attempts) || 0;
+      await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       return { success: false, error: `AI extraction failed: ${err.message}` };
     }
+
+    // Owner rule: recurring interest beats the single presenting pest — a
+    // deterministic backstop on top of the same instruction in the prompt.
+    // INBOUND ONLY (all three call sites): diarization label assignment is
+    // inconsistent on outbound calls — observed live 2026-07-11, the Copeman
+    // outbound call labeled the WAVES AGENT as "Caller:" — so the caller-text
+    // scan could read the agent's own plan pitch as customer intent. The
+    // prompt-driven model, which sees the whole conversation, still applies
+    // the rule on outbound calls.
+    if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
@@ -2211,6 +4364,8 @@ const CallRecordingProcessor = {
           callStartedAt: call.created_at,
           callId: call.id,
           bookableServiceNames,
+          knownCaller,
+          priorCall,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -2307,6 +4462,11 @@ const CallRecordingProcessor = {
       if (!staleType || staleType === 'voicemail' || staleType === 'other') {
         extracted.call_type = 'new_inquiry';
       }
+      // The recurring-intent default keyed off is_lead and ran before this
+      // promotion — a "wasp nest, and I'd like the quarterly package"
+      // voicemail was still is_lead=false then. Re-run it now that the
+      // deterministic signals made this a lead (idempotent, no-op otherwise).
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
     }
 
     // Skip spam and non-workable voicemail
@@ -2340,6 +4500,11 @@ const CallRecordingProcessor = {
           answered_by: extracted.is_voicemail ? 'voicemail' : call.answered_by || null,
         }
       );
+      // The suspected-spam/voicemail population must still get classifier
+      // verdicts + terminal dispositions — it's the population the live
+      // accrual exists to measure. Customer resolution hasn't run on this
+      // path; enrichment keys on the webhook's pre-linked customer if any.
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }
@@ -2369,6 +4534,12 @@ const CallRecordingProcessor = {
     // the appointment is created from the data the gate actually checked.
     let v2RoutingBlocked = false;
     let v2SmsBlocked = false;
+    let v2SmsConsentExplicit = false;
+    // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
+    // inbound consent (no explicit sms_consent_given). The non-ANI recipient
+    // hold at the send site keys off this — a send cleared by explicit consent
+    // or by the legacy (V2-off) path must not be held.
+    let v2SmsClearedByImpliedConsent = false;
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
     let v2ApprovedExtraction = null;
@@ -2423,6 +4594,71 @@ const CallRecordingProcessor = {
           extracted.email = null;
           logger.info(`[call-proc-dictation] Demoted unconfirmed dictated email to email_raw for ${maskSid(callSid)}`);
         }
+
+        // ── Quarantine arbiter (dark: CONTACT_QUARANTINE_ARBITER_ENABLED) ──
+        // A quarantined email no longer just sits null awaiting review: a
+        // second agent rules on the candidates using evidence the transcripts
+        // can't provide (DNS deliverability per domain, cross-customer
+        // ownership, business-name coherence). adopt/adopt_with_confirmation
+        // fills extracted.email before the customer/lead upserts and
+        // first-touch sends read it; a decisive adopt also releases the
+        // forced read-back flag below. The module re-checks every hard gate
+        // deterministically (candidate membership, deliverable domain,
+        // ownership) before returning an adoptable verdict — and fails open
+        // to the existing quarantine on any error.
+        if (dictationEmailPayload?.email_candidates?.length && !extracted.email) {
+          const ownCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
+          const arbiter = await arbitrateQuarantinedEmail({
+            entry: contactDictation.emails?.[0] || null,
+            demotedEmail: extracted.email_raw || null,
+            transcripts: { primary: transcription, contactPass: contactPassTranscript },
+            callerContext: {
+              first_name: extracted.first_name || null,
+              last_name: extracted.last_name || null,
+              organization: v2Result?.extraction?.caller?.organization_name || null,
+              call_summary: extracted.call_summary || null,
+              // Independent second opinion: the schema-valid V2 extraction's
+              // caller email. Only a VALIDATED payload counts as evidence —
+              // and it's exactly the tiebreaker the arbiter lacked when it
+              // stored charlesw.robb@ over V2's (correct) charleswrobb@.
+              v2_email: (v2Result?.status === 'valid' && v2Result?.extraction?.caller?.email) || null,
+            },
+            ownCustomerId,
+          });
+          if (arbiter) {
+            dictationEmailPayload.arbiter = {
+              verdict: arbiter.verdict,
+              chosen_value: arbiter.chosenValue,
+              confidence: arbiter.confidence,
+              reasoning: arbiter.reasoning,
+              eliminated: arbiter.eliminated,
+              domain_evidence: arbiter.domainEvidence,
+              ...(arbiter.confirmationQuestion ? { confirmation_question: arbiter.confirmationQuestion } : {}),
+            };
+            // The Needs Review card renders only the TOP-LEVEL
+            // confirmation_question (TriageInboxTabV2) — lift the arbiter's
+            // question there for any verdict that keeps the card open, or a
+            // decoder-questionless quarantine would open a card with no
+            // read-back prompt.
+            if (arbiter.verdict !== 'adopt' && arbiter.confirmationQuestion) {
+              dictationEmailPayload.confirmation_question = arbiter.confirmationQuestion;
+            }
+            // adopt_with_confirmation ALSO writes — owner ruling (2026-07-09):
+            // a quarantined profile never ships email-less when a candidate
+            // passes every hard gate; the promised first-touch email goes out
+            // and the read-back card stays open for the human confirm. The
+            // gates (candidate membership, deliverable domain, cross-customer
+            // ownership) are enforced deterministically inside the module.
+            if (arbiter.chosenValue && (arbiter.verdict === 'adopt' || arbiter.verdict === 'adopt_with_confirmation')) {
+              extracted.email = arbiter.chosenValue;
+              logger.info(`[quarantine-arbiter] ${arbiter.verdict} email for ${maskSid(callSid)} (confidence ${arbiter.confidence})`);
+            } else {
+              logger.info(`[quarantine-arbiter] review verdict for ${maskSid(callSid)} — quarantine stands`);
+            }
+          }
+        }
       }
     } catch (dictationErr) {
       logger.warn(`[call-proc-dictation] decoder skipped for ${maskSid(callSid)}: ${dictationErr.message}`);
@@ -2453,6 +4689,17 @@ const CallRecordingProcessor = {
       ? addressRecovery.avResult
       : v2AddressValidation;
 
+    // Explicit SMS consent is a property of the CALL, not of the routing mode:
+    // the secondary-contact fan-out at the send site requires it even when V2
+    // runs in shadow (or routing is legacy), where the enforce branch below
+    // never executes. Only a VALID extraction counts — a schema_failed/
+    // normalization_failed payload is untrusted model output and must not
+    // authorize texting anyone. With no valid V2 extraction there is no
+    // consent evidence and it stays false (fan-out fail-closed as before).
+    v2SmsConsentExplicit = v2Result?.status === 'valid'
+      && isV2Extraction(v2Result?.extraction)
+      && v2Result.extraction?.consent?.sms_consent_given === true;
+
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {
       try {
         const v2Extraction = v2Result?.extraction || null;
@@ -2472,14 +4719,54 @@ const CallRecordingProcessor = {
           logger.warn(`[call-proc-v2] Fail-closed for ${callSid}: v2_extraction_status=${failReason}`);
         } else {
           const addressValidation = effectiveAddressValidation;
-          const routingResult = canAutoRoute(v2Extraction, { contactPhone, addressValidation });
+          // Fail-open booking (GATE_CALL_FAIL_OPEN_BOOKING): a confirmed booking
+          // isn't held over recoverable contact-field flags — the ANI satisfies
+          // caller_phone_missing, an existing customer's on-file address clears
+          // address flags, a garbled email (name_email_mismatch) is advisory.
+          const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
+          const knownCustomerForFailOpen = (knownCaller && knownCaller.isExistingCustomer)
+            ? { hasAddress: knownCaller.hasAddress } : null;
+          let routingResult = canAutoRoute(v2Extraction, {
+            contactPhone, addressValidation,
+            failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
+          });
+          // Address fail-open is only safe when the on-file address really is
+          // the booking address — V1-captured address evidence that conflicts
+          // with it demotes to the address-review hold BEFORE the route
+          // decision is recorded (see demoteFailOpenOnV1AddressConflict; the
+          // audit path applies the same rule so shadow metrics agree). No
+          // address values in the log — PII; the review card carries them.
+          {
+            const demoted = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
+            if (demoted !== routingResult) {
+              logger.info(`[call-proc-v2] Fail-open demoted to review for ${maskSid(callSid)}: V1-only address evidence conflicts with the on-file address`);
+              routingResult = demoted;
+            }
+          }
+          if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
+            logger.info(`[call-proc] Fail-open booking for ${maskSid(callSid)}: proceeding despite recoverable flags ${routingResult.failedOpenFlags.join(', ')} (office to confirm)`);
+          }
           const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation });
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
           const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
           const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-          const tcpa = checkTcpaConsent(v2Extraction);
+          // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
+          // caller who booked has implied consent for the transactional
+          // confirmation SMS (established business relationship; they called
+          // us) — but implied consent is PERSONAL to the caller. It authorizes
+          // texting only the number that reached us (the inbound ANI); it does
+          // NOT authorize texting a spoken alternate callback number (which the
+          // customer.phone||extracted.phone||ANI resolution can prefer over the
+          // ANI) nor fanning a confirmation out to a secondary service contact.
+          // Those alternate recipients still require explicit sms_consent_given
+          // (v2SmsConsentExplicit, captured mode-independently above) and are
+          // enforced at the send site.
+          const tcpa = checkTcpaConsent(v2Extraction, {
+            impliedConsent: isEnabled('callInboundImpliedConsent') && !isOutboundCall(call),
+          });
           v2SmsBlocked = !tcpa.canSms;
+          v2SmsClearedByImpliedConsent = tcpa.canSms && tcpa.reason === 'implied_consent_inbound';
           v2EmailBlocked = !tcpa.canEmail;
 
           const routeDecision = buildRouteDecision({
@@ -2574,6 +4861,41 @@ const CallRecordingProcessor = {
               if (n.state) extracted.state = n.state;
               if (n.postal_code) extracted.zip = n.postal_code;
             }
+            // Fail-open recovery: this appointment was allowed only because
+            // recoverable flags were dropped from the blocking set. Surface
+            // them as ADVISORY review items so the office confirms the field
+            // (phone via ANI, garbled email, on-file address, low confidence) —
+            // book-and-flag, never book-and-hide (owner directive).
+            if (routingResult.failedOpenFlags?.length) {
+              for (const f of routingResult.failedOpenFlags) {
+                try {
+                  await db('triage_items')
+                    .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory' }))
+                    .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+                } catch (fe) {
+                  logger.warn(`[call-proc-v2] fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
+                }
+              }
+              // Address flags failed open ⇒ V2 heard NO new address and this
+              // booking must dispatch to the customer's on-file address. Any
+              // legacy V1 street that survives to this point key-matches the
+              // on-file street (a differing V1-only street was demoted to
+              // review above), so it's an unvalidated duplicate at best —
+              // left alone it would win over the on-file address at the
+              // property-linkage stamp. Clear it so
+              // resolveCallBookingPropertyLinkage falls back to the on-file,
+              // Google-verified address. No street values in the log — PII.
+              if (routingResult.failedOpenFlags.some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
+                if (String(extracted.address_line1 || '').trim()) {
+                  logger.info(`[call-proc] Fail-open on-file address for ${maskSid(callSid)}: dropped an unvalidated legacy V1 street (key-matches the on-file address)`);
+                }
+                extracted.address_line1 = null;
+                extracted.address_line2 = null;
+                extracted.city = null;
+                extracted.state = null;
+                extracted.zip = null;
+              }
+            }
             v2ApprovedExtraction = v2Extraction;
           }
         }
@@ -2612,6 +4934,19 @@ const CallRecordingProcessor = {
     // Plus two identity signals on real prospects: caller-arranging-for-someone-
     // else and a missing surname. When DRIVES_ROUTING is later promoted the full
     // gate above owns all of this, so this bridge is guarded off then.
+    // V2 can capture an as-heard malformed email ("brandon@gmail") that the
+    // V1 extractor returned null for; normalizeCaller demotes it to the V2
+    // caller.email_raw. The email review below (repair + ownership gate +
+    // read-back triage, in BOTH the shadow-bridge and enforce branches) only
+    // reads the legacy extracted.email/email_raw — carry the V2 capture into
+    // that channel so the only captured address isn't silently lost.
+    try {
+      const v2CallerRawEmail = v2Result?.extraction?.caller?.email_raw || null;
+      if (v2CallerRawEmail && !extracted.email && !extracted.email_raw) {
+        extracted.email_raw = v2CallerRawEmail;
+      }
+    } catch (_e) { /* best-effort — V1's own capture still flows */ }
+
     if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {
       try {
         const v2Ext = v2Result?.extraction || null;
@@ -2643,7 +4978,23 @@ const CallRecordingProcessor = {
         // silent, which would drop the decoder's candidates/question on the
         // floor — exactly the malformed dictation this pass quarantines.
         // Force a read-back reason so the triage item (with payload) exists.
-        if (dictationEmailPayload
+        // A decisive arbiter adopt resolved the dictation — the read-back
+        // card would only re-ask a settled question. The bridge's
+        // deriveEmailReview gives EVERY call-captured email a read-back
+        // reason unconditionally, so the settled reasons must be REMOVED,
+        // not just not-re-added. adopt_with_confirmation and review verdicts
+        // keep the flag (card stays open). EXCEPTION: when the bridge's
+        // domain-typo corrector proposes a DIFFERENT value than the arbiter
+        // adopted (normalizedEmail below overwrites extracted.email), the
+        // question is NOT settled — the reasons stay so the card survives
+        // the conflicting correction.
+        if (dictationEmailPayload?.arbiter?.verdict === 'adopt'
+            && (!normalizedEmail || normalizedEmail === dictationEmailPayload.arbiter.chosen_value)) {
+          for (const settled of ['email_unverified', 'email_invalid']) {
+            const at = needsConfirmation.indexOf(settled);
+            if (at !== -1) needsConfirmation.splice(at, 1);
+          }
+        } else if (dictationEmailPayload
             && !needsConfirmation.includes('email_unverified')
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
@@ -2740,7 +5091,19 @@ const CallRecordingProcessor = {
         const { normalizedEmail: correctedEmail, needsConfirmation: emailReasons } = deriveEmailReview(extracted);
         // Same decoder-only fallback as the shadow branch: dictation evidence
         // with no extracted email must still open a read-back triage item.
-        if (dictationEmailPayload
+        // Same arbiter release as the shadow branch: a decisive adopt closed
+        // the question, and deriveEmailReview adds a read-back reason for
+        // every call-captured email unconditionally — remove the settled
+        // ones. Anything less than a decisive adopt keeps the card, and so
+        // does a domain-typo correction that would CHANGE the adopted value
+        // (the correction write below must never land unreviewed).
+        if (dictationEmailPayload?.arbiter?.verdict === 'adopt'
+            && (!correctedEmail || correctedEmail === dictationEmailPayload.arbiter.chosen_value)) {
+          for (const settled of ['email_unverified', 'email_invalid']) {
+            const at = emailReasons.indexOf(settled);
+            if (at !== -1) emailReasons.splice(at, 1);
+          }
+        } else if (dictationEmailPayload
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
@@ -2810,6 +5173,58 @@ const CallRecordingProcessor = {
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
     }
 
+    // Multi-property / quote / secondary-contact signals from the extractors.
+    // Resolved BEFORE the customer upsert (Step 3): the secondary-contact
+    // scrub below must run before extracted.email/phone are written onto the
+    // caller's record. Canonical writes only trust a V2 extraction that passed
+    // schema validation — a schema_failed payload is still stored raw for
+    // audit (ai_extraction_enriched, triage payloads) but must not drive
+    // customer/lead side effects.
+    const v2CanonicalExtraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
+    const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
+    const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
+      resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
+    const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
+    const callSecondaryContact = callSecondaryContacts[0] || null;
+    // Capture the caller's email BEFORE the secondary-contact scrub below clears
+    // it — payer linking (resolveCallBillingPayer) uses it to reject a billing
+    // party that is really the caller duplicated into a slot (self-pay "I'll
+    // pay"). After the scrub extracted.email can be null, defeating that guard.
+    const callerEmailPreScrub = extracted.email || null;
+
+    // Deterministic backstop for the exact chimera this feature exists to
+    // prevent: when the model leaves the SECOND person's email/phone in the
+    // caller's top-level fields too (the 2026-07-08 WDO call stored the
+    // buyer's email on the realtor's record), clear the caller-side copy
+    // BEFORE the upsert persists it. Email: the secondary owns it; the
+    // caller's email is simply unknown. Phone: only scrubbed when the ANI
+    // disagrees — extracted.phone legitimately equals the ANI on most calls,
+    // and resolveCallContactPhone falls back to the ANI once cleared.
+    //
+    // GATED on the same flag as the slot persistence: the booking validator's
+    // email requirement is satisfied by the slot email the gated persistence
+    // writes, so scrubbing WITHOUT persisting (gate off) would re-skip the
+    // exact realtor-books-for-buyer booking this feature targets as
+    // missing_required_customer_fields. Kill state = honest full revert to
+    // pre-feature behavior (chimera risk returns while the gate is off).
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && callSecondaryContacts.length) {
+      const scrubLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+      const aniLast10 = scrubLast10(call.from_phone);
+      for (const secondary of callSecondaryContacts) {
+        if (extracted.email && secondary.email
+            && String(extracted.email).toLowerCase() === String(secondary.email).toLowerCase()) {
+          extracted.email = null;
+          logger.info(`[call-proc] Scrubbed secondary contact's email off the caller fields for ${maskSid(callSid)}`);
+        }
+        if (extracted.phone && secondary.phone
+            && scrubLast10(extracted.phone) === scrubLast10(secondary.phone)
+            && aniLast10 && scrubLast10(extracted.phone) !== aniLast10) {
+          extracted.phone = null;
+          logger.info(`[call-proc] Scrubbed secondary contact's phone off the caller fields for ${maskSid(callSid)}`);
+        }
+      }
+    }
+
     // Step 3: Create or update customer
     let customerId = call.customer_id;
     const phone = resolveCallContactPhone(call, extracted.phone);
@@ -2834,11 +5249,27 @@ const CallRecordingProcessor = {
       }
     }
 
+    const sharedPhoneAmbiguity = {};
     if (!customerId && phone) {
       // Try to find an existing customer by the external contact phone.
-      // Name match wins; phone-only matching is allowed only when the number
-      // maps to a single active customer.
-      const existing = await findCustomerForCallContact(phone, extracted);
+      // Name match wins; phone-only matching needs a second deterministic
+      // signal (single owner / AV-address / household) — see the cascade.
+      const existing = await findCustomerForCallContact(phone, extracted, {
+        multiMatchOut: sharedPhoneAmbiguity,
+        callAddress: {
+          address_line1: extracted.address_line1,
+          address_line2: extracted.address_line2 || null,
+          city: extracted.city,
+          zip: extracted.zip,
+        },
+        // Keyed on the same effective (recovery-aware) verdict the routing
+        // gate consumes: when street recovery found a single validated
+        // premise, extracted already carries the recovered address, so the
+        // address-disambiguation leg must see it as decisive too — otherwise
+        // an agent-role slot caller about the recovered property minted a
+        // duplicate customer (codex round-10 P2).
+        avDecisive: ['validated_accept', 'corrected'].includes(effectiveAddressValidation?.status),
+      });
       if (existing) {
         customerId = existing.id;
         // Update with any new info
@@ -2852,6 +5283,27 @@ const CallRecordingProcessor = {
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
         }
+      } else if (sharedPhoneAmbiguity.candidates) {
+        // Shared phone, no deterministic tiebreak: minting ANOTHER customer
+        // on this number would make it permanently multi-match (the duplicate
+        // flywheel, audit #7). Keep the call customer-less — the workable-lead
+        // path below still captures the prospect — and open a blocking review
+        // card so the office attaches it to the right record (or a new one).
+        logger.warn(`[call-proc] Suppressing customer create for ${maskSid(callSid)}: shared phone matches ${sharedPhoneAmbiguity.shareCount} customers`);
+        await db('triage_items')
+          .insert(buildTriageItem({
+            callLogId: call.id,
+            flag: 'shared_phone_ambiguous',
+            extraction: v2CanonicalExtraction || undefined,
+            extraPayload: {
+              share_count: sharedPhoneAmbiguity.shareCount,
+              candidates: sharedPhoneAmbiguity.candidates,
+              extracted_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+            },
+          }))
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore()
+          .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
       } else if (extracted.first_name && phone && !extracted.is_voicemail) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -2942,20 +5394,6 @@ const CallRecordingProcessor = {
       }
     }
 
-    // Multi-property call: the extractors carry EVERY property discussed on the
-    // call (primary in the flat address fields, the rest in additional_properties).
-    // Quote signals ride the same extractions. Resolved once here — used by the
-    // advisory triage below, the customer_properties persistence, the lead
-    // enrichment, and the booking's lead-conversion decision.
-    // Canonical writes (property records, quote routing, lead enrichment) only
-    // trust a V2 extraction that passed schema validation — a schema_failed
-    // payload is still stored raw for audit (ai_extraction_enriched, triage
-    // payloads) but must not drive customer/lead side effects.
-    const v2CanonicalExtraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
-    const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
-    const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
-      resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
-
     // Advisory review signal for EVERY multi-property call (new customers
     // included — the returning-caller differs-check below can't see a brand-new
     // customer whose two addresses arrived on one call, which is exactly the
@@ -2974,6 +5412,35 @@ const CallRecordingProcessor = {
           .ignore();
       } catch (triageErr) {
         logger.warn(`[call-proc-bridge] multi-property triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    }
+
+    // Advisory review signal whenever a second person was named on the call
+    // (realtor's buyer, landlord's tenant): the extraction now retains their
+    // contact info, but the office should confirm it before relying on it —
+    // and when the persistence gate below is off, this triage item is the ONLY
+    // surface carrying the second contact besides the lead's extracted_data.
+    if (callSecondaryContact && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
+      bridgeNeedsConfirmation.push('secondary_contact_captured');
+      try {
+        const secondaryTriageItem = buildTriageItem({
+          callLogId: call.id,
+          flag: 'secondary_contact_captured',
+          extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+          severity: 'advisory',
+          extraPayload: { secondary_contact: callSecondaryContact },
+        });
+        // MERGE the payload (not ignore): in enforce mode the deterministic-
+        // flags loop inserts this flag first with the V2 extraction's contact,
+        // but persistence uses the RESOLVED contact (V1 on a V1/V2 identity
+        // conflict) — the open Needs Review row must show the person that was
+        // actually written to the slot, not a stale competing extraction.
+        await db('triage_items')
+          .insert(secondaryTriageItem)
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .merge({ payload: secondaryTriageItem.payload, updated_at: new Date() });
+      } catch (triageErr) {
+        logger.warn(`[call-proc-bridge] secondary-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
       }
     }
 
@@ -3164,6 +5631,41 @@ const CallRecordingProcessor = {
       }
     }
 
+    // Secondary-contact persistence (additive, gated, non-blocking). Runs
+    // BEFORE the appointment step so a booking made on this same call already
+    // fans its confirmation out to the new contact. Kill switch = unset the gate;
+    // the triage item + lead extracted_data still carry the contact either way.
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
+      // Every extracted party (up to 3), in notification-centrality order —
+      // each entry passes the SAME per-contact gates (wants_notifications,
+      // dedup, cross-customer, empty slot). Stop early when slots run out.
+      for (const secondaryEntry of callSecondaryContacts) {
+      try {
+        const result = await persistCallSecondaryContact(customerId, secondaryEntry);
+        logger.info(`[call-proc] secondary contact for ${maskSid(callSid)}: ${result}`);
+        if (result === 'skipped_phone_belongs_to_other_customer') {
+          // Distinct review card: the named contact's number is another
+          // customer's primary phone — the office decides whether it's the
+          // same household, a realtor's office line, or a mishear.
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'secondary_contact_is_existing_customer',
+              extraction: v2CanonicalExtraction || undefined,
+              extraPayload: { secondary_contact: secondaryEntry },
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore()
+            .catch((triageErr) => logger.warn(`[call-proc] secondary-collision triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+        }
+        if (result === 'skipped_slots_full') break;
+      } catch (e) {
+        // Code/name only — a DB error message can echo the contact's phone/email.
+        logger.warn(`[call-proc] secondary-contact write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+      }
+      }
+    }
+
     // Step 4: Update call log with extraction results.
     // Keep the row claimed as 'processing' while downstream side effects run.
     // The terminal status is written only after leads/estimates/scheduling have
@@ -3201,6 +5703,16 @@ const CallRecordingProcessor = {
     // because Step 3 already created the customer — attribution would find the customer
     // and skip lead creation (race condition).
     let leadId = null;
+    // The composed service_interest the enrichment pass actually wrote (null
+    // when it wrote nothing) — the V2 recurring-default backfill's ownership
+    // predicate must match THIS persisted value, not a label recomputed after
+    // the V2 merge has overwritten matched/requested (codex P1 07-15).
+    let persistedServiceInterestLabel = null;
+    // Just the "+ Family" tail of that label (never its primary): the backfill
+    // recompose may only carry SECONDARY families forward — reinjecting the
+    // whole label would resurrect a stale V1 primary the validated V2 merge
+    // corrected (codex P1 07-15).
+    let persistedServiceInterestExtras = null;
     let voicemailSmsResult = null;
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
@@ -3241,8 +5753,15 @@ const CallRecordingProcessor = {
         // for the per-path filters: soft-deleted excluded always; active-only
         // on the customer-less recovery path; unclaimed-or-ours on the
         // customer-attached path, so a shared-phone lead owned by another
-        // customer is never reused/overwritten).
-        const existingLead = await findReusableCallLead(db, { phone, customerId, workableUnnamedLead });
+        // customer is never reused/overwritten; UNCLAIMED-only when the phone
+        // is ambiguous across customers — this call must not enrich a lead
+        // one of the candidates owns while the office adjudicates).
+        const existingLead = await findReusableCallLead(db, {
+          phone,
+          customerId,
+          workableUnnamedLead,
+          unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
+        });
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -3392,7 +5911,13 @@ const CallRecordingProcessor = {
             isPaid: callAttr.isPaid,
             leadSourceDetail: leadSourceRow.name || 'inbound call',
             // service_interest isn't on the lead row yet (enrichment writes it
-            // later) — pass the extracted service so service-line ROI is right.
+            // later) — pass the PRIMARY matched service, NOT the composed
+            // multi-service label: attribution derives a single service_line
+            // via inferServiceLine, whose keyword order (lawn before pest)
+            // would bucket a pest-primary "… + Lawn Care Service" composite
+            // as lawn and skew paid/organic ROI (codex r3). The secondary
+            // families live on the lead's service_interest; the single-line
+            // funnel field carries the primary by design.
             serviceInterest: extracted.matched_service || extracted.requested_service || null,
             leadDate: call.created_at || null, // date by the actual call
           }).catch(() => {});
@@ -3413,7 +5938,105 @@ const CallRecordingProcessor = {
           if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
           if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
           if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
-          if (extracted.matched_service && isEmpty(current?.service_interest)) leadUpdates.service_interest = extracted.matched_service;
+          // Multi-service calls: matched_service is single-slot, so append the
+          // requested families it doesn't cover ("pest and lawn" must not
+          // price as pest-only). Fill-if-empty semantics unchanged.
+          // When the V2 gate approved this call, compose the extras from the
+          // V2-APPROVED service categories (primary + secondary_categories),
+          // mapped to scannable legacy service words: a V1-hallucinated
+          // family V2 rejected must not leak onto the lead label (codex r9),
+          // and flatView's requested_service is the raw primary category
+          // token ("pest_general"), which drops V2's secondaries and scans
+          // as nothing (codex r10). matched_service stays V1 here — the
+          // recurring-default backfill below re-asserts it post-merge.
+          const v2ServiceRequest = v2ApprovedExtraction?.service_request || null;
+          const v2RequestedForCompose = (() => {
+            if (!v2ServiceRequest) return null;
+            // composeWordsForV2Category, NOT mapServiceCategoryToLegacy: the
+            // legacy map collapses palm_injection into Tree & Shrub and
+            // hard-labels termite as inspection (codex r11).
+            let cats = [v2ServiceRequest.primary_service_category,
+              ...(Array.isArray(v2ServiceRequest.secondary_categories) ? v2ServiceRequest.secondary_categories : [])];
+            // A specialty catalog pick (flea/stinging/bed-bug) rides the
+            // coarse pest_general category in the V2 enum — the generic
+            // category word is the SAME job, not an extra pest request
+            // (codex r20).
+            const v2SpecificPick = flatView(v2ApprovedExtraction).specific_service_name;
+            if (v2SpecificPick && labelIsSpecialtyPestFamily(v2SpecificPick)) {
+              // Only the coarse category BACKING the specialty pick (the
+              // PRIMARY slot) is redundant — a separate pest_general
+              // SECONDARY is a real second request (codex r22).
+              cats = cats.filter((c, i) => !(i === 0 && (c === 'pest_general' || c === 'bundled_waveguard')));
+            }
+            // Null-mapped categories (other/inspection_only/future enums)
+            // yield an EMPTY category-authoritative request — never fall
+            // back to V1 caller text under V2 approval (codex r12)…
+            const words = cats.map((c) => composeWordsForV2Category(c)).filter(Boolean);
+            // …EXCEPT for families the V2 enum cannot express at all
+            // (tree/shrub, wildlife): those exist only in the caller text,
+            // so scan it for JUST them (codex r14 — closes the enum gap
+            // without reopening the V1-hallucination door).
+            const inexpressible = v2InexpressibleFamilyWords(extracted.requested_service);
+            return [words.join(' and '), inexpressible].filter(Boolean).join(' and ');
+          })();
+          // Prefix with the primary the V2 merge will adopt (same adoption
+          // rule as the merge below: V2 anchored a specific service, V1 had
+          // no label, or the category maps one-to-one) — a V1 primary V2
+          // rejected must not lead the label (codex r12).
+          const matchedForCompose = (() => {
+            if (v2ServiceRequest === null) return extracted.matched_service;
+            const v2Flat = flatView(v2ApprovedExtraction);
+            // A V2-anchored catalog pick IS the primary: "Palm Injection"
+            // must lead the label, not the coarse category mapping
+            // ("Tree & Shrub Care") that would then re-append the specific
+            // as a fake second service (codex r13).
+            if (v2Flat.specific_service_name) return v2Flat.specific_service_name;
+            const v2Cat = v2ServiceRequest.primary_service_category || null;
+            // Categories whose legacy mapping is null/coarse (stinging,
+            // exclusion) lead with their own family label — else a
+            // wasp-only call renders as two services (codex r15).
+            const catPrimary = v2PrimaryLabelForCategory(v2Cat);
+            if (catPrimary) return catPrimary;
+            // Termite category with no specific pick: flatView's coarse
+            // "Termite Inspection" would pair with the composed
+            // "+ Termite Service" as a phantom double — pick the single
+            // right primary from the caller's work cue (codex r22).
+            if (v2Cat === 'termite') {
+              return hasTermiteWorkCue(extracted.requested_service) ? 'Termite Service' : 'Termite Inspection';
+            }
+            const preciseV2Category = v2Cat === 'bed_bug' || v2Cat === 'wdo';
+            return v2Flat.matched_service
+              && (!extracted.matched_service || preciseV2Category)
+              ? v2Flat.matched_service
+              : extracted.matched_service;
+          })();
+          const serviceInterestLabel = composeServiceInterest(
+            v2ServiceRequest !== null
+              ? {
+                ...extracted,
+                matched_service: matchedForCompose,
+                requested_service: v2RequestedForCompose,
+                // Only the V2-ADOPTED specific may mark coverage — a stale
+                // V1 specific belonging to a secondary family (e.g. V1
+                // "Monthly Lawn Care Service" under V2 pest+lawn) would
+                // swallow that secondary's tail (codex r21).
+                specific_service_name: flatView(v2ApprovedExtraction).specific_service_name || null,
+              }
+              : extracted,
+            // Caller wording still decides termite work-vs-inspection —
+            // families stay category-authoritative under V2 approval.
+            v2ServiceRequest !== null ? { cueText: extracted.requested_service } : {},
+          );
+          if (serviceInterestLabel && isEmpty(current?.service_interest)) {
+            leadUpdates.service_interest = serviceInterestLabel;
+            persistedServiceInterestLabel = serviceInterestLabel;
+            // composeServiceInterest always prefixes the label with the
+            // matched service it composed with (matchedForCompose under V2
+            // approval), so the slice is exactly the extras.
+            persistedServiceInterestExtras = serviceInterestLabel === matchedForCompose
+              ? null
+              : serviceInterestLabel.slice(String(matchedForCompose || '').length);
+          }
           // Urgency is a triage signal, not a hand-edited field — and the
           // leads schema defaults it to 'normal' at insert (migration
           // 20260401000095_lead_attribution.js:43), so an empty-only guard
@@ -3468,6 +6091,7 @@ const CallRecordingProcessor = {
             ...(callQuoteRequested ? { quote_requested: true } : {}),
             ...(callQuotePromised ? { quote_promised: true } : {}),
             ...(callAdditionalProps.length ? { additional_properties: callAdditionalProps } : {}),
+            ...(callSecondaryContact ? { secondary_contact: callSecondaryContact } : {}),
           });
           // hot/warm AND complete contact. Spam was already early-returned.
           leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
@@ -3559,7 +6183,8 @@ const CallRecordingProcessor = {
           // as an admin notification with the deadline. Without this the
           // promise lives only in the recording and dies if nobody remembers
           // (this is exactly what happened on real multi-property quote calls).
-          if (callQuotePromised && enriched) {
+          if (callQuotePromised && enriched
+            && !(await quotePromisedAlreadyNotified(call.twilio_call_sid, { ignoreNoLead: true }))) {
             try {
               const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
                 .filter(Boolean)
@@ -3612,7 +6237,8 @@ const CallRecordingProcessor = {
     // lead-path notification above never fires for them, so the promise would
     // live only in the recording — the exact failure mode this notification
     // exists to prevent. Surface it at the customer level instead.
-    if (callQuotePromised && !leadId && !extracted.is_spam) {
+    if (callQuotePromised && !leadId && !extracted.is_spam
+      && !(await quotePromisedAlreadyNotified(call.twilio_call_sid))) {
       try {
         const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
           .filter(Boolean)
@@ -3637,6 +6263,29 @@ const CallRecordingProcessor = {
       } catch (notifyErr) {
         logger.warn(`[call-proc] quote-promised (no-lead) admin notify failed: ${notifyErr.message}`);
       }
+    }
+
+    // Estimator engine (GATE_ESTIMATOR_ENGINE, default OFF): quote-flavored
+    // calls get a priced DRAFT estimate composed from the transcript + SMS
+    // thread + profile + arbitrated property data. The generic quote-promised
+    // bell above already rang synchronously (the DURABLE owed-quote record);
+    // the engine upgrades that bell in place with the draft when it finishes.
+    // Non-blocking by contract — a drafting failure must never break call
+    // processing or eat the promise.
+    if (estimatorEngineOn() && !extracted.is_spam
+      && (callQuotePromised || callQuoteRequested)) {
+      // Fire-and-forget: the DEEP composer + property pipeline can take
+      // minutes, and the scheduling/confirmation work below must not wait on
+      // a drafting pass. The engine's own dedupe guards make re-entry safe
+      // and it degrades to the fallback notification on any failure.
+      const { maybeDraftEstimateForCall } = require('./estimator-engine');
+      maybeDraftEstimateForCall({ callLogId: call.id, quotePromised: callQuotePromised === true })
+        .then((engineOutcome) => {
+          logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
+        })
+        .catch((engineErr) => {
+          logger.error(`[call-proc] estimator engine failed (non-blocking): ${engineErr.message}`);
+        });
     }
 
     // A customer-less recovery lead is the ONLY durable record for this call, so
@@ -3669,11 +6318,25 @@ const CallRecordingProcessor = {
     // "YYYY-MM-DDTHH:MM" the legacy parser expects.
     if (v2ApprovedExtraction) {
       const v2Flat = flatView(v2ApprovedExtraction);
-      if (v2Flat.preferred_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.preferred_date_time)) {
-        extracted.preferred_date_time = v2Flat.preferred_date_time.slice(0, 16);
+      const v2WallClock = v2IsoToEtWallClock(v2Flat.preferred_date_time);
+      if (v2WallClock) {
+        extracted.preferred_date_time = v2WallClock;
       }
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
-      if (v2Flat.matched_service) extracted.matched_service = v2Flat.matched_service;
+      // flatView.matched_service is the coarse category→legacy map ("Termite
+      // Inspection" for every termite call). Overwriting V1's specific label
+      // with it downgraded e.g. a pre-slab soil-treatment booking to a plain
+      // inspection whenever the catalog didn't anchor the request. Adopt it
+      // when V2 anchored a catalog service (specific_service_name drives the
+      // booking then anyway), when V1 produced no label at all, or when the
+      // V2 category maps one-to-one to a concrete service (bed_bug/wdo) —
+      // those are more precise than any coarse V1 fallback (codex P2).
+      const v2Category = v2Flat.primary_service_category
+        || v2ApprovedExtraction?.service_request?.primary_service_category || null;
+      const preciseV2Category = v2Category === 'bed_bug' || v2Category === 'wdo';
+      if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)) {
+        extracted.matched_service = v2Flat.matched_service;
+      }
       if (v2Flat.requested_service) extracted.requested_service = v2Flat.requested_service;
       // Catalog-anchored booking fields: the gate validated this extraction, so
       // the booking must use ITS specific service / quoted price / follow-up
@@ -3688,12 +6351,70 @@ const CallRecordingProcessor = {
       // writes ran, and a V2 null/false must not clear a V1 quote promise the
       // office was already notified about.
       extracted.follow_up_visit_mentioned = v2Flat.follow_up_visit_mentioned === true;
-      extracted.follow_up_date_time = (v2Flat.follow_up_date_time && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v2Flat.follow_up_date_time))
-        ? v2Flat.follow_up_date_time.slice(0, 16)
-        : null;
+      extracted.follow_up_date_time = v2IsoToEtWallClock(v2Flat.follow_up_date_time);
       // (AV-normalized address was already written into `extracted` at the gate
       // approval branch above, before the customer/lead upsert — see there.)
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
+      // The V2 merge can restore a singular service — specific_service_name
+      // outranks matched_service in catalog booking, and the V2 prompt does
+      // not carry the recurring-interest rule (adding it would re-version the
+      // shadow prompt mid-promotion-cohort). Re-assert the owner rule over
+      // the merged fields; no-op when nothing singular survived.
+      const preReassertMatched = extracted.matched_service;
+      const preReassertSpecific = extracted.specific_service_name;
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      if (extracted.matched_service !== preReassertMatched
+        || extracted.specific_service_name !== preReassertSpecific) {
+        // ai_extraction and the lead's service_interest were persisted BEFORE
+        // this V2 merge ran — backfill them so pipeline reporting shows the
+        // same program the appointment books. Fail-open: booking proceeds
+        // on the in-memory value regardless.
+        try {
+          await db('call_log').where({ id: call.id }).update({
+            ai_extraction: JSON.stringify(extracted),
+            updated_at: new Date(),
+          });
+          if (leadId) {
+            // Mirror the enrichment path's conventions: fill-if-empty (plus
+            // the one value this run is known to have written — the
+            // pre-reassert AI pick) so an office-edited service_interest is
+            // never clobbered, AND the ownership predicate so a lead claimed
+            // by another customer between lookup and this write is left alone.
+            await db('leads')
+              .where({ id: leadId })
+              .where((qb) => {
+                qb.whereNull('customer_id');
+                if (customerId) qb.orWhere({ customer_id: customerId });
+              })
+              .where((qb) => {
+                qb.whereNull('service_interest').orWhere({ service_interest: '' });
+                if (preReassertMatched) qb.orWhere({ service_interest: preReassertMatched });
+                // Enrichment may have persisted a COMPOSED label (matched +
+                // uncovered requested families) from the pre-V2-merge
+                // extraction — match the exact value it wrote, not a label
+                // recomputed from the since-mutated fields.
+                if (persistedServiceInterestLabel && persistedServiceInterestLabel !== preReassertMatched) {
+                  qb.orWhere({ service_interest: persistedServiceInterestLabel });
+                }
+              })
+              .update({
+                // Recompose over BOTH the post-merge request and the SECONDARY
+                // families enrichment already persisted: the V2 merge can
+                // narrow requested_service to the primary category only, and a
+                // primary-only recompose here would erase those tails. Only
+                // the extras carry forward — never the pre-merge primary,
+                // which the validated V2 merge may have corrected.
+                service_interest: composeServiceInterest({
+                  ...extracted,
+                  requested_service: [persistedServiceInterestExtras, extracted.requested_service]
+                    .filter(Boolean).join(' '),
+                }) || extracted.matched_service,
+              });
+          }
+        } catch (bfErr) {
+          logger.warn(`[call-proc] recurring-default backfill failed open: ${bfErr.message}`);
+        }
+      }
     }
 
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
@@ -3708,25 +6429,78 @@ const CallRecordingProcessor = {
     // the booking. Also rescues catalog services whose names don't hit the
     // coarse canonicalWavesService buckets (every bookable service must be
     // bookable by phone). null -> legacy coarse-label behavior.
-    const callBookingCatalogRow = resolveCallBookingCatalogService({
+    let callBookingCatalogRow = resolveCallBookingCatalogService({
       extracted,
       transcription,
       services: bookableCallServices,
     });
+    // Never book a made-up service (owner directive 2026-07-10): service_type
+    // MUST be a real admin-catalog service. When the service was UNCLEAR
+    // (serviceResolution.noMatch — no coarse label AND no catalog match) OR it
+    // only resolved to the legacy generic "Waves Appointment" placeholder
+    // (ok:true but not a real catalog row, e.g. "come out Tuesday" with no
+    // service named), and fail-open is active, fall back to "Waves Assessment"
+    // (assess on-site) — a real catalog row, not an invented label. Gated so it
+    // NEVER fires on a hard veto (unsupported/out-of-scope call, admin-only),
+    // which returns ok:false WITHOUT noMatch and must stay un-bookable, and
+    // never overrides a service that DID resolve to a real specific service.
+    const resolvedGenericOnly = serviceResolution.ok
+      && serviceResolution.service === GENERIC_CALL_APPOINTMENT_SERVICE;
+    let genericBookingUnbookable = false;
+    if (!callBookingCatalogRow && (serviceResolution.noMatch === true || resolvedGenericOnly)
+        && isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {
+      const wavesAssessment = bookableCallServices.find((s) => /^waves assessment$/i.test(String(s.name || '')));
+      if (wavesAssessment) {
+        callBookingCatalogRow = wavesAssessment;
+        logger.info(`[call-proc] Service unclear for ${maskSid(callSid)} — booking as "Waves Assessment" (catalog fallback; assess on-site)`);
+      } else if (resolvedGenericOnly) {
+        // The fallback row is unavailable (catalog load failed, or the row is
+        // inactive / not booking-enabled). Booking would otherwise proceed on
+        // serviceResolution.ok with the made-up generic label and
+        // service_id=null — exactly what the real-catalog-service invariant
+        // forbids. Hold for review instead; the skip path files the
+        // auto_booking_skipped_after_approval card with this reason. (The
+        // noMatch case needs no flag: ok:false + no catalog row already
+        // can't book.)
+        genericBookingUnbookable = true;
+        logger.warn(`[call-proc] "Waves Assessment" fallback row unavailable for ${maskSid(callSid)} — holding generic booking for review`);
+      }
+    }
     // Use the module-level isOutboundCall(call) helper — a local `const
     // isOutboundCall` here shadows it for the WHOLE function scope, putting the
     // phantom-guard references above (Step 0) in the temporal dead zone:
     // "Cannot access 'isOutboundCall' before initialization" on every call that
     // reaches them with a pre-linked customer_id.
-    const canCreateAppointmentFromCall = !isOutboundCall(call)
+    // The Waves Assessment fallback (above) already set callBookingCatalogRow
+    // when the service was UNCLEAR (noMatch) under fail-open, so the existing
+    // (catalogRow && noMatch) branch books it. Hard vetoes (ok:false, no
+    // noMatch) never set a catalog row, so they stay un-bookable.
+    // Review-gated outbound-callback booking (GATE_CALL_OUTBOUND_BOOKING): a
+    // confirmed booking on an OUTBOUND call still creates the appointment — but
+    // PENDING/needs-review (status/consent/SMS handled below). It requires a
+    // REAL resolved service (a catalog row, or ok on a non-generic service):
+    // the Waves-Assessment generic fallback is inbound-only (see above), so an
+    // unclear/generic outbound call stays unbooked for the office.
+    const outboundReviewBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
+    const inboundCanCreate = !isOutboundCall(call)
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
+    // Outbound requires a REAL catalog row (never a coarse ok-label with
+    // service_id null) AND must respect a hard veto: resolveSchedulableCallService
+    // returns ok:false WITHOUT noMatch for an unsupported/admin-only call, and
+    // that must stay un-bookable even if a catalog keyword happened to match.
+    const outboundCanCreate = outboundReviewBooking
+      && !!callBookingCatalogRow
+      && (serviceResolution.ok || serviceResolution.noMatch === true);
+    const canCreateAppointmentFromCall = !genericBookingUnbookable
+      && (inboundCanCreate || outboundCanCreate);
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
         dateTime: extracted.preferred_date_time,
         scheduleCreated: false,
         smsSent: false,
-        skippedReason: isOutboundCall(call) ? 'outbound_call' : serviceResolution.reason,
+        skippedReason: isOutboundCall(call) ? 'outbound_call'
+          : (genericBookingUnbookable ? 'generic_service_fallback_unavailable' : serviceResolution.reason),
       };
       logger.info(
         `[call-proc] Skipping appointment auto-create for ${callSid}: ` +
@@ -3771,6 +6545,22 @@ const CallRecordingProcessor = {
               catalogRow: callBookingCatalogRow,
             });
             const smsPhone = customerValidation.details.phone;
+            // Implied-consent recipient scope: implied consent is PERSONAL to
+            // the caller. When it is the only clearance and the resolved
+            // customer phone differs from the inbound ANI (saved primary is a
+            // spouse/alternate/service-contact slot), the confirmation goes to
+            // the ANI — the number that called us and booked — never to a
+            // non-consenting third party, and not held either: the caller DID
+            // consent by calling. Held only when the ANI itself is undialable.
+            const smsLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+            const smsTargetIsInboundAni = smsLast10(smsPhone).length === 10
+              && smsLast10(smsPhone) === smsLast10(contactPhone);
+            const redirectImpliedToAni = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni
+              && smsLast10(contactPhone).length === 10;
+            const smsRecipient = redirectImpliedToAni ? contactPhone : smsPhone;
+            if (redirectImpliedToAni) {
+              logger.info(`[call-proc] Implied-consent confirmation for ${maskSid(callSid)} goes to the inbound caller's number (resolved customer phone differs)`);
+            }
 
           // Use SMS template if available, fall back to inline
           let smsBody;
@@ -3786,7 +6576,8 @@ const CallRecordingProcessor = {
               const dateMatch = extracted.preferred_date_time.match(/(\w+day,?\s+\w+\s+\d+|\w+\s+\d+)/);
               const timeMatch = extracted.preferred_date_time.match(/(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))/);
               parsedDate = dateMatch ? dateMatch[1] : extracted.preferred_date_time;
-              parsedTime = timeMatch ? timeMatch[1] : '';
+              parsedTime = timeMatch ? timeMatch[1]
+                : (/\b(noon|midday)\b/i.test(extracted.preferred_date_time) ? '12:00 PM' : '');
             }
           } catch { parsedDate = extracted.preferred_date_time; }
 
@@ -3813,8 +6604,11 @@ const CallRecordingProcessor = {
           // fire an identical confirmation that the customer just got.
           let alreadySent = false;
           try {
+            // Dedupe against the ACTUAL recipient (smsRecipient) — an
+            // implied-consent send redirected to the ANI must be found here
+            // on a reprocess/retry, or the caller gets the same text twice.
             const existing = await db('sms_log')
-              .where({ to_phone: smsPhone, message_type: 'confirmation' })
+              .where({ to_phone: smsRecipient, message_type: 'confirmation' })
               .where('message_body', smsBody)
               .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
               .first();
@@ -3861,7 +6655,31 @@ const CallRecordingProcessor = {
                 if (t.includes('pm') && h < 12) h += 12;
                 if (t.includes('am') && h === 12) h = 0;
                 windowStart = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+              } else if (/\b(noon|midday)\b/i.test(extracted.preferred_date_time)) {
+                // hasSpecificTime accepts "noon"/"midday" but the am/pm regex
+                // above can't parse them — they used to fall through to the
+                // silent 09:00 default below.
+                windowStart = '12:00';
+              } else {
+                const t24 = extracted.preferred_date_time.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+                if (t24) windowStart = `${String(Number(t24[1])).padStart(2, '0')}:${t24[2]}`;
               }
+            }
+
+            // A "specific time required" path must never book a DEFAULT time.
+            // If no time parsed, hold for review instead of silently booking
+            // 09:00 (and texting the customer a confirmation with a blank
+            // time) for a caller who agreed to noon.
+            if (scheduledDate && !windowStart) {
+              logger.warn(`[call-proc] Could not parse a time from: ${extracted.preferred_date_time}; holding booking instead of defaulting 09:00`);
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'unparseable_time',
+              };
+              scheduledDate = null;
             }
 
             const callDateET = etDateString(call.created_at || new Date());
@@ -3901,6 +6719,25 @@ const CallRecordingProcessor = {
                 parentWindowStart: windowStart || '09:00',
               });
               let reusedExistingSchedule = false;
+              // Set when the call was ATTACHED to a live booking made by a
+              // human through another channel (see the attach guard below):
+              // the id drives the distinct log line, and the skipped-plan
+              // flag surfaces the promised-but-not-auto-booked visit 2 as an
+              // advisory review card after commit.
+              let attachedManualBookingId = null;
+              let attachSkippedFollowUpPlan = false;
+              // Resolve the Bill-To payer once, before the transaction (it's a
+              // reusable find-or-create keyed on AP email, independent of the
+              // booking's atomicity), for the fresh insert + fresh follow-up
+              // child to stamp. Reused rows are left as-is (see the note below).
+              const v2CallerForPayer = v2CanonicalExtraction?.caller || {};
+              const callBookingPayerId = await resolveCallBillingPayer(
+                callSecondaryContacts, v2CanonicalExtraction,
+                {
+                  emails: [callerEmailPreScrub, extracted.email, v2CallerForPayer.email],
+                  phones: [contactPhone, extracted.phone, v2CallerForPayer.phone_e164, v2CallerForPayer.phone_raw_spoken],
+                },
+              );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
@@ -3963,7 +6800,26 @@ const CallRecordingProcessor = {
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
+                          // Mirror the primary's Bill-To onto the follow-up: an
+                          // unpriced follow-up is billed at completion, and
+                          // without this PayerService.resolveForInvoice would
+                          // fall back to customer.payer_id/self-pay and send the
+                          // second visit's invoice to the homeowner instead of
+                          // the named payer. Always matches the parent (a fresh
+                          // primary already carries callBookingPayerId here).
+                          payer_id: primaryRow.payer_id || null,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
+                          // Visit 2 treats the same property as visit 1 —
+                          // coordinates included, or the stamped child would
+                          // render the right address with no map pin.
+                          property_id: primaryRow.property_id || null,
+                          lat: primaryRow.lat ?? null,
+                          lng: primaryRow.lng ?? null,
+                          service_address_line1: primaryRow.service_address_line1 || null,
+                          service_address_line2: primaryRow.service_address_line2 || null,
+                          service_address_city: primaryRow.service_address_city || null,
+                          service_address_state: primaryRow.service_address_state || null,
+                          service_address_zip: primaryRow.service_address_zip || null,
                           scheduled_date: fuPlan.scheduledDate,
                           window_start: fuStart,
                           window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
@@ -3987,7 +6843,7 @@ const CallRecordingProcessor = {
                           // semantics of its own.
                           ...callFollowUpBillingShape(priceInfo.price),
                           followup_source_service_id: primaryRow.id,
-                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
+                          estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                           // Customer-safe only: once dispatch confirms this row
                           // the portal filter no longer hides it and
                           // GET /api/schedule returns notes verbatim. The
@@ -4037,8 +6893,16 @@ const CallRecordingProcessor = {
                 });
                 if (existing) {
                   reusedExistingSchedule = true;
+                  // An ATTACHED human booking resurfacing through the linked
+                  // (source_call_log_id) lookup keeps its attach semantics on
+                  // reprocess (Codex #2771 r5): no AI follow-up child on a
+                  // human's booking — a manually planned visit 2 is a
+                  // standalone parent row the child-dedup guard can't see.
+                  // Fresh AI inserts always carry booking_source
+                  // 'phone_call', so anything else came from the attach path.
+                  const isAttachedManualBooking = String(existing.booking_source || '') !== 'phone_call';
                   let primaryRow = existing;
-                  if (!existing.technician_id && defaultTechnicianId) {
+                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId) {
                     const [updatedExisting] = await trx('scheduled_services')
                       .where({ id: existing.id })
                       .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
@@ -4050,20 +6914,190 @@ const CallRecordingProcessor = {
                   // conversion failure) must not strand the lead as open. The
                   // helper's won/duplicate + ownership guards make this a no-op
                   // when the lead already converted.
-                  await convertCallLeadOnPhoneBooking(trx, {
-                    leadId,
-                    customerId,
-                    scheduledServiceId: primaryRow.id,
-                    callSid,
-                    keepOpenForQuote: callQuotePromised,
-                  });
-                  // After the backfill so the child inherits the assigned tech.
-                  followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  // Don't convert the lead for a pending outbound-review booking
+                  // (same as the fresh-insert path) — it closes from the office
+                  // confirmation, not a reused/reprocessed pending row.
+                  if (!outboundReviewBooking) {
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
+                      scheduledServiceId: primaryRow.id,
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
+                    });
+                  }
+                  if (isAttachedManualBooking) {
+                    attachedManualBookingId = primaryRow.id;
+                    attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  } else {
+                    // After the backfill so the child inherits the assigned tech.
+                    followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  }
                   return primaryRow;
                 }
+                // Which property is this visit FOR? Resolved BEFORE the
+                // attach guard (Codex #2771): attach evidence needs the
+                // call's own property linkage, and the fresh-insert path
+                // below stamps the same resolution so dispatch and the tech
+                // portal render the booked property, not the customer's
+                // primary mirror (a rental booking used to dispatch to the
+                // customer's home).
+                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {
+                  ...extracted,
+                  // flatView historically dropped street_line_2; a condo unit
+                  // must survive into the stamp/key (codex P2).
+                  address_line2: extracted.address_line2
+                    || v2ApprovedExtraction?.property?.service_address?.street_line_2
+                    || v2CanonicalExtraction?.property?.service_address?.street_line_2
+                    || null,
+                }, trx);
+                // findExistingCallAppointment only sees THIS call's rows —
+                // a visit booked through ANY other channel (a human in the
+                // portal mid-call, online self-booking) is invisible to it,
+                // and a customer merely re-confirming such a visit ("still
+                // on for Tuesday at 10?") would re-book it here, with
+                // duplicate reminders and a second confirmation SMS. The AI
+                // never books over a human: exactly one live row with the
+                // same service line within ±1 day AND agreeing property
+                // evidence → ATTACH the call to it (source_call_log_id
+                // makes the linkage durable — a reprocess finds it via the
+                // linked lookup) instead of inserting; several plausible
+                // rows → hold for human review; a property mismatch falls
+                // through (a different property's visit is not a duplicate).
+                const attachable = await findAttachableCallAppointment({
+                  customerId, scheduledDate, serviceType, trx,
+                });
+                const attachMatch = attachable.row && attachCandidateMatchesProperty(attachable.row, propertyLinkage)
+                  ? attachable.row
+                  : null;
+                if (attachMatch
+                  && (attachMatch.status !== 'confirmed'
+                    || !attachCandidateSlotAgrees(attachMatch, { scheduledDate, windowStart }))) {
+                  // Hold for human review instead of attaching when the
+                  // match is a PENDING office hold (Codex #2771 r3 —
+                  // attaching would mark the call handled while the visit
+                  // stays unconfirmed and unarmed) or when the requested
+                  // SLOT disagrees (r9 — a neighbor-day or different-time
+                  // row may be a separate visit the customer is adding, and
+                  // silently attaching would lose the new booking; a same
+                  // date+window match is a re-confirmation, anything else
+                  // is a human's call).
+                  return {
+                    __held: {
+                      reason: 'ambiguous_existing_appointment',
+                      existingId: attachMatch.id,
+                      existingStatus: attachMatch.status,
+                      existingService: attachMatch.service_type,
+                    },
+                  };
+                }
+                if (attachMatch) {
+                  const attachNote = `Attached from phone call — Call SID: ${callSid}.`;
+                  // Claim-based attach (Codex #2771): two concurrent calls
+                  // can both read this row while source_call_log_id is still
+                  // NULL — the guarded update lets exactly one win; the
+                  // loser holds for human review instead of hijacking the
+                  // winner's linkage.
+                  const [stamped] = await trx('scheduled_services')
+                    .where({ id: attachable.row.id })
+                    .whereNull('source_call_log_id')
+                    .update({
+                      source_call_log_id: call.id,
+                      // JobDrawer-only: notes is customer-visible verbatim
+                      // (GET /api/schedule), so the linkage cue stays out of it.
+                      internal_notes: attachable.row.internal_notes
+                        ? `${attachable.row.internal_notes} ${attachNote}`
+                        : attachNote,
+                      updated_at: new Date(),
+                    })
+                    .returning('*');
+                  if (!stamped) {
+                    return {
+                      __held: {
+                        reason: 'ambiguous_existing_appointment',
+                        existingId: attachable.row.id,
+                        existingStatus: attachable.row.status,
+                        existingService: attachable.row.service_type,
+                      },
+                    };
+                  }
+                  reusedExistingSchedule = true;
+                  attachedManualBookingId = attachable.row.id;
+                  attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  const primaryRow = stamped;
+                  // The deal still closed — same idempotent, ownership-guarded
+                  // conversion as the reuse path above, same outbound-review
+                  // exception (that lead closes from the office confirmation).
+                  if (!outboundReviewBooking) {
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
+                      scheduledServiceId: primaryRow.id,
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
+                    });
+                  }
+                  // Deliberately NO ensureCallFollowUpVisit on an attached
+                  // human booking: a manually planned visit 2 is a standalone
+                  // parent row the child-dedup guard can't see, so an AI
+                  // child here risks exactly the double-booking this guard
+                  // exists to prevent. A promised visit 2 surfaces as an
+                  // advisory review card instead (post-commit below).
+                  return primaryRow;
+                }
+                if (attachable.ambiguous.length) {
+                  return {
+                    __held: {
+                      reason: 'ambiguous_existing_appointment',
+                      existingId: attachable.ambiguous[0].id,
+                      existingStatus: attachable.ambiguous[0].status,
+                      existingService: attachable.ambiguous[0].service_type,
+                      existingIds: attachable.ambiguous.map((r) => r.id),
+                    },
+                  };
+                }
+                // Any live same-day parent visit for this customer that the
+                // attach guard did not claim (different service line, or an
+                // excluded shape like another call's booking) still means a
+                // human decides: hold instead of inserting a duplicate. (A
+                // genuine second same-day visit is rare enough that one
+                // review card beats a phantom double-dispatch.)
+                const sameDayExisting = await trx('scheduled_services')
+                  .where({ customer_id: customerId })
+                  .whereNull('parent_service_id')
+                  .where('scheduled_date', scheduledDate)
+                  // completed is excluded: a morning job already done must not
+                  // block booking a second visit later the same day (codex P2).
+                  .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped', 'completed'])
+                  .orderBy('created_at', 'asc')
+                  .first();
+                if (sameDayExisting) {
+                  return {
+                    __held: {
+                      reason: 'existing_appointment_same_date',
+                      existingId: sameDayExisting.id,
+                      existingStatus: sameDayExisting.status,
+                      existingService: sameDayExisting.service_type,
+                    },
+                  };
+                }
+                // Bill-To linkage (callBookingPayerId resolved above, before the
+                // transaction): stamp payer_id (per-job) so the completion
+                // invoice routes to the payer. (propertyLinkage resolved above,
+                // before the attach guard.)
                 const insertData = {
                   customer_id: customerId,
+                  payer_id: callBookingPayerId || null,
                   technician_id: defaultTechnicianId,
+                  property_id: propertyLinkage.propertyId,
+                  ...(propertyLinkage.lat != null && propertyLinkage.lng != null
+                    ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
+                    : {}),
+                  service_address_line1: propertyLinkage.address?.line1 || null,
+                  service_address_line2: propertyLinkage.address?.line2 || null,
+                  service_address_city: propertyLinkage.address?.city || null,
+                  service_address_state: propertyLinkage.address?.state || null,
+                  service_address_zip: propertyLinkage.address?.zip || null,
                   scheduled_date: scheduledDate,
                   window_start: windowStart || '09:00',
                   window_end: windowEnd || '10:00',
@@ -4075,11 +7109,17 @@ const CallRecordingProcessor = {
                     price: priceInfo.price,
                     catalogRow: callBookingCatalogRow,
                   }),
-                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || null,
-                  status: 'confirmed',
-                  customer_confirmed: true,
-                  confirmed_at: new Date(),
+                  estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                  // Outbound-callback bookings land PENDING/needs-review (the
+                  // office confirms in dispatch, which arms reminders); inbound
+                  // confirmed bookings auto-confirm as before.
+                  status: outboundReviewBooking ? 'pending' : 'confirmed',
+                  customer_confirmed: !outboundReviewBooking,
+                  ...(outboundReviewBooking ? {} : { confirmed_at: new Date() }),
                   notes: [
+                    // Customer-visible (GET /api/schedule returns notes verbatim):
+                    // keep it customer-safe. The office review cue lives in
+                    // internal_notes below.
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
@@ -4093,6 +7133,9 @@ const CallRecordingProcessor = {
                   // so the catalog-vs-quote review cue lives in internal_notes
                   // (surfaced in the dispatch JobDrawer), never in notes.
                   internal_notes: [
+                    outboundReviewBooking
+                      ? 'Outbound callback — CONFIRM with customer before dispatch (pending review).'
+                      : null,
                     (priceInfo.source === 'transcript'
                       && callBookingCatalogRow
                       && Number(callBookingCatalogRow.base_price) > 0
@@ -4113,7 +7156,11 @@ const CallRecordingProcessor = {
                   ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
-                  source_action: 'ai_call_pipeline',
+                  // Distinct marker for a pending outbound-review booking so the
+                  // customer self-service routes (schedule.js) hide/refuse it
+                  // until the office confirms — same dispatch-owned treatment as
+                  // a call follow-up.
+                  source_action: outboundReviewBooking ? CALL_OUTBOUND_REVIEW_SOURCE_ACTION : 'ai_call_pipeline',
                   idempotency_key: computeAppointmentIdempotencyKey({
                     callLogId: call.id,
                     schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
@@ -4128,19 +7175,44 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
-                  // A phone-booked appointment is the deal closing — convert the
-                  // call's lead to won in the SAME transaction (mirrors the
-                  // admin-leads schedule-appointment route), so the conversion
-                  // can't commit without the appointment row. Every other booking
-                  // path already converts; this one silently didn't, stranding
-                  // phone-booked callers as `new` in the pipeline.
-                  await convertCallLeadOnPhoneBooking(trx, {
-                    leadId,
-                    customerId,
-                    scheduledServiceId: created.id,
-                    callSid,
-                    keepOpenForQuote: callQuotePromised,
-                  });
+                  if (outboundReviewBooking) {
+                    // A pending outbound-callback booking is NOT a closed deal
+                    // yet — the office confirms it first. Do NOT convert the lead
+                    // to won (that would show a phantom closed sale in pipeline/
+                    // conversion metrics that reverts if staff reject the review).
+                    // The lead closes from the office confirmation path instead.
+                    // Surface the pending booking for that review — and carry
+                    // the ORIGINATING lead id (+ the booking-time quote flag)
+                    // on the card: the booking can reuse an existing unclaimed
+                    // phone lead that never gets customer_id stamped, so the
+                    // confirm hook's customer_id lookup alone would miss it.
+                    await trx('triage_items')
+                      .insert(buildTriageItem({
+                        callLogId: call.id,
+                        flag: 'outbound_booking_review',
+                        extraction: v2ApprovedExtraction || extracted,
+                        severity: 'advisory',
+                        extraPayload: {
+                          lead_id: leadId || null,
+                          keep_open_for_quote: !!callQuotePromised,
+                        },
+                      }))
+                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+                  } else {
+                    // A phone-booked appointment is the deal closing — convert the
+                    // call's lead to won in the SAME transaction (mirrors the
+                    // admin-leads schedule-appointment route), so the conversion
+                    // can't commit without the appointment row. Every other booking
+                    // path already converts; this one silently didn't, stranding
+                    // phone-booked callers as `new` in the pipeline.
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
+                      scheduledServiceId: created.id,
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
+                    });
+                  }
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
                 }
@@ -4149,18 +7221,37 @@ const CallRecordingProcessor = {
                 const existingByKey = await trx('scheduled_services')
                   .where({ idempotency_key: insertData.idempotency_key })
                   .first();
+                if (existingByKey && ['cancelled', 'rescheduled'].includes(existingByKey.status)) {
+                  // The office cancelled this exact auto-booking. Silently
+                  // "reusing" the cancelled row resurrected it (lead converted
+                  // + follow-up ensured off a dead visit), and re-inserting
+                  // would need a salted key — which re-opens the true
+                  // double-insert risk the key exists to close. A human books
+                  // it by hand if it's real.
+                  return {
+                    __held: {
+                      reason: 'auto_booking_previously_cancelled',
+                      existingId: existingByKey.id,
+                      existingStatus: existingByKey.status,
+                    },
+                  };
+                }
                 if (existingByKey) {
                   reusedExistingSchedule = true;
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
                   // Same as the reuse path above: the appointment exists, so
-                  // the lead must still convert (idempotent, ownership-guarded).
-                  await convertCallLeadOnPhoneBooking(trx, {
-                    leadId,
-                    customerId,
-                    scheduledServiceId: existingByKey.id,
-                    callSid,
-                    keepOpenForQuote: callQuotePromised,
-                  });
+                  // the lead must still convert (idempotent, ownership-guarded) —
+                  // unless this is a pending outbound-review booking, which closes
+                  // its lead from the office confirmation path, not here.
+                  if (!outboundReviewBooking) {
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
+                      scheduledServiceId: existingByKey.id,
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
+                    });
+                  }
                   // This is exactly the retry whose first attempt may have
                   // lost the savepointed follow-up insert — ensure visit 2.
                   followUpCreated = await ensureCallFollowUpVisit(existingByKey);
@@ -4168,14 +7259,67 @@ const CallRecordingProcessor = {
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
               });
+              if (svc && svc.__held) {
+                // Booking held for human review (same-day duplicate or a
+                // previously-cancelled auto-booking). No schedule row, no SMS,
+                // no side effects. The review card is inserted HERE — not only
+                // in the enforce-gated consolidated block below — because the
+                // hold also fires in shadow/legacy mode, where a silent hold
+                // would otherwise vanish (codex P2).
+                appointmentResult = {
+                  service: serviceType,
+                  dateTime: extracted.preferred_date_time,
+                  scheduleCreated: false,
+                  smsSent: false,
+                  skippedReason: svc.__held.reason,
+                  existingScheduledServiceId: svc.__held.existingId || null,
+                };
+                logger.warn(`[call-proc] Held auto-booking for ${callSid}: ${svc.__held.reason} (existing ${svc.__held.existingId || 'n/a'}, status ${svc.__held.existingStatus || 'n/a'})`);
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag: svc.__held.reason,
+                    extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                    extraPayload: {
+                      existing_scheduled_service_id: svc.__held.existingId || null,
+                      // Ambiguous-attach holds carry EVERY plausible row so the
+                      // review card shows the full choice, not just the oldest.
+                      existing_scheduled_service_ids: svc.__held.existingIds || null,
+                      existing_status: svc.__held.existingStatus || null,
+                      existing_service: svc.__held.existingService || null,
+                      preferred_date_time: extracted.preferred_date_time || null,
+                      service: serviceType || null,
+                    },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore()
+                  .catch((triageErr) => logger.warn(`[call-proc] held-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+              } else {
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
-                logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
+                if (attachedManualBookingId) {
+                  logger.info(`[call-proc] Attached call ${callSid} to existing ${svc.booking_source || 'manually created'} booking ${svc.id}; not creating duplicate`);
+                } else {
+                  logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
+                }
               }
               scheduledServiceId = svc.id;
+              // NOTE: payer_id is stamped only on FRESH bookings (insert +
+              // fresh follow-up child). Retroactively backfilling the Bill-To on
+              // a REUSED/pre-gate row is intentionally out of scope here — it
+              // entangles invoice consistency (Charge-Now pre-completion invoices,
+              // completed-visit self-pay invoices, existing follow-up children)
+              // that a booking-time stamp can't safely reconcile. Those one-off
+              // rows are corrected by the office (or a dedicated backfill).
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
-              if (!scheduleWasReused) {
+              if (!scheduleWasReused && outboundReviewBooking) {
+                // A pending outbound booking must NOT arm reminders yet — the
+                // reminder cron doesn't skip 'pending', so this would text the
+                // customer before the office confirms. Reminders are armed at
+                // the office-confirm transition (admin-schedule) instead.
+                logger.info(`[call-proc] Outbound review booking ${svc.id} PENDING — reminders armed on office confirm`);
+              } else if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
@@ -4185,23 +7329,97 @@ const CallRecordingProcessor = {
                   serviceType: svc.service_type,
                 });
               }
+              if (!svc.technician_id) {
+                // A confirmed, customer-notified booking assigned to NOBODY
+                // used to be invisible (log line only) — surface it so the
+                // visit can't slip off the dispatch board.
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag: 'unassigned_auto_booking',
+                    extraction: v2ApprovedExtraction || undefined,
+                    severity: 'advisory',
+                    extraPayload: { scheduled_service_id: svc.id, scheduled_date: scheduledDate, service: svc.service_type },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore()
+                  .catch((triageErr) => logger.warn(`[call-proc] unassigned-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+              }
+              if (attachedManualBookingId && attachSkippedFollowUpPlan) {
+                // The call promised a follow-up treatment, but the primary is
+                // a human's booking so no AI child was created (a manually
+                // planned visit 2 would be a standalone row the child-dedup
+                // guard can't see). Surface it — visit 2 is booked by hand.
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag: 'attached_booking_followup_unbooked',
+                    extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                    severity: 'advisory',
+                    extraPayload: {
+                      scheduled_service_id: svc.id,
+                      scheduled_date: svc.scheduled_date || null,
+                      service: svc.service_type || null,
+                    },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore()
+                  .catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+              }
+              }
               if (followUpCreated) {
                 // Intentionally NO registerScheduleSideEffects here: the
                 // follow-up is pending and must not message the customer.
                 logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); pending, no customer comms until confirmed`);
               }
 
-            } else {
+            } else if (!appointmentResult) {
               logger.warn(`[call-proc] Could not parse date from: ${extracted.preferred_date_time}; skipping schedule + SMS`);
-              appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false };
+              appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleCreated: false, smsSent: false, skippedReason: 'unparseable_date' };
             }
           } catch (schedErr) {
             logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
             appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
           }
 
-          // Only send the confirmation SMS if the schedule row landed and TCPA gate allows it.
-          if (scheduledServiceId && v2SmsBlocked) {
+          // SMS cleared ONLY by IMPLIED inbound consent, the resolved target
+          // isn't the caller's own number, AND the ANI itself is undialable —
+          // there is no consented SMS recipient. Hold the SMS LEG ONLY: the
+          // TCPA gate still allowed email, and deliverConfirmationByChannel
+          // below is the sole reader of the email/both confirmation
+          // preference, so the send path must still run with the SMS attempt
+          // suppressed. The office confirms the number via the review card.
+          // (A dialable ANI redirects to the caller instead — see
+          // smsRecipient. Sends cleared by explicit sms_consent_given or by
+          // the legacy V2-off path go to the resolved customer phone.)
+          const holdImpliedSmsLeg = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni;
+          if (scheduledServiceId && !v2SmsBlocked && holdImpliedSmsLeg) {
+            logger.info(`[call-proc] Holding confirmation SMS leg for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable (email leg unaffected)`);
+            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
+            // The appointment BOOKED with no confirmation TEXT and the number
+            // needs confirming — that must reach the Needs Review inbox (the
+            // approved-but-unbooked card below is skipped because the
+            // schedule row exists).
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'implied_consent_non_ani_recipient',
+                extraction: v2ApprovedExtraction || undefined,
+                severity: 'advisory',
+                extraPayload: { scheduled_service_id: scheduledServiceId, confirmation_sms_sent: false },
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore()
+              .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
+          }
+          // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
+          if (scheduledServiceId && outboundReviewBooking) {
+            // Pending outbound booking — never auto-text a "confirmed" appt the
+            // customer hasn't been re-confirmed on. Keep scheduledServiceId so
+            // the downstream audit doesn't treat this as a skipped booking.
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound booking pending office review`);
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
+          } else if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
@@ -4240,20 +7458,26 @@ const CallRecordingProcessor = {
                 serviceLabel: serviceType,
                 smsAttempt: async () => {
                   smsRan = true;
-                  const sendResult = await sendCustomerMessage({
-                    to: smsPhone,
-                    body: smsBody,
-                    channel: 'sms',
-                    audience: 'customer',
-                    purpose: 'appointment_confirmation',
-                    customerId,
-                    appointmentId: scheduledServiceId,
-                    identityTrustLevel: 'phone_matches_customer',
-                    metadata: {
-                      original_message_type: 'confirmation',
-                    },
-                  });
-                  if (sendResult.blocked || sendResult.sent === false) {
+                  // SMS leg held (implied consent, no consented recipient):
+                  // skip only the primary text — the channel email leg and
+                  // the gated fan-out/email-only legs below still run.
+                  const sendResult = holdImpliedSmsLeg
+                    ? { sent: false, blocked: true, code: 'implied_consent_non_ani_recipient' }
+                    : await sendCustomerMessage({
+                      to: smsRecipient,
+                      body: smsBody,
+                      channel: 'sms',
+                      audience: 'customer',
+                      purpose: 'appointment_confirmation',
+                      customerId,
+                      appointmentId: scheduledServiceId,
+                      identityTrustLevel: 'phone_matches_customer',
+                      metadata: {
+                        original_message_type: 'confirmation',
+                      },
+                    });
+                  const primaryOk = !(sendResult.blocked || sendResult.sent === false);
+                  if (!primaryOk) {
                     logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
                     appointmentResult = {
                       smsSent: false,
@@ -4265,11 +7489,113 @@ const CallRecordingProcessor = {
                       scheduledDate: scheduledDateForLog,
                       windowStart: windowStartForLog,
                     };
-                    return false;
+                  } else {
+                    logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
+                    appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
                   }
-                  logger.info(`[call-proc] Appointment SMS sent to customer ${customerId}`);
-                  appointmentResult = { smsSent: true, scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog };
-                  return true;
+                  // Gated fan-out to the OTHER appointment contacts: the same
+                  // call may have named a second notification recipient (just
+                  // persisted into a service-contact slot above) — without
+                  // this, the buyer/tenant gets later reminders and en-route
+                  // texts but misses the initial booking confirmation. Uses
+                  // the same contact resolution as the admin confirmation path
+                  // (getAppointmentContacts) and re-renders the template per
+                  // contact so the greeting carries THEIR name, not the
+                  // caller's. Runs REGARDLESS of the primary send's outcome —
+                  // a landline/bad primary number must not strand the
+                  // buyer/tenant whose slot was just written for this purpose —
+                  // and non-blocking: a fan-out failure never voids a primary
+                  // confirmation that already went out.
+                  // The SMS legs require EXPLICIT sms_consent_given: implied
+                  // inbound consent is personal to the caller and never
+                  // authorizes texting a separate service-contact recipient
+                  // (buyer/tenant/realtor). The email-only leg below sends no
+                  // SMS, so it is NOT gated on SMS consent — only on the
+                  // confirmation opt-out and the do-not-contact email block.
+                  if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true') {
+                    try {
+                      const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
+                      const freshCustomer = await db('customers').where({ id: customerId }).first();
+                      const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
+                      const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+                      const extraContacts = !v2SmsConsentExplicit ? [] : getAppointmentContacts(freshCustomer || {}, prefsRow)
+                        .filter((c) => c.phone && fanLast10(c.phone) !== fanLast10(smsPhone));
+                      for (const contact of extraContacts) {
+                        const contactBody = await renderSmsTemplate('appointment_confirmation', {
+                          first_name: String(contact.name || '').trim().split(/\s+/)[0] || firstName,
+                          service_type: serviceType,
+                          date_time: extracted.preferred_date_time,
+                          date: parsedDate,
+                          time: parsedTime,
+                          reschedule_line: '',
+                        }, {
+                          workflow: 'call_booking_confirmation',
+                          entity_type: 'customer',
+                          entity_id: customerId,
+                        });
+                        if (!contactBody) continue;
+                        // Same content-level dedup as the primary send: don't
+                        // re-fire an identical confirmation on a reprocess.
+                        const recentDup = await db('sms_log')
+                          .where({ to_phone: contact.phone, message_type: 'confirmation' })
+                          .where('message_body', contactBody)
+                          .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
+                          .first()
+                          .catch(() => null);
+                        if (recentDup) continue;
+                        await sendCustomerMessage({
+                          to: contact.phone,
+                          body: contactBody,
+                          channel: 'sms',
+                          audience: 'customer',
+                          purpose: 'appointment_confirmation',
+                          customerId,
+                          appointmentId: scheduledServiceId,
+                          identityTrustLevel: isServiceContactRole(contact.role)
+                            ? 'service_contact_authorized'
+                            : 'phone_matches_customer',
+                          metadata: {
+                            original_message_type: 'confirmation',
+                            appointment_contact_role: contact.role,
+                          },
+                        });
+                        logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                      }
+                      // Email-only service contacts never appear in the SMS
+                      // contact list (getAppointmentContacts is phone-based)
+                      // and the default 'sms' channel never runs the email
+                      // leg — so an email-only buyer/tenant whose slot email
+                      // just made this call BOOKABLE would get nothing.
+                      // Send them (and only them) the confirmation email;
+                      // recipientFilter keeps the phone-channel primary from
+                      // receiving an email their channel choice didn't ask for.
+                      // Honors the New Appointment Confirmation opt-out: the
+                      // SMS legs are suppressed by sendCustomerMessage's
+                      // validator, but the email path bypasses it — an
+                      // opted-out account must not leak a confirmation email
+                      // (same rule deliverConfirmationByChannel encodes).
+                      // v2EmailBlocked (do-not-contact) suppresses the email
+                      // leg the same way the TCPA gate suppresses SMS.
+                      const confirmationOptedOut = prefsRow?.appointment_confirmation === false;
+                      const { getServiceContactSlots } = require('./customer-contact');
+                      const emailOnlySlots = (confirmationOptedOut || v2EmailBlocked) ? [] : getServiceContactSlots(freshCustomer || {})
+                        .filter((s) => s.email && !s.phone);
+                      if (emailOnlySlots.length) {
+                        const AppointmentEmail = require('./appointment-email');
+                        await AppointmentEmail.sendAppointmentConfirmationEmail({
+                          customerId,
+                          scheduledServiceId,
+                          appointmentTime: parseETDateTime(extracted.preferred_date_time),
+                          serviceLabel: serviceType,
+                          recipientFilter: emailOnlySlots.map((s) => s.email),
+                        });
+                        logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);
+                      }
+                    } catch (fanErr) {
+                      logger.warn(`[call-proc] secondary confirmation fan-out skipped for customer ${customerId}: ${fanErr.code || fanErr.name || 'error'}`);
+                    }
+                  }
+                  return primaryOk;
                 },
               });
               if (!smsRan) {
@@ -4284,6 +7610,29 @@ const CallRecordingProcessor = {
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };
             }
           }
+          // Card-on-file spec §3 Phase 5.3: phone bookings ride the same
+          // request-card funnel as every other channel — AFTER the
+          // confirmation leg and under the SAME call-level TCPA clearance
+          // (Codex #2771 P1): a v2-blocked or held-implied-consent call has
+          // no consented SMS recipient, so it gets no card text either, and
+          // a redirected implied-consent send goes to the resolved recipient
+          // (the inbound caller who consented), never a non-consenting
+          // saved number. The funnel owns the rest (gate, exemptions,
+          // saved-method auto-secure, dedup, one-text-ever) and is
+          // idempotent on reused/attached rows. Dark until
+          // APPOINTMENT_CARD_REQUEST + the template flip.
+          if (scheduledServiceId && !outboundReviewBooking && !v2SmsBlocked && !holdImpliedSmsLeg) {
+            try {
+              const { requestCardForAppointment } = require('./appointment-card-request');
+              await requestCardForAppointment({
+                scheduledServiceId,
+                trigger: 'ai_call_pipeline',
+                recipientPhone: smsRecipient || null,
+              });
+            } catch (cardErr) {
+              logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
+            }
+          }
           if (followUpCreated) {
             appointmentResult = {
               ...(appointmentResult || {}),
@@ -4296,6 +7645,54 @@ const CallRecordingProcessor = {
       } catch (err) {
         logger.error(`[call-proc] Appointment SMS failed: ${err.message}`);
         appointmentResult = { error: err.message };
+      }
+    }
+
+    // A gate-APPROVED booking the legacy insert chain then skipped (past
+    // date, missing customer email, unparseable time, same-day duplicate
+    // hold, no V1-resolved customer, ...) used to vanish: route_decisions
+    // recorded auto_route, no schedule row landed, and no review card ever
+    // opened. Every approved-but-unbooked confirmed call now opens ONE
+    // blocking review card and corrects the route decision's recorded action
+    // + forward-audit pointer.
+    if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
+      const bookedServiceId = appointmentResult?.scheduledServiceId || null;
+      // Held bookings already opened their own reason-specific card above.
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled']);
+      if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
+        const skipReason = appointmentResult?.skippedReason
+          || appointmentResult?.scheduleError
+          || appointmentResult?.error
+          || (!customerId ? 'booked_call_without_customer' : 'auto_booking_not_created');
+        try {
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'auto_booking_skipped_after_approval',
+              extraction: v2ApprovedExtraction,
+              extraPayload: {
+                skipped_reason: String(skipReason).slice(0, 300),
+                missing_fields: appointmentResult?.missingFields || null,
+                existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,
+                preferred_date_time: extracted.preferred_date_time || null,
+                service: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
+              },
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
+        } catch (skipTriageErr) {
+          logger.warn(`[call-proc] skip-triage insert failed for ${maskSid(callSid)}: ${skipTriageErr.message}`);
+        }
+      }
+      try {
+        await db('route_decisions')
+          .where({ call_log_id: call.id, decision_version: 'v2-1.0.0', mode: 'enforce' })
+          .update({
+            final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
+            ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
+          });
+      } catch (rdErr) {
+        logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
       }
     }
 
@@ -4421,7 +7818,15 @@ const CallRecordingProcessor = {
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
+          // Keep the audit/shadow decision consistent with the enforce path.
+          failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
+          callerAni: contactPhone,
+          knownCustomer: (knownCaller && knownCaller.isExistingCustomer) ? { hasAddress: knownCaller.hasAddress } : null,
         });
+        // Mirror the enforce path's V1 address-conflict demotion — the saved
+        // shadow decision must hold exactly where enforce would hold, or
+        // rollout metrics overstate safe fail-open bookings.
+        routingResult = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
 
         if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {
           const shadowDecision = buildRouteDecision({
@@ -4497,6 +7902,13 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Marked ${callSid} customer_creation_failed — required customer fields were incomplete`);
     }
 
+    // Zero-triage layers, fenced on finalization: finalized === 0 means a
+    // peer reclaimed the processing_token — this attempt's extraction is
+    // stale and must not record verdicts, stamp a disposition, or enrich.
+    if (finalized > 0) {
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
+    }
+
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);
 
     return {
@@ -4517,17 +7929,30 @@ const CallRecordingProcessor = {
         // reclaim handed the lock to a peer, the peer's claim overwrote our
         // token and this UPDATE matches 0 rows — we log and bail without
         // disturbing the peer's lock or duplicating side effects.
-        const released = await db('call_log')
+        //
+        // This write shares the extraction retry budget: without the
+        // increment, a repeatable post-extraction error would come back
+        // through the sweep every 10 minutes with attempts still 0 —
+        // an uncapped retry loop over side-effect-laden code. Counting it
+        // here caps that loop at CALL_EXTRACTION_MAX_ATTEMPTS and files the
+        // same blocking card at the cap. (Re-running after partial side
+        // effects is bounded-safe: the idempotency keys, won-status skips,
+        // and same-date dup holds make reprocessing a supported operation.)
+        const releasedRows = await db('call_log')
           .where({ id: call.id })
           .where('processing_token', procToken)
           .update({
             processing_status: 'extraction_failed',
+            extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
             processing_token: null,
             processing_started_at: null,
             updated_at: new Date(),
-          });
-        if (released === 0) {
+          }).returning(['extraction_attempts']);
+        if (!releasedRows.length) {
           logger.warn(`[call-proc] Skipped lock release for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        } else {
+          const attempts = Number(releasedRows[0]?.extraction_attempts) || 0;
+          await fileExtractionExhaustedTriage(call.id, attempts, procErr, callSid);
         }
       } catch (releaseErr) {
         logger.error(`[call-proc] Failed to release lock for ${callSid}: ${releaseErr.message}`);
@@ -4547,13 +7972,51 @@ const CallRecordingProcessor = {
     //     the inline setTimeout in twilio-voice-webhook.js to a recording the Twilio CDN
     //     hasn't propagated yet, which produces 404s and partial-buffer downloads)
     //   - processing_status='no_transcription' (known-failed retry — no age gate, run promptly)
+    //   - processing_status='extraction_failed' with retry budget left (extraction_attempts
+    //     < CALL_EXTRACTION_MAX_ATTEMPTS) — 10-min age gate spaces the attempts so a
+    //     provider brown-out isn't burned through in one cron tick. 7-day created_at fence:
+    //     belt-and-suspenders with the migration backfill (which parks pre-existing failures
+    //     at the cap) so ancient calls can never be resurrected into fresh leads/SMS.
     //   - processing_status='processing' but stale > 10 min (orphaned claim from crash/hang)
     // Duration filter uses recording_duration_seconds (set by the recording-status webhook)
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
     const pending = await db('call_log')
-      .where('recording_url', '!=', '')
-      .whereNotNull('recording_url')
+      .where(function () {
+        this.where(function () {
+          this.where('recording_url', '!=', '').whereNotNull('recording_url');
+        })
+        // PAN-quarantined rows keep recording_url NULL by design, but their
+        // MASKED transcript still needs extraction/lead/appointment
+        // processing — the webhook processes them immediately, and this
+        // branch is the restart-safe backstop (Codex #2676 round-11 P1).
+        // 10-min age gate lets the immediate path win.
+        .orWhere(function () {
+          this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+            .whereNotNull('transcription')
+            .where(function () {
+              this.whereNull('processing_status')
+                .orWhere('processing_status', 'pending')
+                // The immediate webhook processing can claim the row and
+                // die — a stale 'processing' quarantined row must re-enter
+                // the backstop too (round-12 P1).
+                .orWhere(function () {
+                  this.where('processing_status', 'processing')
+                    .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+                })
+                // A transient extraction failure on a quarantined row must
+                // keep its normal retry budget (round-13 P1): the outer
+                // extraction_failed branch requires recording_url, which
+                // quarantine keeps null by design.
+                .orWhere(function () {
+                  this.where('processing_status', 'extraction_failed')
+                    .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+                    .andWhere('created_at', '>', db.raw("NOW() - INTERVAL '7 days'"));
+                });
+            })
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        });
+      })
       .where(function () {
         this.where(function () {
           // Fresh / waiting branches — only after the 10-min CDN-settle window.
@@ -4572,11 +8035,22 @@ const CallRecordingProcessor = {
         })
         .orWhere('processing_status', 'no_transcription')
         .orWhere(function () {
+          this.where('processing_status', 'extraction_failed')
+            .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"))
+            .andWhere('created_at', '>', db.raw("NOW() - INTERVAL '7 days'"));
+        })
+        .orWhere(function () {
           this.where('processing_status', 'processing')
             .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
         });
       })
-      .where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
+      .where(function () {
+        this.where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
+          // Quarantined rows already proved they carry real content (a card
+          // readback was heard) — never duration-filter them out.
+          .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
+      })
       .orderBy('created_at', 'desc')
       .limit(20);
 
@@ -4604,6 +8078,41 @@ const CallRecordingProcessor = {
 
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) return { success: false, reason: 'call_not_found' };
+    // PAN quarantine guard (Codex #2676 round-7 P1) — checked BEFORE the
+    // recording-url short-circuit (round-14 P1): a same-write stamp can
+    // land while recording_url is still populated (crash before the
+    // quarantine nulled it), and 'already_has_recording' would leave that
+    // replayable card audio untouched forever. Stamped rows are
+    // quarantine work whatever the URL state; the stamp is the durable
+    // guard, and every recovery entry point flows through here.
+    try {
+      const rawMeta = call.transcription_metadata;
+      const meta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
+      if (meta.pan_detected === true) {
+        // Incomplete quarantine (transient Twilio delete failure, or a
+        // crash between stamp and quarantine): this sweep is the durable
+        // place to RETRY — skipping forever would leave the card audio at
+        // Twilio (round-12 P1). The saved quarantine SID is the audio
+        // whose delete actually FAILED — prefer it over the row's possibly
+        // older recording_sid (round-14 P1: the two-recording flow deleted
+        // the old audio and never retried the fresh one). Complete
+        // quarantines just skip.
+        const retrySid = meta.quarantine_recording_sid || call.recording_sid || null;
+        // Retry when the DELETE is incomplete — or when the delete finished
+        // but the office ALERT never delivered (pan_notified missing,
+        // round-18 P2): quarantineCardRecording is idempotent on the strip
+        // and re-sends the alert via the pan_notified guard.
+        if ((meta.recording_quarantined !== true && (retrySid || call.recording_url))
+          || meta.pan_notified !== true) {
+          try {
+            await quarantineCardRecording({ ...call, recording_sid: retrySid }, { source: 'recovery_quarantine_retry' });
+          } catch (qErr) {
+            logger.warn(`[call-proc] recovery quarantine retry failed for ${maskSid(callSid)}: ${qErr.message}`);
+          }
+        }
+        return { success: true, skipped: true, reason: 'pan_quarantined' };
+      }
+    } catch { /* unparseable metadata -> treat as unstamped */ }
     if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
 
     let recordings;
@@ -4654,8 +8163,35 @@ const CallRecordingProcessor = {
       .orderBy('created_at', 'desc')
       .limit(25);
 
+    // Incomplete PAN quarantines (round-15 P1): pan_detected without
+    // recording_quarantined means a Twilio delete is still owed. These rows
+    // fall outside the missing-recording filters above — the backfill feeds
+    // calls OLDER than the 7-day window, and the stamped-before-quarantine
+    // crash window leaves recording_url POPULATED — so they get their own
+    // candidate set; recoverRecordingForCall's pan guard runs the retry.
+    let quarantineRetries = [];
+    try {
+      quarantineRetries = await db('call_log')
+        .select('twilio_call_sid')
+        .whereNotNull('twilio_call_sid')
+        .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+        // Incomplete delete OR undelivered office alert (round-18 P2) —
+        // both are quarantine work the retry path finishes.
+        .whereRaw("(COALESCE(transcription_metadata::jsonb ->> 'recording_quarantined', 'false') <> 'true' OR COALESCE(transcription_metadata::jsonb ->> 'pan_notified', 'false') <> 'true')")
+        .orderBy('created_at', 'desc')
+        .limit(10);
+    } catch (qErr) {
+      logger.warn(`[call-proc] incomplete-quarantine sweep query failed: ${qErr.message}`);
+    }
+    const seenSids = new Set();
+    const sweepRows = [...rows, ...quarantineRetries].filter((row) => {
+      if (!row.twilio_call_sid || seenSids.has(row.twilio_call_sid)) return false;
+      seenSids.add(row.twilio_call_sid);
+      return true;
+    });
+
     const results = [];
-    for (const row of rows) {
+    for (const row of sweepRows) {
       try {
         results.push({ callSid: row.twilio_call_sid, ...(await this.recoverRecordingForCall(row.twilio_call_sid)) });
       } catch (err) {
@@ -4665,7 +8201,7 @@ const CallRecordingProcessor = {
 
     const recovered = results.filter((r) => r.recovered).length;
     if (recovered > 0) logger.info(`[call-proc] Recovered ${recovered} missing recent recording(s)`);
-    return { checked: rows.length, recovered, results };
+    return { checked: sweepRows.length, recovered, results };
   },
 
   /**
@@ -4721,6 +8257,9 @@ const CallRecordingProcessor = {
 };
 
 CallRecordingProcessor._test = {
+  isImplausibleTranscript,
+  scrubTranscriptArtifacts,
+  scrubStructuredTranscript,
   canonicalWavesService,
   referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
@@ -4730,13 +8269,21 @@ CallRecordingProcessor._test = {
   resolveSchedulableCallService,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
+  slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,
+  findAttachableCallAppointment,
+  attachCandidateMatchesProperty,
+  attachCandidateSlotAgrees,
   classifyCallerAccount,
   summarizeKnownCaller,
+  summarizePriorCall,
+  providerTimeoutSignal,
+  PROVIDER_FETCH_TIMEOUTS_MS,
+  downloadRecording,
   isNonLeadCallContent,
   leadContactCompleteness,
   hasWorkableLeadSignal,
@@ -4747,6 +8294,29 @@ CallRecordingProcessor._test = {
   findReusableCallLead,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
+  resolveCallSecondaryContact,
+  resolveCallSecondaryContacts,
+  resolveCallBillingPayer,
+  persistCallSecondaryContact,
+  resolveCallBookingPropertyLinkage,
+  demoteFailOpenOnV1AddressConflict,
+  sameFirstName,
+  firstNameVariants,
+  v2IsoToEtWallClock,
+  phoneNearMissOfAni,
+  isUsableContactPhone,
+  labeledTranscriptPreservesWords,
+  applyRecurringIntentDefault,
 };
+
+// Production contract for the re-transcription backfill (NOT test-only):
+// same transcriber + same hallucination guard the live path uses, so a
+// backfilled transcript can never be lower-integrity than a live one.
+CallRecordingProcessor.transcribeRecording = transcribeRecording;
+CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
+CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
+CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;
+CallRecordingProcessor.withPanStamps = withPanStamps;
+CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 
 module.exports = CallRecordingProcessor;

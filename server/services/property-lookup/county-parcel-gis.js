@@ -106,6 +106,197 @@ function pickParcelFeature(features, lng, lat) {
   return pool[0]?.feature || null;
 }
 
+// ── Stacked-parcel condo/HOA association aggregation ─────────────────────
+// A condo association returns DOZENS of unit "parcels" stacked on one shared
+// polygon (each unit owns no land — live probe: 1555 Tarpon Center Dr, Venice
+// = 118 unit parcels + common elements, 151 stacked at one point). The picker
+// can't choose a unit, so these lookups used to defer and the panel came back
+// empty even though the roll knows everything. When the stack is clearly an
+// association, aggregate it instead: total units, summed living sqft, the
+// shared polygon (or roll figure) for land, a building count from distinct
+// unit street numbers, and an explicit multifamily land-use so the profile
+// routes COMMERCIAL. Small stacks (a paired villa's 2 identical rows) stay on
+// the old defer path — aggregating a duplex would misprice it.
+const AGGREGATE_MIN_UNITS = 5;
+
+function modalValue(values) {
+  const counts = new Map();
+  let best = null;
+  let bestCount = 0;
+  for (const value of values) {
+    if (value == null || value === '') continue;
+    const count = (counts.get(value) || 0) + 1;
+    counts.set(value, count);
+    if (count > bestCount) { best = value; bestCount = count; }
+  }
+  return best;
+}
+
+// Labeled secondary-unit designators on a situs line. County rows label units
+// as "APT 101" / "UNIT B4" / "# 12" (and some layers emit a bare trailing
+// number instead). Left in place, the designator word survives the bare-
+// number strip ("13510 LUXE AVE APT") and the situs guard reads it as a
+// different street, dropping the whole association back to the empty
+// address-search path (codex P2 #2721). The designator set mirrors
+// stripUnitDesignators in ai-property-lookup.js.
+const SITUS_UNIT_DESIGNATOR_RE = /\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM|FL|#)\s*#?\s*[A-Z0-9-]*\s*$/i;
+
+function stripSitusDesignators(situs) {
+  let s = String(situs || '').split(',')[0].replace(/\s+/g, ' ').trim().toUpperCase();
+  // Peel repeatedly — "STE 200 BLDG C" carries two designators.
+  for (let i = 0; i < 3; i += 1) {
+    const next = s.replace(SITUS_UNIT_DESIGNATOR_RE, '').trim();
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
+// Split a designator-stripped situs into its base line and any BARE trailing
+// number. Whether that number is a UNIT number (strip it) or part of a
+// numbered route's street name ("123 US 41" — keep it) is decided by
+// cross-row evidence in buildStackedAggregate, not here (codex P2 #2721).
+function splitSitusTrailingNumber(situs) {
+  const m = stripSitusDesignators(situs).match(/^(\d+\s+\S[^,]*?)(?:\s+(\d+))?$/);
+  return m ? { base: m[1].trim(), trailing: m[2] || null } : null;
+}
+
+function buildStackedAggregate(county, layer, features, lng, lat) {
+  const rows = [];
+  for (const feature of features) {
+    const rings = feature?.geometry?.rings || null;
+    if (!rings || !polygonContainsPoint(rings, lng, lat)) continue;
+    rows.push({ parsed: layer.parse(ciAttr(feature.attributes || {})), rings });
+  }
+  if (rows.length < AGGREGATE_MIN_UNITS) return null;
+
+  const unitRows = rows.filter((row) => (row.parsed.residentialUnits || 0) > 0
+    || (row.parsed.livingAreaSqft || 0) > 0);
+  // A unit row with living area but no explicit livunits still IS a unit —
+  // counting it as zero would reject a valid association whose layer omits
+  // the unit-count column on most rows (codex P2 #2721).
+  const units = unitRows.reduce(
+    (sum, row) => sum + Math.max(row.parsed.residentialUnits || 0, (row.parsed.livingAreaSqft || 0) > 0 ? 1 : 0),
+    0,
+  );
+  if (units < AGGREGATE_MIN_UNITS) return null;
+
+  const livingAreaSqft = unitRows.reduce((sum, row) => sum + (row.parsed.livingAreaSqft || 0), 0);
+  const groundAreaSqft = unitRows.reduce((sum, row) => sum + (row.parsed.groundAreaSqft || 0), 0);
+
+  // Distinct leading street numbers among the unit situs addresses — the
+  // roll's only building signal ("1535 / 1555 / 1575 Tarpon Center Dr" = 3
+  // buildings). Single shared number → 1; satellite vision refines later.
+  const streetNumbers = new Set();
+  // Building identity also honors an explicit BLDG token: "100 MAIN ST
+  // BLDG A/B/C" is 3 buildings under one street number, and collapsing them
+  // to 1 would underestimate the multi-building perimeter (codex P2 #2721).
+  const buildingKeys = new Set();
+  // Cross-row evidence for the bare-trailing-number strip: unit numbers VARY
+  // across a base line (or the base also appears bare), while a numbered
+  // route's number ("123 US 41") is identical on every row — stripping it
+  // would make the situs guard reject the association as a wrong street
+  // (codex P2 #2721).
+  const baseVariants = new Map();
+  for (const row of unitRows) {
+    const situs = String(row.parsed.situsAddress || '');
+    const m = situs.match(/^(\d+)\s/);
+    if (m) streetNumbers.add(m[1]);
+    if (m) {
+      const bldg = situs.split(',')[0].match(/\b(?:BLDG|BUILDING)\.?\s*#?\s*([A-Z0-9-]+)/i);
+      buildingKeys.add(`${m[1]}|${bldg ? bldg[1].toUpperCase() : ''}`);
+    }
+    const parts = splitSitusTrailingNumber(situs);
+    if (!parts) continue;
+    const entry = baseVariants.get(parts.base) || { numbers: new Set(), bare: false, rows: 0 };
+    entry.rows += 1;
+    if (parts.trailing) entry.numbers.add(parts.trailing); else entry.bare = true;
+    baseVariants.set(parts.base, entry);
+  }
+  // Resolved "NUMBER STREET" line for a situs — the base with the trailing
+  // number stripped when the evidence says it's a unit number, the full line
+  // when a shared single number reads as part of the street name. The situs
+  // guard needs street identity, not just the number: "1555 Harbor Dr" must
+  // not ride a 1555 that only exists on Tarpon Center Dr (codex P2 r4).
+  const resolveSitusLine = (situs) => {
+    const parts = splitSitusTrailingNumber(situs);
+    if (!parts) return null;
+    if (!parts.trailing) return parts.base;
+    const entry = baseVariants.get(parts.base);
+    const routeNumber = entry && !entry.bare && entry.numbers.size === 1 && entry.rows >= 2;
+    return routeNumber ? `${parts.base} ${parts.trailing}` : parts.base;
+  };
+  const situsLines = new Set();
+  for (const row of unitRows) {
+    const line = resolveSitusLine(row.parsed.situsAddress);
+    if (line) situsLines.add(line);
+  }
+  const buildingCount = Math.max(1, buildingKeys.size);
+
+  // Land: a stacked master/common row carrying a roll land figure wins; else
+  // the shared polygon's own area (units all carry lsqft 0 by design). Only a
+  // GENUINE common row may key PAO detail fetches — advertising an arbitrary
+  // unit's parcel id would let a by-parcel unit record collapse the aggregate
+  // back to single-unit dimensions on merge ties (codex P2 #2721).
+  // A common row must carry NO unit/living facts at all — a living-only
+  // unit row with a land figure must never become the "master" and expose
+  // its unit parcel id to the by-parcel PAO lookup (codex P2 r2 #2721).
+  const isCommonRow = (row) => !(row.parsed.residentialUnits > 0)
+    && !((row.parsed.livingAreaSqft || 0) > 0);
+  const commonRow = rows.find((row) => isCommonRow(row) && (row.parsed.lotSqft || 0) > 0)
+    || rows.find(isCommonRow)
+    || null;
+  const masterRow = commonRow || rows[0];
+  const polyArea = polygonAreaSqft(masterRow.rings);
+  const lotSqft = masterRow.parsed.lotSqft || polyArea;
+
+  const yearBuilt = modalValue(unitRows.map((row) => row.parsed.yearBuilt));
+  const stories = unitRows.reduce((max, row) => Math.max(max, row.parsed.stories || 0), 0) || null;
+  // Situs without the trailing unit designator — the modal "NUMBER STREET".
+  const situsAddress = modalValue(unitRows.map(
+    (row) => resolveSitusLine(row.parsed.situsAddress) || row.parsed.situsAddress,
+  )) || masterRow.parsed.situsAddress || null;
+
+  return {
+    parcelId: masterRow.parsed.parcelId || unitRows[0]?.parsed.parcelId || null,
+    masterIsCommon: Boolean(commonRow),
+    // The common row's OWN parcel id, or nothing — parcelId above falls back
+    // to a unit id when the common row's id is blank, and keying PAO detail
+    // off that unit id would let a single-unit record collapse the aggregate
+    // on merge ties (codex P2 #2721).
+    masterParcelId: commonRow?.parsed.parcelId || null,
+    situsLines: [...situsLines].sort(),
+    // Every building number in the association — the situs-mismatch guard
+    // must accept a lookup for ANY of them, not just the modal one
+    // (codex P2 #2721: entering 1575 in a 1535/1555/1575 association).
+    situsHouseNumbers: [...streetNumbers].sort(),
+    situsAddress,
+    situsCity: modalValue(rows.map((row) => row.parsed.situsCity)),
+    situsZip: modalValue(rows.map((row) => row.parsed.situsZip)),
+    lotSqft,
+    livingAreaSqft: livingAreaSqft > 0 ? livingAreaSqft : null,
+    groundAreaSqft: groundAreaSqft > 0 ? groundAreaSqft : null,
+    stories,
+    yearBuilt,
+    residentialUnits: units,
+    dorUseCode: modalValue(unitRows.map((row) => row.parsed.dorUseCode)),
+    // Human-readable AND machine-routing: "multifamily" is the token
+    // detectCategory/commercialSignalText key on. buildCadastralRecord
+    // branches on `aggregated` for the propertyType, so the word
+    // "condominium" here can never trip the residential Condo mapping.
+    landUseDescription: `Multifamily condo/HOA association — ${units} units, ${buildingCount} building${buildingCount === 1 ? '' : 's'} (county aggregate)`,
+    subdivision: modalValue(rows.map((row) => row.parsed.subdivision)),
+    poolFlag: rows.some((row) => row.parsed.poolFlag === true) ? true : null,
+    rollYear: modalValue(rows.map((row) => row.parsed.rollYear)),
+    imperviousAreaSf: masterRow.parsed.imperviousAreaSf ?? null,
+    aggregated: true,
+    aggregateUnitParcels: unitRows.length,
+    buildingCount,
+    _masterRings: masterRow.rings,
+    _polyArea: polyArea,
+  };
+}
+
 // ArcGIS servers can return attribute keys in a different case than the field
 // definitions / requested outFields (hosted FeatureServers especially), and a
 // silent case mismatch would zero out a whole county's parse and quietly fall
@@ -124,8 +315,9 @@ const COUNTY_LAYERS = {
     outFields: [
       'PARID', 'SITUS_ADDRESS', 'SITUS_POSTAL_CITY', 'SITUS_POSTAL_ZIP',
       'LAND_SQFT_CAMA', 'BLDGS_SQFT_LIVING', 'BLDG_R1_STORIES', 'BLDG_R1_YRBUILT',
+      'BLDG_C1_SQFTLIVNG', 'BLDG_C1_STORIES', 'BLDG_C1_YRBUILT',
       'BLDGS_LIVINGUNITS', 'CUR_DOR_LUC_CODE', 'CUR_MAN_LUC_DESC',
-      'PAR_SUBDIV_NAME', 'PAR_SWIMPOOL_FLAG', 'CUR_ROLL_YEAR',
+      'PAR_SUBDIV_NAME', 'PAR_SWIMPOOL_FLAG', 'CUR_ROLL_YEAR', 'FEATS_SQFT_IMPERV',
     ],
     parse: (g) => ({
       parcelId: cleanStr(g('PARID')),
@@ -133,15 +325,24 @@ const COUNTY_LAYERS = {
       situsCity: cleanStr(g('SITUS_POSTAL_CITY')),
       situsZip: zip5(g('SITUS_POSTAL_ZIP')),
       lotSqft: positiveOrNull(g('LAND_SQFT_CAMA')),
-      livingAreaSqft: positiveOrNull(g('BLDGS_SQFT_LIVING')),
-      stories: positiveOrNull(g('BLDG_R1_STORIES')),
-      yearBuilt: positiveOrNull(g('BLDG_R1_YRBUILT')),
+      livingAreaSqft: positiveOrNull(g('BLDGS_SQFT_LIVING')) ?? positiveOrNull(g('BLDG_C1_SQFTLIVNG')),
+      // Manatee splits building facts into residential (BLDG_R1_*) and
+      // commercial (BLDG_C1_*) blocks; a pure-commercial parcel (warehouse,
+      // office) carries only the C1 block, so R1-only reads left stories /
+      // year built empty on every commercial lookup.
+      stories: positiveOrNull(g('BLDG_R1_STORIES')) ?? positiveOrNull(g('BLDG_C1_STORIES')),
+      yearBuilt: positiveOrNull(g('BLDG_R1_YRBUILT')) ?? positiveOrNull(g('BLDG_C1_YRBUILT')),
       residentialUnits: positiveOrNull(g('BLDGS_LIVINGUNITS')),
       dorUseCode: cleanStr(g('CUR_DOR_LUC_CODE')),
       landUseDescription: cleanStr(g('CUR_MAN_LUC_DESC')),
       subdivision: cleanStr(g('PAR_SUBDIV_NAME')),
       poolFlag: yesNoFlag(g('PAR_SWIMPOOL_FLAG')),
       rollYear: positiveOrNull(g('CUR_ROLL_YEAR')),
+      // Assessed impervious sqft (driveways, pool decks) — feeds the shadow
+      // footprint-turf computation when the GIS layer is the only county hit
+      // (new construction). 0 on the roll means not-yet-assessed, not "no
+      // hardscape" (live probe: a just-sold 2024 build carried 0) → null.
+      imperviousAreaSf: positiveOrNull(g('FEATS_SQFT_IMPERV')),
     }),
   },
   Sarasota: {
@@ -158,6 +359,9 @@ const COUNTY_LAYERS = {
       situsZip: zip5(g('loczip')),
       lotSqft: positiveOrNull(g('lsqft')),
       livingAreaSqft: positiveOrNull(g('living')),
+      // Per-unit built ground area (includes lanai/garage) — summed by the
+      // stacked-parcel aggregate as a footprint signal for associations.
+      groundAreaSqft: positiveOrNull(g('grnd_area')),
       stories: null, // not in the Sarasota layer
       yearBuilt: positiveOrNull(g('yrbl')),
       residentialUnits: positiveOrNull(g('livunits')),
@@ -166,6 +370,7 @@ const COUNTY_LAYERS = {
       subdivision: cleanStr(g('subd')),
       poolFlag: yesNoFlag(g('pool')),
       rollYear: null,
+      imperviousAreaSf: null, // not in the Sarasota layer
     }),
   },
   Charlotte: {
@@ -189,6 +394,7 @@ const COUNTY_LAYERS = {
       subdivision: cleanStr(g('subneighborhood')),
       poolFlag: null,
       rollYear: null,
+      imperviousAreaSf: null, // not in the Charlotte ownership layer
     }),
   },
 };
@@ -310,9 +516,44 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
     if (!features.length) return null;
 
     // Smallest containing polygon = the unit's own parcel, not a master/common
-    // parcel; identical stacked footprints return null (defer to address search).
+    // parcel. Identical stacked footprints: an association-sized stack
+    // aggregates (units/sqft/land summed); a small stack (paired villa)
+    // still returns null and defers to the address search.
     const feature = pickParcelFeature(features, lng, lat);
     if (!feature) {
+      // A page-capped response is a PARTIAL stack — summing it would
+      // understate the association's units/sqft and underprice the job.
+      // Defer to the address search instead (codex P2 r3 #2721).
+      const truncated = !!data?.exceededTransferLimit;
+      const aggregate = truncated ? null : buildStackedAggregate(county, layer, features, lng, lat);
+      if (truncated) {
+        logger.info('[county-parcel-gis] stacked parcels truncated by page cap — deferring aggregation', {
+          county, count: features.length, elapsedMs: Date.now() - t0,
+        });
+      }
+      if (aggregate && aggregate.parcelId) {
+        const parcel = {
+          ...aggregate,
+          county,
+          paoParcelId: aggregate.masterParcelId ? paoParcelIdFrom(aggregate.masterParcelId) : null,
+          polygon: aggregate._masterRings,
+          polygonAreaSqft: aggregate._polyArea,
+          assessmentYear: aggregate.rollYear || null,
+          sourceUrl: layer.url.replace(/\/query\/?$/, ''),
+          gisProvider: `${county.toLowerCase()}_gis`,
+        };
+        delete parcel._masterRings;
+        delete parcel._polyArea;
+        logger.info('[county-parcel-gis] aggregated stacked association', {
+          county,
+          stacked: features.length,
+          units: parcel.residentialUnits,
+          buildings: parcel.buildingCount,
+          lotSqft: parcel.lotSqft,
+          elapsedMs: Date.now() - t0,
+        });
+        return parcel;
+      }
       logger.info('[county-parcel-gis] ambiguous stacked parcels at point — deferring', {
         county, count: features.length, elapsedMs: Date.now() - t0,
       });
@@ -409,9 +650,20 @@ const SITUS_QUERY_FIELDS = {
   Charlotte: ['FullPropertyAddress', 'propertyaddress'],
 };
 
+// Situs ZIP per county, returned alongside each situs string so the audit can
+// scope its verdict to the typed ZIP — SWFL grid streets repeat across cities
+// ("51ST AVE E" exists in both Bradenton 34203 and Palmetto 34221), so a
+// county-wide house-number hit can validate the wrong city's address.
+const SITUS_ZIP_FIELDS = {
+  Manatee: 'SITUS_POSTAL_ZIP',
+  Sarasota: 'loczip',
+  Charlotte: 'zipcode',
+};
+
 // All situs strings on the county roll whose address contains the given
 // street text ("TOBERMORY" → every parcel on Tobermory Way, including
-// multi-situs paired-villa rows). Returns { situs, truncated } — truncated
+// multi-situs paired-villa rows). Returns { situs, zips, truncated } — zips
+// is index-parallel to situs (roll ZIP or null) for ZIP scoping; truncated
 // mirrors the ArcGIS exceededTransferLimit flag so the caller knows a "number
 // missing" verdict could be an artifact of the page cap on a long street.
 // Fail-open null on error/timeout — the audit is a diagnostic hint, never
@@ -424,10 +676,11 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
   const text = String(streetText || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!layer || !fields || text.length < 3) return null;
 
+  const zipField = SITUS_ZIP_FIELDS[county];
   const params = new URLSearchParams({
     f: 'json',
     where: fields.map((f) => `UPPER(${f}) LIKE '%${text}%'`).join(' OR '),
-    outFields: fields.join(','),
+    outFields: [...fields, ...(zipField ? [zipField] : [])].join(','),
     returnGeometry: 'false',
     resultRecordCount: '2000',
   });
@@ -441,17 +694,22 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
     const data = await resp.json();
     if (data?.error) throw new Error(`${county} street GIS error: ${data.error.message || data.error.code}`);
     const features = Array.isArray(data?.features) ? data.features : [];
-    const situs = features
-      .map((f) => {
-        const g = ciAttr(f.attributes || {});
-        return fields.map((field) => cleanStr(g(field))).filter(Boolean).join(';');
-      })
-      .filter(Boolean);
+    const situs = [];
+    const zips = [];
+    for (const f of features) {
+      const g = ciAttr(f.attributes || {});
+      const line = fields.map((field) => cleanStr(g(field))).filter(Boolean).join(';');
+      if (!line) continue;
+      situs.push(line);
+      // Parallel array: zips[i] is the roll ZIP for situs[i] (null when the
+      // layer/row has none — the audit treats unknown as in-scope, fail-open).
+      zips.push(zipField ? zip5(g(zipField)) : null);
+    }
     const truncated = !!data?.exceededTransferLimit;
     logger.info('[county-parcel-gis] street situs query', {
       county, matches: situs.length, truncated, elapsedMs: Date.now() - t0,
     });
-    return { situs, truncated };
+    return { situs, zips, truncated };
   } catch (err) {
     const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
     // County + error only — no street/address values in logs (PII rule).
@@ -464,17 +722,110 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
   }
 }
 
+// ── Subdivision living-sqft median (estimator engine, new-construction) ──
+// When the annual roll shows a parcel as vacant/unassessed but the caller
+// lives there (new construction), the already-assessed neighbors in the same
+// recorded subdivision are the best sourceable size signal. Positive-only,
+// fail-open: any miss returns null and the caller falls to its next source.
+// Charlotte's ownership layer carries no living-area figure — unsupported.
+const SUBDIVISION_MEDIAN_FIELDS = {
+  Manatee: { nameField: 'PAR_SUBDIV_NAME', livingField: 'BLDGS_SQFT_LIVING' },
+  Sarasota: { nameField: 'subd', livingField: 'living' },
+};
+const SUBDIVISION_MEDIAN_MIN_SAMPLES = 8;
+
+// Recorded plat names carry phase/unit suffixes ("PARRISH LAKES PH IIE
+// PB81/164"); when the exact phase has too few assessed homes the query
+// widens to the base plat name.
+function subdivisionBaseName(name) {
+  return String(name || '')
+    .replace(/\s+(PH|PHASE|UNIT|SEC|SECTION|PB)\b.*$/i, '')
+    .trim();
+}
+
+async function querySubdivisionLivingSqft(county, whereName, timeoutMs) {
+  const cfg = SUBDIVISION_MEDIAN_FIELDS[county];
+  // Injection guard: plat names are alnum/space/slash/dash/&/' — drop quotes
+  // entirely rather than escaping (ArcGIS string WHERE, county-hosted layers).
+  const safe = String(whereName || '').replace(/'/g, '').trim();
+  if (!cfg || !safe) return null;
+  const params = new URLSearchParams({
+    f: 'json',
+    where: `UPPER(${cfg.nameField}) LIKE '${safe.toUpperCase()}%' AND ${cfg.livingField} > 0`,
+    outFields: cfg.livingField,
+    returnGeometry: 'false',
+    resultRecordCount: '1000',
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${COUNTY_LAYERS[county].url}?${params.toString()}`, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`subdivision layer ${resp.status}`);
+    const data = await resp.json();
+    if (data?.error) throw new Error(`subdivision layer error: ${data.error.message || data.error.code}`);
+    const values = (Array.isArray(data?.features) ? data.features : [])
+      .map((f) => positiveOrNull(ciAttr(f?.attributes || {})(cfg.livingField)))
+      .filter(Boolean)
+      .sort((a, b) => a - b);
+    return values;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Returns { medianSqft, sampleCount, p25, p75, subdivisionQueried } or null
+// (unsupported county, no subdivision, too few samples, provider failure).
+async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, options = {}) {
+  if (isDisabled()) return null;
+  const key = normalizeCountyName(county);
+  if (!SUBDIVISION_MEDIAN_FIELDS[key] || !String(subdivision || '').trim()) return null;
+  const timeoutMs = timeoutMsFor(options);
+  const t0 = Date.now();
+  try {
+    let queried = String(subdivision).trim();
+    let values = await querySubdivisionLivingSqft(key, queried, timeoutMs);
+    if ((values?.length || 0) < SUBDIVISION_MEDIAN_MIN_SAMPLES) {
+      const base = subdivisionBaseName(queried);
+      if (base && base.toUpperCase() !== queried.toUpperCase()) {
+        queried = base;
+        values = await querySubdivisionLivingSqft(key, base, timeoutMs);
+      }
+    }
+    if (!values || values.length < SUBDIVISION_MEDIAN_MIN_SAMPLES) return null;
+    const mid = Math.floor(values.length / 2);
+    const median = values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+    logger.info('[county-parcel-gis] subdivision median resolved', {
+      county: key, samples: values.length, elapsedMs: Date.now() - t0,
+    });
+    return {
+      medianSqft: Math.round(median),
+      sampleCount: values.length,
+      p25: values[Math.floor(values.length / 4)],
+      p75: values[Math.floor((values.length * 3) / 4)],
+      subdivisionQueried: queried,
+    };
+  } catch (err) {
+    // Subdivision names never appear in logs (PII-adjacent parcel data rule).
+    logger.warn('[county-parcel-gis] subdivision median lookup failed', {
+      county: key || null, error: err?.message || String(err), elapsedMs: Date.now() - t0,
+    });
+    return null;
+  }
+}
+
 module.exports = {
   lookupCountyParcelByPoint,
   queryStreetSitusAddresses,
   countyUseDescToPropertyType,
   dorMajorCategory,
   normalizeCountyName,
+  lookupSubdivisionMedianLivingSqft,
   _private: {
     COUNTY_LAYERS,
     queryCountyLayer,
     paoParcelIdFrom,
     zip5,
     yesNoFlag,
+    subdivisionBaseName,
   },
 };

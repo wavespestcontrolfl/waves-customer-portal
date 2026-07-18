@@ -9,6 +9,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const AccountMembershipEmail = require('./account-membership-email');
 const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+const { isEnabled } = require('../config/feature-gates');
 
 /**
  * Billing Cron Service
@@ -48,6 +49,7 @@ function dateKeyOf(paymentDate) {
 }
 
 const { isBillingDayMatch } = require('./billing-helpers');
+const { isPaused } = require('./autopay-eligibility');
 
 async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint }) {
   const sendResult = await sendCustomerMessage({
@@ -107,6 +109,14 @@ const BillingCron = {
     // Get active customers with a monthly rate — include autopay + pause state.
     // service_paused_at is set when the 3-retry ladder exhausts; skip those so
     // we don't keep burning charges against a dead card until billing is fixed.
+    // billing_mode ships in migration 20260709000010 — selecting it
+    // unconditionally would abort the WHOLE monthly run on a pre-migration
+    // database (Codex round-9); absent column leaves customer.billing_mode
+    // undefined and GUARD 3b inert, exactly the legacy behavior.
+    let billingModeColumnExists = false;
+    try {
+      billingModeColumnExists = await db.schema.hasColumn('customers', 'billing_mode');
+    } catch { /* keep false — legacy select shape */ }
     const customers = await db('customers')
       .where({ active: true })
       .where('monthly_rate', '>', 0)
@@ -115,7 +125,7 @@ const BillingCron = {
       .select(
         'id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id',
-        'billing_day',
+        'billing_day', ...(billingModeColumnExists ? ['billing_mode'] : []),
       );
 
     // Annual-prepay customers paid for the whole period up front. The paid
@@ -148,7 +158,7 @@ const BillingCron = {
         }
 
         // GUARD 2: autopay paused — skip, log
-        if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) >= new Date(now.toDateString())) {
+        if (isPaused(customer, now)) {
           await logAutopay(customer.id, 'skipped_paused', {
             details: { paused_until: customer.autopay_paused_until },
           });
@@ -162,6 +172,30 @@ const BillingCron = {
         // of their billing_day. See isBillingDayMatch for the NULL-default
         // contract.
         if (!isBillingDayMatch(customer.billing_day, todayDay)) {
+          continue;
+        }
+
+        // GUARD 3b: billing mode — this cron is the MONTHLY MEMBERSHIP
+        // subscription biller only. Estimate-flow customers bill per visit
+        // (billing_mode 'per_application' — completion collects the
+        // application fee; owner ruling 2026-07-09): charging them here
+        // would bill a monthly subscription ON TOP of their per-visit
+        // invoices. 'annual_prepay' is ALSO never this cron's customer
+        // (Codex round-5 P1): with autopay enrolled at signup, a naturally
+        // EXPIRED term would sail past the coverage-dated guards below and
+        // hit chargeMonthly — but the renewal flow is notice + annual
+        // invoice (roll-to-per-app is the follow-up build), never silent
+        // monthly dues. The unbilled-forever risk that once justified
+        // coverage-dating this skip is now closed at the term choke point:
+        // a true void/refund resets billing_mode
+        // (resetBillingModeAfterTermCancel), returning the customer to
+        // per-visit (estimate-flow terms) or legacy monthly (manual
+        // prepays). NULL/'monthly_membership' = legacy behavior unchanged.
+        if (['per_application', 'annual_prepay'].includes(customer.billing_mode)) {
+          await logAutopay(customer.id, 'skipped_billing_mode', {
+            details: { billing_mode: customer.billing_mode },
+          });
+          skipped++;
           continue;
         }
 
@@ -420,13 +454,44 @@ const BillingCron = {
         }
 
         if (failedPayment) {
-          await PaymentLifecycleEmail.sendPaymentRetryNotice({
-            customerId: customer.id,
-            paymentId: failedPayment.id,
-            retryDate: retryAt,
-          }).catch((emailErr) => {
-            logger.warn(`[billing-cron] Retry notice email failed for payment ${failedPayment.id}: ${emailErr.message}`);
-          });
+          // One email per failure (owner rule 2026-07-11): with the gate on,
+          // the Automations-tab payment_failed sequence (editable; its copy
+          // matches the Day-3 retry + portal card-update CTA) REPLACES the
+          // transactional retry-notice email. The failure SMS above, with the
+          // card-update link, is unchanged either way. 14-day dedupe = one
+          // enrollment per failure episode across the retry ladder; a repeat
+          // failure months later re-enrolls via reactivation.
+          //
+          // DUNNING NEVER GOES EMAIL-SILENT: the sequence only counts as
+          // covering the failure when it enrolled, this episode already
+          // enrolled (deduped), or no email exists anywhere (the transactional
+          // notice couldn't send either). A paused/empty sequence
+          // (not_sendable), an unsubscribe suppression the runner would
+          // cancel on (suppressed), or an error all fall back to the
+          // transactional retry notice, which has its own delivery rules.
+          let emailed = false;
+          if (isEnabled('paymentFailedEnroll')) {
+            const { enrollSequenceFromEvent } = require('./automation-enroll');
+            const enrollResult = await enrollSequenceFromEvent({
+              templateKey: 'payment_failed',
+              customerId: customer.id,
+              dedupe: 14,
+              recipient: 'billing',
+              checkSuppression: true,
+              retryFailedUnsent: false,
+              source: 'autopay_failure',
+            });
+            emailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);
+          }
+          if (!emailed) {
+            await PaymentLifecycleEmail.sendPaymentRetryNotice({
+              customerId: customer.id,
+              paymentId: failedPayment.id,
+              retryDate: retryAt,
+            }).catch((emailErr) => {
+              logger.warn(`[billing-cron] Retry notice email failed for payment ${failedPayment.id}: ${emailErr.message}`);
+            });
+          }
         }
       }
     }
@@ -614,6 +679,42 @@ const BillingCron = {
         continue;
       }
 
+      // STATE GUARD (mirrors monthly GUARD 3b): a MONTHLY obligation row
+      // exists for a per-application customer — almost always mis-created
+      // before the customer was classified (the July failed-charge cohort).
+      // The ladder STOPS (disarm), but the row is deliberately NOT
+      // self-superseded (Codex round-6 P2): "never successfully paid a
+      // monthly charge" cannot prove misclassification — a real monthly
+      // member's FIRST-ever charge can fail before they later accept a
+      // per-application estimate, and an auto-write-off would erase that
+      // legitimate pre-conversion debt with no stronger signal available
+      // retroactively (mode-change timestamps aren't stored; pre-#2505
+      // estimate accepts also created monthly members, so accepted_at can't
+      // discriminate either). Disarmed rows stay visible for manual triage;
+      // the owner-run staged backfill supersedes the KNOWN mis-created July
+      // cohort explicitly, with human eyes on each row.
+      if (isMonthlyObligation && customer.billing_mode === 'per_application'
+        && !(await db('payments')
+          .where({ customer_id: payment.customer_id, status: 'paid' })
+          .where('description', 'like', '%WaveGuard Monthly%')
+          .whereNot({ id: payment.id })
+          .first())) {
+        await db('payments')
+          .where({ id: payment.id })
+          .update({
+            next_retry_at: null,
+            failure_reason: db.raw(
+              "COALESCE(failure_reason, '') || ' — retry ladder stopped: customer bills per application (review manually — likely mis-created monthly obligation)'",
+            ),
+          }).catch((updErr) => logger.error(`[billing-cron] retry disarm (billing mode) failed for payment ${payment.id}: ${updErr.message}`));
+        await logAutopay(payment.customer_id, 'skipped_billing_mode', {
+          paymentId: payment.id,
+          details: { source: 'autopay_retry', billing_mode: customer.billing_mode, ladder_stopped: true, superseded: false },
+        }).catch(() => {});
+        logger.info(`[billing-cron] Retry ladder stopped for payment ${payment.id} — billing_mode ${customer.billing_mode}; row left visible for manual review`);
+        continue;
+      }
+
       // STATE GUARD (mirrors monthly GUARD 1): autopay disabled — the
       // customer deliberately turned off automatic charging, so the ladder
       // STOPS (disarm, no supersede: the row stays a visible, collectible
@@ -641,7 +742,7 @@ const BillingCron = {
       // STATE GUARD (mirrors monthly GUARD 2): autopay paused — temporary
       // by definition, so skip WITHOUT disarming; the sweep re-evaluates
       // daily and collection resumes when the pause lapses.
-      if (customer.autopay_paused_until && new Date(customer.autopay_paused_until) >= new Date(new Date().toDateString())) {
+      if (isPaused(customer)) {
         await logAutopay(payment.customer_id, 'skipped_paused', {
           paymentId: payment.id,
           details: { source: 'autopay_retry', paused_until: customer.autopay_paused_until },
@@ -1069,13 +1170,37 @@ const BillingCron = {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);
           }
 
-          await PaymentLifecycleEmail.sendPaymentRetryNotice({
-            customerId: customer.id,
-            paymentId: payment.id,
-            retryDate: nextRetry,
-          }).catch((emailErr) => {
-            logger.warn(`[billing-cron] Retry notice email failed for payment ${payment.id}: ${emailErr.message}`);
-          });
+          // Same gate swap as the initial-failure path: with the sequence
+          // covering this failure episode (14-day dedupe means this call is
+          // usually a no-op re-enroll, which is the point — one email per
+          // episode), the per-retry transactional notice stays quiet. The
+          // retry SMS above is unchanged. Same covered-reasons contract as
+          // the initial-failure site: paused sequence, suppression, or error
+          // fall back to the transactional notice — dunning never goes
+          // email-silent.
+          let retryEmailed = false;
+          if (isEnabled('paymentFailedEnroll')) {
+            const { enrollSequenceFromEvent } = require('./automation-enroll');
+            const enrollResult = await enrollSequenceFromEvent({
+              templateKey: 'payment_failed',
+              customerId: customer.id,
+              dedupe: 14,
+              recipient: 'billing',
+              checkSuppression: true,
+              retryFailedUnsent: false,
+              source: 'autopay_retry_failure',
+            });
+            retryEmailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);
+          }
+          if (!retryEmailed) {
+            await PaymentLifecycleEmail.sendPaymentRetryNotice({
+              customerId: customer.id,
+              paymentId: payment.id,
+              retryDate: nextRetry,
+            }).catch((emailErr) => {
+              logger.warn(`[billing-cron] Retry notice email failed for payment ${payment.id}: ${emailErr.message}`);
+            });
+          }
         }
         continue;
       }

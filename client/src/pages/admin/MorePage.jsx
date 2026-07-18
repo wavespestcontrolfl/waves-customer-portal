@@ -27,11 +27,13 @@ import {
   ChevronRight,
   Bot,
   Sprout,
-  Leaf,
+  Camera,
   Newspaper,
   Send,
+  Sparkles,
 } from "lucide-react";
 import { refetchFlags } from "../../hooks/useFeatureFlag";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 
 const SECTIONS = [
   {
@@ -43,7 +45,7 @@ const SECTIONS = [
         label: "Pipeline",
       },
       { path: "/admin/timetracking", icon: Clock, label: "Staff" },
-      { path: "/admin/service-library", icon: BookOpen, label: "Services" },
+      { path: "/admin/service-library", icon: BookOpen, label: "Services", adminOnly: true },
     ],
   },
   {
@@ -62,14 +64,18 @@ const SECTIONS = [
       { path: "/admin/social-media", icon: Share2, label: "Social Media" },
       { path: "/admin/blog", icon: Newspaper, label: "Blog" },
       { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
+      // Consolidated assessments hub — Lead Magnets tab + Field Assessment
+      // tab (the old standalone /admin/lawn-assessment flow). Mobile lands
+      // on the Field tab: it matches the entry this replaced, and tech-role
+      // users are allowed on the lawn-assessment API (requireTechOrAdmin)
+      // but not on the admin-only photo-assessments API backing the
+      // default Lead Magnets tab.
+      { path: "/admin/lawn-assessments?tab=field", icon: Camera, label: "Assessments" },
     ],
   },
   {
     section: "Field & Equipment",
     items: [
-      // Restored alongside the desktop sidebar entry — the photo-scoring
-      // assessment flow lost its nav link in the V2 shell cutover.
-      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
       { path: "/admin/turf-height", icon: Sprout, label: "Turf Height Review" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
@@ -98,6 +104,7 @@ const SECTIONS = [
       { path: "/admin/banking", icon: Landmark, label: "Banking" },
       { path: "/admin/tax", icon: Calculator, label: "Taxes" },
       { path: "/admin/pricing-logic", icon: Ruler, label: "Pricing" },
+      { path: "/admin/price-change", icon: Megaphone, label: "Price Notices" },
     ],
   },
   {
@@ -111,6 +118,13 @@ const SECTIONS = [
 
 export default function MorePage() {
   const navigate = useNavigate();
+  let currentRole = null;
+  try {
+    currentRole = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role || null;
+  } catch {
+    currentRole = null;
+  }
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
 
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
@@ -138,7 +152,7 @@ export default function MorePage() {
             {section}
           </div>{" "}
           <ul className="bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
-            {items.map(({ path, icon: Icon, label }) => (
+            {items.filter((item) => !item.adminOnly || currentRole === "admin").map(({ path, icon: Icon, label }) => (
               <li key={path}>
                 {" "}
                 <Link
@@ -156,6 +170,15 @@ export default function MorePage() {
                 </Link>{" "}
               </li>
             ))}
+            {section === "Agents" && agentEstimateEnabled && (
+              <li>
+                <Link to="/admin/agent-estimate" className="flex items-center gap-3 px-4 h-14 active:bg-zinc-50 text-zinc-900">
+                  <Sparkles size={20} strokeWidth={1.75} className="text-zinc-600 shrink-0" />
+                  <span className="flex-1 text-14">Agent Estimate</span>
+                  <ChevronRight size={16} className="text-zinc-400" />
+                </Link>
+              </li>
+            )}
           </ul>{" "}
         </section>
       ))}

@@ -52,7 +52,7 @@ try { PhotoService = require('./photos'); } catch { PhotoService = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const GEMINI_VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
+const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
 const VISION_PROMPT = `You are a tree & shrub (landscape ornamental) plant-health assessment tool for a professional lawn & pest company in Southwest Florida. Analyze the provided photo of shrubs, hedges, palms, trees, or landscape beds and return ONLY a JSON object with the scores below. Base your analysis strictly on what is visible.
 
@@ -576,13 +576,17 @@ async function previewTreeShrubAssessment({ photos = [], loadImage, analyze = an
 // ── Report loader ───────────────────────────────────────────────────────────────
 
 async function photoUrl(photo) {
-  // Prefer a stored direct URL; otherwise presign the S3 key (same view-URL helper
-  // the lawn report uses) so the customer report's photo cards actually render.
-  if (photo.url) return photo.url;
+  // Presign from the S3 key FIRST — a stored photo.url can be a stale
+  // presign from write time and 403 later; the stored URL only remains as
+  // the fallback for legacy rows that never got a key.
   if (photo.s3_key && PhotoService && !String(photo.s3_key).startsWith('pending/')) {
-    try { return await PhotoService.getViewUrl(photo.s3_key, 15 * 60); } catch { return null; }
+    try {
+      return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
+    } catch {
+      /* fall through to the stored URL */
+    }
   }
-  return null;
+  return photo.url || null;
 }
 
 function formatAssessmentScores(row) {

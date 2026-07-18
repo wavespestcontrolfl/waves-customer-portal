@@ -254,11 +254,29 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   if (targetNewRows === 0) return rows;
   const maxAttempts = (plannedCount - 1) * 4 + 30;
 
+  // Owner blackout days (opts.blackoutDates: Set of YYYY-MM-DD, resolved by
+  // the async caller): a seeded follow-up must not land on a day off. Nudge
+  // forward a day at a time (re-applying the weekend shift) until clear —
+  // skipping the visit entirely would silently shrink the customer's plan.
+  const blackoutDates = opts.blackoutDates instanceof Set ? opts.blackoutDates : null;
+  const clearOfBlackout = (dateStr) => {
+    if (!blackoutDates || !blackoutDates.size) return dateStr;
+    let candidate = dateStr;
+    for (let nudge = 0; nudge < 14 && blackoutDates.has(candidate); nudge++) {
+      candidate = shiftPastWeekend(
+        etDateString(addETDays(parseETDateTime(`${candidate}T12:00`), 1)),
+        skipWeekends,
+        'forward',
+      );
+    }
+    return candidate;
+  };
+
   let attempt = 1;
   while (rows.length < targetNewRows && attempt < maxAttempts) {
     const rawNext = nextRecurringDate(baseDate, pattern, attempt, rOpts);
     attempt++;
-    const nextDateStr = shiftPastWeekend(rawNext, skipWeekends, shiftDir);
+    const nextDateStr = clearOfBlackout(shiftPastWeekend(rawNext, skipWeekends, shiftDir));
     if (recurringCandidateTooCloseToAnchor(baseDate, pattern, nextDateStr)) continue;
     if (existingDates.has(nextDateStr)) continue;
     existingDates.add(nextDateStr);
@@ -379,10 +397,23 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   });
 
   const existingDates = await existingSeriesDates(conn, parent, columns);
+  // Owner blackout days over the whole seeding horizon (generous 15 months
+  // covers every planned-count/pattern combination) — the sync builder
+  // nudges any follow-up off a blocked date. Fail-open helper.
+  let blackoutDates = null;
+  try {
+    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
+    blackoutDates = await getBlackoutDates(
+      baseDate,
+      etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
+    );
+  } catch { /* fail open */ }
   const rows = buildRecurringFollowUpRows(parent, {
     ...opts,
     pattern,
     existingDates,
+    blackoutDates,
   }).map((row) => filterByColumns(row, columns));
 
   if (!rows.length) {

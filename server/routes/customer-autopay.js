@@ -7,7 +7,12 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const { logAutopay, getRecent } = require('../services/autopay-log');
-const { isChargeableAutopayMethod } = require('../services/autopay-eligibility');
+const {
+  isChargeableAutopayMethod,
+  isBankMethodType,
+  isExpiredCardMethod,
+  isPaused,
+} = require('../services/autopay-eligibility');
 const { etDateString } = require('../utils/datetime-et');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
@@ -74,6 +79,7 @@ router.get('/', async (req, res, next) => {
         'id', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_pause_reason',
         'autopay_payment_method_id', 'billing_day', 'next_charge_date',
+        'ach_status',
       )
       .first();
 
@@ -85,13 +91,13 @@ router.get('/', async (req, res, next) => {
         'id',
         db.raw('card_brand as brand'),
         db.raw('last_four as last4'),
-        'exp_month', 'exp_year', 'is_default', 'autopay_enabled',
+        'exp_month', 'exp_year', 'is_default', 'autopay_enabled', 'method_type',
+        'bank_name', 'ach_status',
       )
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
 
-    const pausedUntil = customer.autopay_paused_until ? new Date(customer.autopay_paused_until) : null;
-    const isPaused = !!(pausedUntil && pausedUntil >= new Date(new Date().toDateString()));
+    const autopayPaused = isPaused(customer);
 
     const chargeableAutopayMethod = await db('payment_methods')
       .where({
@@ -100,19 +106,56 @@ router.get('/', async (req, res, next) => {
         is_default: true,
         autopay_enabled: true,
       })
-      .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled', 'card_funding', 'card_brand');
-    const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod);
+      .first(
+        'id', 'processor', 'method_type', 'stripe_payment_method_id',
+        'is_default', 'autopay_enabled', 'card_funding', 'card_brand',
+        'exp_month', 'exp_year'
+      );
+    // Mirror customerOnAutopay's ACH-health rule (Codex round-12): when
+    // customers.ach_status is non-empty and not 'active'
+    // (needs_verification / suspended), collection refuses everything but a
+    // card — reporting 'active' for an unhealthy bank default would promise
+    // auto-charges that will actually fall back to manual payment.
+    const achHealthBlocked = !!customer.ach_status && customer.ach_status !== 'active'
+      && chargeableAutopayMethod?.method_type !== 'card';
+    const hasAutopayMethod = isChargeableAutopayMethod(chargeableAutopayMethod) && !achHealthBlocked;
+    // Per-application customers pay per completed visit — their autopay card
+    // is HOW each visit charge collects, not a monthly subscription, and the
+    // monthly cron skips them (GUARD 3b). Never project a monthly next-charge
+    // from monthly_rate for them (Codex round-2): it advertises a charge that
+    // will never run. Column-guarded read — pre-migration keeps legacy shape.
+    let billingMode = null;
+    try {
+      const modeRow = await db('customers').where({ id: req.customerId }).first('billing_mode');
+      billingMode = modeRow?.billing_mode || null;
+    } catch { /* billing_mode column absent pre-migration */ }
+    const perApplicationBilling = billingMode === 'per_application';
+    // Both non-monthly modes must suppress the monthly projection: the
+    // monthly cron never charges per_application, and annual_prepay is
+    // term-covered (renewal collects via its own flow) — projecting
+    // monthly_rate for either advertises a charge that will not run
+    // (Codex round-2 + round-5).
+    const nonMonthlyBilling = perApplicationBilling || billingMode === 'annual_prepay';
+    // Per-application collection takes ANY saved tender (owner ruling
+    // 2026-07-09): chargeInvoiceWithSavedCard locks the PI to the saved
+    // method's family (card settles inline, ACH rides processing→paid), so
+    // an ACH default is a genuinely active Auto Pay state here too.
     const customerAutopayEnabled = !!customer.autopay_enabled && hasAutopayMethod;
     const autopayFunding = customerAutopayEnabled
       ? await resolveAutopayCardFunding(chargeableAutopayMethod)
       : null;
-    const nextCharge = customerAutopayEnabled
-      ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type, { funding: autopayFunding })
+    // NULL monthly_rate = unpriced (manual quote pending), never $0: the
+    // monthly cron filters monthly_rate > 0 and will not charge, so
+    // projecting "Next charge: $0.00 on <date>" is false. Serialize null and
+    // let the portal render an unpriced state (NULL-not-$0 rule).
+    const hasMonthlyRate = Number(customer.monthly_rate) > 0;
+    const nextCharge = customerAutopayEnabled && !nonMonthlyBilling && hasMonthlyRate
+      ? computeChargeAmount(customer.monthly_rate, chargeableAutopayMethod.method_type, { funding: autopayFunding })
       : null;
 
     let state = 'disabled';
-    if (customerAutopayEnabled && !isPaused) state = 'active';
-    else if (customerAutopayEnabled && isPaused) state = 'paused';
+    if (customerAutopayEnabled && !autopayPaused) state = 'active';
+    else if (customerAutopayEnabled && autopayPaused) state = 'paused';
 
     const recentEvents = await getRecent(req.customerId, 10);
 
@@ -123,7 +166,8 @@ router.get('/', async (req, res, next) => {
       pause_reason: customer.autopay_pause_reason,
       autopay_payment_method_id: hasAutopayMethod ? chargeableAutopayMethod.id : null,
       billing_day: customer.billing_day || 1,
-      next_charge_date: customer.next_charge_date,
+      billing_mode: billingMode,
+      next_charge_date: nonMonthlyBilling || !hasMonthlyRate ? null : customer.next_charge_date,
       next_charge_amount: nextCharge?.total ?? null,
       next_charge_base_amount: nextCharge?.base ?? null,
       next_charge_surcharge_amount: nextCharge?.surcharge ?? null,
@@ -147,7 +191,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
     const current = await db('customers')
       .where({ id: req.customerId })
-      .select('autopay_enabled', 'autopay_payment_method_id', 'billing_day')
+      .select('autopay_enabled', 'autopay_payment_method_id', 'billing_day', 'ach_status')
       .first();
 
     if (!current) return res.status(404).json({ error: 'Customer not found' });
@@ -158,20 +202,20 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
     if (autopay_payment_method_id) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ id: autopay_payment_method_id, customer_id: req.customerId })
-        .first('id', 'processor', 'stripe_payment_method_id');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
       if (!selectedPaymentMethod) return res.status(400).json({ error: 'Payment method not found' });
     } else if (autopay_payment_method_id === null || autopay_payment_method_id === '') {
       selectedPaymentMethod = null;
     } else if (current.autopay_payment_method_id) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ id: current.autopay_payment_method_id, customer_id: req.customerId })
-        .first('id', 'processor', 'stripe_payment_method_id');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
     } else if (willBeEnabled) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ customer_id: req.customerId, is_default: true, processor: 'stripe' })
         .whereNotNull('stripe_payment_method_id')
         .orderBy('created_at', 'desc')
-        .first('id', 'processor', 'stripe_payment_method_id');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
     }
 
     if (
@@ -183,7 +227,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
         .where({ customer_id: req.customerId, is_default: true, processor: 'stripe' })
         .whereNotNull('stripe_payment_method_id')
         .orderBy('created_at', 'desc')
-        .first('id', 'processor', 'stripe_payment_method_id');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
     }
 
     const methodCanChargeAutopay = selectedPaymentMethod?.processor === 'stripe'
@@ -191,6 +235,40 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
     if (willBeEnabled && !methodCanChargeAutopay) {
       return res.status(400).json({ error: 'Add a payment method before enabling Auto Pay.' });
+    }
+
+    if (willBeEnabled && isExpiredCardMethod(selectedPaymentMethod)) {
+      return res.status(400).json({
+        error: 'This card is expired. Add a current payment method before enabling Auto Pay.',
+      });
+    }
+
+    // A micro-deposit bank account that hasn't verified (or failed
+    // verification) must not be put in charge of Auto Pay (portal ACH
+    // lane): collection would debit an account that can't be debited and
+    // Stripe's rejection would escalate through handleAchFailure. The
+    // setup_intent.succeeded webhook flips the row to 'verified' and
+    // enrolls it; until then the portal shows it as pending.
+    if (willBeEnabled
+      && isBankMethodType(selectedPaymentMethod?.method_type)
+      && ['pending_verification', 'verification_failed'].includes(selectedPaymentMethod?.ach_status)) {
+      return res.status(400).json({
+        error: selectedPaymentMethod.ach_status === 'verification_failed'
+          ? 'This bank account could not be verified. Remove it and add it again.'
+          : 'This bank account is still being verified. You can use it for Auto Pay as soon as verification clears.',
+      });
+    }
+
+    // Customer-level ACH block (Codex #2706 r3): while customers.ach_status
+    // is non-active, customerOnAutopay/cron refuse every non-card method —
+    // persisting Auto Pay flags onto a bank here would silently stop
+    // collection while the UI shows Active. Reject honestly instead;
+    // 'suspended' clears through a successful ACH payment (or
+    // needs_verification through a bank verification).
+    if (willBeEnabled
+      && isBankMethodType(selectedPaymentMethod?.method_type)
+      && current.ach_status && current.ach_status !== 'active') {
+      return res.status(400).json({ error: 'Bank payments are unavailable on your account right now — Auto Pay needs a card until that clears.' });
     }
 
     if (typeof autopay_enabled === 'boolean' && autopay_enabled !== current.autopay_enabled) {
@@ -292,6 +370,24 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       }).catch((emailErr) => {
         logger.warn(`[customer-autopay] payment method update email failed for customer ${req.customerId}: ${emailErr.message}`);
       });
+    }
+
+    // Authorization-copy backstop (Codex #2698 r3): a card ENTERING the
+    // in-charge role via the portal — the re-enable toggle or use-this-card
+    // — may never have received its enrollment copy (it was enrolled behind
+    // a healthy incumbent under the in-charge-only rule, or before the gate
+    // flipped). Consent-version-keyed idempotency makes this at-most-once
+    // per agreement; the sender itself skips non-card methods and customers
+    // with no enrollment-scoped consent row. Fire-and-forget; gate off =
+    // total no-op.
+    if (willBeEnabled && activePaymentMethodId && (enabledEvent || methodChangedEvent)) {
+      try {
+        const { sendAutopayEnrollmentConfirmation } = require('../services/card-enrollment-email');
+        void sendAutopayEnrollmentConfirmation({
+          customerId: req.customerId,
+          paymentMethodRowId: activePaymentMethodId,
+        });
+      } catch { /* best-effort */ }
     }
 
     res.json({ success: true, updated: true, changes: Object.keys(updates) });

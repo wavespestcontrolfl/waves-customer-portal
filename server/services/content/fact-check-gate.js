@@ -26,7 +26,9 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 
-const FACTCHECK_MODEL = process.env.MODEL_FACTCHECK || MODELS.DEEP;
+// Env override swaps only the Anthropic leg; the cross-provider deep fallback
+// stays. Without an override the shared deepAnalysis policy is used as-is.
+const FACTCHECK_MODEL_OVERRIDE = process.env.MODEL_FACTCHECK || null;
 // Bound how long a publish (or the autonomous publishing lock) can wait on this
 // advisory check. The SDK default is a 10-minute timeout WITH retries, so a
 // stalled model could hold the pipeline for many minutes before fail-open
@@ -89,12 +91,12 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
 
   let response;
   try {
-    const policy = FACTCHECK_MODEL === MODELS.DEEP
-      ? MODELS.TEXT_POLICIES.deepAnalysis
-      : {
-        primary: { provider: MODELS.PROVIDER.ANTHROPIC, model: FACTCHECK_MODEL },
+    const policy = FACTCHECK_MODEL_OVERRIDE
+      ? {
+        primary: { provider: MODELS.PROVIDER.ANTHROPIC, model: FACTCHECK_MODEL_OVERRIDE },
         fallback: MODELS.TEXT_POLICIES.deepAnalysis.fallback,
-      };
+      }
+      : MODELS.TEXT_POLICIES.deepAnalysis;
     response = await dispatchWithFallback(policy, {
       maxTokens: 6000,
       timeoutMs: FACTCHECK_TIMEOUT_MS,
@@ -120,4 +122,4 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
   return { pass, findings, checked: true, model: response.model };
 }
 
-module.exports = { evaluate, _internals: { normalizeFinding, FACTCHECK_MODEL } };
+module.exports = { evaluate, _internals: { normalizeFinding, FACTCHECK_MODEL_OVERRIDE } };

@@ -10,14 +10,15 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest } = require('../services/cancellation-processor');
+const {
+  MAX_PHOTOS,
+  MAX_ENCODED_PHOTO_CHARS,
+  validateRequestPhotos,
+} = require('../utils/request-photo-validation');
 
 const VALID_CATEGORIES = ['pest_issue', 'lawn_concern', 'add_service', 'schedule_change', 'billing', 'cancellation', 'pause', 'upgrade', 'other'];
 const VALID_URGENCIES = ['routine', 'urgent'];
 const VALID_LOCATIONS = ['front_yard', 'back_yard', 'side_yard', 'inside_home', 'garage_lanai', 'garden_beds', 'other'];
-
-const MAX_PHOTOS = 3;
-const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // 5 MB per photo decoded
-const DATA_URL_RE = /^data:image\/(jpeg|jpg|png|webp|heic|heif);base64,([A-Za-z0-9+/=]+)$/;
 
 // Throttle creates per authenticated customer — POST fans out two SMS messages,
 // so we want stricter scoping than the global /api limiter.
@@ -41,26 +42,13 @@ const createSchema = Joi.object({
   locationOnProperty: Joi.string().valid(...VALID_LOCATIONS).allow(null, '').optional(),
   source: Joi.string().trim().max(50).optional(),
   type: Joi.string().trim().max(50).optional(),
-  photos: Joi.array().items(Joi.string().max(8 * 1024 * 1024)).max(MAX_PHOTOS).optional(),
+  photos: Joi.array().items(Joi.string().max(MAX_ENCODED_PHOTO_CHARS)).max(MAX_PHOTOS).optional(),
 });
 
 // Strip any HTML-ish characters before storage so admin/UI surfaces can never
 // render injected markup, regardless of the client renderer.
 function stripHtml(s) {
   return String(s || '').replace(/[<>]/g, '');
-}
-
-// Validate a single photo entry — must be a small base64 data URL of an allowed image type.
-function validatePhoto(p) {
-  if (typeof p !== 'string') return null;
-  const m = DATA_URL_RE.exec(p);
-  if (!m) return null;
-  const b64 = m[2];
-  // Approximate decoded byte size from base64 length
-  const padding = (b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0);
-  const decoded = Math.floor((b64.length * 3) / 4) - padding;
-  if (decoded > MAX_PHOTO_BYTES) return null;
-  return p;
 }
 
 // =========================================================================
@@ -87,10 +75,19 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     const cleanSubject = stripHtml(subject);
     const cleanDescription = stripHtml(description || '');
 
-    // Server-side photo validation — strict data URL, type, decoded size
-    const photoData = Array.isArray(photos)
-      ? photos.map(validatePhoto).filter(Boolean).slice(0, MAX_PHOTOS)
-      : [];
+    // Reject the whole submission when an attachment is unreadable or too
+    // large. Silently dropping a photo makes the customer believe staff saw
+    // evidence that was never persisted.
+    const photoValidation = validateRequestPhotos(photos);
+    if (!photoValidation.ok) {
+      return res.status(photoValidation.status).json({
+        error: photoValidation.error,
+        ...(Number.isInteger(photoValidation.photoIndex)
+          ? { photoIndex: photoValidation.photoIndex }
+          : {}),
+      });
+    }
+    const photoData = photoValidation.photos;
 
     // Lightweight server-side dedupe — reject identical create within 60s
     const dupeWindow = new Date(Date.now() - 60 * 1000);
@@ -290,8 +287,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     }
 
     // Send customer confirmation SMS. A cancellation is auto-processed, so it
-    // gets a dedicated template — the generic copy ("we'll text you when it has
-    // been assigned to a technician") is wrong for a cancellation.
+    // gets a dedicated template with cancellation-specific next steps.
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
     let confirmationSmsSent = false;
     try {

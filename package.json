@@ -14,9 +14,10 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
-    "prebuild": "npm run verify:blog-schema && npm run check:portal-brand",
+    "prebuild": "npm run verify:blog-schema && npm run check:portal-brand && npm run check:domain-rules",
     "build": "cd client && npm run build",
     "check:portal-brand": "node scripts/check-portal-brand.js",
+    "check:domain-rules": "node scripts/check-domain-rules.js",
     "prestart": "npm run verify:blog-schema",
     "start": "node server/index.js",
     "db:migrate": "cd server && npx knex migrate:latest",
@@ -46,15 +47,25 @@
     "backlink:sync-strategy-agent": "node scripts/create-backlink-strategy-agent.js",
     "seo:pipeline:run": "node server/scripts/run-seo-pipeline.js",
     "seo:pipeline:worker": "node server/scripts/run-seo-pipeline-worker.js",
+    "audit:staff-rollout": "node server/scripts/audit-staff-rollout-readiness.js",
+    "rotate:legacy-staff-passwords": "node server/scripts/rotate-legacy-staff-passwords.js",
     "audit:waveguard-materials": "node server/scripts/audit-waveguard-protocol-material-costs.js",
     "prepare": "git config core.hooksPath scripts/hooks 2>/dev/null || true",
-    "hooks:install": "git config core.hooksPath scripts/hooks"
+    "hooks:install": "git config core.hooksPath scripts/hooks",
+    "lint:staged": "lint-staged"
+  },
+  "lint-staged": {
+    "*.{js,jsx,cjs,mjs}": "eslint --fix --cache --cache-location node_modules/.cache/eslint --no-warn-ignored"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.9"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react": "^7.37.5",
+    "globals": "^17.7.0",
+    "lint-staged": "^15.5.2"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

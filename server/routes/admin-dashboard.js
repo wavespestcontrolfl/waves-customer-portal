@@ -866,7 +866,12 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       );
       const [window] = await db('estimate_deposits')
         .modify((qb) => applyETTimestampWindow(qb, 'received_at', start, todayStr))
-        .select(db.raw('COALESCE(SUM(amount), 0) as collected'), db.raw('COUNT(*) as n'));
+        // Collected = CASH that arrived in the window: face value + the
+        // card surcharge captured with it (amount stays face-only by
+        // design — it is the credit authority; the fee rides
+        // card_surcharge). on_hand above deliberately stays face-based:
+        // the fee is never creditable to an invoice.
+        .select(db.raw('COALESCE(SUM(amount + COALESCE(card_surcharge, 0)), 0) as collected'), db.raw('COUNT(*) as n'));
       deposits = {
         onHand: parseFloat(ledger.on_hand),
         onHandCount: parseInt(ledger.on_hand_count, 10),
@@ -1746,6 +1751,13 @@ router.get('/lead-funnel', dashboardCache, async (req, res, next) => {
     // Effective paid signal mirrors splitFacebookByPaid: a Meta click id
     // (fbclid/_fbc) OR the explicit flag — is_paid alone is NULL on most
     // historical rows and would misfile click-attributed paid Meta as organic.
+    // NOTE: this boolean is consumed by buildLeadFunnel ONLY to split facebook
+    // rows (paid vs facebook_organic); google_ads rows are already paid by their
+    // platform key. So a Google click id must NOT be added here — for a
+    // facebook-keyed row that happens to carry a gclid it would mislabel a Google
+    // click as paid Facebook, and for an organic-keyed row the platform key wins
+    // anyway. Correctly surfacing gclid-only organic rows as paid needs re-keying
+    // them to google_ads, not widening this Facebook-only signal.
     const PAID_SQL = '(asa.is_paid IS TRUE OR asa.fbclid IS NOT NULL OR asa.fbc IS NOT NULL)';
     // lead_date is an ET DATE column; the window's from/to are ET date
     // strings, so direct comparison is timezone-safe. Parity with the sibling
@@ -2052,17 +2064,18 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
 const ALLOWED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_IMAGES = 3;
 const MAX_IMAGE_B64 = 7 * 1024 * 1024; // ~5 MB decoded
-const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
-function isValidBase64(s) {
-  return typeof s === 'string' && s.length > 0 && s.length % 4 === 0 && B64_RE.test(s);
-}
+// Stack-safe (sliced) validation, size-capped BEFORE the charset scan — a
+// whole-string regex on an oversized payload can blow V8's regex stack; see
+// server/utils/base64-validate.js.
+const { isValidBase64 } = require('../utils/base64-validate');
 function sanitizeChartImages(raw) {
   if (!Array.isArray(raw)) return [];
   return raw
     // Reject malformed/oversized data up front so a stale client or direct
     // request can't burn a Gemini+Claude call on garbage before it fails.
     .filter((im) => im && ALLOWED_IMAGE_MIME.has(im.mimeType)
-      && isValidBase64(im.data) && im.data.length <= MAX_IMAGE_B64)
+      && typeof im.data === 'string' && im.data.length <= MAX_IMAGE_B64
+      && isValidBase64(im.data))
     .slice(0, MAX_IMAGES)
     .map((im) => ({ data: im.data, mimeType: im.mimeType }));
 }

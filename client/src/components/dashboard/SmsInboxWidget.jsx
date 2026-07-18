@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#FFFFFF', card: '#F8FAFC', border: '#E2E8F0', teal: '#0A7EC2', red: '#C0392B', text: '#334155', muted: '#64748B', white: '#fff' };
@@ -18,7 +19,7 @@ export default function SmsInboxWidget() {
   const [replyText, setReplyText] = useState('');
   const [sending, setSending] = useState(false);
 
-  const token = localStorage.getItem('adminToken');
+  const token = getAdminAuthToken();
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
   const fetchInbox = useCallback(async () => {

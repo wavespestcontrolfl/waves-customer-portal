@@ -5,8 +5,12 @@ import {
   FONTS,
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { DOC_COLUMN_MAX, DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
 import Icon from '../components/Icon';
+import PublicLoadError from '../components/PublicLoadError';
 import BrandFooter from '../components/BrandFooter';
+import DocumentActionBar from '../components/DocumentActionBar';
+import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -21,14 +25,14 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const BOOK_URL = 'https://www.wavespestcontrol.com/book/';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
-const FONT_BODY = "'Inter', system-ui, sans-serif";
+const FONT_BODY = DOC_FONT; // "'Inter', system-ui, sans-serif" — the one customer body stack
 const ESTIMATE_BG = CUSTOMER_SURFACE.page;
 const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
 // Normalized from drifted gray-500 #6B7280 to the portal's slate-600.
 const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
 const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
 const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
-const ESTIMATE_BUTTON_BG = B.blueDeeper;
+const ESTIMATE_BUTTON_BG = B.glassNavy;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';
 
@@ -39,15 +43,13 @@ const cardStyle = {
   border: `1px solid ${ESTIMATE_BORDER}`,
 };
 
-// Same tracking as the estimate's kicker/label system (HEADER_EYEBROW_STYLE /
-// SECTION_KICKER_STYLE in EstimateViewPage) so the two pages read as one
-// family.
+// THE document eyebrow — theme-doc's DOC_EYEBROW (12px/700/0.11em/1.2/
+// uppercase/var(--text-muted)), the same spec the glass runtime forces at
+// [data-gt="eyebrow"] and ReportViewPage's .section-eyebrow now carries.
+// marginBottom is zeroed here because every call site sets its own.
 const eyebrowStyle = {
-  fontSize: 12,
-  color: ESTIMATE_MUTED,
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-  fontWeight: 700,
+  ...DOC_EYEBROW,
+  marginBottom: 0,
 };
 
 const primaryButtonStyle = {
@@ -91,6 +93,32 @@ const TYPE_LABELS = {
   pre_treatment_termite_certificate: 'Certificate of Compliance — Pre-Construction Termite Treatment',
 };
 
+// Termite Phase-3 compliance answers (FS 482.226 / FAC 5E-14) must render
+// on the customer report even when the AI-drafted narrative suppresses the
+// raw findings list — the narrative writer treats structured findings as
+// its INPUT, not its content, so these statutory statements would otherwise
+// vanish from the sent page (Codex P1 r3 on #2703). Labels mirror
+// CUSTOMER_FIELD_LABELS in activity-indicators.js. Exported for the admin
+// ProjectsPage customer-report preview, which must render the same block
+// under the same suppression rule (preview == final; Codex P2 r4).
+export const TERMITE_COMPLIANCE_SECTIONS = {
+  termite_inspection: {
+    eyebrow: 'Inspection record',
+    fields: [
+      ['areas_not_inspected', 'Areas not inspected'],
+      ['inspection_notice_affixed', 'Inspection notice posted'],
+    ],
+  },
+  termite_treatment: {
+    eyebrow: 'Application record',
+    fields: [
+      ['percent_solution', 'Solution strength'],
+      ['epa_registration', 'EPA registration no.'],
+      ['posted_notice', 'Posted notice placed'],
+    ],
+  },
+};
+
 // Mirrors the estimate hero's phone display (EstimateViewPage helper of the
 // same name): 10-digit US numbers get the (xxx) xxx-xxxx treatment, anything
 // else renders as stored.
@@ -101,11 +129,20 @@ function formatCustomerPhone(phone) {
   return String(phone || '').trim();
 }
 
+// Date-only values are pinned to UTC noon (never `T12:00:00` local — a
+// far-east viewer's local noon is still the PRIOR calendar day in NY, which
+// rendered the FDACS inspection date a day early). Same anchor the server's
+// report-page-metadata uses.
+function dateOnlyToNoonUtc(dateOnlyValue) {
+  const [y, m, d] = dateOnlyValue.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 12));
+}
+
 function formatReportDate(value) {
   if (!value) return '';
   const raw = String(value);
   const dateOnlyValue = dateOnly(raw);
-  const date = dateOnlyValue ? new Date(`${dateOnlyValue}T12:00:00`) : new Date(raw);
+  const date = dateOnlyValue ? dateOnlyToNoonUtc(dateOnlyValue) : new Date(raw);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
 }
@@ -114,7 +151,7 @@ function formatAppointmentDate(value) {
   if (!value) return '';
   const raw = String(value);
   const dateOnlyValue = dateOnly(raw);
-  const date = dateOnlyValue ? new Date(`${dateOnlyValue}T12:00:00`) : new Date(raw);
+  const date = dateOnlyValue ? dateOnlyToNoonUtc(dateOnlyValue) : new Date(raw);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
 }
@@ -207,7 +244,6 @@ const FIELD_LABELS = {
   previous_treatment_evidence: 'Evidence of previous treatment',
   previous_treatment_notes: 'Previous treatment observations',
   notice_location: 'Notice of Inspection location',
-  structure_sqft: 'Structure footprint (approx. sq ft)',
   inspection_fee: 'Inspection fee',
   treated_at_inspection: 'Treated at time of inspection',
   organism_treated: 'Organism treated',
@@ -217,6 +253,10 @@ const FIELD_LABELS = {
   comments: 'Comments / financial disclosure notes',
   termite_type: 'Termite species',
   activity_status: 'Activity status',
+  // "infestation" is banned in customer NARRATIVE copy, but WDO/termite
+  // reports are official FDACS inspection documents where it is the
+  // regulatory term — deliberate exception (owner ruling 2026-07-16);
+  // compliance sweeps must not "fix" this label.
   infestation_extent: 'Infestation extent',
   pests_identified: 'Pests identified',
   severity: 'Severity',
@@ -331,30 +371,98 @@ export default function ProjectReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
-  // Liquid-glass theme — now unconditional, except on the certificate view.
-  // This page has no client pdf/static render modes (the filed FDACS-13645
-  // PDF is a server-side artifact linked below, never rendered here), but the
-  // pre-construction termite Certificate of Compliance IS a state compliance
-  // document rendered on this page — it never mounts the scene, so the
-  // certificate stays the plain paper document.
+  // Liquid-glass theme — unconditional EXCEPT on official compliance
+  // documents, which stay the plain navy/beige paper (owner ruling
+  // 2026-07-16): the pre-construction termite Certificate of Compliance and
+  // WDO inspection reports never mount the scene. Regular termite
+  // inspection/treatment reports and the other project types stay glass.
+  // (This page has no client pdf/static render modes — the filed FDACS-13645
+  // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
-  const glassActive = !isCertificate;
+  const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
+  const glassActive = !isPaperDocument;
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
+    setLoading(true);
+    setLoadError(false);
     fetch(`${API_BASE}/reports/project/${token}/data`)
-      .then(r => r.json())
+      .then(r => {
+        if (r.status === 404 || r.status === 410 || r.status === 402) return r.json();
+        if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
+        return r.json();
+      })
       .then(d => { setData(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [token]);
+      .catch(() => { setLoadError(true); setLoading(false); });
+  }, [token, loadAttempt]);
+
+  // Paid-but-unswept: without this, the 402 card sits static after the
+  // customer pays in another tab. Quietly re-check every 30s and swap the
+  // report in once it unlocks. Safe to poll: the server 402s before any
+  // view-stamp/activity write, and non-OK re-checks change nothing here.
+  useEffect(() => {
+    if (data?.code !== 'report_payment_required') return undefined;
+    // `cancelled` invalidates in-flight responses on cleanup — clearing the
+    // interval alone would let a slow response for the PREVIOUS token setData
+    // over the newly-loaded report (codex P2 #2824 r2).
+    let cancelled = false;
+    const id = window.setInterval(() => {
+      fetch(`${API_BASE}/reports/project/${token}/data`)
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => { if (!cancelled && d && !d.error) setData(d); })
+        .catch(() => {});
+    }, 30000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [data?.code, token]);
 
   if (loading) return (
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: FONT_BODY }}>
-      <div style={{ ...cardStyle, width: 'min(420px, calc(100% - 40px))' }}>
-        <div style={{ height: 12, width: 120, background: B.offWhite, borderRadius: 4 }} />
-        <div style={{ height: 32, width: '70%', background: B.offWhite, borderRadius: 4, marginTop: 14 }} />
-        <div style={{ height: 14, width: '50%', background: B.offWhite, borderRadius: 4, marginTop: 10 }} />
+      <div role="status" aria-label="Loading your report" style={{ ...cardStyle, width: 'min(420px, calc(100% - 40px))' }}>
+        <div style={{ height: 12, width: 120, background: B.offWhite, borderRadius: 6 }} />
+        <div style={{ height: 32, width: '70%', background: B.offWhite, borderRadius: 6, marginTop: 16 }} />
+        <div style={{ height: 14, width: '50%', background: B.offWhite, borderRadius: 6, marginTop: 12 }} />
+      </div>
+    </div>
+  );
+
+  if (loadError) return (
+    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'grid', placeItems: 'center', padding: 20, fontFamily: FONT_BODY }}>
+      <div style={{ ...cardStyle, maxWidth: 480 }}><PublicLoadError resource="project report" onRetry={() => setLoadAttempt(a => a + 1)} /></div>
+    </div>
+  );
+
+  // Payment-held report (402 report_payment_required): the inspection is
+  // done and the report exists, but it unlocks — and is emailed automatically
+  // — only once the invoice is paid. Warm customer-surface card with the pay
+  // CTA when the server offered a live pay link.
+  if (data?.code === 'report_payment_required') return (
+    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
+      <div style={{ ...cardStyle, maxWidth: 440, textAlign: 'center' }}>
+        <div style={{ color: ESTIMATE_MUTED }}><Icon name="lock" size={32} strokeWidth={1.75} /></div>
+        <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>
+          Your {data.reportTypeLabel || 'inspection'} report is ready
+        </h1>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
+          {data.payerBilled
+            ? 'This inspection is billed directly to the requesting party. As soon as their invoice is paid, your official report is emailed automatically and unlocks right here.'
+            : data.paymentProcessing
+              ? 'Your bank payment is processing — as soon as it clears, your official report is emailed to you automatically and unlocks right here. No extra steps needed.'
+              : <>Once your invoice{data.invoiceNumber ? ` ${data.invoiceNumber}` : ''} is paid, your official
+                report is emailed to you automatically and unlocks right here — no extra steps needed.</>}
+        </div>
+        {data.payUrl ? (
+          <a href={data.payUrl} style={{ ...primaryButtonStyle, marginTop: 16 }}>
+            Pay invoice{data.invoiceNumber ? ` ${data.invoiceNumber}` : ''}
+          </a>
+        ) : null}
+        <div style={{ marginTop: data.payUrl ? 10 : 16 }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={data.payUrl ? { ...secondaryButtonStyle } : { ...primaryButtonStyle }}>
+            Call Waves — {WAVES_PHONE_DISPLAY}
+          </a>
+        </div>
       </div>
     </div>
   );
@@ -363,12 +471,12 @@ export default function ProjectReportViewPage() {
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
       <div style={{ ...cardStyle, maxWidth: 420, textAlign: 'center' }}>
         <div style={{ color: ESTIMATE_MUTED }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
-        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, marginTop: 8 }}>Report unavailable</div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
+        <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>Report unavailable</h1>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-          ...primaryButtonStyle, marginTop: 18,
+          ...primaryButtonStyle, marginTop: 16,
         }}>Call Waves</a>
       </div>
     </div>
@@ -394,13 +502,23 @@ export default function ProjectReportViewPage() {
   const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
+  // Statutory compliance answers survive the narrative suppression in their
+  // own block; when the raw findings list renders they're already in it.
+  const complianceSection = TERMITE_COMPLIANCE_SECTIONS[data.projectType] || null;
+  const complianceEntries = (suppressFindingsForNarrative && complianceSection)
+    ? complianceSection.fields
+      .map(([key, label]) => [label, findings[key]])
+      .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    : [];
   const atAGlanceRows = buildAtAGlance({ data, typeLabel });
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   // The certificate headline mirrors the full type label (owner directive
   // 2026-07-04) — same wording as the kicker, not the bare short form.
+  // Owner ruling 2026-07-16: every report headline starts "Hi" and ends "!".
+  // Acronyms survive the lowercase (WDO, not "wdo").
   const headline = isCertificate
-    ? `Hey ${firstName}, here's your ${typeLabel}.`
-    : `Hey ${firstName}, here's your ${typeLabel.toLowerCase()} report.`;
+    ? `Hi ${firstName}, here's your ${typeLabel}!`
+    : `Hi ${firstName}, here's your ${typeLabel.toLowerCase().replace(/\bwdo\b/g, 'WDO')} report!`;
   // The address line of the hero contact block. Document types use the
   // REPORT's own recorded address, never the live customer row: a
   // certificate's treatment address (a pre-construction lot may differ from
@@ -413,15 +531,25 @@ export default function ProjectReportViewPage() {
     : data.projectType === 'wdo_inspection'
       ? (String(findings.property_address || '').trim() || data.customerAddress || data.cityState || '')
       : (data.customerAddress || data.cityState || '');
-  // Mirrors the customer estimate hero (owner directive 2026-07-04): the
-  // recipient's own contact lines — name, email, phone, address — under the
-  // headline, same uppercase treatment as EstimateViewPage's Header.
+  // Identity block under the headline — owner ruling 2026-07-16: every
+  // report shows the same block in the same order and format: name, email,
+  // phone, address, MIXED-CASE ("William Carter", never "WILLIAM CARTER" —
+  // supersedes the uppercase treatment). ALL-CAPS records title-case for
+  // display only, same rule as ReportViewPage's contact block.
+  const displayContactLine = (raw) => {
+    const s2 = String(raw || '').trim();
+    if (!s2 || s2 !== s2.toUpperCase()) return s2;
+    if (s2.includes('@')) return s2.toLowerCase();
+    return s2.toLowerCase()
+      .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
+      .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
+  };
   const heroContactLines = [
     data.customerName,
     data.customerEmail,
     formatCustomerPhone(data.customerPhone),
     heroAddressLine,
-  ].map((line) => String(line || '').trim()).filter(Boolean);
+  ].map(displayContactLine).filter(Boolean);
 
   return (
     <div className="project-report-page" style={{
@@ -458,13 +586,28 @@ export default function ProjectReportViewPage() {
       `}</style>
       {/* Page-local top bar removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main style={{ flex: 1, padding: '32px 20px 64px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div style={{ flex: 1, padding: '32px 20px 64px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+        {/* Owner rules 2026-07-16: the four-box bar (Download PDF / Share /
+            Print / Portal Login) sits at the TOP of every report, above the
+            header. A filed WDO report downloads the real FDACS PDF;
+            everything else falls back to the print dialog (Save as PDF). */}
+        <DocumentActionBar
+          shareTitle="Waves project report"
+          pdfUrl={data?.fdacsPdfAvailable ? `${API_BASE}/reports/project/${token}/fdacs-pdf` : null}
+          pdfFileName="FDACS-13645-WDO-Inspection-Report.pdf"
+          printFallbackDownload
+        />
+        {/* Waves AI on every report EXCEPT the WDO / pre-treat paper
+            documents (owner 2026-07-16); sits tight under the tools card
+            like the service report. */}
+        {!isPaperDocument && <ProjectAskWaves token={token} />}
         <div style={{ padding: '8px 0 24px' }}>
           {/* The kicker carries what the project is FOR (its title) when one
               is recorded — the bare type alone reads generic; the type still
               anchors the headline below. Mirrors the estimate's
               "Your estimate · {service}" kicker. */}
-          <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 6 }}>
+          <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
             Project report{reportTitle ? ` · ${reportTitle}` : ''}
           </div>
           <h1 style={{
@@ -479,9 +622,9 @@ export default function ProjectReportViewPage() {
             {headline}
           </h1>
           {heroContactLines.length ? (
-            <div style={{ marginTop: 14, display: 'grid', gap: 4 }}>
+            <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
               {heroContactLines.map((line) => (
-                <div key={line} style={{ ...eyebrowStyle, lineHeight: 1.5 }}>{line}</div>
+                <div key={line} style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, fontWeight: 600 }}>{line}</div>
               ))}
             </div>
           ) : null}
@@ -502,29 +645,29 @@ export default function ProjectReportViewPage() {
               of these fields — showing both reads twice). */}
           {!suppressFindingsForNarrative && findingsEntries.length > 0 && (
             <div style={{ marginTop: 16 }}>
-              <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 10 }}>
+              <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 12 }}>
                 Findings
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {findingsEntries.map(([key, value]) => {
                   const insight = getFindingInsight(key, value);
                   const showRoofRatPhoto = isRoofRatFinding(key, value);
                   const formattedValue = formatFindingValue(key, value);
                   return (
-                    <div key={key} style={{ padding: '12px 14px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+                    <div key={key} style={{ padding: '12px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
                       {key === 'species' ? (
-                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
+                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                           <strong style={{ color: ESTIMATE_TEXT }}>Species:</strong> {formattedValue}
                         </div>
                       ) : (
                         <>
                           <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{humanizeKey(key)}</div>
-                          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{formattedValue}</div>
+                          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{formattedValue}</div>
                         </>
                       )}
                       {showRoofRatPhoto && <RoofRatPhoto />}
                       {insight && (
-                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
+                        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
                           {insight}
                         </div>
                       )}
@@ -533,7 +676,7 @@ export default function ProjectReportViewPage() {
                           <summary style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT, cursor: 'pointer' }}>
                             Learn more about roof rats
                           </summary>
-                          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 6 }}>
+                          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
                             {ROOF_RAT_LEARN_MORE}
                           </div>
                         </details>
@@ -545,6 +688,25 @@ export default function ProjectReportViewPage() {
             </div>
           )}
 
+          {/* Termite Phase-3 compliance answers — rendered deterministically
+              when the narrative suppresses the raw findings list, so the
+              statutory statements always reach the sent page (Codex P1 r3). */}
+          {complianceEntries.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 12 }}>
+                {complianceSection.eyebrow}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {complianceEntries.map(([label, value]) => (
+                  <div key={label} style={{ padding: '12px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{label}</div>
+                    <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Recommendations — if the text is the three-section AI-drafted
                format, render each section with its own heading. Otherwise
                fall back to the single "Recommendations" block. */}
@@ -552,12 +714,18 @@ export default function ProjectReportViewPage() {
         </div>
         )}
 
+        {/* "How did today's visit go?" — every report except the WDO /
+            pre-treat paper documents (owner 2026-07-16), in the slot right
+            below the summary card (the service report's below-weather slot).
+            Self-suppresses once a review is recorded. */}
+        {!isPaperDocument && <ProjectReviewAsk data={data} />}
+
         {data.projectType === 'wdo_inspection' && (
           <div data-glass="card" style={{ ...cardStyle, marginTop: 16 }}>
-            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 6 }}>
+            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
               Official WDO Form
             </div>
-            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
               {data.fdacsPdfAvailable
                 ? 'Your completed, signed FDACS-13645 Wood-Destroying Organisms Inspection Report — exactly as it was filed.'
                 : 'This inspection follows Florida FDACS-13645, Wood-Destroying Organisms Inspection Report.'}
@@ -570,7 +738,7 @@ export default function ProjectReportViewPage() {
               target="_blank"
               rel="noreferrer"
               style={{
-                ...secondaryButtonStyle, marginTop: 14,
+                ...secondaryButtonStyle, marginTop: 16,
               }}
             >
               <Icon name="document" size={15} strokeWidth={2} /> View FDACS-13645
@@ -600,13 +768,13 @@ export default function ProjectReportViewPage() {
             </div>
             {data.followupCompletedAt && (
               <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>
-                {new Date(data.followupCompletedAt).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                {formatReportDate(data.followupCompletedAt)}
               </div>
             )}
             {data.followupFindings && Object.keys(data.followupFindings).length > 0 && (
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {Object.entries(data.followupFindings).filter(([, v]) => v).map(([key, value]) => (
-                  <div key={key} style={{ padding: '10px 12px', borderRadius: 8, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+                  <div key={key} style={{ padding: '12px 12px', borderRadius: 8, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT }}>{humanizeKey(key)}</div>
                     <div style={{ fontSize: 14, color: ESTIMATE_BODY, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
                   </div>
@@ -621,40 +789,32 @@ export default function ProjectReportViewPage() {
           </div>
         )}
 
-        {/* CTA */}
-        <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY }}>Questions about this report?</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'center', marginTop: 10 }}>
-            <a data-glass-accent="" href={`sms:${WAVES_PHONE_TEL}`} style={{
-              ...primaryButtonStyle,
-            }}><Icon name="message" size={16} strokeWidth={2} /> Text Us</a>
-            <a data-glass="chip" href={`tel:${WAVES_PHONE_TEL}`} style={{
-              ...secondaryButtonStyle,
-            }}><Icon name="phone" size={16} strokeWidth={2} /> Call Us</a>
-          </div>
-        </div>
+        {/* Closing strip — owner ruling 2026-07-16: every report ends with the
+            service report's footer line, not the Text Us / Call Us CTA. */}
+        <footer style={{ marginTop: 20, padding: '16px 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, textAlign: 'center' }}>
+          Questions about today&apos;s service? Ask Waves in your portal or call {WAVES_PHONE_DISPLAY}.
+          {' '}This report is provided for your records.
+        </footer>
 
-      </main>
-      {/* Quiet contact footer mirroring the customer estimate (owner
-          directive 2026-07-04): company email · phone · street address.
-          Still no trust strip / newsletter tail — the 2026-07-03 "delivered
-          document" directive stands for everything above this line. */}
-      <BrandFooter variant="contact" />
+      </div>
+      {/* Newsletter signup lives only on the newsletter pages (owner
+          2026-07-09, supersedes the 2026-07-08 glass-views ruling). */}
+      <BrandFooter variant={isCertificate ? 'contact' : undefined} />
     </div>
   );
 }
 
 function AtAGlance({ rows }) {
   return (
-    <div style={{ marginTop: 16, padding: '14px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
-      <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 10 }}>
+    <div style={{ marginTop: 16, padding: '16px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+      <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 12 }}>
         At a glance
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 0.45fr) 1fr', gap: '8px 12px' }}>
         {rows.map(([label, value]) => (
           <div key={label} style={{ display: 'contents' }}>
             <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT }}>{label}</div>
-            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45 }}>{value}</div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.35 }}>{value}</div>
           </div>
         ))}
       </div>
@@ -722,15 +882,15 @@ function CertificateFieldGrid({ fields, compact }) {
       padding: compact ? 0 : '16px 24px 8px',
       display: 'grid',
       gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-      rowGap: 14,
-      columnGap: 18,
+      rowGap: 16,
+      columnGap: 20,
     }}>
       {fields.map(([label, value]) => (
         <div key={label}>
           <div style={{
             ...eyebrowStyle,
             fontFamily: FONT_BODY,
-            marginBottom: 5,
+            marginBottom: 4,
           }}>
             {label}
           </div>
@@ -818,11 +978,11 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       <div style={{
         background: B.white,
         borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-        padding: '22px 24px 20px',
+        padding: '24px 24px 20px',
         position: 'relative',
         display: 'flex',
         alignItems: 'flex-start',
-        gap: 18,
+        gap: 20,
       }}>
         <div style={{ flex: 1 }}>
           <div style={{
@@ -834,10 +994,10 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           </div>
           <div style={{
             fontFamily: FONTS.serif,
-            fontSize: 30,
+            fontSize: 28,
             fontWeight: 500,
             color: ESTIMATE_TEXT,
-            lineHeight: 1.15,
+            lineHeight: 1.2,
             letterSpacing: 0,
           }}>
             Pre-Construction Termite Protection
@@ -846,7 +1006,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
             fontSize: 14,
             color: ESTIMATE_BODY,
             marginTop: 8,
-            lineHeight: 1.4,
+            lineHeight: 1.35,
           }}>
             Required by FL Building Code 1816.1.7 • FL Statutes 482.226 • FDACS LIC. {WAVES_FDACS_LICENSE_NUMBER}
           </div>
@@ -855,7 +1015,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       </div>
 
       {/* Property + customer header */}
-      <div style={{ padding: '18px 24px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ padding: '16px 24px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
         {customerName && (
           <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT }}>
             Issued to: {customerName}
@@ -871,14 +1031,14 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           treatment). Single-product certificates keep these lines in the
           main grid above. */}
       {multiApplication && (
-        <div style={{ padding: '8px 24px 8px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ padding: '8px 24px 8px', display: 'flex', flexDirection: 'column', gap: 16 }}>
           {applications.map((app, index) => (
             <div
               key={index}
               style={{
                 border: `1px solid ${ESTIMATE_BORDER}`,
                 borderRadius: 12,
-                padding: '14px 16px',
+                padding: '16px 16px',
               }}
             >
               <div style={{ ...eyebrowStyle, marginBottom: 12 }}>
@@ -903,9 +1063,9 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
         <div style={{
           fontSize: 15,
           color: ESTIMATE_BODY,
-          lineHeight: 1.55,
+          lineHeight: 1.5,
           textAlign: 'center',
-          padding: '14px 16px',
+          padding: '16px 16px',
           borderRadius: 12,
           background: ESTIMATE_INPUT_BG,
           border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
@@ -920,7 +1080,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           fontWeight: 700,
           lineHeight: 1.5,
           textAlign: 'center',
-          marginTop: 10,
+          marginTop: 12,
           padding: '0 8px',
         }}>
           This Certificate must be retained in the building permit file as required by FBC 1816.1.7.
@@ -928,13 +1088,13 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
         {f.comments && (
           <div style={{
             marginTop: 12,
-            padding: '12px 14px',
+            padding: '12px 16px',
             borderRadius: 10,
             background: ESTIMATE_INPUT_BG,
             border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
             fontSize: 14,
             color: ESTIMATE_BODY,
-            lineHeight: 1.55,
+            lineHeight: 1.5,
             whiteSpace: 'pre-wrap',
           }}>
             <div style={{ ...eyebrowStyle, marginBottom: 4 }}>
@@ -952,23 +1112,23 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       {f.applicator_attestation && (f.applicator_name || technicianName) && (
         <div style={{
           margin: '16px 24px 0',
-          padding: '14px 16px',
+          padding: '16px 16px',
           borderRadius: 12,
           background: '#F5F1E6',
           border: `1px solid ${ESTIMATE_BORDER}`,
         }}>
           <div style={{
             ...eyebrowStyle,
-            marginBottom: 6,
+            marginBottom: 8,
           }}>
             Signed electronically
           </div>
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
             {f.applicator_attestation}
           </div>
           <div style={{
-            marginTop: 10,
-            paddingTop: 10,
+            marginTop: 12,
+            paddingTop: 12,
             borderTop: `1px solid ${ESTIMATE_BORDER}`,
             fontSize: 14,
             color: ESTIMATE_TEXT,
@@ -990,10 +1150,10 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       )}
 
       <div style={{
-        margin: '18px 24px 24px',
+        margin: '16px 24px 24px',
         background: ESTIMATE_BUTTON_BG,
         borderRadius: 12,
-        padding: '16px 18px',
+        padding: '16px 16px',
         textAlign: 'center',
       }}>
         <div style={{
@@ -1026,10 +1186,10 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           }}>wavespestcontrol.com/register</a>
         </div>
         <div style={{
-          fontSize: 10,
+          fontSize: FS.micro,
           color: B.white,
           opacity: 0.85,
-          marginTop: 6,
+          marginTop: 8,
         }}>
           Waves Pest Control, LLC • 13649 Luxe Ave #110, Bradenton, FL 34211
         </div>
@@ -1040,7 +1200,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
         position: 'absolute',
         bottom: 7,
         right: 10,
-        fontSize: 9,
+        fontSize: FS.micro,
         color: ESTIMATE_MUTED,
         opacity: 0.8,
         letterSpacing: 0.5,
@@ -1054,7 +1214,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
 
 function RoofRatPhoto() {
   return (
-    <figure style={{ margin: '10px 0 0', borderRadius: 10, overflow: 'hidden', border: `1px solid ${ESTIMATE_BORDER}`, background: B.white }}>
+    <figure style={{ margin: '12px 0 0', borderRadius: 10, overflow: 'hidden', border: `1px solid ${ESTIMATE_BORDER}`, background: B.white }}>
       <img
         src="/brand/roof-rat-report.png"
         alt="Roof rat"
@@ -1072,7 +1232,7 @@ function PhotoGrid({ title, photos, noCard }) {
   const content = (
     <div>
       {title && (
-        <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 10 }}>
+        <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 12 }}>
           {title}
         </div>
       )}
@@ -1112,7 +1272,7 @@ function PhotoGrid({ title, photos, noCard }) {
                   {media}
                 </div>
               )}
-              <div style={{ padding: '8px 9px' }}>
+              <div style={{ padding: '8px 8px' }}>
                 <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1.35, textTransform: 'capitalize' }}>
                   {label}
                 </div>
@@ -1167,13 +1327,13 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
   const sections = parseSections(text);
   if (sections) {
     return (
-      <div style={{ marginTop: 16, padding: '18px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+      <div style={{ marginTop: 16, padding: '16px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
         {sections.map((s, i) => (
-          <div key={s.heading} style={{ marginTop: i === 0 ? 0 : 14 }}>
-            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 6 }}>
+          <div key={s.heading} style={{ marginTop: i === 0 ? 0 : 16 }}>
+            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
               {titleCase(s.heading)}
             </div>
-            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{s.body}</div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{s.body}</div>
             {s.heading === 'WHAT WE RECOMMEND' && shouldShowBookingCta(s.body) && <BookingCta upcomingAppointment={upcomingAppointment} text={s.body} />}
           </div>
         ))}
@@ -1181,9 +1341,9 @@ function RecommendationsBlock({ text, upcomingAppointment }) {
     );
   }
   return (
-    <div style={{ marginTop: 16, padding: '18px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
-      <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 6 }}>Recommendations</div>
-      <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{text}</div>
+    <div style={{ marginTop: 16, padding: '16px 20px', borderRadius: 12, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+      <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>Recommendations</div>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{text}</div>
       {shouldShowBookingCta(text) && <BookingCta upcomingAppointment={upcomingAppointment} text={text} />}
     </div>
   );
@@ -1203,8 +1363,8 @@ function BookingCta({ upcomingAppointment, text }) {
   if (appt) {
     return (
       <div style={{
-        marginTop: 14,
-        padding: '14px 16px',
+        marginTop: 16,
+        padding: '16px 16px',
         borderRadius: 10,
         background: B.white,
         border: `1px solid ${ESTIMATE_BORDER}`,
@@ -1213,11 +1373,11 @@ function BookingCta({ upcomingAppointment, text }) {
         <div style={{ ...eyebrowStyle }}>
           Upcoming appointment
         </div>
-        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55, marginTop: 4 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 4 }}>
           {[appt.serviceType, formatAppointmentWindow(appt)].filter(Boolean).join(' - ')}
         </div>
         {appt.technicianName && (
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45 }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.35 }}>
             Technician: {appt.technicianName}
           </div>
         )}
@@ -1225,7 +1385,7 @@ function BookingCta({ upcomingAppointment, text }) {
     );
   }
   return (
-    <div style={{ marginTop: 14, display: 'flex', justifyContent: 'center' }}>
+    <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center' }}>
       <a
         data-glass-accent=""
         href={BOOK_URL}

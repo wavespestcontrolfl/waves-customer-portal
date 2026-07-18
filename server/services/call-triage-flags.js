@@ -159,9 +159,17 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
       flags.push('out_of_service_area');
     } else if (avStatus === 'confirm_needed' || avStatus === 'missing_component' || avStatus === 'ambiguous') {
       flags.push('address_unverified');
+    } else if (typeof confidence.service_address === 'number' && confidence.service_address < addressThreshold) {
+      // AV accepted a REAL premise — but the model wasn't sure it heard the
+      // right street. "Palm Ave" misheard as "Park Ave" validates cleanly at
+      // the wrong (real) house; the model's low confidence was the only
+      // signal, and it used to be discarded here. Advisory: the call still
+      // auto-routes on AV's verdict, the office just reads the street back.
+      flags.push('address_readback');
     }
-    // validated_accept / corrected → clean, no address flag (the whole point:
-    // a corrected bad zip clears triage instead of holding the call).
+    // validated_accept / corrected → clean, no blocking address flag (the
+    // whole point: a corrected bad zip clears triage instead of holding the
+    // call).
   } else {
     if (!addr.street_line_1 && !addr.city && !addr.postal_code) {
       flags.push('missing_service_address');
@@ -256,6 +264,13 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   if (extraction.service_request?.quote_promised === true) {
     flags.push('quote_promised');
   }
+  // A second person was named as a party to the service (realtor's buyer,
+  // landlord's tenant) — deterministic from the extraction body. ADVISORY:
+  // the office confirms their contact info; the booking itself is fine.
+  const secondary = extraction.secondary_contact;
+  if (secondary && (secondary.name_full || secondary.first_name || secondary.phone_e164 || secondary.email)) {
+    flags.push('secondary_contact_captured');
+  }
 
   // A decisive AV acceptance is authoritative for the address + service area —
   // drop any address flags reached above (incl. a lead_quality-sourced
@@ -278,12 +293,19 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // Recovered-street read-back reminder — informs the callback, never blocks
   // routing (the recovered premise passed Address Validation).
   'address_recovered',
+  // AV accepted a real premise but the model's own address confidence was low
+  // (possible valid-but-wrong-street mishear) — read the street back on the
+  // confirmation call; never blocks the AV-approved routing.
+  'address_readback',
   // Caller discussed more than one property — the extra addresses are recorded
   // (customer_properties) / surfaced on the lead; the booked visit itself is fine.
   'multi_property_call',
   // Agent promised to send a quote after the call — work is owed to the caller,
   // but the appointment that was ALSO booked must still auto-route.
   'quote_promised',
+  // A second contact (buyer/tenant/spouse) was named on the call — the office
+  // confirms their info; never holds the appointment.
+  'secondary_contact_captured',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
@@ -326,13 +348,75 @@ function mergeTriageFlags(modelFlags, deterministicFlags) {
   return [...new Set([...(modelFlags || []), ...(deterministicFlags || [])])];
 }
 
+// Address flags that fail-open booking treats as recoverable ONLY for an
+// EXISTING customer with an address already on file (Google-verified at
+// signup) — they didn't restate it because they're known. Never includes
+// out_of_service_area, which stays a hard block. New-customer addresses are
+// still governed by Google Address Validation.
+const FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS = new Set([
+  'address_unverifiable', 'missing_service_address', 'low_confidence_address', 'address_unverified',
+]);
+
 function canAutoRoute(extraction, opts = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
 
   const modelFlags = suppressAddressFlagsForAV(extraction.triage_flags || [], opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-  const appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f) && !ADVISORY_TRIAGE_FLAGS.has(f));
+  let appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f) && !ADVISORY_TRIAGE_FLAGS.has(f));
+
+  // Fail-open booking (opts.failOpen): a CONFIRMED appointment must not die over
+  // recoverable contact-field flags. Grounded in live misses (2026-07-10):
+  // bookings blocked because the caller didn't recite a callback number (the ANI
+  // is present), an existing customer didn't restate an address already on file,
+  // or a garbled email tripped name_email_mismatch. The flag is still returned
+  // (failedOpenFlags) so the office can confirm the field — it just no longer
+  // holds the appointment. Hard blocks (out_of_service_area, do_not_contact,
+  // caller_not_authorized, spam) are NOT recoverable and stay in the filter.
+  // Fail-open exists for CONFIRMED bookings only (the feature's contract).
+  // An unconfirmed call keeps every flag, so when it blocks on not_confirmed
+  // the blocked branch still files the contact/address/name review cards
+  // that protect the customer/lead writes — not just the time card.
+  const failedOpenFlags = [];
+  const confirmedWithStart = extraction.scheduling?.status === 'confirmed'
+    && !!extraction.scheduling?.confirmed_start_at;
+  if (opts.failOpen && confirmedWithStart) {
+    const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
+    const knownCustomer = !!opts.knownCustomer;
+    const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
+    // Address fail-open applies ONLY when the caller did NOT give a new service
+    // address on this call — i.e. we're using their on-file, Google-verified
+    // address (Barbara's case: she didn't restate it). If they DID provide an
+    // address and Google Address Validation couldn't accept it (that's why the
+    // flag survived suppressAddressFlagsForAV), a new/secondary/ambiguous
+    // address is NOT auto-approved — AV still governs new addresses. ANY
+    // service-address component counts as "new address given" — a partial
+    // location (city/ZIP/unit only) that AV returns missing_component/
+    // unverified for must still stay blocked, or the booking fallback would
+    // stamp the customer's on-file primary address instead of the stated one.
+    // raw_text counts too: a spoken address the parser couldn't split into
+    // components survives ONLY there, and it's still a new address. State/
+    // region alone does NOT count — this is a Florida-only portal, "FL" by
+    // itself locates nothing (buildAddressLines ignores state-only addresses
+    // for the same reason), and treating it as evidence would keep the
+    // on-file-address recovery dark for confirmed known-customer bookings.
+    // A spoken community/subdivision ("the Lakewood Ranch property") is
+    // location evidence too — without street/city/ZIP it can't be verified,
+    // so it must hold for review, not fall back to the on-file primary.
+    const sa = extraction.property?.service_address || {};
+    const newAddressGiven = [
+      'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
+      'city', 'locality', 'postal_code', 'zip', 'zip_code',
+      'subdivision_or_community', 'raw_text',
+    ].some((k) => String(sa[k] || '').trim());
+    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
+      if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
+      if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
+      if (f === 'low_extraction_confidence' && knownCustomer) { failedOpenFlags.push(f); return false; }
+      if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
+      return true;
+    });
+  }
 
   if (appointmentBlockingFlags.length > 0) {
     return { allowed: false, reason: 'triage_flags', flags: finalFlags, appointmentBlockingFlags };
@@ -341,7 +425,12 @@ function canAutoRoute(extraction, opts = {}) {
   const confidence = extraction.confidence || {};
   const threshold = opts.confidenceThreshold || DEFAULT_CONFIDENCE_THRESHOLD;
 
-  if (typeof confidence.overall !== 'number' || confidence.overall < threshold) {
+  // Fail-open: a KNOWN caller with a CONFIRMED time + start isn't held over a low
+  // overall-confidence score. Short familiar calls score low (Barbara scored 0),
+  // but a returning customer confirming a slot is a real booking.
+  const failOpenLowConfidence = opts.failOpen && !!opts.knownCustomer
+    && extraction.scheduling?.status === 'confirmed' && !!extraction.scheduling?.confirmed_start_at;
+  if (!failOpenLowConfidence && (typeof confidence.overall !== 'number' || confidence.overall < threshold)) {
     return { allowed: false, reason: 'low_confidence', overall: confidence.overall };
   }
 
@@ -358,7 +447,7 @@ function canAutoRoute(extraction, opts = {}) {
     return { allowed: false, reason: 'do_not_contact' };
   }
 
-  return { allowed: true, flags: finalFlags };
+  return { allowed: true, flags: finalFlags, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
 }
 
 // Suffix-insensitive street comparison shared by the shadow bridge and the
@@ -586,6 +675,7 @@ module.exports = {
   SMS_ONLY_FLAGS,
   ADVISORY_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
+  FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,
   isDialablePhone,

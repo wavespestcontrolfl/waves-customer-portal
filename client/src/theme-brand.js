@@ -14,7 +14,11 @@ export const COLORS = {
   // Primary Blues (--color-brand-* in Astro @theme)
   wavesBlue: '#009CDE',    // PMS 2925 — van body, section bg, links
   blueDark: '#065A8C',     // interstitial
-  blueDeeper: '#1B2C5B',   // PMS 2766 — headings on light bg, .btn border/shadow color
+  blueDeeper: '#1B2C5B',   // PMS 2766 marketing-site navy — RESERVED for the marketing-mirror
+                           // surfaces only (admin ProjectsPage and .btn specs below).
+  glassNavy: '#04395E',    // THE customer-surface navy (owner ruling 2026-07-12): glass navy is
+                           // authoritative everywhere on `/` customer pages. New customer code
+                           // uses glassNavy, never blueDeeper.
   blueLight: '#E3F5FD',    // hover fills, soft wash
   sky: '#4DC9F6',          // hero bg
   bluePale: '#4DC9F6',     // alias for sky

@@ -62,6 +62,24 @@ function portalTabUrl(tab = 'visits') {
   return buildPortalUrl(`/?tab=${encodeURIComponent(tab || 'visits')}`);
 }
 
+// The visit-specific stamped address (call bookings for a secondary/rental
+// property) — the email's Property row must name the BOOKED property, not
+// the customer's primary mirror (codex round-8 P2). Null when the visit is
+// unstamped (callers keep the customer-based label).
+async function stampedPropertyLabel(scheduledServiceId) {
+  if (!scheduledServiceId) return null;
+  try {
+    const row = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+    if (!clean(row?.service_address_line1)) return null;
+    const cityStateZip = [row.service_address_city, [row.service_address_state, row.service_address_zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    return [[row.service_address_line1, row.service_address_line2].filter(Boolean).join(' '), cityStateZip].filter(Boolean).join(', ');
+  } catch {
+    return null;
+  }
+}
+
 async function loadCustomer(customerId) {
   if (!customerId) return null;
   return db('customers')
@@ -104,9 +122,19 @@ async function resolveRecipients(customer) {
       recipients.push({ email: value, name });
     }
   };
-  // The SMS appointment recipients first (service contacts and/or primary, each
-  // with their own email — service email falls back to primary email in here).
-  for (const c of getAppointmentContacts(customer, prefs || {})) add(c.email, c.name);
+  // The SMS appointment recipients first (service contacts and/or primary).
+  // A service contact's email inside getAppointmentContacts falls back to the
+  // PRIMARY email when their slot has none — keep that delivery fallback (the
+  // primary mailbox still gets the notice) but under the PRIMARY's name: a
+  // greeting with the service contact's name on the primary's address
+  // mislabels the email (phone-only buyer/tenant slots made this common).
+  const primary = getPrimaryContact(customer);
+  const slotEmailByRole = new Map(getServiceContactSlots(customer).map((s) => [s.role, s.email]));
+  for (const c of getAppointmentContacts(customer, prefs || {})) {
+    const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
+    if (ownEmail) add(ownEmail, c.name);
+    else add(primary.email, primary.name);
+  }
   // A service-contact slot can carry an email WITHOUT a phone, so it never appears
   // in the SMS contact list above — include those addresses too so an email-only
   // service contact can still receive the notice.
@@ -114,7 +142,6 @@ async function resolveRecipients(customer) {
   // Last resort: the primary customer email (e.g. email-only customer with no
   // appointment phone contacts at all).
   if (!recipients.length) {
-    const primary = getPrimaryContact(customer);
     add(primary.email, primary.name);
   }
   return recipients;
@@ -156,11 +183,20 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
  *   { ok: false, blocked: true, reason }           — all recipients suppressed
  *   { ok: false, error }                           — threw
  */
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {} }) {
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
-  const recipients = await resolveRecipients(customer);
+  let recipients = await resolveRecipients(customer);
+  // Optional allowlist of addresses: the call-booking confirmation fan-out
+  // targets ONLY email-only service-contact slots (a phone-channel customer's
+  // primary must not receive an email their channel choice didn't ask for) —
+  // still resolved through resolveRecipients so names/dedup/suppression
+  // semantics stay identical to a full send.
+  if (Array.isArray(recipientFilter)) {
+    const allow = new Set(recipientFilter.map((e) => String(e || '').trim().toLowerCase()).filter(Boolean));
+    recipients = recipients.filter((r) => allow.has(r.email.toLowerCase()));
+  }
   if (!recipients.length) {
     await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'missing_email', metadata });
     return { ok: false, skipped: true, reason: 'missing_email' };
@@ -247,13 +283,18 @@ function apptStamp(apptTime) {
   return apptTime ? String(apptTime.getTime()) : 'na';
 }
 
-async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey } = {}) {
+async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, rescheduleUrl, idempotencyKey, recipientFilter = null } = {}) {
   const apptTime = toDate(appointmentTime);
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   return sendTemplate({
     customerId,
+    recipientFilter,
     templateKey: 'appointment.confirmation',
     eventType: 'appointment.confirmation',
     payload: {
+      // Stamped visit address overrides the customer-derived property label
+      // (finalPayload spreads payload last).
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
       service_type: clean(serviceLabel) || 'service',
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
@@ -289,20 +330,33 @@ async function technicianFirstName(scheduledServiceId) {
 async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, appointmentTime, serviceLabel, kind, rescheduleUrl, idempotencyKey } = {}) {
   const apptTime = toDate(appointmentTime);
   const techName = await technicianFirstName(scheduledServiceId);
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   const is72 = String(kind) === '72h';
   const templateKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
+  // Card-hold fee-policy disclosure (spec Phase 1) — resolved HERE, not
+  // threaded from callers, so every email path carries it: the email/both
+  // channel sends AND the undelivered-SMS fallback (Codex #2677 round-1).
+  // '' for non-card-hold bookings; the template's callout block renders
+  // nothing for an empty variable. Lazy require avoids a load cycle.
+  let cardHoldPolicyNote = '';
+  try {
+    cardHoldPolicyNote = await require('./estimate-card-holds').cardHoldReminderNote(scheduledServiceId);
+  } catch { /* best-effort — the reminder must never fail on the disclosure */ }
   // Empty reschedule_url hides the template's "Reschedule appointment" CTA
   // block (renderBlocks skips a cta with no href) — never a broken button.
   const payload = is72
     ? {
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
       service_type: clean(serviceLabel) || 'service',
       appointment_day: apptTime ? formatETDay(apptTime) : '',
       appointment_date: apptTime ? formatETDate(apptTime) : '',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
       technician_name: techName,
       reschedule_url: clean(rescheduleUrl),
+      card_hold_policy_note: cardHoldPolicyNote,
     }
     : {
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
       service_type: clean(serviceLabel) || 'service',
       appointment_time: apptTime ? formatETTime(apptTime) : '',
       // The details card lists Date above Scheduled start (owner call
@@ -318,6 +372,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
         : '',
       technician_name: techName,
       reschedule_url: clean(rescheduleUrl),
+      card_hold_policy_note: cardHoldPolicyNote,
     };
   return sendTemplate({
     customerId,
@@ -352,12 +407,17 @@ async function sendTechEnRouteEmail({ customerId, scheduledServiceId, techName, 
 // Email twin of the tech_arrived SMS — sent when the customer's Tech Arrived
 // delivery channel is email/both (template seeded by 20260707000050).
 async function sendTechArrivedEmail({ customerId, scheduledServiceId, techName, idempotencyKey } = {}) {
+  // Same stamped-label override as the confirmation/reminder emails — the
+  // template's Property row must name where the tech actually arrived
+  // (codex round-10 P2).
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   return sendTemplate({
     customerId,
     templateKey: 'appointment.tech_arrived',
     eventType: 'appointment.tech_arrived',
     payload: {
       tech_name: clean(techName) || 'Your technician',
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
     },
     idempotencyKey: idempotencyKey || `appointment.tech_arrived:${scheduledServiceId || customerId}`,
     categories: ['appointment_tech_arrived'],

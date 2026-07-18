@@ -1,16 +1,18 @@
 /**
- * Waves app showcase — React port of the SSR estimate's transparency card
- * (PR #2060): real app screenshots in phone frames, the six trust features,
- * and store badges. The #1 switcher complaint is "never knew when techs
- * were coming or what got done" — this card answers it with the actual app.
+ * Waves app showcase — the estimate page's "get the app" card. One layout
+ * only (owner ask 2026-07-09: the legacy four-iPhone-screenshot variant is
+ * gone): two Android-style phone mocks (home dashboard front, Billing &
+ * Auto Pay behind — owner 2026-07-07), the six trust features as gold
+ * chips, the household line, and the store badges. The #1 switcher
+ * complaint is "never knew when techs were coming or what got done" — this
+ * card answers it with the actual app.
  *
  * Store URLs mirror the server's WAVES_IOS_APP_URL / WAVES_ANDROID_APP_URL
- * envs (VITE_-prefixed for the client build, same defaults): a missing URL
- * renders that badge unlinked, and with neither URL set the card shows
- * "Coming soon to iPhone & Android".
+ * envs (VITE_-prefixed for the client build, same defaults). Both stores
+ * are live (Play went live 2026-07-09, owner confirmed).
  */
 import { estimateCard } from './cardStyles';
-import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
+import { GLASS_COPY } from '../../lib/estimate-glass-copy';
 import { isNativeApp } from '../../native/platform';
 import { W } from './tokens';
 
@@ -19,31 +21,6 @@ const APP_STORE_URL = import.meta.env.VITE_IOS_APP_URL
   || 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 const PLAY_STORE_URL = import.meta.env.VITE_ANDROID_APP_URL
   || 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
-
-const APP_SHOTS = [
-  { src: '/images/app/app-tracking.webp', alt: 'Waves app visit screen with a live-GPS tech-en-route update before arrival', title: 'See your tech coming', caption: 'Live GPS, the hour before arrival' },
-  { src: '/images/app/app-visits.webp', alt: 'Waves app Visits screen listing upcoming and completed service visits', title: 'Every visit & report', caption: 'Upcoming, past, and what we did' },
-  { src: '/images/app/app-alerts.webp', alt: 'Waves app notification settings, with each alert set to text, email, or both', title: 'Alerts you control', caption: 'Text, email, or both' },
-  { src: '/images/app/app-contacts.webp', alt: 'Waves app on-location contacts screen to add a spouse, tenant, or property manager', title: 'Loop in your family', caption: 'Spouse, tenant, or property manager' },
-];
-
-const FEATURE_ICONS = {
-  pin: <><path d="M12 21s7-6.3 7-11a7 7 0 1 0-14 0c0 4.7 7 11 7 11z" /><circle cx="12" cy="10" r="2.6" /></>,
-  chat: <path d="M21 11.5a8 8 0 0 1-11.5 7.2L4 20.5l1.8-4.4A8 8 0 1 1 21 11.5z" />,
-  doc: <><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4M9 13h6M9 17h4" /></>,
-  family: <><circle cx="9" cy="8" r="3.2" /><path d="M3.2 19.2c0-3.4 2.8-5.6 5.8-5.6s5.8 2.2 5.8 5.6" /><path d="M16.2 5.4a3 3 0 0 1 0 5.8" /><path d="M17.4 13.8c2.6.4 4.4 2.4 4.4 5.4" /></>,
-  card: <><rect x="3" y="6" width="18" height="12" rx="2.5" /><path d="M3 10h18M6.5 14.5h4" /></>,
-  cal: <><rect x="3.5" y="5" width="17" height="15" rx="2.5" /><path d="M3.5 9.5h17M8 3v4M16 3v4" /></>,
-};
-
-const APP_FEATURES = [
-  ['pin', 'Live tech tracking'],
-  ['chat', 'Text your tech'],
-  ['doc', 'Photo & video reports'],
-  ['family', 'Add family to alerts'],
-  ['card', 'Billing & autopay'],
-  ['cal', 'Reschedule & history'],
-];
 
 function AppStoreBadge() {
   return (
@@ -75,19 +52,16 @@ function GooglePlayBadge() {
 }
 
 function StoreBadge({ url, label, children }) {
-  if (url) {
-    return (
-      <a href={url} target="_blank" rel="noopener noreferrer" aria-label={label} style={{ display: 'inline-flex', lineHeight: 0, borderRadius: 7 }}>
-        {children}
-      </a>
-    );
-  }
   return (
-    <span role="img" aria-label={`${label} — coming soon`} style={{ display: 'inline-flex', lineHeight: 0, borderRadius: 7 }}>
+    <a href={url} target="_blank" rel="noopener noreferrer" aria-label={label} style={{ display: 'inline-flex', lineHeight: 0, borderRadius: 7 }}>
       {children}
-    </span>
+    </a>
   );
 }
+
+// Reused by the booked-success card (owner ask 2026-07-12: store badges
+// under the app line) — one badge source, no duplicated SVGs.
+export { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL };
 
 // onBookToday: scroll-to-booking callback — the "Book today!" CTA renders
 // only when the page can actually self-book (omitted on accepted/terminal
@@ -95,12 +69,9 @@ function StoreBadge({ url, label, children }) {
 export default function AppShowcaseCard({ onBookToday = null }) {
   // Inside the native app the store badges are dead weight (and an App
   // Store review flag) — every other surface hides them via isNativeApp().
-  // Only the badge rows go, though: the rest of the card (and especially
+  // Only the badge row goes, though: the rest of the card (and especially
   // the "Book today!" CTA on self-bookable estimates) must stay.
   const native = isNativeApp();
-  const anyStoreLive = !!(APP_STORE_URL || PLAY_STORE_URL);
-  // Glass copy pack (PR B).
-  const glass = glassCopyActive();
   return (
     <section style={estimateCard()}>
       <div style={{
@@ -113,156 +84,60 @@ export default function AppShowcaseCard({ onBookToday = null }) {
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,
         color: W.blueDeeper, margin: '0 0 8px',
       }}>
-        {glass ? GLASS_COPY.appTitle : 'Watch every visit — right from your phone'}
+        {GLASS_COPY.appTitle}
       </h2>
       <p style={{ fontSize: 14, color: W.textCaption, margin: '0 0 16px', lineHeight: 1.5 }}>
-        {glass
-          ? GLASS_COPY.appExcerpt
-          : 'Live GPS, visit reports, and alerts you control — the Waves app keeps you in the loop from booking to done.'}
+        {GLASS_COPY.appExcerpt}
       </p>
 
-      {glass ? (
-        <div className="gc-app-visual">
-          <div className="gc-av-left">
-            <div className="gc-av-glow" aria-hidden="true" />
-            {/* Two Android-style phones, two different in-app screens
-                (owner 2026-07-07): the home dashboard up front, the
-                Billing & Auto Pay screen behind. */}
-            <figure className="gc-phone gc-phone--android">
-              <span className="gc-phone-cam" aria-hidden="true" />
-              <img
-                src="/images/app/app-dashboard-glass.webp"
-                width="780"
-                height="1688"
-                loading="lazy"
-                alt="Waves app home screen with your plan, balance, and next visit"
-              />
-            </figure>
-            <figure className="gc-phone gc-phone--android gc-phone--b">
-              <span className="gc-phone-cam" aria-hidden="true" />
-              <img
-                src="/images/app/app-billing-glass.webp"
-                width="780"
-                height="1688"
-                loading="lazy"
-                alt="Waves app Billing screen with Auto Pay, saved card, and payment history"
-              />
-            </figure>
-          </div>
-          <div className="gc-av-right">
-            <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', color: W.navyDeep }}>
-              It&rsquo;s all in the Waves app
-            </div>
-            <p style={{ fontSize: 14, color: W.textBody, margin: '8px 0 0', lineHeight: 1.5 }}>
-              {GLASS_COPY.appHouseholdLine}
-            </p>
-            <div className="gc-av-chips">
-              {/* data-glass-accent renders these as the same gold pills as the
-                  report-card / AI slot-search chips (owner 2026-07-07); the
-                  inline styles remain the non-glass fallback. */}
-              {APP_FEATURES.map(([, label]) => (
-                <span
-                  key={label}
-                  data-glass-accent=""
-                  style={{
-                    padding: '8px 14px', borderRadius: 999,
-                    fontSize: 14, fontWeight: 700, color: W.navyDeep,
-                    background: W.white, border: '1px solid #DCEAF3',
-                    boxShadow: '0 2px 8px rgba(4,57,94,.08)',
-                  }}
-                >
-                  {label}
-                </span>
-              ))}
-            </div>
-            {native ? null : (
-            /* Badges centered under the copy column (owner ask 07-07). */
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap', opacity: anyStoreLive ? 1 : 0.92 }}>
-              {(APP_STORE_URL || !PLAY_STORE_URL) ? (
-                <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
-              ) : null}
-              {(PLAY_STORE_URL || !APP_STORE_URL) ? (
-                <StoreBadge url={PLAY_STORE_URL} label="Get Waves on Google Play"><GooglePlayBadge /></StoreBadge>
-              ) : null}
-              {!anyStoreLive ? (
-                <span style={{ flexBasis: '100%', marginTop: -2, fontSize: 12, fontWeight: 600, color: W.blueDark, letterSpacing: '0.02em', textAlign: 'center' }}>
-                  Coming soon to iPhone &amp; Android
-                </span>
-              ) : null}
-            </div>
-            )}
-          </div>
-        </div>
-      ) : (
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 16, margin: '4px 0 20px' }}>
-        {APP_SHOTS.map((shot) => (
-          <figure key={shot.src} style={{ margin: 0, display: 'flex', flexDirection: 'column' }}>
-            <div style={{
-              background: W.blueDeeper, borderRadius: 22, padding: 5,
-              boxShadow: '0 12px 26px rgba(15,23,42,.20), 0 3px 8px rgba(15,23,42,.12)',
-            }}>
-              <img
-                src={shot.src}
-                width="760"
-                height="1647"
-                loading="lazy"
-                alt={shot.alt}
-                style={{ display: 'block', width: '100%', height: 'auto', borderRadius: 17, background: W.white }}
-              />
-            </div>
-            <figcaption style={{ marginTop: 11 }}>
-              <strong style={{ display: 'block', fontSize: 14, fontWeight: 700, lineHeight: 1.2, color: W.blueDeeper }}>{shot.title}</strong>
-              <span style={{ display: 'block', marginTop: 2, fontSize: 13, fontWeight: 500, lineHeight: 1.35, color: W.textBody }}>{shot.caption}</span>
-            </figcaption>
+      <div className="gc-app-visual">
+        <div className="gc-av-left">
+          <div className="gc-av-glow" aria-hidden="true" />
+          {/* Two Android-style phones, two different in-app screens
+              (owner 2026-07-07): the home dashboard up front, the
+              Billing & Auto Pay screen behind. */}
+          <figure className="gc-phone gc-phone--android">
+            <span className="gc-phone-cam" aria-hidden="true" />
+            <img
+              src="/images/app/app-dashboard-glass.webp"
+              width="780"
+              height="1688"
+              loading="lazy"
+              alt="Waves app home screen with your plan, balance, and next visit"
+            />
           </figure>
-        ))}
-      </div>
-      )}
-
-      {glass ? null : (
-      <div style={{ marginTop: 16, padding: 16, borderRadius: 12, background: W.blueLight, border: '1px solid #CDEBFA' }}>
-        <div style={{ marginBottom: 12 }}>
-          <strong style={{ display: 'block', fontSize: 15, color: W.blueDeeper }}>It&rsquo;s all in the Waves app</strong>
-          <span style={{ display: 'block', marginTop: 2, fontSize: 13, color: W.textBody, lineHeight: 1.4 }}>
-            {glass ? GLASS_COPY.appHouseholdLine : 'One login for your whole household — everything in one place.'}
-          </span>
+          <figure className="gc-phone gc-phone--android gc-phone--b">
+            <span className="gc-phone-cam" aria-hidden="true" />
+            <img
+              src="/images/app/app-billing-glass.webp"
+              width="780"
+              height="1688"
+              loading="lazy"
+              alt="Waves app Billing screen with Auto Pay, saved card, and payment history"
+            />
+          </figure>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, margin: '12px 0 16px' }}>
-          {APP_FEATURES.map(([icon, label]) => (
-            <div key={label} style={{
-              display: 'flex', alignItems: 'center', gap: 9,
-              background: W.white, border: '1px solid #DCEAF3', borderRadius: 10, padding: '10px 11px',
-            }}>
-              <span style={{
-                flex: '0 0 auto', width: 28, height: 28, borderRadius: 7,
-                background: W.blueLight, color: W.blueDark,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                <svg viewBox="0 0 24 24" width={17} height={17} fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                  {FEATURE_ICONS[icon]}
-                </svg>
-              </span>
-              <span style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.25, color: W.blueDeeper }}>{label}</span>
-            </div>
-          ))}
-        </div>
-        {native ? null : (
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginTop: 2, opacity: anyStoreLive ? 1 : 0.92 }}>
-          {(APP_STORE_URL || !PLAY_STORE_URL) ? (
+        <div className="gc-av-right">
+          <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', color: W.navyDeep }}>
+            It&rsquo;s all in the Waves app
+          </div>
+          <p style={{ fontSize: 14, color: W.textBody, margin: '8px 0 0', lineHeight: 1.5 }}>
+            {GLASS_COPY.appHouseholdLine}
+          </p>
+          {/* The six feature chips were removed (owner 2026-07-11) — the
+              phones + household line carry the pitch. */}
+          {native ? null : (
+          /* Badges centered under the copy column (owner ask 07-07), always
+             SIDE BY SIDE (owner 2026-07-09) — the pair is ~280px, so nowrap
+             fits even a 390px phone; wrap made them stack in the narrow
+             copy column. */
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center', flexWrap: 'nowrap' }}>
             <StoreBadge url={APP_STORE_URL} label="Download Waves on the App Store"><AppStoreBadge /></StoreBadge>
-          ) : null}
-          {(PLAY_STORE_URL || !APP_STORE_URL) ? (
             <StoreBadge url={PLAY_STORE_URL} label="Get Waves on Google Play"><GooglePlayBadge /></StoreBadge>
-          ) : null}
-          {!anyStoreLive ? (
-            <span style={{ flexBasis: '100%', marginTop: -2, fontSize: 12, fontWeight: 600, color: W.blueDark, letterSpacing: '0.02em' }}>
-              Coming soon to iPhone &amp; Android
-            </span>
-          ) : null}
+          </div>
+          )}
         </div>
-        )}
       </div>
-      )}
 
       {onBookToday ? (
         <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
@@ -282,7 +157,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
               cursor: 'pointer',
             }}
           >
-            {glass ? GLASS_COPY.ctaBook : 'Book today!'}
+            {GLASS_COPY.ctaBook}
           </button>
         </div>
       ) : null}

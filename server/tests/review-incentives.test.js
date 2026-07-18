@@ -431,10 +431,20 @@ describe('review incentives', () => {
       amount_cents: 500,
     });
     expect(conn.__state.rows.review_incentive_payouts[0].attribution_snapshot).toContain('manual_admin_match');
-    expect(conn.__state.rows.activity_log[0]).toMatchObject({
+    // Find by action, not index — the manual match now ALSO writes the
+    // review_manual_marked row (has_left_google_review parity with the sync
+    // paths) before the attribution row.
+    const activityActions = conn.__state.rows.activity_log.map((r) => r.action);
+    expect(activityActions).toContain('review_manual_marked');
+    const attributed = conn.__state.rows.activity_log.find((r) => r.action === 'review_incentive_attributed');
+    expect(attributed).toMatchObject({
       admin_user_id: 'admin-1',
       customer_id: 'customer-1',
       action: 'review_incentive_attributed',
+    });
+    // And the customer is marked so future review asks stop.
+    expect(conn.__state.rows.customers.find((c) => c.id === 'customer-1')).toMatchObject({
+      has_left_google_review: true,
     });
   });
 

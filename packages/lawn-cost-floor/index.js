@@ -18,7 +18,11 @@
 // Default knobs — mirror server constants.js LAWN_PRICING_V2 (+ GLOBAL admin/labor).
 // The server overrides these at runtime from DB config; the client uses them as-is.
 const LAWN_COST_FLOOR_DEFAULTS = {
-  targetCollectedMarginFloor: 0.55,
+  // Mirrors LAWN_PRICING_V2.targetCollectedMarginFloor (35% collected-margin
+  // floor). Callers always pass their own targetGrossMargin; this default is a
+  // documentation anchor, not a live knob. (A stale 0.55 sat here from the
+  // retired 55%-floor-is-price model — never consumed, but regression bait.)
+  targetCollectedMarginFloor: 0.35,
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -34,11 +38,24 @@ const LAWN_TIER_VISITS = { basic: 4, standard: 6, enhanced: 9, premium: 12 };
 
 // Annual material budgets at the 4,500 sqft reference, by track → visits.
 // Sun/shade is NOT a pricing input — every lawn prices on its track's budget.
+// 2026-07-16 (owner-approved): budgets now FUND the protocol spot-treatment
+// reserves (protocols.json conditional_cost — ¼ of gated fungicide/
+// insecticide apps, ⅛ of herbicide spot). Reserve deltas follow the same
+// cadence conversion as the scheduled materials — average the flagged
+// calendar slots of the sold cadence's protocol tier (standard→bronze,
+// enhanced→enhanced, premium→premium, basic prorates bronze; the mapping
+// pinned by waveguard-pricing-exposure PROTOCOL_TIER_BY_PRICING_TIER),
+// multiply by the SOLD visit count (4/6/9/12), ceil so the funded floor
+// always covers the audited reserve. OR-alternative branches fund the
+// MAX-cost branch (e.g. zoysia Feb Medallion-or-Velista reserves the
+// $67.50 Velista side). Reserve deltas per track at 4/6/9/12 visits:
+// st_aug 11/16/15/20, bermuda 4/6/8/11, zoysia 16/23/31/41 (large-patch
+// program dominates), bahia 7/10/12/16.
 const LAWN_MATERIAL_BUDGETS = {
-  st_augustine: { 4: 64, 6: 87, 9: 167, 12: 205 },
-  bermuda: { 4: 57, 6: 87, 9: 164, 12: 215 },
-  zoysia: { 4: 67, 6: 101, 9: 174, 12: 178 },
-  bahia: { 4: 45, 6: 68, 9: 95, 12: 115 },
+  st_augustine: { 4: 75, 6: 103, 9: 182, 12: 225 },
+  bermuda: { 4: 61, 6: 93, 9: 172, 12: 226 },
+  zoysia: { 4: 83, 6: 124, 9: 205, 12: 219 },
+  bahia: { 4: 52, 6: 78, 9: 107, 12: 131 },
 };
 
 const MATERIAL_REFERENCE_SQFT = 4500;
@@ -70,10 +87,11 @@ function lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriv
   );
 }
 
-// The canonical 55% cost-floor arithmetic. All inputs are fully resolved numbers
-// supplied by the caller. Returns the per-component annual breakdown plus
-// minimumCollectedAnnualPriceFor55 (annual is the source of truth; callers derive
-// perApp = ceil(that / visits) and monthly = round(annual/12)).
+// The canonical collected-margin cost-floor arithmetic (the caller's
+// targetGrossMargin — 35% today — sets the floor). All inputs are fully
+// resolved numbers supplied by the caller. Returns the per-component annual
+// breakdown plus minimumCollectedAnnualPrice (annual is the source of truth;
+// callers derive perApp = ceil(that / visits) and monthly = round(annual/12)).
 function computeLawnCostFloor({
   lawnSqFt,
   visits,
@@ -99,7 +117,7 @@ function computeLawnCostFloor({
   const annualEquipment = equipmentReservePerVisit * visits;
   const annualCallbackReserve = callbackReservePerVisit * visits;
   const annualCost = annualMaterial + annualLabor + annualDrive + annualEquipment + annualCallbackReserve + adminAnnual;
-  const minimumCollectedAnnualPriceFor55 = Math.round((annualCost / (1 - targetGrossMargin)) * 100) / 100;
+  const minimumCollectedAnnualPrice = Math.round((annualCost / (1 - targetGrossMargin)) * 100) / 100;
 
   return {
     materialCostPerVisit,
@@ -111,7 +129,7 @@ function computeLawnCostFloor({
     annualCallbackReserve,
     annualAdmin: adminAnnual,
     annualCost,
-    minimumCollectedAnnualPriceFor55,
+    minimumCollectedAnnualPrice,
   };
 }
 

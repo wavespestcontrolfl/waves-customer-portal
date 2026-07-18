@@ -210,13 +210,23 @@ router.post('/:id/verdict', async (req, res) => {
     if (!OPEN_STATES.includes(item.status)) {
       return res.status(409).json({ error: `Item already ${item.status}` });
     }
+    // Bounce re-verification cards are NOT call-routing judgments — they can
+    // arrive DAYS after the call and say nothing about whether the AI routed
+    // it correctly. They resolve individually via /resolve; recording an
+    // accept/deny on one would pollute route_feedback calibration.
+    if (item.reason_code === 'email_bounce_reverify') {
+      return res.status(400).json({ error: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.' });
+    }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
     // one update. The affected-row count is the win check — the first verdict
     // closes the whole call and writes one call-level verdict; a concurrent
     // reviewer sees 0 open rows, gets a 409, and writes no feedback.
+    // email_bounce_reverify rows are excluded: the reviewer is judging the
+    // CALL, and a pending bounce follow-up must survive that judgment.
     const resolved = await db('triage_items')
       .where({ call_log_id: item.call_log_id })
+      .whereNot('reason_code', 'email_bounce_reverify')
       .whereIn('status', OPEN_STATES)
       .update({
         status: 'resolved',
@@ -229,9 +239,15 @@ router.post('/:id/verdict', async (req, res) => {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
     }
 
+    // A surviving bounce card keeps the call visible in review.
+    const stillOpen = await db('triage_items')
+      .where({ call_log_id: item.call_log_id })
+      .whereIn('status', OPEN_STATES)
+      .count('* as n')
+      .first();
     await db('call_log')
       .where({ id: item.call_log_id })
-      .update({ review_status: 'resolved', updated_at: new Date() });
+      .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: new Date() });
 
     await upsertFeedback({
       callLogId: item.call_log_id,

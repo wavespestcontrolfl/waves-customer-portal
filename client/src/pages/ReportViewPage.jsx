@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import PublicLoadError from '../components/PublicLoadError';
+import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
-import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
+import { StationMapCard } from '../components/StationMapCard';
+import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
+import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
   AlertTriangle,
@@ -28,6 +32,16 @@ import {
   FONTS,
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import {
+  DOC_COLUMN_MAX,
+  DOC_FONT,
+  FS,
+  FW,
+  LH,
+  SP,
+  docButton,
+  docTransition,
+} from '../theme-doc';
 import BrandFooter from '../components/BrandFooter';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -37,14 +51,14 @@ import ActivityCard from '../components/ActivityCard';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
-const FONT_BODY = "'Inter', system-ui, sans-serif";
+const FONT_BODY = DOC_FONT; // "'Inter', system-ui, sans-serif" — the one customer body stack
 const ESTIMATE_BG = CUSTOMER_SURFACE.page;
 const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
 // Normalized from drifted gray-500 #6B7280 to the portal's slate-600.
 const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
 const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
 const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
-const ESTIMATE_BUTTON_BG = B.blueDeeper;
+const ESTIMATE_BUTTON_BG = B.glassNavy;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';
 const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
@@ -328,10 +342,13 @@ function formatReportTitleDate(value) {
   const date = value instanceof Date && !Number.isNaN(value.getTime())
     ? new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate(), 12))
     : (() => {
-      const raw = String(value);
-      const dateOnly = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
-      if (dateOnly) return new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12));
-      const parsed = new Date(raw);
+      // calendarDateFromDateOnlyValue is ANCHORED: true timestamps fall
+      // through to instant-based NY formatting, matching the body's
+      // formatDate. An unanchored prefix match would pin a timestamp's UTC
+      // date to noon and disagree with the body by a day.
+      const dateOnly = calendarDateFromDateOnlyValue(value);
+      if (dateOnly) return dateOnly;
+      const parsed = new Date(String(value));
       return Number.isNaN(parsed.getTime()) ? null : parsed;
     })();
   if (!date) return '';
@@ -344,7 +361,12 @@ function formatReportTitleDate(value) {
 }
 
 function serviceDisplayName(data = {}) {
-  return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
+  const raw = data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
+  // Customers see the service, not the billing cadence: "Quarterly Pest Control"
+  // renders as "Pest Control" (owner 2026-07-09 — match lawn / tree & shrub, which
+  // carry no term qualifier).
+  const stripped = String(raw).replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '').trim();
+  return stripped || raw;
 }
 
 function reportDocumentTitle(data = {}) {
@@ -424,17 +446,31 @@ function formatCustomerPhone(phone) {
 // "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
 // The displayed arrival window is ALWAYS window_start + 2 hours — window_end
 // is the internal job block and never renders on customer surfaces.
+// "Every 6 Weeks Lawn Care Service" -> "Lawn Care": the next-service cell names
+// the service, not the billing cadence (owner 2026-07-09).
+function nextServiceName(serviceType) {
+  const cleaned = String(serviceType || '')
+    .replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '')
+    .replace(/^every\s+\d+\s+(weeks?|months?|days?)\s+/i, '')
+    .replace(/\s+service$/i, '')
+    .trim();
+  return cleaned || null;
+}
+
 function formatNextAppointmentLabel(nextAppointment) {
   if (!nextAppointment?.scheduledDate) return null;
-  const dateLabel = (() => {
-    try {
-      return new Date(`${nextAppointment.scheduledDate}T12:00:00Z`)
-        .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
-    } catch { return null; }
-  })();
+  // calendarDateFromDateOnlyValue instead of string-concatenating T12:00:00Z:
+  // if scheduledDate ever arrives as a full timestamp, the concat produced an
+  // Invalid Date that toLocaleDateString renders as the literal "Invalid
+  // Date" (it doesn't throw, so the old try/catch never fired).
+  const scheduledCalendarDate = calendarDateFromDateOnlyValue(nextAppointment.scheduledDate);
+  const dateLabel = scheduledCalendarDate
+    ? scheduledCalendarDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+    : null;
   if (!dateLabel) return null;
   const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppointment.windowStart || ''));
-  if (!m) return dateLabel;
+  const noWindowName = nextServiceName(nextAppointment.serviceType);
+  if (!m) return noWindowName ? `${noWindowName} · ${dateLabel}` : dateLabel;
   const fmt = (mins) => {
     const h24 = Math.floor(mins / 60) % 24;
     const h12 = h24 % 12 || 12;
@@ -442,7 +478,9 @@ function formatNextAppointmentLabel(nextAppointment) {
     return `${h12}:${String(mm).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`;
   };
   const start = (Number(m[1]) * 60) + Number(m[2]);
-  return `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+  const when = `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+  const name = nextServiceName(nextAppointment.serviceType);
+  return name ? `${name} · ${when}` : when;
 }
 
 export function serviceReportDateTimeLabel(data = {}) {
@@ -583,7 +621,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (primaryFinding) {
     return {
-      heading: 'we found activity that needs attention.',
+      heading: 'we found activity that needs attention!',
       status: pendingReadyText || 'Follow-up recommended',
       statusTone: pendingReadyText ? 'pending' : 'warning',
       result: pendingReadyText
@@ -601,7 +639,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
     const area = item.areaName || item.name || 'one area';
     const inaccessible = isInaccessibleCoverageStatus(item.status);
     return {
-      heading: inaccessible ? 'one area could not be serviced.' : 'one area needs attention.',
+      heading: inaccessible ? 'one area could not be serviced!' : 'one area needs attention!',
       status: pendingReadyText || (inaccessible ? 'Action needed' : 'Follow-up recommended'),
       statusTone: pendingReadyText ? 'pending' : 'warning',
       result: pendingReadyText
@@ -629,7 +667,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (context.pressureTrend?.direction === 'down') {
     return {
-      heading: 'pest pressure is trending down.',
+      heading: 'pest pressure is trending down!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'ready',
       result: context.pressureTrend.customerSummary || 'Activity has decreased since the last visit.',
@@ -1102,14 +1140,85 @@ function weatherIconInfo(conditions = {}, weatherCall) {
   const headline = String(weatherCall?.headline || '').toLowerCase();
   const signal = `${sky} ${headline}`.toLowerCase();
 
-  if ((Number.isFinite(wind) && wind > 10) || /\bwind\b/.test(headline)) return { Icon: Wind, label: 'Wind noted' };
+  if ((Number.isFinite(wind) && wind > 10) || /\bwind\b/.test(headline)) return { Icon: Wind, label: 'Wind noted', kind: 'wind' };
   if ((Number.isFinite(rain) && rain > 0.1) || /\brain|storm|shower|drizzle\b/.test(signal)) {
-    return { Icon: CloudRain, label: 'Rain noted' };
+    return { Icon: CloudRain, label: 'Rain noted', kind: 'rain' };
   }
-  if (/\bclear|sun|sunny\b/.test(signal)) return { Icon: Sun, label: 'Sunny conditions' };
-  if (/\bpartly|mostly sunny|few clouds\b/.test(signal)) return { Icon: CloudSun, label: 'Partly cloudy' };
-  if (/\bcloud|overcast\b/.test(signal)) return { Icon: Cloud, label: 'Cloud cover' };
-  return { Icon: CloudSun, label: 'Treatment weather' };
+  if (/\bclear|sun|sunny\b/.test(signal)) return { Icon: Sun, label: 'Sunny conditions', kind: 'sun' };
+  if (/\bpartly|mostly sunny|few clouds\b/.test(signal)) return { Icon: CloudSun, label: 'Partly cloudy', kind: 'partly' };
+  if (/\bcloud|overcast\b/.test(signal)) return { Icon: Cloud, label: 'Cloud cover', kind: 'cloud' };
+  return { Icon: CloudSun, label: 'Treatment weather', kind: 'partly' };
+}
+
+// Animated weather mark for the conditions panel — etched-instrument line work
+// in the report ink at one 1.6px stroke weight, cool glass tints, and a single
+// condition-matched motion each (sun turns, rain falls, clouds drift, wind
+// flows). Animates in live mode only; static/pdf/reduced-motion get the
+// settled frame via the shared media block.
+function AnimatedWeatherIcon({ kind = 'partly', live = false }) {
+  const ink = 'var(--text)';
+  const s = { fill: 'none', stroke: ink, strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  const cloud = (d, tint = 'rgba(175, 225, 255, 0.28)', w = 1.6) => (
+    <path d={d} fill={tint} stroke={ink} strokeWidth={w} strokeLinejoin="round" />
+  );
+  return (
+    <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true" className={live ? 'wx wx--live' : 'wx'} style={{ display: 'block', overflow: 'visible' }}>
+      {kind === 'sun' && (
+        <>
+          <g className="wx-rays">
+            {[0, 45, 90, 135, 180, 225, 270, 315].map((a) => (
+              <line key={a} x1="18" y1="5" x2="18" y2={a % 90 === 0 ? '8.4' : '7.4'} {...s} strokeWidth={1.4} transform={`rotate(${a} 18 18)`} />
+            ))}
+          </g>
+          <circle className="wx-core" cx="18" cy="18" r="6.2" fill="rgba(255, 222, 120, 0.4)" stroke={ink} strokeWidth="1.6" />
+          <path d="M13.6 15.4 a5.4 5.4 0 0 1 3.4-2.4" fill="none" stroke="rgba(255,255,255,0.95)" strokeWidth="1.1" strokeLinecap="round" />
+        </>
+      )}
+      {kind === 'partly' && (
+        <>
+          <g className="wx-rays" style={{ transformOrigin: '13px 12px' }}>
+            {[0, 60, 120, 180, 240, 300].map((a) => (
+              <line key={a} x1="13" y1="3.6" x2="13" y2="5.8" {...s} strokeWidth={1.3} transform={`rotate(${a} 13 12)`} />
+            ))}
+          </g>
+          <circle cx="13" cy="12" r="4.2" fill="rgba(255, 222, 120, 0.4)" stroke={ink} strokeWidth="1.4" />
+          <g className="wx-cloud">
+            {cloud('M11.5 28.5 a4.9 4.9 0 0 1 1.2-9.6 A6.4 6.4 0 0 1 25 17 a4.5 4.5 0 0 1 1.5 8.8 Z', 'rgba(255,255,255,0.92)')}
+            <path d="M13.6 20.6 a5 5 0 0 1 3.2-1.9" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          </g>
+        </>
+      )}
+      {kind === 'cloud' && (
+        <>
+          <g className="wx-cloud-back">
+            {cloud('M14.5 16.5 a4.2 4.2 0 0 1 1-8.2 A5.6 5.6 0 0 1 26 7.4 a3.9 3.9 0 0 1 1.3 7.6 Z', 'rgba(175, 225, 255, 0.22)', 1.3)}
+          </g>
+          <g className="wx-cloud">
+            {cloud('M9.5 27.5 a5.3 5.3 0 0 1 1.3-10.4 A7 7 0 0 1 24.6 14.6 a4.9 4.9 0 0 1 1.7 9.6 Z', 'rgba(255,255,255,0.92)')}
+            <path d="M11.8 20.6 a5.4 5.4 0 0 1 3.5-2.1" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          </g>
+        </>
+      )}
+      {kind === 'rain' && (
+        <>
+          {cloud('M10 22.5 a5.6 5.6 0 0 1 1.4-11 A7.4 7.4 0 0 1 26 9.9 a5.1 5.1 0 0 1 1.7 10.1 Z', 'rgba(255,255,255,0.92)')}
+          <path d="M12.4 15.2 a5.6 5.6 0 0 1 3.6-2.2" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          <g stroke="#0A7EC2" strokeWidth="1.7" strokeLinecap="round">
+            <line className="wx-drop wx-drop-1" x1="13.5" y1="26" x2="12.4" y2="30" />
+            <line className="wx-drop wx-drop-2" x1="19" y1="26" x2="17.9" y2="30" />
+            <line className="wx-drop wx-drop-3" x1="24.5" y1="26" x2="23.4" y2="30" />
+          </g>
+        </>
+      )}
+      {kind === 'wind' && (
+        <g fill="none" strokeLinecap="round">
+          <path className="wx-gust wx-gust-1" d="M4.5 13 h15.5 a3.4 3.4 0 1 0 -3.4 -3.4" stroke="#0A7EC2" strokeWidth="1.7" />
+          <path className="wx-gust wx-gust-2" d="M4.5 19 h21.5 a3.4 3.4 0 1 1 -3.4 3.4" stroke={ink} strokeWidth="1.6" />
+          <path className="wx-gust wx-gust-3" d="M4.5 25 h12.5 a2.9 2.9 0 1 1 -2.9 2.9" stroke="#7CC7F0" strokeWidth="1.6" />
+        </g>
+      )}
+    </svg>
+  );
 }
 
 function recommendedFinding(findings = []) {
@@ -1120,29 +1229,11 @@ function recommendedFinding(findings = []) {
   return ranked.find((finding) => String(finding.recommendation || '').trim()) || null;
 }
 
+// THE document button — theme-doc's docButton() is the canonical spec
+// (identical values to the previous local object; DocumentActionBar consumes
+// the same factory). Local 'plain' kind maps to the doc 'chip' outline.
 function actionButtonStyle(kind = 'plain') {
-  const isPrimary = kind === 'primary';
-  return {
-    minHeight: 48,
-    padding: '0 18px',
-    borderRadius: 10,
-    border: isPrimary ? `1px solid ${ESTIMATE_BUTTON_BG}` : `1px solid ${ESTIMATE_BORDER}`,
-    background: isPrimary ? ESTIMATE_BUTTON_BG : '#FFFFFF',
-    color: isPrimary ? '#FFFFFF' : ESTIMATE_TEXT,
-    fontFamily: FONT_BODY,
-    fontWeight: 700,
-    fontSize: 14,
-    lineHeight: 1,
-    cursor: 'pointer',
-    textDecoration: 'none',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    boxShadow: 'none',
-    textTransform: 'none',
-    whiteSpace: 'nowrap',
-  };
+  return docButton(kind === 'primary' ? 'primary' : 'chip');
 }
 
 function reviewLocationForReport(data = {}) {
@@ -1171,52 +1262,6 @@ function ReentryTargetTile({ target, nowMs, mode, timezone }) {
           : `Ready after ${formatReadyTime(target.readyAt, timezone)}`}
       </div>
     </div>
-  );
-}
-
-function ReentryTimer({ context, mode, token, compact = false }) {
-  const generatedAtMs = Date.parse(context.generatedAt) || Date.now();
-  const [nowMs, setNowMs] = useState(generatedAtMs);
-  const timezone = context.displayTimezone || SERVICE_REPORT_TIME_ZONE;
-  const allReady = (context.targets || []).every((target) => Date.parse(target.readyAt) <= nowMs);
-  const rootClass = compact ? 'hero-reentry-status reentry-timer' : 'report-card reentry-timer';
-
-  useEffect(() => {
-    if (mode !== 'live') return undefined;
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [mode]);
-
-  useEffect(() => {
-    if (mode !== 'live') return;
-    trackReportEvent(token, 'reentry_timer_viewed');
-  }, [mode, token]);
-
-  useEffect(() => {
-    if (mode !== 'live' || !allReady) return;
-    trackReportEvent(token, 'reentry_timer_completed');
-  }, [allReady, mode, token]);
-
-  return (
-    <section className={rootClass} data-section="reentry-timer">
-      <div className="reentry-heading">
-        <div className="section-eyebrow">Ready to re-enter</div>
-        <h2>{allReady ? 'Treated areas are ready' : 'Re-entry timing'}</h2>
-      </div>
-      <div className="reentry-details">
-        <div className="reentry-target-grid">
-          {(context.targets || []).map((target) => (
-            <ReentryTargetTile
-              key={target.key}
-              target={target}
-              nowMs={nowMs}
-              mode={mode}
-              timezone={timezone}
-            />
-          ))}
-        </div>
-      </div>
-    </section>
   );
 }
 
@@ -1260,7 +1305,7 @@ function PressureTrendChart({ points = [], neighborhood, summary }) {
       {points.length > 1 && <path d={path} className="pressure-line" fill="none" />}
       {points.map((point, index) => (
         <g
-          key={point.serviceRecordId}
+          key={point.serviceRecordId ?? index}
           className="pressure-point-hit"
           tabIndex={0}
           role="img"
@@ -1592,7 +1637,7 @@ function TechnicianVisitLine({ data }) {
   return (
     <div className="tech-visit-line">
       {technician.photoUrl ? (
-        <img src={technician.photoUrl} alt={name} className="tech-photo" />
+        <img src={technician.photoUrl} alt={name} className="tech-photo" referrerPolicy="no-referrer" />
       ) : (
         <div className="tech-photo tech-photo-fallback" aria-hidden="true">{initials}</div>
       )}
@@ -1615,12 +1660,22 @@ function readinessSummary(context, mode = 'live', nowMsOverride) {
   });
   const allReady = targets.length > 0 && readyTargets.length === targets.length;
   const areaTypes = targets.map((target) => target.label).filter(Boolean);
+  // "Ready time pending" only when NO target has a concrete ready-at —
+  // otherwise the chip claimed the time was pending while a live countdown
+  // ticked right beside it. With known times, name the last one.
+  const readyAtTimes = targets.map((target) => Date.parse(target.readyAt)).filter(Number.isFinite);
+  const lastReadyAtMs = readyAtTimes.length ? Math.max(...readyAtTimes) : null;
+  const pendingStatus = lastReadyAtMs != null
+    ? `Ready after ${formatReadyTime(new Date(lastReadyAtMs).toISOString(), context?.displayTimezone)}`
+    : 'Ready time pending';
   return {
     allReady,
     areaType: areaTypes.length ? areaTypes.join(', ') : 'Treatment areas',
-    status: targets.length ? (allReady ? 'Ready now' : 'Ready time pending') : 'See advisory',
+    status: targets.length ? (allReady ? 'Ready now' : pendingStatus) : 'See advisory',
     badge: targets.length ? (allReady ? 'Ready now' : 'Re-entry timing') : 'Readiness noted',
-    headline: allReady ? `Treated ${areaTypes.join(', ').toLowerCase() || 'areas'} areas are ready now.` : (context?.customerSummary || 'Review the readiness details below.'),
+    headline: allReady
+      ? (areaTypes.length ? `Treated ${areaTypes.join(', ').toLowerCase()} areas are ready now.` : 'Treated areas are ready now.')
+      : (context?.customerSummary || 'Review the readiness details below.'),
     precautions: context?.petAdvisory || 'None listed',
   };
 }
@@ -1640,7 +1695,18 @@ function useReadinessNow(context, mode) {
 
   useEffect(() => {
     if (mode !== 'live' || !context) return undefined;
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    // Tick only while a countdown is actually running: once every target's
+    // readyAt has passed (or none has one) the 1 Hz re-render is pure waste —
+    // and previously it never stopped for the life of the page.
+    const readyAts = (Array.isArray(context.targets) ? context.targets : [])
+      .map((target) => Date.parse(target.readyAt))
+      .filter(Number.isFinite);
+    const lastReadyMs = readyAts.length ? Math.max(...readyAts) : null;
+    if (lastReadyMs == null || lastReadyMs <= Date.now()) return undefined;
+    const id = window.setInterval(() => {
+      setNowMs(Date.now());
+      if (Date.now() >= lastReadyMs) window.clearInterval(id);
+    }, 1000);
     return () => window.clearInterval(id);
   }, [context, mode]);
 
@@ -1656,7 +1722,12 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const smartStatus = smartStatusSummary(data, mode, nowMs);
   const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
   const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
-  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // ALL-CAPS records (older customer rows) title-case for display, same rule
+  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
+  const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
+    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
+    : rawFirstName;
   const serviceLabel = serviceDisplayName(data);
   // "Quarterly Pest Control Service" → "Quarterly Pest Control" so the
   // headline never reads "... Service service is complete".
@@ -1670,21 +1741,31 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   return (
     <section className="service-report-hero" id="service-status">
       <div className="service-report-hero-copy">
-        <div className="section-eyebrow">Service report</div>
-        <h1 className="sr-title">Hey {firstName}, {headline}</h1>
+        <div className="section-eyebrow">Service report{serviceLabel ? ` \u00B7 ${serviceLabel}` : ''}</div>
+        <h1 className="sr-title">Hi {firstName}, {headline}</h1>
         {(() => {
           // Mirrors the estimate header's contact block: each of name / email /
-          // phone / address on its own eyebrow-styled line.
+          // phone / address on its own line, rendered mixed-case ("Chris Whitney",
+          // not "CHRIS WHITNEY" — owner 2026-07-09). Records stored ALL-CAPS
+          // (common on older customer rows) are title-cased for display only.
+          const displayContactLine = (raw) => {
+            const s = String(raw || '').trim();
+            if (!s || s !== s.toUpperCase()) return s;
+            if (s.includes('@')) return s.toLowerCase();
+            return s.toLowerCase()
+              .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
+              .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
+          };
           const contactLines = [
             data.customerName,
             data.customerEmail,
             formatCustomerPhone(data.customerPhone),
             data.serviceAddress,
-          ].map((line) => String(line || '').trim()).filter(Boolean);
+          ].map(displayContactLine).filter(Boolean);
           return contactLines.length ? (
             <div className="service-meta-contact">
-              {contactLines.map((line) => (
-                <div key={line} className="service-meta-address">{line}</div>
+              {contactLines.map((line, index) => (
+                <div key={`${index}-${line}`} className="service-meta-address">{line}</div>
               ))}
             </div>
           ) : null;
@@ -1708,25 +1789,32 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             <div className="sr-cell-label">What Waves did today</div>
             <div className="sr-cell-value">{smartStatus.completedLine}</div>
           </div>
-          <div className="sr-cell">
-            <div className="sr-cell-label">Technician</div>
-            <div className="sr-cell-value">{technician}</div>
-          </div>
+          {/* Gate on: the photo card below carries the tech identity, so the
+              plain-text cell would duplicate the name inside the same card. */}
+          {!data.techVisitCard && (
+            <div className="sr-cell">
+              <div className="sr-cell-label">Technician</div>
+              <div className="sr-cell-value">{technician}</div>
+            </div>
+          )}
           <div className="sr-cell">
             <div className="sr-cell-label">Completion status</div>
             <div className="sr-cell-value">{completionStatus}</div>
           </div>
           {nextAppointmentLabel && (
             <div className="sr-cell">
-              <div className="sr-cell-label">Next appointment</div>
+              <div className="sr-cell-label">Next service</div>
               <div className="sr-cell-value">{nextAppointmentLabel}</div>
+              <div className="sr-cell-note">Subject to change</div>
             </div>
           )}
         </div>
+        {data.techVisitCard && <TechnicianVisitLine data={data} />}
         {smartStatus.detail && <p className="smart-status-detail">{smartStatus.detail}</p>}
         <HeroConditions
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
+          live={mode === 'live'}
         />
       </div>
     </section>
@@ -1752,18 +1840,21 @@ function InternalReviewBar() {
 
 function ReportActionBar({ pdfUrl, token, onShare }) {
   const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef(null);
+  // Clear the copied-feedback timer on unmount so it can't fire setState on
+  // an unmounted component.
+  useEffect(() => () => window.clearTimeout(copiedTimerRef.current), []);
   const handleShare = async () => {
     const result = await onShare();
     if (result === 'copied') {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
     }
   };
   return (
     <section data-glass="card" className="report-action-bar" aria-label="Report tools">
       <div className="section-eyebrow">Report Tools</div>
-      <h2 className="report-action-title">Download, share, or print</h2>
-      <p className="report-action-copy">For your records.</p>
       <div className="report-action-buttons">
         {pdfUrl
           ? <a
@@ -1779,12 +1870,12 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
                 if (canSaveNative()) {
                   e.preventDefault();
                   saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
-                    .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                    .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
                 }
               }}
               style={actionButtonStyle('primary')}
             ><Download size={16} /> Download PDF</a>
-          : <span data-glass-accent="" style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }} aria-disabled="true"><Download size={16} /> Download PDF</span>}
+          : <button data-glass-accent="" type="button" disabled style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }}><Download size={16} /> Download PDF</button>}
         <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? 'Link copied' : 'Share'}</button>
         {/* window.print() is a no-op in the Capacitor webview — hide the
             button there; the Download PDF share sheet carries Print on iOS. */}
@@ -1796,10 +1887,11 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
 }
 
 // "Your Visit, in Motion" — the tech-approved recap clip embedded in the
-// report (owner ask 2026-07-05; previously reachable only from the SMS
-// /recap/:token link). The server only attaches `recap` on live views when an
-// approved clip exists, so this self-gates everywhere else (pdf/static/
-// sms_preview and visits without a recap).
+// report (owner ask 2026-07-05; the standalone /recap/:token player was
+// retired 2026-07-09 — this card is the only surface, and old SMS links
+// redirect here). The server only attaches `recap` on live views of PEST
+// reports when an approved clip exists, so this self-gates everywhere else
+// (pdf/static/sms_preview, non-pest lines, and visits without a recap).
 function RecapVideoCard({ recap, token }) {
   // ready:true only reflects the DB row — the video read can still 404/5xx
   // (pruned clip, S3 error), which used to strand a dead black player. Hide
@@ -1817,7 +1909,7 @@ function RecapVideoCard({ recap, token }) {
         preload="metadata"
         playsInline
         onError={() => setVideoFailed(true)}
-        style={{ width: '100%', maxWidth: 420, borderRadius: 14, background: '#000', display: 'block', margin: '12px auto 0' }}
+        style={{ width: '100%', maxWidth: 420, borderRadius: 12, background: '#000', display: 'block', margin: '12px auto 0' }}
       />
     </section>
   );
@@ -1876,17 +1968,17 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall }) {
+function HeroConditions({ conditions, weatherCall, live = false }) {
   const rows = conditionRows(conditions);
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);
-  const { Icon, label } = weatherIconInfo(conditions, weatherCall);
+  const { label, kind } = weatherIconInfo(conditions, weatherCall);
   return (
     <div className="hero-conditions">
       <div className="hero-conditions-copy">
         <div className="weather-call-title">
-          <span className="weather-call-icon" aria-hidden="true"><Icon size={18} strokeWidth={1.8} /></span>
+          <span className="weather-call-icon weather-call-icon-animated" aria-hidden="true"><AnimatedWeatherIcon kind={kind} live={live} /></span>
           <div>
             <div className="section-eyebrow">{weatherCall ? 'Weather call' : 'Conditions at application'}</div>
             <div className="weather-call-icon-label">{label}</div>
@@ -1942,7 +2034,10 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
       .forEach((i) => { if (QUESTION_BY_CATEGORY[i.category]) add(QUESTION_BY_CATEGORY[i.category]); });
   }
 
-  if (hasReentry) add('Is it safe to re-enter now?');
+  // never the word "safe" on a customer surface (owner rule; the server's own
+  // EXTRA_FORBIDDEN bans it for narrative on this exact page) — "re-enter"
+  // still routes to the assistant's re-entry answer
+  if (hasReentry) add('When can I re-enter treated areas?');
   if (hasCoverage) add('What areas were treated?');
   if (product) add(`Why was ${product} used?`);
   else if ((data.applications || []).length) add('Why were these products used?');
@@ -2020,6 +2115,96 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
   );
 }
 
+// Floating Ask Waves — the report's AI helper as a slim bar pinned under the
+// shell header while the customer scrolls (owner ask 2026-07-09: inline, sleek —
+// small header, contextual prompt pills, chat input + button). Live mode only;
+// pdf/static keep the legacy "Need help with this report?" section untouched.
+function FloatingAskWaves({ mode, token, serviceLine, data }) {
+  const prompts = reportAskPrompts(data, serviceLine);
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [asking, setAsking] = useState(false);
+
+  const ask = async (text) => {
+    const q = String((text ?? question) || '').trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setAnswer('');
+    try {
+      const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'question_failed');
+      // Server records report_question_asked — no client event (double-count).
+      setAnswer(payload.answer || 'I could not answer that from this report.');
+    } catch {
+      setAnswer('I could not answer that right now. Reply to the text message or call Waves for help.');
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  if (mode !== 'live') return null;
+
+  return (
+    <div className="floating-ask-wrap">
+      <section data-glass="card" className="floating-ask-bar" aria-label="Waves AI — ask about this report">
+        <span className="floating-ask-title">Waves AI</span>
+
+        {/* marquee: prompts drift slowly left, vanish behind the label edge, and
+            re-enter from the input side; list is doubled for a seamless loop.
+            Hover/focus pauses so a moving pill can be clicked. */}
+        <div className="floating-ask-pills" aria-label="Example questions">
+          <div className="floating-ask-track">
+            {[...prompts, ...prompts].map((prompt, i) => (
+              <button
+                data-glass="chip"
+                type="button"
+                key={`${prompt}-${i}`}
+                className="floating-ask-pill"
+                onClick={() => ask(prompt)}
+                disabled={asking}
+                tabIndex={i < prompts.length ? 0 : -1}
+                aria-hidden={i >= prompts.length}
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="floating-ask-form">
+          <input
+            id="floating-report-question"
+            name="floating_report_question"
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                ask();
+              }
+            }}
+            placeholder="Ask Waves"
+            aria-label="Ask Waves about this service report"
+          />
+          <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
+            {asking ? 'Checking…' : 'Ask'}
+          </button>
+        </div>
+        {answer && (
+          <div className="floating-ask-answer" role="status" data-glass="soft">
+            <span>{answer}</span>
+            <button type="button" className="floating-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">{'\u2715'}</button>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true } = {}) {
   return [
     ['#visit-summary', 'Summary'],
@@ -2092,26 +2277,211 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
  * Zero-state values ("No active signs observed today") are results and
  * render like any other finding.
  */
+/**
+ * D1: designed finding tiles (the pestV2/lawnV2 visual standard) replacing
+ * the bare definition list. Same section, same title, same snapshot items in
+ * the same reportPriority order, same customer copy — presentation only.
+ */
+// Visually-hidden but real DOM text (screen readers + copy-paste see it).
+const CHIP_SEPARATOR_STYLE = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+};
+
 function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
-  const items = typedReport?.findings;
-  if (!Array.isArray(items) || !items.length) return null;
+  const rawItems = typedReport?.findings;
+  const hasTileText = (item) => {
+    const text = item?.customerValueLabel != null && item.customerValueLabel !== ''
+      ? String(item.customerValueLabel)
+      : (item?.value != null ? String(item.value) : '');
+    return !!text.trim();
+  };
+  // all-valueless snapshots hide the whole card, not a header over zero
+  // tiles (codex P3)
+  const items = Array.isArray(rawItems) ? rawItems.filter(hasTileText) : [];
+  if (!items.length) return null;
   return (
     <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-findings">
-      <h2>What we found & did</h2>
-      <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
-        {items.map((item) => (
-          <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 10 }}>
-            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
-              {item.customerLabel}
-            </dt>
-            <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
-              {item.customerValueLabel != null && item.customerValueLabel !== ''
-                ? String(item.customerValueLabel)
-                : String(item.value)}
-            </dd>
-          </div>
-        ))}
+      <h2>What we found &amp; did</h2>
+      {/* <dl> keeps the label/value term-definition semantics the pre-D1
+          list exposed to assistive tech; each tile is a <div> group wrapper
+          (valid dl content per the HTML spec). */}
+      <dl
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+          gap: 12,
+          margin: 0,
+        }}
+      >
+        {items.map((item) => {
+          const text = item.customerValueLabel != null && item.customerValueLabel !== ''
+            ? String(item.customerValueLabel)
+            : (item.value != null ? String(item.value) : '');
+          // Chips render ONLY from the snapshot's authoritative mapped
+          // parts (multi-select fields persist them at completion) — never
+          // from splitting the display text, which would shred customer
+          // labels containing commas (Codex P2). Legacy snapshots without
+          // the array render as prose, exactly the pre-D1 presentation.
+          const chips = Array.isArray(item.customerValueParts) && item.customerValueParts.length > 1
+            ? item.customerValueParts
+            : null;
+          return (
+            <div
+              key={item.fieldKey}
+              style={{
+                background: 'var(--wash)',
+                border: '1px solid var(--line)',
+                borderRadius: 12,
+                padding: '14px 16px',
+                // Long prose tiles read better full-width.
+                gridColumn: !chips && text.length > 90 ? '1 / -1' : undefined,
+              }}
+            >
+              <dt
+                style={{
+                  fontSize: 12,
+                  letterSpacing: '0.06em',
+                  textTransform: 'uppercase',
+                  color: 'var(--muted)',
+                  fontWeight: 500,
+                  marginBottom: 6,
+                }}
+              >
+                {item.customerLabel}
+              </dt>
+              {chips ? (
+                <dd style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: 0 }}>
+                  {chips.map((chip, idx) => (
+                    <Fragment key={chip}>
+                      {/* Real ", " text nodes (visually hidden) keep the
+                          customer copy intact for copy-paste and screen
+                          readers — the pills alone would concatenate. */}
+                      {idx > 0 && <span style={CHIP_SEPARATOR_STYLE}>, </span>}
+                      <span
+                        className="sr-ink"
+                        style={{
+                          display: 'inline-block',
+                          background: 'var(--paper)',
+                          border: '1px solid var(--line)',
+                          borderRadius: 999,
+                          padding: '4px 10px',
+                          fontSize: 14,
+                          color: '#04395E',
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        {chip}
+                      </span>
+                    </Fragment>
+                  ))}
+                </dd>
+              ) : (
+                <dd className="sr-ink" style={{ fontSize: 14, color: '#04395E', lineHeight: 1.5, margin: 0 }}>
+                  {text}
+                </dd>
+              )}
+            </div>
+          );
+        })}
       </dl>
+    </section>
+  );
+}
+
+// Timeline rows want a compact date ("Jul 10, 2026") — same robust
+// date-only parse + report time zone as formatDate, different verbosity.
+function formatTimelineDate(value) {
+  if (!value) return '';
+  const dateOnly = calendarDateFromDateOnlyValue(value);
+  const date = dateOnly || new Date(String(value));
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString('en-US', {
+    timeZone: SERVICE_REPORT_TIME_ZONE,
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+/**
+ * D2: cross-visit timeline for typed trend programs (trap checks, bait
+ * stations, roach knockdowns). The server derives it from the same bounded
+ * history series as the activity gauge and freezes each row's headline from
+ * that visit's own snapshot — one-shot types and first visits ship no
+ * timeline (visits < 2 renders nothing).
+ */
+function TypedVisitTimelineCard({ timeline, sectionId = 'typed-visit-timeline' }) {
+  const visits = Array.isArray(timeline?.visits) ? timeline.visits.filter(Boolean) : [];
+  if (visits.length < 2) return null;
+  return (
+    <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-visit-timeline">
+      <h2>Visit history</h2>
+      <ol style={{ listStyle: 'none', margin: 0, padding: 0, position: 'relative' }}>
+        {visits.map((visit, i) => {
+          const isLast = i === visits.length - 1;
+          return (
+            <li
+              key={visit.serviceRecordId || `${visit.serviceDate}-${i}`}
+              style={{ display: 'flex', gap: 14, position: 'relative', paddingBottom: isLast ? 0 : 18 }}
+            >
+              {!isLast && (
+                <span
+                  aria-hidden="true"
+                  style={{ position: 'absolute', left: 6, top: 18, bottom: 0, width: 2, background: 'var(--line)' }}
+                />
+              )}
+              <span
+                aria-hidden="true"
+                style={{
+                  flex: 'none',
+                  width: 14,
+                  height: 14,
+                  marginTop: 4,
+                  borderRadius: 999,
+                  border: '2px solid #04395E',
+                  background: visit.isCurrent ? '#04395E' : 'var(--paper)',
+                  zIndex: 1,
+                }}
+              />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 14, color: 'var(--muted)' }}>
+                    {formatTimelineDate(visit.serviceDate)}
+                  </span>
+                  {visit.isCurrent && (
+                    <span
+                      style={{
+                        fontSize: 14,
+                        color: '#04395E',
+                        background: 'var(--wash)',
+                        border: '1px solid var(--line)',
+                        borderRadius: 999,
+                        padding: '1px 8px',
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      This visit
+                    </span>
+                  )}
+                </div>
+                {visit.headline && (
+                  <div className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.45, marginTop: 2 }}>
+                    {visit.headline}
+                  </div>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
     </section>
   );
 }
@@ -2142,266 +2512,6 @@ function CompanionSectionHeader({ companion }) {
       <div className="section-eyebrow">Also completed this visit</div>
       <h2 style={{ margin: 0 }}>{title}</h2>
     </section>
-  );
-}
-
-function pressureProgressHeadline(pressureTrend, fallback = 'Service is complete.') {
-  if (pressureTrend?.direction === 'first_visit') return 'Your first pressure marker';
-  if (pressureTrend?.direction === 'down') return 'Pressure is moving your way';
-  if (pressureTrend?.direction === 'up') return 'Pressure needs a closer watch';
-  if (pressureTrend?.direction === 'flat') return 'Pressure is holding steady';
-  if (pressureTrend?.current?.pressureIndex != null) return 'Pressure snapshot';
-  return fallback;
-}
-
-function WavesAiSummary({ context = {}, mode, token, pressureTrend, neighborhood, lawnAssessment, serviceLine }) {
-  useEffect(() => {
-    if (mode !== 'live') return;
-    trackReportEvent(token, 'ai_summary_viewed');
-  }, [mode, token]);
-
-  const isLawn = serviceLine === 'lawn' && lawnAssessment?.scores;
-  const headline = isLawn
-    ? (lawnAssessment.customerSummary || 'Lawn assessment is complete.')
-    : pressureProgressHeadline(pressureTrend, context.headline || 'Service is complete.');
-  const body = isLawn ? lawnAssessmentBody(lawnAssessment) : context.body;
-
-  return (
-    <section data-glass="card" className="report-card ai-summary-card" data-section="waves-ai-summary">
-      {isLawn && <div className="section-eyebrow">Lawn intelligence</div>}
-      <h2>{headline}</h2>
-      {isLawn ? <LawnMethodologyDropdown /> : <PressureMethodologyDropdown />}
-      {body && <p className="ai-summary-body">{body}</p>}
-      {!isLawn && Array.isArray(context.bullets) && context.bullets.length > 0 && (
-        <div className="ai-summary-bullets">
-          {context.bullets.slice(0, 4).map((bullet) => (
-            <div className="ai-summary-bullet" key={bullet.text}>{bullet.text}</div>
-          ))}
-        </div>
-      )}
-      {isLawn ? (
-        <LawnAssessmentCard assessment={lawnAssessment} mode={mode} token={token} embedded />
-      ) : pressureTrend && (
-        <PressureTrendCard
-          context={pressureTrend}
-          neighborhood={neighborhood}
-          mode={mode}
-          token={token}
-          embedded
-        />
-      )}
-    </section>
-  );
-}
-
-function LawnMethodologyDropdown() {
-  return (
-    <details className="pressure-methodology report-accordion">
-      <summary>
-        <span>How we score lawn health</span>
-        <span className="accordion-action">Details</span>
-      </summary>
-      <div className="accordion-body">
-        <p>
-          Lawn health is a 0-100 assessment built from turf photos captured during
-          the visit, dual-model vision scoring, technician review, and seasonal
-          normalization for Southwest Florida turf. The score weighs turf density,
-          weed suppression, color health, fungus control, and thatch level. We also
-          compare the current assessment to this property’s baseline and prior
-          readings, then interpret it against the treatment plan, expected residual
-          activity from products applied, irrigation context, and visible stress
-          signals. Higher is better.
-        </p>
-      </div>
-    </details>
-  );
-}
-
-function PressureMethodologyDropdown() {
-  return (
-    <details className="pressure-methodology report-accordion">
-      <summary>
-        <span>How we calculate pest pressure</span>
-        <span className="accordion-action">Details</span>
-      </summary>
-      <div className="accordion-body">
-        <p>
-          Pest pressure is a 0-5 operational index. The current visit starts with
-          documented findings, affected zones, activity level, severity, and the main
-          driver observed by the technician. We then compare that signal against this
-          property’s historical pressure curve and the treatment plan already in place,
-          including residual exterior protection, targeted bait placements, application
-          method, treated-zone coverage, and the expected remaining effectiveness window
-          for the materials applied. Lower is better. The final reading blends current
-          activity with prior visits so a single spike does not overwhelm the trend, while
-          recurring pressure still stays visible.
-        </p>
-      </div>
-    </details>
-  );
-}
-
-function WavesAiPersonalitySummary({ context, mode, token, pressureTrend, neighborhood }) {
-  const variants = context.variants || {};
-  const active = variants.straight || variants[context.defaultMode] || Object.values(variants)[0];
-
-  useEffect(() => {
-    if (mode !== 'live') return;
-    trackReportEvent(token, 'ai_summary_personality_viewed', { mode: 'straight' });
-  }, [mode, token]);
-
-  if (!active) return null;
-  const headline = pressureProgressHeadline(pressureTrend, active.headline || 'Service is complete.');
-
-  return (
-    <section data-glass="card" className="report-card ai-summary-card premium-ai-summary" data-section="waves-ai-summary">
-      <div className="premium-section-header">
-        <div>
-          <h2>{headline}</h2>
-        </div>
-      </div>
-      {pressureTrend && (
-        <PressureTrendCard
-          context={pressureTrend}
-          neighborhood={neighborhood}
-          mode={mode}
-          token={token}
-          embedded
-        />
-      )}
-      <PressureMethodologyDropdown />
-      {active.body && <p className="ai-summary-body">{active.body}</p>}
-      {Array.isArray(active.bullets) && active.bullets.length > 0 && (
-        <div className="ai-summary-bullets">
-          {active.bullets.slice(0, 4).map((bullet) => (
-            <div className="ai-summary-bullet" key={bullet.text}>{bullet.text}</div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function TheOneThing({ move }) {
-  if (!move?.title) return null;
-  return (
-    <section data-glass="card" className="report-card the-one-thing" data-section="the-one-thing">
-      <div className="section-eyebrow">The one thing</div>
-      <h2>{move.title}</h2>
-      {(move.why || move.impact) && (
-        <div className="one-thing-detail">
-          {move.why && (
-            <div>
-              <div className="sr-cell-label">Why</div>
-              <p>{move.why}</p>
-            </div>
-          )}
-          {move.impact && (
-            <div>
-              <div className="sr-cell-label">Impact</div>
-              <p>{move.impact}</p>
-            </div>
-          )}
-        </div>
-      )}
-      {move.dueLabel && <p className="sr-muted">{move.dueLabel}</p>}
-    </section>
-  );
-}
-
-function statusLabel(value) {
-  const labels = {
-    active: 'Active',
-    clear: 'Clear',
-    watched: 'Watched',
-    needs_attention: 'Needs attention',
-    not_checked: 'Not checked',
-  };
-  return labels[value] || formatEnumLabel(value);
-}
-
-function PropertyDefenseStatus({ context }) {
-  if (!context?.items?.length) return null;
-  return (
-    <section data-glass="card" className="report-card property-defense-status" data-section="property-defense-status">
-      <div className="section-eyebrow">Property defense status</div>
-      <h2>{context.summary}</h2>
-      <div className="defense-status-grid">
-        {context.items.map((item) => (
-          <div className={`defense-status-item status-${item.status}`} key={item.key}>
-            <div className="sr-cell-label">{item.label}</div>
-            <div className="defense-status-value">{statusLabel(item.status)}</div>
-            {item.detail && <div className="sr-row-detail">{item.detail}</div>}
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function BugFileList({ bugFiles = [], mode = 'live', embedded = false }) {
-  if (!bugFiles.length) return null;
-  const Root = embedded ? 'div' : 'section';
-  return (
-    <Root className={`${embedded ? 'bug-file-section bug-file-section-embedded' : 'sr-section bug-file-section'}`} data-section="bug-file">
-      <h2>The bug file</h2>
-      <div className="bug-file-grid">
-        {bugFiles.map((bug) => (
-          <details className="bug-file-card report-accordion" key={bug.pestKey} open={mode !== 'live'}>
-            <summary>
-              <span>
-                <span className="sr-cell-label">Suspect</span>
-                <span className="bug-file-suspect">{bug.suspectLabel}</span>
-              </span>
-              <span className="accordion-action">Details</span>
-            </summary>
-            <div className="accordion-body">
-              {bug.whereSeen?.text && (
-                <div className="bug-file-row">
-                  <div className="sr-cell-label">Where we saw it</div>
-                  <p>{bug.whereSeen.text}</p>
-                </div>
-              )}
-              {bug.whyItMatters?.text && (
-                <div className="bug-file-row">
-                  <div className="sr-cell-label">Why it matters</div>
-                  <p>{bug.whyItMatters.text}</p>
-                </div>
-              )}
-              {bug.whatWeDid?.text && (
-                <div className="bug-file-row">
-                  <div className="sr-cell-label">What we did</div>
-                  <p>{bug.whatWeDid.text}</p>
-                </div>
-              )}
-              {bug.yourMove?.text && (
-                <div className="bug-file-row">
-                  <div className="sr-cell-label">Your move</div>
-                  <p>{bug.yourMove.text}</p>
-                </div>
-              )}
-            </div>
-          </details>
-        ))}
-      </div>
-    </Root>
-  );
-}
-
-function WhyActivityCard({ context, embedded = false }) {
-  if (!context?.title || !context.body) return null;
-  const Root = embedded ? 'div' : 'section';
-  return (
-    <Root className={`${embedded ? 'why-activity-card why-activity-card-embedded' : 'sr-section why-activity-card'}`} data-section="why-activity">
-      <h2>{context.title}</h2>
-      <p>{context.body}</p>
-      {context.whenToTextUs && (
-        <div className="when-to-text">
-          <div className="sr-cell-label">When to text us</div>
-          <p>{context.whenToTextUs}</p>
-        </div>
-      )}
-    </Root>
   );
 }
 
@@ -2438,77 +2548,6 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
       >
         {copy.cta}
       </a>
-    </section>
-  );
-}
-
-function ExecutiveStatusGrid({ data, pressureTrend, reentry, mode }) {
-  const nowMs = mode === 'live' ? Date.now() : Date.parse(reentry?.generatedAt) || Date.now();
-  const targets = reentry?.targets || [];
-  const readySummary = targets.length
-    ? targets.map((target) => {
-      const readyAtMs = Date.parse(target.readyAt);
-      const value = Number.isFinite(readyAtMs) && readyAtMs <= nowMs
-        ? 'Ready now'
-        : `Ready after ${formatReadyTime(target.readyAt, reentry.displayTimezone)}`;
-      return `${target.label}: ${value}`;
-    }).join(' · ')
-    : 'See customer advisory';
-  const pressureValue = pressureTrend?.current?.pressureIndex ?? data.pressureIndex;
-
-  return (
-    <section className="executive-status-grid" aria-label="Executive summary">
-      <div className="executive-status-cell">
-        <div className="sr-cell-label">Pressure trend</div>
-        <div className="executive-status-value">{pressureTrend?.customerSummary || `${formatPressureIndex(pressureValue)} pressure index`}</div>
-        <div className="sr-row-detail">Lower is better</div>
-      </div>
-      <div className="executive-status-cell">
-        <div className="sr-cell-label">Ready to re-enter</div>
-        <div className="executive-status-value">{readySummary}</div>
-      </div>
-      <div className="executive-status-cell">
-        <div className="sr-cell-label">Today's service</div>
-        <div className="executive-status-value">{serviceDisplayName(data)}</div>
-        <div className="sr-row-detail">{formatDate(data.serviceDate)}</div>
-      </div>
-    </section>
-  );
-}
-
-function SinceLastVisit({ context }) {
-  const rows = [
-    context.pressureLine ? ['Pressure', context.pressureLine.replace(/^Pressure:\s*/i, '')] : null,
-    context.activityLine ? ['Activity', context.activityLine] : null,
-    context.actionLine ? ['Customer action', context.actionLine.replace(/^Customer action:\s*/i, '')] : null,
-  ].filter(Boolean);
-  if (!rows.length) return null;
-  return (
-    <section data-glass="card" className="sr-section since-last-visit">
-      <h2>Since last visit</h2>
-      <div className="sr-list">
-        {rows.map(([label, value]) => (
-          <div className="sr-row" key={label}>
-            <div>
-              <div className="sr-cell-label">{label}</div>
-              <div className="sr-row-title">{value}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function RecommendedActionCard({ findings = [], aiSummary, primaryMove }) {
-  const aiAction = aiSummary?.recommendedNextStep?.text;
-  const finding = recommendedFinding(findings);
-  const text = primaryMove?.title || aiAction || finding?.recommendation;
-  if (!text) return null;
-  return (
-    <section data-glass="card" className="sr-section recommended-action-card">
-      <h2>Recommended next step</h2>
-      <p className="recommended-action-text">{text}</p>
     </section>
   );
 }
@@ -2780,7 +2819,9 @@ function normalizeCoverageStatus(status, actionTypes = []) {
   if (/\b(follow up|follow-up|return visit)\b/.test(raw)) return 'needs_follow_up';
   if (/\b(skip|skipped|weather)\b/.test(raw)) return 'skipped';
   if (/\b(not serviced|not included)\b/.test(raw)) return 'not_serviced';
-  if (/\b(inspect|inspection|no activity found|entry point found)\b/.test(raw)) return 'inspected';
+  // inspect(?:ed|ion)? — bare \binspect\b never matched the plain status
+  // "inspected" (word boundary fails before "ed"), mirroring service-coverage.js
+  if (/\b(inspect(?:ed|ion)?|no activity found|entry point found)\b/.test(raw)) return 'inspected';
   if (/\b(station checked|device checked|checked|monitor)\b/.test(raw)) return 'checked';
   if (/\b(treat|treated|spot treated)\b/.test(raw)) return 'treated';
   return 'completed';
@@ -3028,14 +3069,18 @@ function serviceCoverageDescription(location, { areaName, status, serviceLine })
   const areaKey = coverageAreaKey(areaName);
   if (status === 'inaccessible') return reason ? `Technician could not access this area because ${reason}.` : 'Technician could not access this area.';
   if (status === 'needs_attention') return 'Technician noted an issue that may need attention.';
+  if (status === 'needs_follow_up') return 'Technician flagged this area for follow-up.';
   if (status === 'skipped') return reason ? `Service was skipped because ${reason}.` : 'Service was skipped for this area.';
+  if (status === 'not_serviced') return 'This area was not serviced on this visit.';
+  if (serviceLine === 'termite' && (areaKey === 'station' || status === 'checked')) return 'Station checked.';
+  if (serviceLine === 'termite' && status === 'inspected') return 'Inspection completed.';
+  // mirrors service-coverage.js: inspected/checked never fall through to
+  // the line-specific "…treatment completed" copy
+  if (status === 'inspected' || status === 'checked') return `${areaName} inspected.`;
   if ((serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') && areaKey === 'perimeter') return 'Exterior perimeter service completed.';
   if ((serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') && areaKey === 'entry_points') return 'Entry points inspected and treated.';
   if (serviceLine === 'lawn') return String(location.status || '').toLowerCase().includes('weed') ? 'Weed control applied.' : 'Lawn treatment completed.';
-  if (serviceLine === 'termite' && (areaKey === 'station' || status === 'checked')) return 'Station checked.';
-  if (serviceLine === 'termite' && status === 'inspected') return 'Inspection completed.';
   if (serviceLine === 'tree_shrub') return 'Plant health treatment completed.';
-  if (status === 'inspected') return `${areaName} inspected.`;
   if (status === 'treated') return `${areaName} treatment completed.`;
   return `${areaName} service completed.`;
 }
@@ -3045,6 +3090,8 @@ function serviceCoverageSummary(items = []) {
     if (item.status === 'inspected' || item.status === 'checked') summary.inspectedCount += 1;
     else if (item.status === 'inaccessible') summary.inaccessibleCount += 1;
     else if (item.status === 'needs_attention' || item.status === 'needs_follow_up') summary.needsAttentionCount += 1;
+    // skipped / not-serviced areas are NOT completed work (mirrors service-coverage.js)
+    else if (item.status === 'skipped' || item.status === 'not_serviced') summary.skippedCount += 1;
     else summary.completedCount += 1;
     return summary;
   }, {
@@ -3052,6 +3099,7 @@ function serviceCoverageSummary(items = []) {
     inspectedCount: 0,
     inaccessibleCount: 0,
     needsAttentionCount: 0,
+    skippedCount: 0,
   });
 }
 
@@ -3364,11 +3412,15 @@ function ServiceCoverageMap({
   const projection = useMemo(() => buildCoverageProjection(mapLocations), [mapLocations]);
   const legend = Array.isArray(coverage?.legend) && coverage.legend.length
     ? coverage.legend.map((entry) => {
+      // legend entries built by coverageLegendItems carry TONE keys ('green',
+      // 'orange') in `key` and their own tone/Icon/label; server statusLegend
+      // entries carry STATUS keys. Feeding tone keys to coverageStatusConfig
+      // painted every chip gray (audit 2026-07-16) — trust the entry first.
       const config = coverageStatusConfig(entry.key);
       return {
         key: entry.key,
-        tone: config.tone,
-        Icon: config.Icon,
+        tone: entry.tone || config.tone,
+        Icon: entry.Icon || config.Icon,
         label: entry.label || config.label,
       };
     })
@@ -3452,6 +3504,9 @@ function ServiceCoverageSummary({ summary = {} }) {
     ['Inspected', summary.inspectedCount || 0, 'blue'],
     ['Inaccessible', summary.inaccessibleCount || 0, 'orange'],
     ['Needs Attention', summary.needsAttentionCount || 0, 'orange'],
+    // only when present — the usual four-chip layout is unchanged for
+    // reports with nothing skipped
+    ...(summary.skippedCount ? [['Skipped', summary.skippedCount, 'orange']] : []),
   ];
   return (
     <div className="service-coverage-summary" aria-label="Service coverage summary">
@@ -3540,28 +3595,32 @@ function ServiceCoverageList({ coverage, activeItemId, onActivate, applications 
             {merged.map((zone) => {
               const isActive = zone.entries.some((entry) => entry.id === activeItemId);
               const allProducts = Array.from(new Set(zone.entries.flatMap((entry) => entry.products)));
+              // A11y: the activator is a real <button> inside the h3 —
+              // role="button" on the <article> flattened the heading for AT,
+              // and the old onFocus handler activated rows just by tabbing
+              // through them. The article keeps onClick as a pointer-size
+              // convenience only.
               return (
                 <article
                   className={`coverage-summary-row zone-service-row service-coverage-item${isActive ? ' is-active' : ''}`}
                   key={zone.key}
-                  tabIndex={0}
-                  role="button"
-                  aria-pressed={isActive ? 'true' : 'false'}
                   onClick={() => onActivate(zone.firstItemId)}
-                  onFocus={() => onActivate(zone.firstItemId)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      onActivate(zone.firstItemId);
-                    }
-                  }}
                 >
                   <div className="zone-service-identity">
                     <span className="zone-letter-badge" aria-label={zone.markerLabel ? `Coverage marker ${zone.markerLabel}` : 'Service coverage marker'}>
                       {zone.markerLabel}
                     </span>
                     <div className="zone-service-copy">
-                      <h3>{zone.areaName}</h3>
+                      <h3>
+                        <button
+                          type="button"
+                          className="zone-activate-button"
+                          aria-pressed={isActive ? 'true' : 'false'}
+                          onClick={() => onActivate(zone.firstItemId)}
+                        >
+                          {zone.areaName}
+                        </button>
+                      </h3>
                       {zone.entries.map((entry) => (
                         <p key={`desc-${entry.id}`} className="zone-status-description">
                           {entry.description}
@@ -4350,7 +4409,7 @@ function SmsReportPreview({ data }) {
           min-height: 1500px;
           background: #f7f7f7;
           color: #171717;
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           padding: 72px;
           box-sizing: border-box;
         }
@@ -4488,9 +4547,9 @@ function LoadingState({ glass = false }) {
           boxSizing: 'border-box',
         }}
       >
-        <div style={{ height: 12, width: 120, background: skeleton, borderRadius: 4 }} />
-        <div style={{ height: 32, width: '70%', background: skeleton, borderRadius: 4, marginTop: 14 }} />
-        <div style={{ height: 14, width: '50%', background: skeleton, borderRadius: 4, marginTop: 10 }} />
+        <div style={{ height: 12, width: 120, background: skeleton, borderRadius: 6 }} />
+        <div style={{ height: 32, width: '70%', background: skeleton, borderRadius: 6, marginTop: 16 }} />
+        <div style={{ height: 14, width: '50%', background: skeleton, borderRadius: 6, marginTop: 12 }} />
       </div>
     </div>
   );
@@ -4511,10 +4570,10 @@ function NotFoundState({ glass = false }) {
         }}
       >
         <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: glass ? '#04395E' : ESTIMATE_TEXT }}>Report unavailable</div>
-        <div style={{ fontSize: 15, color: glass ? 'rgba(12, 21, 40, 0.7)' : ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
+        <div style={{ fontSize: 15, color: glass ? 'rgba(12, 21, 40, 0.7)' : ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
-        <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}>Call Waves</a>
+        <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 16 }}>Call Waves</a>
       </div>
     </div>
   );
@@ -4522,7 +4581,12 @@ function NotFoundState({ glass = false }) {
 
 function LegacyReport({ data, token, glass = false }) {
   const pdfUrl = `${API_BASE}/reports/${token}`;
-  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // ALL-CAPS records (older customer rows) title-case for display, same rule
+  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
+  const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
+    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
+    : rawFirstName;
   // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
   // sticky header replaces this page-local top bar — rendering both stacked
   // two headers (codex P2, PR #2439). Kept for any standalone render.
@@ -4547,13 +4611,14 @@ function LegacyReport({ data, token, glass = false }) {
         </div>
       </header>
       ) : null}
-      <main style={{ flex: 1, maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
-          <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>
+          <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
           </div>
           <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
-            Hey {firstName}, here's your service report.
+            Hi {firstName}, here's your service report!
           </h1>
           {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
         </div>
@@ -4561,7 +4626,7 @@ function LegacyReport({ data, token, glass = false }) {
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
-          {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.6, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
+          {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
           <a
             href={pdfUrl}
             download
@@ -4572,16 +4637,16 @@ function LegacyReport({ data, token, glass = false }) {
               if (canSaveNative()) {
                 e.preventDefault();
                 saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
-                  .catch(() => window.alert('Could not save the PDF. Please try again.'));
+                  .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
               }
             }}
-            style={{ ...actionButtonStyle('primary'), marginTop: 18 }}
+            style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
           ><Download size={16} /> Download PDF</a>
         </section>
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
-      </main>
+      </div>
       <BrandFooter />
     </div>
   );
@@ -4685,11 +4750,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // hides it too (the "Where we protected" diagram replaces the lettered map).
   const hideCoverageCard = data.serviceLine === 'lawn'
     || /tree|shrub/.test(String(data.serviceLine || ''))
-    || Boolean(data.pestReportV2);
+    || Boolean(data.pestReportV2)
+    // Mosquito V2's habitat diagram replaces the lettered map the same way.
+    || Boolean(data.mosquitoReportV2);
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and
-  // records no event (mirrors RecapViewPage.share).
+  // records no event.
   const share = async () => {
     try {
       if (navigator.share) {
@@ -4770,7 +4837,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-brand-lockup {
           display: flex;
           align-items: center;
-          gap: 10px;
+          gap: 12px;
           min-width: 0;
         }
         .sr-brand-logo {
@@ -4780,7 +4847,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-brand-title {
           font-family: ${FONTS.heading};
           font-size: 16px;
-          font-weight: 850;
+          font-weight: 800;
           color: var(--text);
           line-height: 1.1;
           letter-spacing: 0;
@@ -4794,7 +4861,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           white-space: nowrap;
         }
         .sr-shell {
-          max-width: 720px;
+          max-width: 800px;
           width: 100%;
           margin: 0 auto;
           padding: 32px 20px 64px;
@@ -4803,17 +4870,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
           display: block;
-          margin: 0 0 18px;
-          padding: 20px 22px;
+          /* owner 2026-07-16: the tools card sits almost overlapping the
+             Waves AI strip below it */
+          margin: 0 0 2px;
+          padding: 20px 24px;
           background: var(--paper);
           border: 1px solid var(--line);
           border-radius: 16px;
         }
         .report-action-bar .section-eyebrow {
-          margin-bottom: 6px;
+          margin-bottom: 8px;
         }
         .report-action-title {
-          margin: 6px 0 4px;
+          margin: 8px 0 4px;
           font-family: ${FONTS.serif};
           font-weight: 500;
           font-size: 24px;
@@ -4824,12 +4893,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 2px 0 0;
           color: ${ESTIMATE_BODY};
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .report-action-buttons {
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 10px;
+          gap: 12px;
           margin-top: 16px;
         }
         .report-action-buttons > a,
@@ -4862,19 +4931,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-meta {
           margin-top: 8px;
-          color: ${ESTIMATE_BODY};
+          /* var(--muted): one supporting gray on this surface (was ESTIMATE_BODY,
+             a third ink — owner palette reduction 2026-07-09) */
+          color: var(--muted);
           font-size: 15px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .smart-status-result {
           color: var(--text);
-          font-size: 22px;
-          line-height: 1.25;
-          font-weight: 750;
+          font-size: 24px;
+          line-height: 1.2;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .smart-status-detail {
-          margin: 14px 0 0;
+          margin: 16px 0 0;
           color: var(--muted);
           font-size: 14px;
           line-height: 1.5;
@@ -4891,11 +4962,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 16px;
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.5;
-          font-weight: 700;
+          font-weight: 600;
           letter-spacing: 0;
-          text-transform: uppercase;
+          /* mixed-case contact lines (owner 2026-07-09) — no uppercase transform */
         }
         .service-meta-contact {
           margin-top: 4px;
@@ -4910,11 +4981,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: center;
           gap: 12px;
           margin-top: 16px;
-          padding: 12px 14px;
+          padding: 12px 16px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: var(--wash);
-          max-width: 820px;
+          max-width: ${DOC_COLUMN_MAX}px;
         }
         .tech-photo {
           width: 54px;
@@ -4928,7 +4999,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           align-items: center;
           justify-content: center;
-          background: ${B.blueDeeper};
+          background: ${B.glassNavy};
           color: #fff;
           font-family: ${FONTS.heading};
           font-size: 18px;
@@ -4937,7 +5008,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .tech-name {
           color: var(--text);
           font-size: 16px;
-          line-height: 1.25;
+          line-height: 1.2;
           font-weight: 800;
         }
         .tech-role {
@@ -4949,13 +5020,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .tech-visit-times {
           margin-top: 3px;
           color: var(--text);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
-          font-weight: 650;
+          font-weight: 600;
         }
         .hero-conditions {
           margin-top: 16px;
-          padding: 12px 14px 14px;
+          padding: 12px 16px 16px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
@@ -4964,8 +5035,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           align-items: baseline;
           justify-content: space-between;
-          gap: 14px;
-          margin-bottom: 10px;
+          gap: 16px;
+          margin-bottom: 12px;
         }
         .hero-conditions-copy .section-eyebrow {
           margin-bottom: 0;
@@ -4974,7 +5045,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .weather-call-title {
           display: flex;
           align-items: center;
-          gap: 10px;
+          gap: 12px;
           flex: 0 0 auto;
           min-width: 176px;
         }
@@ -4999,8 +5070,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .hero-conditions-copy p {
           margin: 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
           text-align: right;
         }
         .hero-condition-row {
@@ -5017,11 +5088,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .hero-condition-cell {
           flex: 0 0 148px;
           min-height: 62px;
-          padding: 10px;
+          padding: 12px;
           background: var(--wash);
         }
         .sr-hero-summary {
-          margin: 14px 0 0;
+          margin: 16px 0 0;
           color: var(--text);
           font-size: 16px;
           line-height: 1.5;
@@ -5045,13 +5116,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 34px;
           border: 1px solid #86efac;
           border-radius: 999px;
-          background: #dcfce7;
-          color: #14532d;
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
           font-size: 12px;
           line-height: 1;
-          font-weight: 850;
+          font-weight: 800;
           white-space: nowrap;
-          padding: 8px 11px;
+          padding: 8px 12px;
         }
         .status-badge.status-pending {
           border-color: #cbd5e1;
@@ -5059,9 +5130,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #475569;
         }
         .status-badge.status-warning {
-          border-color: #fdba74;
-          background: #ffedd5;
-          color: #7c2d12;
+          border-color: rgba(245, 158, 11, 0.45);
+          background: rgba(245, 158, 11, 0.12);
+          color: #B45309;
         }
         .status-badge.status-neutral {
           border-color: #cbd5e1;
@@ -5085,20 +5156,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .service-status-timeline {
           margin-top: 16px;
-          padding: 15px;
+          padding: 16px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
         }
         .status-timeline-list {
           display: grid;
-          gap: 10px;
-          margin-top: 10px;
+          gap: 12px;
+          margin-top: 12px;
         }
         .status-timeline-item {
           display: grid;
           grid-template-columns: 30px minmax(0, 1fr);
-          gap: 10px;
+          gap: 12px;
           align-items: start;
         }
         .status-timeline-marker {
@@ -5108,9 +5179,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          border: 1px solid #bbf7d0;
-          background: #dcfce7;
-          color: #14532d;
+          border: 1px solid rgba(22, 163, 74, 0.35);
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
         }
         .status-timeline-marker-pending {
           border-color: #cbd5e1;
@@ -5124,13 +5195,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .status-timeline-title {
           color: var(--text);
           font-size: 15px;
-          line-height: 1.3;
+          line-height: 1.35;
           font-weight: 800;
         }
         .status-timeline-time {
           margin-top: 2px;
           color: var(--muted);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
         }
         .status-timeline-summary {
@@ -5138,21 +5209,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: baseline;
           justify-content: space-between;
           gap: 12px;
-          margin-top: 13px;
-          padding-top: 13px;
+          margin-top: 12px;
+          padding-top: 12px;
           border-top: 1px solid var(--line);
         }
         .status-timeline-summary-label {
           color: var(--muted);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
           font-weight: 700;
         }
         .status-timeline-summary-value {
           color: var(--text);
           font-size: 16px;
-          line-height: 1.25;
-          font-weight: 850;
+          line-height: 1.2;
+          font-weight: 800;
           white-space: nowrap;
         }
         .readiness-facts,
@@ -5160,7 +5231,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           grid-template-columns: repeat(3, minmax(0, 1fr));
         }
         .readiness-card {
-          border-color: #bbf7d0;
+          border-color: rgba(22, 163, 74, 0.35);
           background: #f0fdf4;
         }
         .readiness-card h2 {
@@ -5174,7 +5245,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 16px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .quick-report-tools .report-ask-box {
           max-width: none;
@@ -5192,17 +5263,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 999px;
           background: #fff;
           color: var(--text);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 800;
           text-decoration: none;
-          padding: 9px 11px;
+          padding: 8px 12px;
         }
         .timeline-note {
           margin: 12px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .visit-timeline-details {
           display: grid;
@@ -5213,20 +5284,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 10px 12px;
+          padding: 12px;
         }
         .visit-timeline-detail span {
           display: block;
           color: var(--text);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
-          font-weight: 850;
+          font-weight: 800;
         }
         .visit-timeline-detail p {
           margin: 3px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .visit-timeline-data-source {
           font-size: 12px;
@@ -5244,15 +5315,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .visit-progress-summary span {
           color: var(--muted);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
           font-weight: 700;
         }
         .visit-progress-summary strong {
           color: var(--text);
           font-size: 16px;
-          line-height: 1.25;
-          font-weight: 850;
+          line-height: 1.2;
+          font-weight: 800;
           white-space: nowrap;
         }
         .legacy-section-anchor {
@@ -5266,33 +5337,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           flex-wrap: wrap;
           gap: 8px;
-          margin: 14px 0;
+          margin: 16px 0;
         }
         .service-coverage-chip {
           display: inline-flex;
           align-items: center;
           justify-content: space-between;
-          gap: 10px;
+          gap: 12px;
           min-width: 132px;
           border: 1px solid var(--line);
           border-radius: 999px;
-          padding: 8px 11px;
+          padding: 8px 12px;
           background: #fff;
           font-size: 12px;
           line-height: 1;
           font-weight: 800;
         }
         .service-coverage-chip strong {
-          font-size: 13px;
+          font-size: 14px;
         }
-        .service-coverage-chip.status-green { border-color: #86efac; background: #dcfce7; color: #14532d; }
-        .service-coverage-chip.status-blue { border-color: #93c5fd; background: #dbeafe; color: #1e3a8a; }
-        .service-coverage-chip.status-orange { border-color: #fdba74; background: #ffedd5; color: #7c2d12; }
+        .service-coverage-chip.status-green { border-color: #86efac; background: rgba(22, 163, 74, 0.12); color: #15803D; }
+        .service-coverage-chip.status-blue { border-color: rgba(10, 126, 194, 0.45); background: rgba(10, 126, 194, 0.12); color: #0A7EC2; }
+        .service-coverage-chip.status-orange { border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); color: #B45309; }
         .service-coverage-card-grid {
           display: grid;
           grid-template-columns: minmax(0, .88fr) minmax(320px, 1.12fr);
           grid-template-areas: "list map";
-          gap: 14px;
+          gap: 16px;
           align-items: start;
         }
         .service-coverage-card-grid.list-only {
@@ -5321,8 +5392,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 2px 0 4px;
           color: var(--text);
           font-size: 14px;
-          line-height: 1.25;
-          font-weight: 850;
+          line-height: 1.2;
+          font-weight: 800;
         }
         .coverage-map-unavailable {
           grid-area: map;
@@ -5331,20 +5402,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 12px;
           background: var(--wash);
           color: var(--muted);
-          padding: 14px;
-          font-size: 13px;
-          line-height: 1.45;
+          padding: 16px;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .sr-pressure {
           justify-self: end;
           background: var(--paper);
           border: .5px solid var(--line);
           border-radius: 8px;
-          padding: 18px;
+          padding: 16px;
           min-width: 220px;
         }
         .sr-pressure-value { font-size: 44px; line-height: 1; font-weight: 500; }
-        .sr-pressure-label { margin-top: 6px; font-size: 13px; color: var(--muted); }
+        .sr-pressure-label { margin-top: 8px; font-size: 14px; color: var(--muted); }
         .sr-band {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -5356,22 +5427,37 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           overflow: hidden;
         }
         .sr-metric { background: var(--paper); padding: 16px; min-height: 86px; }
-        .sr-metric-value { color: var(--text); font-size: 26px; line-height: 1; font-weight: 650; }
-        .sr-metric-label { margin-top: 10px; font-size: 13px; color: var(--muted); }
+        .sr-metric-value { color: var(--text); font-size: 24px; line-height: 1; font-weight: 600; }
+        .sr-metric-label { margin-top: 12px; font-size: 14px; color: var(--muted); }
         .sr-section {
           background: var(--paper);
           border: 1px solid var(--line);
           border-radius: 16px;
           padding: 24px;
-          margin-top: 16px;
+          /* 20px rhythm: the glass hover lift (translateY(-4px) + scale 1.016)
+             intrudes ~8px into the gap above a card — at 16px cards read as
+             near-collision on hover (owner 2026-07-09). */
+          margin-top: 20px;
           break-inside: avoid;
+        }
+        /* a nested glass card that closes its host section drops its trailing
+           margin — the host's 24px padding is the tail spacing; the stacked
+           margin+padding read as dead space (owner 2026-07-09). The embed
+           wrapper's trailing chain flattens for the same reason (an inner
+           grouping div was still holding 16px of tail). */
+        .sr-section [data-glass="card"]:last-child,
+        .sr-section div:last-child > [data-glass="card"]:last-child,
+        .report-v2-embed > :last-child,
+        .report-v2-embed > :last-child > :last-child,
+        .report-v2-embed > :last-child > :last-child > :last-child {
+          margin-bottom: 0 !important;
         }
         .sr-section h2 {
           margin: 0 0 16px;
           color: var(--text);
           font-family: ${FONTS.serif};
           font-size: 28px;
-          line-height: 1.18;
+          line-height: 1.2;
           font-weight: 500;
           letter-spacing: 0;
         }
@@ -5388,30 +5474,30 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: flex-start;
           justify-content: space-between;
           gap: 16px;
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .treatment-map-header h2 {
-          margin-bottom: 6px;
+          margin-bottom: 8px;
         }
         .map-context-copy,
         .map-footnote {
           margin: 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .map-footnote {
-          margin-top: 10px;
+          margin-top: 12px;
         }
         .coverage-section-header {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
           gap: 16px;
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .coverage-section-header h2 {
-          margin-bottom: 6px;
+          margin-bottom: 8px;
         }
         .coverage-map-meta {
           display: grid;
@@ -5482,7 +5568,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-area.status-green,
         .coverage-marker.status-green .coverage-marker-inner {
           fill: #15803D;
-          stroke: #14532d;
+          stroke: #15803D;
         }
         .coverage-area.status-light-green,
         .coverage-area.status-partially_treated {
@@ -5492,7 +5578,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-area.status-blue,
         .coverage-marker.status-blue .coverage-marker-inner {
           fill: #2563eb;
-          stroke: #1e3a8a;
+          stroke: #0A7EC2;
         }
         .coverage-area.status-orange,
         .coverage-marker.status-orange .coverage-marker-inner {
@@ -5513,7 +5599,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           fill: rgba(22,163,74,.28);
         }
         .coverage-partial-line {
-          stroke: #14532d;
+          stroke: #15803D;
           stroke-width: 2;
           opacity: .65;
         }
@@ -5556,16 +5642,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-marker-text {
           fill: #fff;
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           font-size: 14px;
-          font-weight: 850;
+          font-weight: 800;
           letter-spacing: 0;
         }
         .coverage-map-label {
           fill: #111827;
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           font-size: 12px;
-          font-weight: 750;
+          font-weight: 700;
           letter-spacing: 0;
           paint-order: stroke;
           stroke: rgba(255,255,255,.92);
@@ -5586,23 +5672,23 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-status-chip {
           display: inline-flex;
           align-items: center;
-          gap: 7px;
+          gap: 8px;
           border: 1px solid var(--line);
           border-radius: 999px;
           background: #fff;
           color: var(--text);
           font-size: 12px;
           line-height: 1;
-          font-weight: 750;
+          font-weight: 700;
           white-space: nowrap;
         }
         .coverage-legend-item {
           min-height: 30px;
-          padding: 6px 9px;
+          padding: 6px 8px;
         }
         .coverage-status-chip {
           align-self: center;
-          padding: 7px 9px;
+          padding: 8px 8px;
           flex: 0 0 auto;
         }
         .coverage-legend-swatch {
@@ -5615,16 +5701,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
         }
         .coverage-legend-item.status-green .coverage-legend-swatch,
-        .coverage-status-chip.status-green { background: #dcfce7; border-color: #86efac; color: #14532d; }
+        .coverage-status-chip.status-green { background: rgba(22, 163, 74, 0.12); border-color: #86efac; color: #15803D; }
         .coverage-legend-item.status-green .coverage-legend-swatch { background: #16a34a; color: #fff; }
         .coverage-legend-item.status-light-green .coverage-legend-swatch,
         .coverage-status-chip.status-light-green { background: #ecfccb; border-color: #bef264; color: #365314; }
         .coverage-legend-item.status-light-green .coverage-legend-swatch { background: #65a30d; color: #fff; }
         .coverage-legend-item.status-blue .coverage-legend-swatch,
-        .coverage-status-chip.status-blue { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+        .coverage-status-chip.status-blue { background: rgba(10, 126, 194, 0.12); border-color: rgba(10, 126, 194, 0.45); color: #0A7EC2; }
         .coverage-legend-item.status-blue .coverage-legend-swatch { background: #2563eb; color: #fff; }
         .coverage-legend-item.status-orange .coverage-legend-swatch,
-        .coverage-status-chip.status-orange { background: #ffedd5; border-color: #fdba74; color: #7c2d12; }
+        .coverage-status-chip.status-orange { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.45); color: #B45309; }
         .coverage-legend-item.status-orange .coverage-legend-swatch { background: #f59e0b; color: #fff; }
         .coverage-legend-item.status-red .coverage-legend-swatch,
         .coverage-status-chip.status-red { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
@@ -5646,20 +5732,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-left: 5px solid var(--zone-color, var(--line));
           border-radius: 10px;
           background: #fff;
-          padding: 11px 12px;
+          padding: 12px;
         }
         .zone-service-row {
           align-items: center;
         }
         .service-coverage-item {
           cursor: pointer;
-          transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+          transition: ${docTransition('border-color', 'box-shadow', 'transform')};
         }
         .service-coverage-item:hover,
         .service-coverage-item:focus,
         .service-coverage-item.is-active {
-          border-color: rgba(27,44,91,.36);
-          box-shadow: 0 0 0 3px rgba(27,44,91,.08);
+          border-color: rgba(4,57,94,.36);
+          box-shadow: 0 0 0 3px rgba(4,57,94,.08);
           outline: none;
         }
         .zone-service-identity {
@@ -5672,14 +5758,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           width: 34px;
           height: 34px;
           border-radius: 999px;
-          background: var(--zone-color, ${B.blueDeeper});
+          background: var(--zone-color, ${B.glassNavy});
           color: #fff;
           display: inline-flex;
           align-items: center;
           justify-content: center;
           flex: 0 0 auto;
-          font-size: 13px;
-          font-weight: 850;
+          font-size: 14px;
+          font-weight: 800;
           line-height: 1;
         }
         .zone-service-copy {
@@ -5689,29 +5775,42 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 15px;
-          line-height: 1.25;
+          line-height: 1.2;
           font-weight: 800;
           letter-spacing: 0;
+        }
+        /* The in-heading activator inherits the h3's look 1:1. */
+        .coverage-summary-row h3 .zone-activate-button {
+          appearance: none;
+          background: none;
+          border: 0;
+          padding: 0;
+          margin: 0;
+          font: inherit;
+          color: inherit;
+          letter-spacing: inherit;
+          text-align: left;
+          cursor: pointer;
         }
         .coverage-summary-row p,
         .coverage-evidence-note {
           margin: 4px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .coverage-product-line {
           margin-top: 8px;
           color: var(--text);
           font-size: 12px;
           line-height: 1.35;
-          font-weight: 750;
+          font-weight: 700;
         }
         .coverage-evidence-note {
           margin-top: 12px;
         }
         .coverage-status-chip.zone-status-chip {
-          font-weight: 850;
+          font-weight: 800;
         }
         .zone-status-chips {
           display: flex;
@@ -5723,8 +5822,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .zone-status-description {
           margin: 4px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .zone-status-description + .zone-status-description {
           margin-top: 2px;
@@ -5736,7 +5835,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--muted);
           padding: 16px;
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .coverage-empty-state-map {
           min-height: 210px;
@@ -5775,9 +5874,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           width: 34px;
           height: 34px;
           border-radius: 999px;
-          border: 1px solid #bbf7d0;
-          background: #dcfce7;
-          color: #14532d;
+          border: 1px solid rgba(22, 163, 74, 0.35);
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -5789,47 +5888,47 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #475569;
         }
         .workflow-status-current .workflow-event-icon {
-          border-color: #93c5fd;
-          background: #dbeafe;
-          color: #1e3a8a;
+          border-color: rgba(10, 126, 194, 0.45);
+          background: rgba(10, 126, 194, 0.12);
+          color: #0A7EC2;
         }
         .workflow-status-skipped .workflow-event-icon {
-          border-color: #fdba74;
-          background: #ffedd5;
-          color: #7c2d12;
+          border-color: rgba(245, 158, 11, 0.45);
+          background: rgba(245, 158, 11, 0.12);
+          color: #B45309;
         }
         .workflow-event-body {
           min-width: 0;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: #fff;
-          padding: 11px 12px;
+          padding: 12px;
         }
         .workflow-event-heading {
           display: flex;
           align-items: baseline;
           justify-content: space-between;
-          gap: 10px;
+          gap: 12px;
         }
         .workflow-event-heading h3 {
           margin: 0;
           color: var(--text);
           font-size: 15px;
-          line-height: 1.25;
+          line-height: 1.2;
           font-weight: 800;
           letter-spacing: 0;
         }
         .workflow-event-heading time {
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.3;
+          font-size: 14px;
+          line-height: 1.35;
           white-space: nowrap;
         }
         .workflow-event-body p {
-          margin: 5px 0 0;
+          margin: 4px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .coverage-skeleton-map,
         .coverage-skeleton-list span,
@@ -5858,6 +5957,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           0% { background-position: 200% 0; }
           100% { background-position: -200% 0; }
         }
+        @media (prefers-reduced-motion: reduce) {
+          .coverage-skeleton-map,
+          .coverage-skeleton-list span,
+          .workflow-skeleton-list span { animation: none; }
+        }
         .map-toggle {
           display: inline-flex;
           border: 1px solid var(--line);
@@ -5872,8 +5976,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
           color: var(--muted);
           font: inherit;
-          font-size: 13px;
-          padding: 8px 11px;
+          font-size: 14px;
+          padding: 8px 12px;
           cursor: pointer;
         }
         .map-toggle button:first-child { border-left: 0; }
@@ -5919,7 +6023,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .satellite-bait-label,
         .satellite-flag-mark,
         .satellite-flag-label {
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           letter-spacing: 0;
         }
         .satellite-zone-label {
@@ -5949,7 +6053,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .satellite-application-badge text {
           fill: #fff;
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           font-size: 10px;
           font-weight: 800;
           letter-spacing: 0;
@@ -6000,9 +6104,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: rgba(255,255,255,.86);
           color: #404040;
           border: .5px solid rgba(0,0,0,.12);
-          border-radius: 4px;
+          border-radius: 6px;
           padding: 3px 6px;
-          font-size: 10px;
+          font-size: 11px;
           line-height: 1.2;
         }
         .treatment-overlay-key {
@@ -6020,14 +6124,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .treatment-overlay-row {
           display: grid;
           grid-template-columns: auto minmax(0, 1fr);
-          gap: 10px;
+          gap: 12px;
           align-items: center;
           width: 100%;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: #fff;
           color: var(--text);
-          padding: 10px;
+          padding: 12px;
           text-align: left;
           font: inherit;
           cursor: pointer;
@@ -6048,7 +6152,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
           font-size: 12px;
           line-height: 1;
-          font-weight: 850;
+          font-weight: 800;
         }
         .treatment-overlay-row-copy {
           min-width: 0;
@@ -6071,15 +6175,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 14px;
+          padding: 16px;
           min-height: 148px;
         }
         .treatment-overlay-detail h3 {
-          margin: 6px 0 8px;
+          margin: 8px 0 8px;
           color: var(--text);
-          font-size: 19px;
+          font-size: 18px;
           line-height: 1.2;
-          font-weight: 850;
+          font-weight: 800;
           letter-spacing: 0;
         }
         .treatment-overlay-detail p {
@@ -6091,7 +6195,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .treatment-overlay-meta {
           display: flex;
           flex-wrap: wrap;
-          gap: 6px;
+          gap: 8px;
           margin-top: 12px;
         }
         .treatment-overlay-meta span {
@@ -6101,48 +6205,54 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 12px;
           line-height: 1;
-          font-weight: 750;
+          font-weight: 700;
           padding: 6px 8px;
         }
         .sr-grid-2 { display: grid; grid-template-columns: 1fr; gap: 0; }
         .sr-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--line); }
-        .sr-cell { background: #fff; padding: 14px; min-height: 72px; }
+        .sr-cell { background: #fff; padding: 16px; min-height: 72px; }
+        .sr-cell-note {
+          margin-top: 3px;
+          color: var(--muted);
+          font-size: 11px;
+          line-height: 1.4;
+        }
         .sr-cell-label { font-size: 12px; color: var(--soft); }
-        .sr-cell-value { margin-top: 6px; font-size: 15px; color: var(--text); }
-        .sr-list { display: grid; gap: 10px; }
+        .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
+        .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);
           border-radius: 10px;
-          padding: 13px 14px;
+          padding: 12px 16px;
           display: grid;
           grid-template-columns: 1fr auto;
           gap: 12px;
         }
         .sr-row-title { font-size: 15px; font-weight: 700; color: var(--text); }
-        .sr-row-detail { margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.45; }
-        .sr-pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; font-size: 12px; color: ${B.blueDeeper}; background: var(--wash); white-space: nowrap; height: fit-content; }
+        .sr-row-detail { margin-top: 4px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+        .sr-pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: ${B.glassNavy}; background: var(--wash); white-space: nowrap; height: fit-content; }
         .sr-finding-high { border-left: 3px solid var(--red); }
         .sr-advisory { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-        .sr-advisory strong { font-size: 22px; font-weight: 500; display: block; }
-        .sr-advisory span { color: var(--muted); font-size: 13px; }
-        .sr-footer { color: var(--soft); font-size: 12px; line-height: 1.6; padding: 22px 0 0; }
+        .sr-advisory strong { font-size: 20px; font-weight: 500; display: block; }
+        .sr-advisory span { color: var(--muted); font-size: 14px; }
+        .sr-footer { color: var(--soft); font-size: 12px; line-height: 1.5; padding: 24px 0 0; }
         .ai-summary-card h2 {
           color: var(--text);
-          font-size: 26px;
+          font-size: 24px;
           line-height: 1.2;
-          max-width: 820px;
-          font-weight: 650;
+          max-width: ${DOC_COLUMN_MAX}px;
+          font-weight: 600;
         }
         .ai-summary-body {
           margin: 0;
           color: var(--muted);
           font-size: 16px;
-          line-height: 1.55;
-          max-width: 820px;
+          line-height: 1.5;
+          max-width: ${DOC_COLUMN_MAX}px;
         }
         .pressure-methodology {
-          margin: 12px 0 14px;
-          max-width: 820px;
+          margin: 12px 0 16px;
+          max-width: ${DOC_COLUMN_MAX}px;
           background: var(--wash);
         }
         .pressure-methodology summary {
@@ -6154,7 +6264,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .ai-summary-bullets {
           margin-top: 16px;
@@ -6164,26 +6274,203 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .ai-summary-bullet {
           border: 1px solid var(--report-border);
           border-radius: 10px;
-          padding: 11px 12px;
+          padding: 12px;
           color: var(--report-text);
           background: var(--wash);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
+        }
+        /* Floating Ask Waves bar — sticky under the 49px shell header (live only).
+           Grid areas: desktop "title pills form"; phone stacks form + pills. */
+        .floating-ask-wrap {
+          position: sticky;
+          top: 57px;
+          z-index: 8;
+          margin-top: 20px;
+        }
+        .floating-ask-bar {
+          display: grid;
+          grid-template-areas: 'title pills form';
+          grid-template-columns: auto minmax(0, 1fr) minmax(280px, 38%);
+          align-items: center;
+          gap: 10px;
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          background: var(--wash);
+          padding: 10px 14px;
+        }
+        .floating-ask-title {
+          grid-area: title;
+          color: var(--text);
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }
+        .floating-ask-title::before {
+          /* \\2726 = four-pointed star (escaped: raw glyphs fail check:portal-brand) */
+          content: '\\2726  ';
+          color: ${B.yellow};
+        }
+        /* prompt marquee: pills drift slowly left, fade out behind the Waves AI
+           label and re-enter from the input side (owner ask 2026-07-09). The
+           track holds the prompt list twice and loops at exactly half its own
+           width, so the belt is seamless; hover/focus pauses it for clicking. */
+        .floating-ask-pills {
+          grid-area: pills;
+          min-width: 0;
+          overflow: hidden;
+          -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
+          mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
+        }
+        .floating-ask-track {
+          display: flex;
+          gap: 8px;
+          width: max-content;
+          animation: floatingPillMarquee 56s linear infinite;
+        }
+        .floating-ask-pills:hover .floating-ask-track,
+        .floating-ask-track:focus-within {
+          animation-play-state: paused;
+        }
+        @keyframes floatingPillMarquee {
+          from { transform: translateX(0); }
+          /* -4px = half the 8px gap, so the loop point is invisible */
+          to { transform: translateX(calc(-50% - 4px)); }
+        }
+        .floating-ask-pill {
+          flex: 0 0 auto;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--text);
+          font: inherit;
+          font-size: 14px;
+          line-height: 1;
+          font-weight: 700;
+          padding: 9px 12px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .floating-ask-track { animation: none; }
+        }
+        .floating-ask-form {
+          grid-area: form;
+          display: flex;
+          gap: 8px;
+          min-width: 0;
+        }
+        .floating-ask-form input {
+          flex: 1;
+          min-width: 0;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 9px 14px;
+          color: var(--text);
+          font: inherit;
+          font-size: 14px;
+          outline: none;
+          background: #fff;
+        }
+        .floating-ask-form button {
+          border: 1px solid ${B.glassNavy};
+          border-radius: 999px;
+          background: ${B.yellow};
+          color: ${B.glassNavy};
+          font: inherit;
+          font-size: 14px;
+          font-weight: 800;
+          padding: 9px 16px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .floating-ask-form button:disabled,
+        .floating-ask-pills button:disabled {
+          opacity: .5;
+          cursor: default;
+        }
+        /* answer floats as a dropdown UNDER the bar (absolute — an in-flow answer
+           grows the sticky bar and scroll-anchoring yanks the page) */
+        .floating-ask-answer {
+          position: absolute !important;
+          top: calc(100% + 8px);
+          left: 0;
+          right: 0;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          background: var(--wash);
+          padding: 12px 14px;
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.5;
+          box-shadow: 0 18px 50px rgba(4, 57, 94, 0.18);
+        }
+        .floating-ask-dismiss {
+          flex: 0 0 auto;
+          border: 0;
+          background: transparent;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1;
+          padding: 2px 4px;
+          cursor: pointer;
+        }
+        @media (max-width: 700px) {
+          .floating-ask-bar {
+            grid-template-areas:
+              'title form'
+              'pills pills';
+            grid-template-columns: auto minmax(0, 1fr);
+            border-radius: 16px;
+          }
+        }
+        /* animated weather mark — live only; the media block below parks it */
+        .weather-call-icon-animated {
+          width: 44px;
+          height: 44px;
+          display: grid;
+          place-items: center;
+        }
+        .wx .wx-rays, .wx .wx-core { transform-box: view-box; transform-origin: 18px 18px; }
+        .wx--live .wx-rays { animation: wxSpin 70s linear infinite; }
+        .wx--live .wx-core { animation: wxPulse 9s ease-in-out infinite; }
+        .wx--live .wx-cloud { animation: wxDrift 12s ease-in-out infinite; }
+        .wx--live .wx-cloud-back { animation: wxDriftBack 15s ease-in-out infinite; }
+        .wx--live .wx-drop { animation: wxDrop 3.4s linear infinite; }
+        .wx--live .wx-drop-2 { animation-delay: 1.1s; }
+        .wx--live .wx-drop-3 { animation-delay: 2.2s; }
+        .wx--live .wx-gust { stroke-dasharray: 34 14; animation: wxFlow 5.6s linear infinite; }
+        .wx--live .wx-gust-2 { animation-duration: 6.8s; }
+        .wx--live .wx-gust-3 { animation-duration: 4.8s; }
+        @keyframes wxSpin { to { transform: rotate(360deg); } }
+        @keyframes wxPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+        @keyframes wxDrift { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(2.5px); } }
+        @keyframes wxDriftBack { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(-2.5px); } }
+        @keyframes wxDrop { 0% { transform: translateY(-2px); opacity: 0; } 25% { opacity: 1; } 80% { opacity: 1; } 100% { transform: translateY(5px); opacity: 0; } }
+        @keyframes wxFlow { to { stroke-dashoffset: -48; } }
+        @media (print), (prefers-reduced-motion: reduce) {
+          .wx--live * { animation: none !important; }
         }
         .report-ask-box {
           margin-top: 16px;
           border: 1px solid var(--report-border);
           border-radius: 12px;
           background: var(--wash);
-          padding: 14px;
-          max-width: 820px;
+          padding: 16px;
+          max-width: ${DOC_COLUMN_MAX}px;
         }
         .report-ask-prompt {
           color: var(--report-text);
           font-size: 14px;
-          line-height: 1.4;
-          font-weight: 650;
-          margin: -2px 0 10px;
+          line-height: 1.35;
+          font-weight: 600;
+          margin: -2px 0 12px;
         }
         .report-ask-form {
           display: flex;
@@ -6194,7 +6481,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-width: 0;
           border: 1px solid var(--report-border);
           border-radius: 10px;
-          padding: 11px 12px;
+          padding: 12px;
           color: var(--report-text);
           font: inherit;
           font-size: 14px;
@@ -6208,13 +6495,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--report-text);
           font: inherit;
           font-size: 14px;
-          padding: 10px 12px;
+          padding: 12px;
           cursor: pointer;
         }
         .report-ask-form button {
           background: ${B.yellow};
-          color: ${B.blueDeeper};
-          border-color: ${B.blueDeeper};
+          color: ${B.glassNavy};
+          border-color: ${B.glassNavy};
           font-weight: 800;
           min-width: 72px;
         }
@@ -6227,14 +6514,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 8px;
-          margin-top: 10px;
+          margin-top: 12px;
         }
         .report-ask-actions button {
           min-height: 48px;
           text-align: left;
           justify-content: flex-start;
-          background: ${B.blueDeeper};
-          border-color: ${B.blueDeeper};
+          background: ${B.glassNavy};
+          border-color: ${B.glassNavy};
           color: #fff;
         }
         .report-ask-answer {
@@ -6251,29 +6538,29 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .applied-products-header {
           display: flex;
           justify-content: space-between;
-          gap: 14px;
+          gap: 16px;
           align-items: flex-start;
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .applied-products-header h2 {
-          margin-bottom: 6px;
+          margin-bottom: 8px;
         }
         .applied-products-header p {
           margin: 0;
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .applied-products-grid {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-          gap: 10px;
+          gap: 12px;
         }
         .applied-product-card {
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
-          padding: 14px;
+          padding: 16px;
           min-height: 158px;
         }
         .applied-product-card h3 {
@@ -6285,7 +6572,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           letter-spacing: 0;
         }
         .solution-detail {
-          margin-top: 10px;
+          margin-top: 12px;
         }
         .solution-detail summary {
           align-items: flex-start;
@@ -6293,59 +6580,59 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .solution-detail summary > span:first-child {
           color: var(--text);
           font-size: 14px;
-          line-height: 1.45;
-          font-weight: 650;
+          line-height: 1.5;
+          font-weight: 600;
         }
         .solution-detail-body {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .solution-product-detail {
           display: grid;
-          gap: 6px;
+          gap: 8px;
         }
         .solution-product-detail + .solution-product-detail {
           border-top: 1px solid var(--line);
-          padding-top: 10px;
+          padding-top: 12px;
         }
         .solution-product-name {
           color: var(--text);
           font-size: 15px;
           font-weight: 800;
-          line-height: 1.3;
+          line-height: 1.35;
         }
         .solution-product-facts {
           color: var(--muted);
           font-size: 12px;
-          line-height: 1.45;
+          line-height: 1.5;
           font-weight: 700;
         }
         .manufacturer-guideline-note {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 12px 14px;
-          margin-bottom: 14px;
+          padding: 12px 16px;
+          margin-bottom: 16px;
           color: var(--text);
           font-size: 14px;
           line-height: 1.5;
         }
         .manufacturer-guideline-note strong {
           color: var(--text);
-          font-weight: 750;
+          font-weight: 700;
         }
         .applied-product-maker {
           margin: -2px 0 8px;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.3;
+          font-size: 14px;
+          line-height: 1.35;
           font-weight: 600;
         }
         .product-watering-guidance {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 10px;
+          padding: 12px;
         }
         .product-watering-guidance .watering-headline {
           margin-top: 4px;
@@ -6356,17 +6643,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 4px;
         }
         .product-manufacturer-line {
-          font-size: 13px;
+          font-size: 14px;
         }
         .applied-product-card p {
           margin: 0;
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .product-purpose-grid {
           display: grid;
-          gap: 10px;
+          gap: 12px;
           margin-top: 12px;
         }
         .product-purpose-grid > div,
@@ -6374,10 +6661,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 10px;
+          padding: 12px;
         }
         .product-why {
-          margin-top: 10px;
+          margin-top: 12px;
           background: #fff;
         }
         .product-purpose-grid p,
@@ -6389,7 +6676,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 0;
         }
         .product-group-list {
-          margin-top: 14px;
+          margin-top: 16px;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
@@ -6406,7 +6693,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           align-items: baseline;
           justify-content: space-between;
-          gap: 10px;
+          gap: 12px;
           color: var(--text);
           font-size: 14px;
           line-height: 1.35;
@@ -6419,7 +6706,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .applied-product-meta {
           display: flex;
           flex-wrap: wrap;
-          gap: 6px;
+          gap: 8px;
           margin-top: 12px;
         }
         .applied-product-meta span {
@@ -6429,7 +6716,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 12px;
           line-height: 1;
-          font-weight: 750;
+          font-weight: 700;
           padding: 6px 8px;
         }
         .executive-status-grid {
@@ -6446,7 +6733,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .executive-status-cell {
           background: #fff;
-          padding: 18px;
+          padding: 16px;
           min-height: 112px;
         }
         .executive-status-value {
@@ -6460,11 +6747,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 18px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .where-accordion-list {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .report-accordion {
           background: #fff;
@@ -6478,9 +6765,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 14px;
+          gap: 16px;
           min-height: 52px;
-          padding: 12px 14px;
+          padding: 12px 16px;
           cursor: pointer;
         }
         .report-accordion summary::-webkit-details-marker {
@@ -6491,7 +6778,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-bottom: 1px solid var(--line);
         }
         .accordion-body {
-          padding: 13px 14px 14px;
+          padding: 12px 16px 16px;
         }
         .accordion-action {
           flex: 0 0 auto;
@@ -6500,7 +6787,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           line-height: 1;
           border: 1px solid var(--line);
           border-radius: 999px;
-          padding: 5px 8px;
+          padding: 4px 8px;
           background: #fff;
         }
         .where-place {
@@ -6511,7 +6798,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .where-detail {
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
           margin: 0;
         }
         .report-card {
@@ -6519,33 +6806,41 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--report-border);
           border-radius: 16px;
           padding: 20px;
-          margin-top: 16px;
+          /* matches .sr-section's 20px rhythm — hover-lift headroom */
+          margin-top: 20px;
           break-inside: avoid;
           page-break-inside: avoid;
         }
+        /* THE section eyebrow — single rule matching theme-doc's DOC_EYEBROW
+           (12px/700/0.11em/1.2/uppercase/var(--muted)), same spec the glass
+           runtime forces at [data-gt="eyebrow"]. Replaces the two previously
+           conflicting .section-eyebrow rules. */
         .section-eyebrow {
-          color: ${B.blueDeeper};
-          font-size: 12px;
-          line-height: 1.2;
-          margin-bottom: 8px;
-          font-weight: 800;
+          color: var(--muted);
+          font-family: ${FONT_BODY};
+          font-size: ${FS.caption}px;
+          line-height: ${LH.heading};
+          margin-bottom: ${SP.xs}px;
+          font-weight: ${FW.bold};
+          letter-spacing: 0.11em;
+          text-transform: uppercase;
         }
         .report-card h2 {
-          margin: 0 0 14px;
+          margin: 0 0 16px;
           color: var(--text);
-          font-size: 21px;
+          font-size: 20px;
           line-height: 1.2;
-          font-weight: 650;
+          font-weight: 600;
           letter-spacing: 0;
         }
         .review-request-card {
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto;
           align-items: center;
-          gap: 14px;
+          gap: 16px;
         }
         .review-request-card-top {
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .review-request-card h2 {
           margin-bottom: 0;
@@ -6557,29 +6852,29 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 44px;
           min-width: 210px;
           padding: 12px 18px;
-          border: 1px solid ${B.blueDeeper};
+          border: 1px solid ${B.glassNavy};
           border-radius: 12px;
           background: ${B.yellow};
-          color: ${B.blueDeeper};
+          color: ${B.glassNavy};
           font: inherit;
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
-          font-weight: 900;
+          font-weight: 800;
           text-decoration: none;
-          box-shadow: 3px 3px 0 ${B.blueDeeper};
-          transition: transform .15s ease, box-shadow .15s ease;
+          box-shadow: 3px 3px 0 ${B.glassNavy};
+          transition: ${docTransition('transform', 'box-shadow')};
         }
         .review-request-card .review-cta:hover,
         .review-request-card .review-cta:focus-visible {
           transform: translate(-1px, -1px);
-          box-shadow: 4px 4px 0 ${B.blueDeeper};
+          box-shadow: 4px 4px 0 ${B.glassNavy};
           outline: none;
         }
         .review-request-card p {
           margin: 0;
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .sr-muted {
           margin: 12px 0 0;
@@ -6589,14 +6884,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .hero-reentry-status {
           margin-top: 12px;
-          padding: 12px 14px;
+          padding: 12px 16px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
-          max-width: 820px;
+          max-width: ${DOC_COLUMN_MAX}px;
           display: grid;
           grid-template-columns: minmax(128px, .7fr) minmax(0, 1.3fr);
-          gap: 14px;
+          gap: 16px;
           align-items: center;
         }
         .hero-reentry-status .section-eyebrow {
@@ -6606,8 +6901,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 18px;
-          line-height: 1.25;
-          font-weight: 750;
+          line-height: 1.2;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .reentry-details {
@@ -6616,20 +6911,25 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .reentry-target-grid {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
+          gap: 12px;
+        }
+        /* a single ready-time target fills the row instead of leaving a
+           half-empty column (owner ask 2026-07-09) */
+        .readiness-target-grid {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
         }
         .reentry-target-tile {
           border: 1px solid var(--report-border);
           border-radius: 10px;
-          padding: 14px;
+          padding: 16px;
           min-height: 78px;
           background: var(--wash);
         }
         .reentry-target-value {
           margin-top: 8px;
           color: var(--report-text);
-          font-size: 22px;
-          line-height: 1.15;
+          font-size: 20px;
+          line-height: 1.2;
           font-weight: 700;
         }
         .hero-reentry-status .reentry-target-grid {
@@ -6643,7 +6943,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 58px;
           border: 0;
           border-radius: 0;
-          padding: 10px 12px;
+          padding: 12px;
           background: var(--wash);
         }
         .hero-reentry-status .reentry-target-value {
@@ -6654,17 +6954,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .reentry-notes {
           display: flex;
           flex-wrap: wrap;
-          gap: 4px 14px;
+          gap: 4px 16px;
           margin-top: 8px;
         }
         .reentry-notes .sr-muted {
           margin: 0;
-          font-size: 13px;
+          font-size: 14px;
         }
         .pressure-trend-layout {
           display: grid;
           grid-template-columns: minmax(0, 1fr) minmax(260px, 420px);
-          gap: 18px;
+          gap: 20px;
           align-items: center;
         }
         .pressure-summary {
@@ -6679,12 +6979,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           justify-self: end;
         }
         .pressure-line {
-          stroke: ${B.blueDeeper};
+          stroke: ${B.glassNavy};
           stroke-width: 1.6;
         }
         .pressure-point {
           fill: #fff;
-          stroke: ${B.blueDeeper};
+          stroke: ${B.glassNavy};
           stroke-width: 1.5;
         }
         .pressure-point-target {
@@ -6711,9 +7011,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 10px;
         }
         .pressure-value-label {
-          fill: ${B.blueDeeper};
+          fill: ${B.glassNavy};
           font-size: 10px;
-          font-weight: 850;
+          font-weight: 800;
           pointer-events: none;
         }
         .neighborhood-pressure-line {
@@ -6722,10 +7022,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-dasharray: 4 4;
         }
         .neighborhood-pressure-summary {
-          margin: 10px 0 0;
+          margin: 12px 0 0;
           color: var(--report-muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .pressure-legend {
           display: flex;
@@ -6741,11 +7041,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-top: 1px solid var(--line);
         }
         .pressure-trend-card-embedded h2 {
-          margin: 0 0 10px;
+          margin: 0 0 12px;
           color: var(--text);
-          font-size: 21px;
+          font-size: 20px;
           line-height: 1.2;
-          font-weight: 650;
+          font-weight: 600;
           letter-spacing: 0;
         }
         .lawn-assessment-card-embedded {
@@ -6757,9 +7057,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-assessment-card-embedded h2 {
           margin: 0 0 12px;
           color: var(--text);
-          font-size: 21px;
+          font-size: 20px;
           line-height: 1.2;
-          font-weight: 650;
+          font-weight: 600;
           letter-spacing: 0;
         }
         .lawn-program-overview-card {
@@ -6779,7 +7079,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--soft-blue-border);
           border-radius: 10px;
           background: var(--soft-blue);
-          color: ${B.blueDeeper};
+          color: ${B.glassNavy};
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -6787,10 +7087,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .lawn-program-copy,
         .lawn-program-distinction {
-          margin: 14px 0 0;
+          margin: 16px 0 0;
           color: var(--text);
           font-size: 16px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .lawn-program-distinction {
           padding: 12px;
@@ -6804,7 +7104,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 1px;
-          margin-top: 14px;
+          margin-top: 16px;
           overflow: hidden;
           border: 1px solid var(--line);
           border-radius: 10px;
@@ -6817,16 +7117,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .lawn-program-fact strong {
           display: block;
-          margin-top: 7px;
+          margin-top: 8px;
           color: var(--text);
           font-size: 15px;
-          line-height: 1.25;
-          font-weight: 850;
+          line-height: 1.2;
+          font-weight: 800;
         }
         .lawn-assessment-layout {
           display: grid;
           grid-template-columns: minmax(0, 1fr) minmax(260px, 420px);
-          gap: 18px;
+          gap: 20px;
           align-items: center;
         }
         /* First assessment: no trend chart yet — collapse to a single column so
@@ -6839,7 +7139,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: center;
           gap: 12px;
           margin-bottom: 12px;
-          padding: 10px 12px;
+          padding: 12px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: var(--wash);
@@ -6869,14 +7169,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-profile-line,
         .lawn-water-line,
         .lawn-before-after-line {
-          margin-top: 10px;
+          margin-top: 12px;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
-          font-weight: 650;
+          font-size: 14px;
+          line-height: 1.5;
+          font-weight: 600;
         }
         .lawn-water-line {
-          padding: 10px 12px;
+          padding: 12px;
           border: 1px solid var(--line);
           border-radius: 8px;
           background: var(--wash);
@@ -6901,12 +7201,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           justify-self: end;
         }
         .lawn-health-line {
-          stroke: ${B.blueDeeper};
+          stroke: ${B.glassNavy};
           stroke-width: 1.6;
         }
         .lawn-health-point {
           fill: #fff;
-          stroke: ${B.blueDeeper};
+          stroke: ${B.glassNavy};
           stroke-width: 1.5;
         }
         .pressure-point-hit:hover .lawn-health-point,
@@ -6930,16 +7230,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding: 12px;
         }
         .lawn-score-value {
-          margin-top: 7px;
+          margin-top: 8px;
           color: var(--text);
-          font-size: 22px;
+          font-size: 20px;
           line-height: 1.1;
           font-weight: 800;
         }
         .lawn-photo-strip {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 10px;
+          gap: 12px;
           margin-top: 16px;
         }
         .lawn-photo-strip figure {
@@ -6956,30 +7256,30 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           object-fit: cover;
         }
         .lawn-photo-strip figcaption {
-          padding: 8px 10px;
+          padding: 8px 12px;
           color: var(--muted);
           font-size: 12px;
-          line-height: 1.3;
+          line-height: 1.35;
           font-weight: 700;
         }
         .premium-section-header {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
-          gap: 14px;
+          gap: 16px;
         }
         .the-one-thing {
           background: ${B.blueSurface};
         }
         .the-one-thing h2 {
-          font-size: 25px;
-          line-height: 1.22;
+          font-size: 24px;
+          line-height: 1.2;
           margin-bottom: 0;
         }
         .one-thing-detail {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
+          gap: 12px;
           margin-top: 16px;
         }
         .one-thing-detail > div {
@@ -6992,7 +7292,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .why-activity-card p,
         .bug-file-row p,
         .when-to-text p {
-          margin: 6px 0 0;
+          margin: 8px 0 0;
           color: var(--muted);
           font-size: 14px;
           line-height: 1.5;
@@ -7009,12 +7309,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .defense-status-item {
           min-height: 118px;
           background: #fff;
-          padding: 14px;
+          padding: 16px;
         }
         .defense-status-value {
           margin-top: 8px;
           color: var(--text);
-          font-size: 17px;
+          font-size: 16px;
           line-height: 1.2;
           font-weight: 800;
         }
@@ -7029,28 +7329,28 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .bug-file-grid {
           display: grid;
           grid-template-columns: 1fr;
-          gap: 10px;
+          gap: 12px;
         }
         .bug-file-section-embedded,
         .why-activity-card-embedded {
-          margin-top: 14px;
+          margin-top: 16px;
           border-top: 1px solid var(--line);
-          padding-top: 14px;
+          padding-top: 16px;
         }
         .bug-file-section-embedded h2,
         .why-activity-card-embedded h2 {
-          margin: 0 0 10px;
+          margin: 0 0 12px;
           color: var(--text);
           font-size: 20px;
           line-height: 1.2;
-          font-weight: 750;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .bug-file-card {
           background: var(--wash);
         }
         .bug-file-suspect {
-          margin-top: 6px;
+          margin-top: 8px;
           color: var(--text);
           display: block;
           font-size: 18px;
@@ -7058,7 +7358,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 800;
         }
         .bug-file-row + .bug-file-row {
-          margin-top: 14px;
+          margin-top: 16px;
         }
         .why-activity-card {
           background: var(--wash);
@@ -7067,10 +7367,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 16px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .when-to-text {
-          margin-top: 14px;
+          margin-top: 16px;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: #fff;
@@ -7085,7 +7385,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .customer-action-list,
         .property-memory-grid {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .customer-action-item,
         .property-memory-item {
@@ -7103,7 +7403,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .customer-action-item p,
         .customer-action-section > p,
         .property-memory-item p {
-          margin: 6px 0 0;
+          margin: 8px 0 0;
           color: var(--muted);
           font-size: 14px;
           line-height: 1.5;
@@ -7117,30 +7417,30 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding-left: 20px;
           color: var(--text);
           font-size: 15px;
-          line-height: 1.6;
+          line-height: 1.5;
         }
         .contact-waves-cta {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          margin-top: 14px;
+          margin-top: 16px;
           min-height: 40px;
-          border: 1px solid ${B.blueDeeper};
+          border: 1px solid ${B.glassNavy};
           border-radius: 8px;
-          background: ${B.blueDeeper};
+          background: ${B.glassNavy};
           color: #fff;
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
-          font-weight: 850;
+          font-weight: 800;
           text-decoration: none;
-          padding: 10px 14px;
+          padding: 12px 16px;
         }
         .supporting-details-list {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .supporting-details-section > h2 {
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .supporting-detail-grid {
           margin-top: 12px;
@@ -7152,7 +7452,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .supporting-metadata {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .supporting-metadata p,
         .supporting-note {
@@ -7176,19 +7476,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .receipt-stat {
           min-height: 100px;
           background: #fff;
-          padding: 14px;
+          padding: 16px;
         }
         .receipt-value {
           margin-top: 8px;
           color: var(--text);
           font-size: 24px;
-          line-height: 1.05;
+          line-height: 1.1;
           font-weight: 800;
         }
         .map-tap-prompt {
           margin: 8px 0 0;
-          color: ${B.blueDeeper};
-          font-size: 13px;
+          color: ${B.glassNavy};
+          font-size: 14px;
           font-weight: 800;
           line-height: 1.35;
         }
@@ -7196,7 +7496,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 8px;
           color: var(--muted);
           font-size: 12px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .sr-section,
         .report-card {
@@ -7217,7 +7517,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-section h2,
         .report-card h2 {
           font-size: 28px;
-          line-height: 1.18;
+          line-height: 1.2;
         }
         .sr-band,
         .sr-grid-3,
@@ -7265,24 +7565,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           letter-spacing: 0;
           text-transform: uppercase;
         }
-        .section-eyebrow {
-          color: var(--muted);
-          font-family: ${FONT_BODY};
-          font-size: 12px;
-          font-weight: 700;
-          letter-spacing: 0;
-          text-transform: uppercase;
-        }
         .map-toggle {
           border-color: var(--line-strong);
           border-radius: 8px;
         }
         .map-toggle button {
           font-family: ${FONTS.heading};
-          font-weight: 850;
+          font-weight: 800;
         }
         .map-toggle button.is-active {
-          background: ${B.blueDeeper};
+          background: ${B.glassNavy};
           color: #fff;
         }
         .report-ask-box,
@@ -7296,13 +7588,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-color: var(--soft-blue-border);
         }
         .report-ask-form button {
-          background: ${B.blueDeeper};
-          border-color: ${B.blueDeeper};
+          background: ${B.glassNavy};
+          border-color: ${B.glassNavy};
           color: #fff;
         }
         .review-request-card .review-cta {
-          background: ${B.blueDeeper};
-          border-color: ${B.blueDeeper};
+          background: ${B.glassNavy};
+          border-color: ${B.glassNavy};
           color: #fff;
           box-shadow: none;
         }
@@ -7315,8 +7607,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
-          .sr-shell { padding: 14px 14px 36px; }
-          .report-action-bar { padding: 18px 16px; }
+          .sr-shell { padding: 16px 16px 36px; }
+          .report-action-bar { padding: 16px; }
           .report-action-buttons { grid-template-columns: 1fr; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
@@ -7328,7 +7620,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .premium-section-header { flex-direction: column; }
           .sr-row { grid-template-columns: 1fr; }
           .hero-conditions-copy { display: block; }
-          .hero-conditions-copy p { margin-top: 6px; text-align: left; }
+          .hero-conditions-copy p { margin-top: 8px; text-align: left; }
           .hero-condition-cell { flex-basis: 138px; }
           .report-ask-form { flex-direction: column; }
           .report-ask-actions { grid-template-columns: 1fr; }
@@ -7379,11 +7671,27 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         /* the glass ::before/::after specular layers position against the card */
         html[data-glass-theme] .service-report-v1 [data-glass] { position: relative; }
+        /* the global glass card hover (translateY(-4px) scale(1.016) + 110px
+           shadow) reads as a jarring "pop" on the report's large reading
+           cards (owner-flagged 2026-07-16) — soften to a subtle 1px lift */
+        html[data-glass-theme] .service-report-v1 [data-glass="card"]:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 28px 90px rgba(4, 57, 94, 0.18), 0 5px 18px rgba(4, 57, 94, 0.07),
+            inset 0 1px 0 rgba(255, 255, 255, 0.52), inset 1px 1px 0 rgba(175, 225, 255, 0.32) !important;
+        }
         /* glass layout drops the uppercase eyebrow labels (owner ask 2026-07-05);
            the :has(+ h1) form catches the V2 dashboards' ring-header eyebrows
            ("Overall Lawn Status") without touching their inner list labels */
         html[data-glass-theme] .service-report-v1 .section-eyebrow,
-        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1) { display: none; }
+        /* V2 hero eyebrows hide under glass; the heroes are h2 now (one h1 per
+           page — codex P3 on #2567), so match them by class alongside the h1. */
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1),
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h2.sr-v2-hero-title),
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ div > h2.sr-v2-hero-title) { display: none; }
+        /* EXCEPT the hero kicker — owner ruling 2026-07-16: every report leads
+           with "[Report kind] · [the service performed]" above the header,
+           mirroring the project report's kicker. */
+        html[data-glass-theme] .service-report-v1 .service-report-hero .section-eyebrow { display: block; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
@@ -7391,11 +7699,34 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         /* inner fact grids + weather panel: the navy hairline wash / solid-white
            panels read legacy on the scene — go whisper-white (owner ask 2026-07-05) */
-        html[data-glass-theme] .service-report-v1 .service-status-grid,
-        html[data-glass-theme] .service-report-v1 .hero-condition-row,
-        html[data-glass-theme] .service-report-v1 .readiness-facts {
+        html[data-glass-theme] .service-report-v1 .hero-condition-row {
           background: rgba(255, 255, 255, 0.6);
           border-color: rgba(255, 255, 255, 0.7);
+        }
+        /* fact grids: the legacy 1px-hairline separators disappear on glass and the
+           cells read as one merged slab — give the tiles real gutters instead
+           (owner ask 2026-07-09) */
+        html[data-glass-theme] .service-report-v1 .service-status-grid,
+        html[data-glass-theme] .service-report-v1 .readiness-facts,
+        html[data-glass-theme] .service-report-v1 .supporting-detail-grid {
+          gap: 10px;
+          background: transparent;
+          border: 0;
+          overflow: visible;
+        }
+        html[data-glass-theme] .service-report-v1 .service-status-grid .sr-cell,
+        html[data-glass-theme] .service-report-v1 .readiness-facts .sr-cell,
+        html[data-glass-theme] .service-report-v1 .supporting-detail-grid .sr-cell {
+          border: 1px solid rgba(255, 255, 255, 0.7);
+        }
+        /* visit-timeline event tiles: solid #fff borders vanish on glass — restate
+           as glass tiles and keep the connector visible (owner ask 2026-07-09) */
+        html[data-glass-theme] .service-report-v1 .workflow-event-body {
+          background: rgba(255, 255, 255, 0.42);
+          border-color: rgba(255, 255, 255, 0.7);
+        }
+        html[data-glass-theme] .service-report-v1 .workflow-event:not(:last-child)::before {
+          background: rgba(4, 57, 94, 0.14);
         }
         html[data-glass-theme] .service-report-v1 .hero-conditions {
           background: rgba(255, 255, 255, 0.42);
@@ -7418,7 +7749,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-color: rgba(255, 255, 255, 0.65) !important;
         }
         /* photo-strip arrows + photo score badges carry the old marketing
-           navy #1B2C5B inline — remap to the glass navy while the theme is
+           navy inline — remap to the glass navy while the theme is
            mounted (inert in the legacy / pdf render) */
         html[data-glass-theme] .service-report-v1 .lawn-photo-arrow {
           background: rgba(4, 57, 94, 0.85) !important;
@@ -7431,7 +7762,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         html[data-glass-theme] .service-report-v1 [data-glass="chip"] * {
           color: #04395E !important;
         }
-        /* inline #1B2C5B stragglers (typed-findings dd, photo summary) — the
+        /* inline old-navy stragglers (typed-findings dd, photo summary) — the
            inline styles stay untouched for non-glass purity; .sr-ink remaps
            them to the glass navy only while the theme is mounted */
         html[data-glass-theme] .service-report-v1 .sr-ink {
@@ -7479,10 +7810,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
       {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
           route wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main className="sr-shell">
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div className="sr-shell">
         {mode === 'live' && (data.internalOnly
           ? <InternalReviewBar />
           : <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />)}
+
+        {/* Ask Waves floats with the customer: sticky under the shell header for
+            the whole scroll (owner ask 2026-07-09). Live only — the pdf/static
+            document keeps the legacy section below instead. */}
+        <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
@@ -7526,31 +7863,56 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
+        {/* Mosquito Report V2 — yard-usability dashboard, same slot and same
+            suppression rules as Pest V2. Mutually exclusive with pestReportV2
+            (one service line per report), so the visit-summary anchor is never
+            duplicated. */}
+        {data.mosquitoReportV2 && (
+          <div id="visit-summary">
+            <MosquitoReportV2Section data={data.mosquitoReportV2} print={mode === 'pdf' || mode === 'static'} token={token} mode={mode} />
+          </div>
+        )}
+
         {/* V2: Visit Timeline + Ask Waves render directly under Re-entry (lawn + tree_shrub). */}
         {isV2LeadLayout && (
           <>
-            <div id="service-timeline">
-              <LawnVisitTimeline timeline={data.visitTimeline || normalizedVisitTimeline} />
-            </div>
-            <QuickNavigationAndAsk
-              mode={mode}
-              token={token}
-              serviceLine={data.serviceLine}
-              data={data}
-              hasProducts={hasApplications}
-              hasVisitTimeline={normalizedVisitTimeline.enabled}
-              hasPestPressure={hasPestPressure}
-              hasReentry={hasReentry}
-              hasActivity={Boolean(data.activity)}
-              hasCoverageMap={!hideCoverageCard}
-            />
+            {/* marginTop keeps the 20px card rhythm — the V2 timeline card carries
+                only a bottom margin, so without this it sat flush against the
+                Re-enter card above (owner-flagged overlap 2026-07-09).
+                Audit 2026-07-16 fixes: (a) the timeline always feeds through
+                normalizeVisitTimeline — the raw server object bypassed the
+                per-event-type config filters; (b) PrintContext rides this
+                mount (the one V2 mount outside its Section wrapper), else PDF
+                capture races the stagger-fade and prints faded/blank rows;
+                (c) the anchor div only renders when the timeline will. */}
+            {normalizedVisitTimeline.enabled && (normalizedVisitTimeline.events || []).length > 0 && (
+              <div id="service-timeline" style={{ marginTop: 20 }}>
+                <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+                  <LawnVisitTimeline timeline={normalizedVisitTimeline} />
+                </LawnPrintContext.Provider>
+              </div>
+            )}
+            {mode !== 'live' && (
+              <QuickNavigationAndAsk
+                mode={mode}
+                token={token}
+                serviceLine={data.serviceLine}
+                data={data}
+                hasProducts={hasApplications}
+                hasVisitTimeline={normalizedVisitTimeline.enabled}
+                hasPestPressure={hasPestPressure}
+                hasReentry={hasReentry}
+                hasActivity={Boolean(data.activity)}
+                hasCoverageMap={!hideCoverageCard}
+              />
+            )}
           </>
         )}
 
-        {/* Pest V2 owns the summary slot (the protection-first dashboard above
-            carries the id="visit-summary" anchor), so the legacy Visit Summary
-            paragraph is suppressed for pest V2 to avoid showing the report twice. */}
-        {!data.pestReportV2 && (
+        {/* Pest/Mosquito V2 own the summary slot (the dashboard above carries
+            the id="visit-summary" anchor), so the legacy Visit Summary
+            paragraph is suppressed for them to avoid showing the report twice. */}
+        {!data.pestReportV2 && !data.mosquitoReportV2 && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
@@ -7610,11 +7972,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             Only pass token in live mode so the interactive rating picker
             doesn't render into generated/cached PDFs (mode === 'pdf' /
             'static') where the controls would be non-functional anyway. */}
-        {/* Pest V2 surfaces the pressure/activity reading in the dashboard hero,
-            so the standalone meter is suppressed for pest V2 (no double report). */}
-        {!data.pestReportV2 && (data.activity
+        {/* Pest/Mosquito V2 surface the pressure/activity reading in the dashboard
+            hero, so the standalone meter is suppressed for them (no double report)
+            — EXCEPT typed reports with a gauge (owner ruling 2026-07-14): they
+            render the full ActivityCard (score history + knockdown progress chip)
+            alongside the dashboard, and the server withholds `activity` from the
+            hero on typed visits so the reading still shows exactly once. */}
+        {((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
           ? <ActivityCard data={data.activity} />
           : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />)}
+
+        {/* D2: cross-visit timeline right under the gauge — the same trend
+            neighborhood. Server ships it only for typed trend programs with
+            2+ visits, so this renders nothing everywhere else. */}
+        <TypedVisitTimelineCard timeline={data.typedVisitTimeline} />
 
         {/* Companion typed sections (combined services): primary content
             first, then one block per companion — heading, Today's Result,
@@ -7644,8 +8015,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 sectionId={`companion-${companion.type}-activity`}
               />
             )}
+            <TypedVisitTimelineCard
+              timeline={companion.visitTimeline}
+              sectionId={`companion-${companion.type}-visit-timeline`}
+            />
           </div>
         ))}
+
+        {/* Bait station map (station-map-v1) — live web only; pdf/static have
+            no satellite basemap to pin against (provider ToS). */}
+        {mode === 'live' && <StationMapCard stationMap={data.stationMap} />}
 
         {/* Lawn: program explainer drops below the factual record, just above
             Ask-Waves. Removed from the V2 report (the visit-specific dashboard
@@ -7654,8 +8033,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <LawnProgramOverviewCard context={data.lawnProgramOverview} />
         )}
 
-        {/* V2 (lawn + tree_shrub) renders Ask Waves up top (under Re-entry); otherwise keep it here. */}
-        {!isV2LeadLayout && (
+        {/* V2 (lawn + tree_shrub) renders Ask Waves up top (under Re-entry); otherwise keep it here.
+            Live mode replaces this section with the floating bar; pdf/static keep it. */}
+        {!isV2LeadLayout && mode !== 'live' && (
           <QuickNavigationAndAsk
             mode={mode}
             token={token}
@@ -7663,9 +8043,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             data={data}
             hasProducts={hasApplications}
             hasVisitTimeline={normalizedVisitTimeline.enabled}
-            hasPestPressure={hasPestPressure && !data.pestReportV2}
+            hasPestPressure={hasPestPressure && !data.pestReportV2 && !data.mosquitoReportV2}
             hasReentry={hasReentry}
-            hasActivity={Boolean(data.activity) && !data.pestReportV2}
+            hasActivity={Boolean(data.activity)
+              && (Boolean(data.typedReport) || (!data.pestReportV2 && !data.mosquitoReportV2))}
             hasCoverageMap={!hideCoverageCard}
           />
         )}
@@ -7694,7 +8075,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {orderedProofMoments.length > 0 && (
           <section data-glass="card" className="sr-section" id="service-highlights">
             <h2>Service Highlights</h2>
-            <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, margin: '0 0 14px' }}>
+            <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '0 0 16px' }}>
               {visualProofMomentIntro(orderedProofMoments)}
             </p>
             <div className="sr-grid-3">
@@ -7721,7 +8102,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                       {moment.locationArea}
                     </div>
                   )}
-                  <div style={{ fontSize: 14, lineHeight: 1.45, color: ESTIMATE_BODY, marginTop: 6 }}>
+                  <div style={{ fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY, marginTop: 8 }}>
                     {moment.customerCaption || 'Service highlight documented by your technician.'}
                   </div>
                 </div>
@@ -7737,7 +8118,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (
-              <p className="sr-ink" style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
+              <p className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.5, margin: '0 0 16px' }}>
                 {data.typedReport.photoSummary}
               </p>
             )}
@@ -7766,8 +8147,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-        <BrandFooter variant="document" />
-      </main>
+        {/* Live (glass) view carries the standard newsletter card + identity
+            footer — same as /track (owner 2026-07-08/09). PDF/static/
+            sms_preview keep the quiet document sign-off so the print
+            pipeline stays byte-identical. */}
+        {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
+        <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
+      </div>
     </div>
   );
 }
@@ -7776,6 +8162,8 @@ export default function ReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const mode = useMemo(() => {
     if (typeof window === 'undefined') return 'live';
     const requestedMode = new URLSearchParams(window.location.search).get('mode');
@@ -7794,16 +8182,30 @@ export default function ReportViewPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadError(false);
     const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`;
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
-    // and customers never have one. Same-origin localStorage only.
-    const staffToken = localStorage.getItem('waves_admin_token') || localStorage.getItem('adminToken');
+    // and customers never have one. Same-origin localStorage only. Guarded:
+    // sandboxed webviews can throw on localStorage access, and an unguarded
+    // throw here stranded the page on the loading skeleton — degrade to an
+    // unauthenticated fetch instead.
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     fetch(dataUrl, {
       cache: 'no-store',
       headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
     })
-      .then((r) => r.json())
+      .then((r) => {
+        // Static sentinel, not r.json(): a 404/410 with an HTML body (proxy
+        // error pages) made the parse reject into the retryable error state
+        // when the truth is "this report does not exist".
+        if (r.status === 404 || r.status === 410) {
+          return r.json().catch(() => ({ error: 'not_found' }));
+        }
+        if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
+        return r.json();
+      })
       .then((d) => {
         // Must register BEFORE setData: the view-event effect fires on first
         // render of the report, and a staff read may never post events.
@@ -7811,7 +8213,7 @@ export default function ReportViewPage() {
         if (!cancelled) setData(d);
       })
       .catch(() => {
-        if (!cancelled) setData({ error: 'Report not found' });
+        if (!cancelled) setLoadError(true);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -7819,14 +8221,63 @@ export default function ReportViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, mode]);
+  }, [token, mode, loadAttempt]);
 
   useEffect(() => {
     if (!data || data.error) return;
     applyReportDocumentMetadata(data);
   }, [data]);
 
+  // The browser resolves the URL fragment against the loading skeleton —
+  // anchor targets (e.g. #visit-recap from recap SMS links) don't exist
+  // until /data resolves and the report tree commits, so re-run the scroll
+  // here. Cards above the anchor keep settling after that first commit
+  // (self-gating sections unmount, images load) and shift the target, so
+  // re-anchor for a short window — stopping the moment the reader scrolls
+  // or the window elapses. No-op when the hash is absent or the target
+  // never renders (recap not ready), which leaves the reader at the top.
+  useEffect(() => {
+    if (!data || data.error) return undefined;
+    const anchorId = window.location.hash.slice(1);
+    if (!anchorId) return undefined;
+
+    let readerTookOver = false;
+    const markTakeover = () => { readerTookOver = true; };
+    const inputEvents = ['wheel', 'touchstart', 'keydown', 'pointerdown'];
+    inputEvents.forEach((e) => window.addEventListener(e, markTakeover, { passive: true }));
+
+    const align = () => {
+      const target = document.getElementById(anchorId);
+      if (!target) return;
+      // The WavesShell top bar is sticky — without a scroll margin the
+      // card's top edge lands underneath it.
+      const header = document.querySelector('[data-waves-shell-header]');
+      const margin = (header?.offsetHeight || 64) + 12;
+      target.style.scrollMarginTop = `${margin}px`;
+      if (Math.abs(target.getBoundingClientRect().top - margin) > 4) {
+        target.scrollIntoView({ block: 'start' });
+      }
+    };
+
+    align();
+    const interval = setInterval(() => {
+      if (readerTookOver) { clearInterval(interval); return; }
+      align();
+    }, 250);
+    const stop = setTimeout(() => clearInterval(interval), 2000);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(stop);
+      inputEvents.forEach((e) => window.removeEventListener(e, markTakeover));
+    };
+  }, [data]);
+
   if (loading) return <LoadingState glass={glassActive} />;
+  if (loadError) return (
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glassActive ? '#F8FCFE' : '#FAF8F3' }}>
+      <PublicLoadError resource="service report" onRetry={() => setLoadAttempt(a => a + 1)} />
+    </div>
+  );
   if (!data || data.error) return <NotFoundState glass={glassActive} />;
   if (data.reportVersion === 'service_report_v1') return <ServiceReportV1 data={data} token={token} mode={mode} />;
   return <LegacyReport data={data} token={token} glass={glassActive} />;

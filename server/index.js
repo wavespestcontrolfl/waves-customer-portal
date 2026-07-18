@@ -25,6 +25,7 @@ const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
+const { redactRequestUrl } = require('./utils/redact-request-url');
 
 // Fail closed on missing critical secrets in production. A missing JWT_SECRET
 // would otherwise let the app boot and then break auth at runtime — jwt.sign
@@ -120,11 +121,15 @@ const twilioVoiceWebhookRoutes = require('./routes/twilio-voice-webhook');
 const adminReviewRequestRoutes = require('./routes/admin-review-requests');
 const reviewPublicRoutes = require('./routes/review-public');
 const adminIntelligenceBarRoutes = require('./routes/admin-intelligence-bar');
+const adminAgentEstimateRoutes = require('./routes/admin-agent-estimate');
 const toolHealthRoutes = require('./routes/tool-health');
 
 const app = express();
 
-const SERVICE_ESTIMATE_SLUGS = require('./config/service-estimate-slugs');
+const {
+  estimateMarketingRedirectTarget,
+  preserveOriginalQuery,
+} = require('./config/estimate-marketing-redirects');
 
 // Railway terminates TLS upstream and forwards via X-Forwarded-For.
 // Trust a single proxy hop so express-rate-limit can key on the real client IP.
@@ -155,7 +160,9 @@ const cspDirectives = {
   // report PDFs through an iframe on a blob URL (Capacitor shell has no
   // download pipeline); blob frames are same-origin script-created only.
   frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
-  mediaSrc: ["'self'", "https:"],
+  // Authenticated call recordings are fetched with a Bearer header and played
+  // from short-lived, script-created Blob URLs (revoked when the player leaves).
+  mediaSrc: ["'self'", "https:", "blob:"],
   // PostHog session replay records via a web worker created from a blob URL.
   workerSrc: ["'self'", "blob:"],
 };
@@ -200,9 +207,21 @@ app.use(cors({
   credentials: true,
 }));
 
+// Phase-B Staff maintenance interlock. This must run before every API route,
+// rate limiter, and body parser so login, timer writes, and Staff bearer tokens
+// on otherwise-public routes all fail closed with the same response.
+const {
+  isStaffMaintenanceEnabled,
+  staffMaintenance,
+} = require('./middleware/staff-maintenance');
+app.use(staffMaintenance);
+
 // Rate limiting — key generator shared with route-level limiters (JWT subject
 // when authenticated, /64-collapsed IP otherwise; full rationale in the module).
-const { rateLimitKey } = require('./middleware/rate-limit-key');
+const {
+  rateLimitKey,
+  unauthenticatedAuthLimitKey,
+} = require('./middleware/rate-limit-key');
 
 const limiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
@@ -217,7 +236,7 @@ const limiter = rateLimit({
 // GATE_PAYER_STATEMENTS is off). Runs before the limiter; the route's own
 // gate + per-route limiter still apply when the feature is enabled.
 app.use('/api/pay/statement', (req, res, next) => {
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('payerStatements')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -227,7 +246,7 @@ app.use('/api/pay/statement', (req, res, next) => {
 // contract: while the gate is off the surface must read 404 even for an IP
 // that already exhausted the global /api/ limiter (a 429 would reveal it).
 app.use('/api/public/lawn-assessment', (req, res, next) => {
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('lawnAssessmentMagnet')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -239,10 +258,30 @@ app.use('/api/public/pest-identifier', (req, res, next) => {
   // invalid token 404s exactly like the dark surface (see the matching
   // carve-out in routes/public-pest-identifier.js).
   if (req.method === 'GET' && /^\/[a-f0-9]{32}\/?$/.test(req.path)) return next();
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('pestIdentifier')) {
     return res.status(404).json({ error: 'Not found' });
   }
+  next();
+});
+// The AI-content-report surface (default ON — MS Store policy 11.16 needs it
+// live; GATE_AI_CONTENT_REPORT=false kills it) carries the same contract:
+// while dark it must read 404 even for an IP that already exhausted the
+// global /api/ limiter. Mirrors requireAiContentReport in routes/ai-assistant.js.
+app.use('/api/ai/chat/report', (req, res, next) => {
+  if (process.env.GATE_AI_CONTENT_REPORT === 'false') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+// Secure-card privacy headers must survive EVERY outcome — including the
+// GLOBAL /api limiter's 429s, which fire before the router's own header
+// middleware can run (Codex #2771 r7). Scoped ahead of the limiter; the
+// route's middleware still covers everything downstream.
+app.use('/api/public/secure-card', (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Robots-Tag', 'noindex');
   next();
 });
 app.use('/api/', limiter);
@@ -252,6 +291,9 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10, // 10 attempts per window
   message: { error: 'Too many login attempts, please try again in 15 minutes.' },
+  // These routes are unauthenticated. Ignore any attached JWT so a caller
+  // cannot mint extra buckets, while still collapsing IPv6 clients by /64.
+  keyGenerator: unauthenticatedAuthLimitKey,
 });
 app.use('/api/auth/send-code', authLimiter);
 app.use('/api/auth/verify-code', authLimiter);
@@ -333,6 +375,12 @@ app.use('/api/webhooks/sendgrid', require('./routes/webhooks-sendgrid'));
 // reason as SendGrid; verifies a Svix HMAC-SHA256 signature.
 app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 
+// Staff authentication is unauthenticated by definition and accepts only
+// tiny credential payloads. Parse/cap it before the legacy 50 MB global body
+// parsers so login/reset floods cannot force large JSON parsing work.
+const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
+app.use('/api/admin/auth', ...staffAuthBodyParsers);
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -345,7 +393,15 @@ app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
 }));
 
 // Request logging
-app.use(morgan('combined', {
+morgan.token('redacted-url', (req) => redactRequestUrl(req.originalUrl || req.url || ''));
+morgan.token('redacted-referrer', (req) => {
+  const referrer = req.headers?.referer || req.headers?.referrer;
+  return referrer ? redactRequestUrl(referrer) : '-';
+});
+const REDACTED_COMBINED_LOG = ':remote-addr - :remote-user [:date[clf]] '
+  + '":method :redacted-url HTTP/:http-version" :status :res[content-length] '
+  + '":redacted-referrer" ":user-agent"';
+app.use(morgan(REDACTED_COMBINED_LOG, {
   stream: { write: (message) => logger.info(message.trim()) },
 }));
 
@@ -370,6 +426,8 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Digital business card — public token-scoped data + Save-contact vCard.
+app.use('/api/card', require('./routes/card-public'));
 // Universal-link association files (apple-app-site-association / assetlinks.json).
 // Dark behind GATE_UNIVERSAL_LINKS — both files 404 until flipped.
 app.use('/.well-known', require('./routes/well-known'));
@@ -381,6 +439,7 @@ app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
 app.use('/api/admin/intelligence-bar', adminIntelligenceBarRoutes);
+app.use('/api/admin/agent-estimate', adminAgentEstimateRoutes);
 app.use('/api/admin/tool-health', toolHealthRoutes);
 app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 // Mounted before adminCustomerRoutes so the customer router doesn't
@@ -388,6 +447,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 // /api/admin/customers prefix; Express tries them in mount order.
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
+app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
 app.use('/api/admin/command-center', require('./routes/admin-command-center'));
@@ -400,11 +460,18 @@ app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
 app.use('/api/service-outlines', serviceOutlinePublicRoutes);
-// Customer-facing estimate URL. Service slugs render the SPA quote wizard;
-// everything else remains a server-rendered accepted-estimate token.
+// Public acquisition pages now live on wavespestcontrol.com. Redirect them
+// before the SPA loads, preserving campaign parameters; URL fragments (the
+// voicemail prefill credential) remain browser-only and carry across the HTTP
+// redirect automatically. Unknown /estimate/:token values are private customer
+// estimates and must continue through the tokenized estimate renderer.
+app.get(['/estimate', '/estimate/', '/quote', '/quote/'], (req, res) => {
+  const target = estimateMarketingRedirectTarget(req.path);
+  return res.redirect(301, preserveOriginalQuery(target, req.originalUrl));
+});
 app.get('/estimate/:token', (req, res, next) => {
-  const slug = String(req.params.token || '').toLowerCase();
-  if (SERVICE_ESTIMATE_SLUGS.has(slug)) return next();
+  const target = estimateMarketingRedirectTarget(`/estimate/${req.params.token}`);
+  if (target) return res.redirect(301, preserveOriginalQuery(target, req.originalUrl));
   return estimatePublicRoutes.handleEstimateView(req, res, next);
 });
 app.use('/api/public/quote', paidEstimatorDailyLimiter, publicQuoteRoutes);
@@ -439,7 +506,11 @@ app.use('/api/public/track', require('./routes/track-public'));
 // GATE_GROWTHBOOK inside the route (404 when off), own per-route rate limit.
 app.use('/api/public/experiments', require('./routes/experiments-public'));
 app.use('/api/public/reschedule', require('./routes/reschedule-public'));
+// "Secure your appointment" card-on-file capture page (appointment-card-
+// request funnel). Token-gated; unreachable until the funnel sends links.
+app.use('/api/public/secure-card', require('./routes/secure-card-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
+app.use('/api/public/price-change', require('./routes/price-change-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
 app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));
@@ -471,6 +542,7 @@ app.use('/api/webhooks/voice-agent', require('./routes/webhooks-voice-agent'));
 app.use('/api/reports', reportsPublicRoutes);
 app.use('/api/admin/inventory', adminInventoryRoutes);
 app.use('/api/admin/price-match', adminPriceMatchRoutes);
+app.use('/api/admin/price-change', require('./routes/admin-price-change'));
 app.use('/api/admin/compliance', adminComplianceRoutes);
 app.use('/api/admin/workflows', adminWorkflowRoutes);
 app.use('/api/admin/ads', adminAdsRoutes);
@@ -585,11 +657,13 @@ app.use('/api/admin', require('./routes/admin-billing-health'));
 // Health check
 app.get('/api/health', (req, res) => {
   const { gates } = require('./config/feature-gates');
+  res.set('Cache-Control', 'no-store');
   res.json({
     status: 'ok',
     service: 'waves-customer-portal',
     timestamp: new Date().toISOString(),
     environment: config.nodeEnv,
+    staffMaintenance: { enabled: isStaffMaintenanceEnabled() },
     gates,
   });
 });
@@ -848,6 +922,24 @@ httpServer.listen(PORT, () => {
       };
       setTimeout(runReceiptDeliveryQueue, 30 * 1000).unref();
       setInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
+    }
+
+    // WDO report payment-hold release sweep — delivers held reports once
+    // their invoice settles. The interval is the guarantee (every settlement
+    // path converges on invoices.status); payment paths also nudge it via
+    // scheduleHoldReleaseSweep for near-instant release. No-op until the
+    // hold columns migrate and a held row exists.
+    {
+      const runReportHoldSweep = async () => {
+        try {
+          const { sweepHeldReportReleases } = require('./services/project-report-hold');
+          await sweepHeldReportReleases({ limit: 5 });
+        } catch (err) {
+          logger.error(`[report-hold] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runReportHoldSweep, 45 * 1000).unref();
+      setInterval(runReportHoldSweep, 60 * 1000).unref();
     }
 
     // Call recordings are processed by the every-5-minute scheduler.js

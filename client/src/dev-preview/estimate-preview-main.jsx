@@ -9,8 +9,13 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import EstimateViewPage from '../pages/EstimateViewPage';
+import WavesShell from '../components/brand/WavesShell';
+// Brand tokens (--surface/--border/...) normally ride in via main.jsx —
+// without them the WavesShell top bar computes a transparent background and
+// the preview's colors drift from the real page.
+import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'accepted'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -29,7 +34,12 @@ const CONTACT = {
 const BASE_ESTIMATE = {
   id: 1,
   token: 'preview-token',
-  slug: null,
+  // Estimate # + issued/expiration render under the hero contact block on
+  // every estimate — the harness carries real-shaped values so the block is
+  // exercised in preview.
+  slug: 'WPC-2026-0512',
+  createdAt: '2026-07-09T14:00:00.000Z',
+  expiresAt: '2026-07-16T14:00:00.000Z',
   ...CONTACT,
   askToken: 'preview-ask-token',
   category: 'RESIDENTIAL',
@@ -105,7 +115,7 @@ function pestScenario() {
         quoteRequired: false,
         copy: { priceWording: {} },
       }],
-      renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: true },
+      renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: true, showServiceDetailsRequest: true },
       waveGuardTier: 'Bronze',
       askChips: ['How do you handle ants?', 'Can you treat inside?', 'When am I charged?', 'What happens after approval?'],
       anchorOneTimePrice: 0,
@@ -223,7 +233,7 @@ function bundleScenario() {
           copy: { priceWording: {} },
         },
       ],
-      renderFlags: { showRecurringSummary: true, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
+      renderFlags: { showRecurringSummary: true, showWaveGuardSetupFee: false, showPestRecurringAddOns: false, showServiceDetailsRequest: true },
       waveGuardTier: 'Gold',
       combinedRecurring: { monthlySubtotal: 178.65, annualSubtotal: 2143.8, waveGuardTierLabel: 'Gold' },
       askChips: ['What is included in this plan?', 'How do you handle ants?', 'Are pets and kids safe?'],
@@ -269,10 +279,128 @@ function acceptedScenario() {
   };
 }
 
+// Lawn-only recurring estimate — exercises the lawn variant of the report
+// showcase (lawn health score mock instead of the pest recap video).
+function lawnScenario() {
+  const bundle = bundleScenario();
+  const lawnService = bundle.pricing.services.find((s) => s.key === 'lawn_care');
+  return {
+    ...bundle,
+    // Mirrors the real lawn-program + one-time-curative shape (e.g. a chinch
+    // knockdown quoted alongside the program): show_one_time_option on with a
+    // priced one_time_lawn row, so the harness exercises the recurring/one-time
+    // mode toggle on a lawn-only estimate.
+    estimate: { ...bundle.estimate, serviceCategory: 'lawn_care', showOneTimeOption: true },
+    pricing: {
+      ...bundle.pricing,
+      services: [lawnService],
+      renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
+      waveGuardTier: null,
+      combinedRecurring: null,
+      anchorOneTimePrice: 174,
+      oneTimeBreakdown: {
+        total: 174,
+        items: [{ service: 'one_time_lawn', label: 'One-Time Lawn', amount: 174, detail: 'Single treatment', kind: 'charge' }],
+      },
+      askChips: ['What is included in the lawn program?', 'How fast will my lawn improve?', 'Are pets and kids safe?'],
+    },
+  };
+}
+
+// Pest + Lawn WITH a Referral Credit — the exact split payload the server now
+// produces after the reconciliation fix (a referral no longer collapses the
+// plan into the badge-free bundle card). Numbers mirror the real Silver
+// pest+lawn draft: per-service cards show WaveGuard-net prices (pre-referral),
+// and the referral + net live in the plan-level discount summary.
+function bundleReferralScenario() {
+  return {
+    estimate: { ...BASE_ESTIMATE, serviceCategory: 'bundle', intelligence: PEST_INTELLIGENCE },
+    pricing: {
+      services: [
+        {
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          waveGuardTierEligible: true,
+          defaultFrequencyKey: 'quarterly',
+          // Silver 10% off: $107 anchor → $96.30/visit.
+          frequencies: [
+            {
+              key: 'quarterly', label: 'Quarterly', monthly: 32.10, annual: 385.20, perVisit: 107,
+              perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice: 96.30, perTreatment: 107, visitsPerYear: 4 }],
+              included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+            },
+            {
+              key: 'bi_monthly', label: 'Bi-monthly', monthly: 40.93, annual: 491.16, perVisit: 90.95,
+              included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+            },
+            {
+              key: 'monthly', label: 'Monthly', monthly: 67.41, annual: 808.92, perVisit: 67.41,
+              included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+            },
+          ],
+          copy: { priceWording: {} },
+        },
+        {
+          key: 'lawn_care',
+          label: 'Lawn Care',
+          isRecurring: true,
+          isPest: false,
+          waveGuardTierEligible: true,
+          defaultFrequencyKey: 'enhanced',
+          // Silver 10% off: $57.75/mo base → $51.98/mo.
+          frequencies: [
+            {
+              key: 'enhanced', label: 'Lawn Program', serviceCategory: 'lawn_care', visitsPerYear: 9,
+              monthly: 51.98, monthlyBase: 57.75, annual: 623.76, billingFrequencyKey: 'monthly',
+              included: [
+                { key: 'fert', label: 'Fertilization + weed control', detail: '9 applications/year' },
+                { key: 'pests', label: 'Chinch, sod webworm & turf pest response', detail: null },
+              ],
+              addOns: [],
+            },
+            {
+              key: 'premium', label: 'Premium', serviceCategory: 'lawn_care', visitsPerYear: 12,
+              monthly: 71.10, monthlyBase: 79, annual: 853.20, billingFrequencyKey: 'monthly',
+              included: [
+                { key: 'fert', label: 'Fertilization + weed control', detail: '12 applications/year' },
+                { key: 'pests', label: 'Chinch, sod webworm & turf pest response', detail: null },
+              ],
+              addOns: [],
+            },
+          ],
+          copy: { priceWording: {} },
+        },
+      ],
+      renderFlags: { showRecurringSummary: true, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
+      waveGuardTier: 'Silver',
+      combinedRecurring: {
+        monthlySubtotal: 82,
+        annualSubtotal: 984,
+        waveGuardTierLabel: 'Silver',
+        manualDiscount: {
+          label: 'Referral Credit', type: 'FIXED', value: 25,
+          amount: 25, recurringAmount: 25, monthlyAmount: 2.08,
+        },
+      },
+      askChips: ['What is included in this plan?', 'How do you handle ants?', 'Are pets and kids safe?'],
+      anchorOneTimePrice: 0,
+      oneTimeBreakdown: { total: 0, items: [] },
+      setupFee: null,
+      annualPrepayEligible: true,
+      defaultServiceMode: 'recurring',
+    },
+    cta: { canAccept: true, terminalState: null, quoteRequired: false, quoteRequiredReason: null, reviewBeforeBooking: false },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
   bundle: bundleScenario,
+  bundle_referral: bundleReferralScenario,
+  lawn: lawnScenario,
   accepted: acceptedScenario,
 };
 
@@ -315,7 +443,9 @@ window.fetch = async (input, init) => {
   });
 
   if (url.includes('/api/estimates/') && url.includes('/data')) {
-    return respond(PAYLOADS[scenario]());
+    // Prod sends glassDefault per eligible category with the gate unset =
+    // ALL categories, so the harness mirrors the live copy pack.
+    return respond({ ...PAYLOADS[scenario](), glassDefault: true });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;
@@ -373,7 +503,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <MemoryRouter initialEntries={['/estimate/preview-token']}>
       <Routes>
-        <Route path="/estimate/:token" element={<EstimateViewPage />} />
+        {/* Same shell chrome as the real /estimate/:token route in App.jsx —
+            previews must show the universal header/footer (owner 2026-07-09). */}
+        <Route path="/estimate/:token" element={<WavesShell><EstimateViewPage /></WavesShell>} />
       </Routes>
     </MemoryRouter>
     <ScenarioBar />

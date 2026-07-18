@@ -23,6 +23,7 @@
  * mobile-first stacked layout, two-column desktop via grid.
  */
 import Icon from '../components/Icon';
+import PublicLoadError from '../components/PublicLoadError';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
@@ -31,10 +32,14 @@ import BrandFooter from '../components/BrandFooter';
 import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
-import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
+import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
+import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
+import { CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
-import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
-import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
+import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
+import { isNativeApp } from '../native/platform';
+import DocumentActionBar from '../components/DocumentActionBar';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 
@@ -64,11 +69,13 @@ import {
 } from '../components/estimate/glass/GlassEstimateExtras';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
+import useModalFocus from '../hooks/useModalFocus';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { formatETDate } from '../lib/timezone';
-import { PRICE_FONT } from '../components/estimate/tokens';
+import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
+import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
 
-const FONT_BODY = "'Inter', system-ui, sans-serif";
+const FONT_BODY = DOC_FONT; // the one customer body stack (theme-doc alias)
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
@@ -80,7 +87,27 @@ const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
 const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
 const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_CHROME = CUSTOMER_SURFACE.chrome;
-const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
+const ESTIMATE_BUTTON_BG = COLORS.glassNavy;
+
+// THE estimate primary CTA (modal pay/confirm buttons + success links) —
+// hoisted so the repeated inline copies can't drift (doc-style unify).
+// NOTE: deliberately NOT theme-doc docButton — estimate buttons are a
+// different anatomy (16px vertical padding, not minHeight 48).
+const estimateCtaStyle = {
+  padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
+  border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
+};
+// Quiet outline secondary ("Not now" / "Go back") — same dedupe.
+const estimateSecondaryCtaStyle = {
+  padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
+  border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
+};
+// Call-Waves anchor CTA (AcceptanceModeCard / ReviewBeforeBookingCard).
+const estimateCallCtaStyle = {
+  display: 'inline-block', marginTop: 16, padding: '12px 20px',
+  background: ESTIMATE_BUTTON_BG, color: COLORS.white, borderRadius: 10,
+  textDecoration: 'none', fontSize: 14, fontWeight: 700,
+};
 
 // Universal hero headline (owner directive 2026-07-03). The eyebrow line
 // ("Your estimate · <quoted services>") carries the service specifics, so
@@ -113,6 +140,8 @@ const SECTION_KICKER_STYLE = {
 
 const BOOKING_SECTION_ID = 'estimate-booking-section';
 const PRICE_SECTION_ID = 'estimate-price-section';
+const PAYMENT_SECTION_ID = 'estimate-payment-section';
+const REVIEW_SECTION_ID = 'estimate-review-section';
 
 function scrollToPriceSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(PRICE_SECTION_ID) : null;
@@ -122,6 +151,18 @@ function scrollToPriceSection() {
 function scrollToBookingSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(BOOKING_SECTION_ID) : null;
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Once a slot is picked the approve CTAs land on the payment step (the actual
+// next action) instead of the top of the slot list — scrolling to the slot
+// list leaves the payment card below the fold, still opacity-0 under the
+// glass scroll-reveal, and the tap reads as doing nothing. Falls back to the
+// booking section when the payment card isn't mounted (no slot picked yet).
+function scrollToPaymentSection() {
+  if (typeof document === 'undefined') return;
+  const el = document.getElementById(PAYMENT_SECTION_ID);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  else scrollToBookingSection();
 }
 
 // Primary booking CTA — same navy treatment as the add-service button;
@@ -137,7 +178,7 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0 24px' }}>
       <button
         type="button"
-        onClick={scrollToBookingSection}
+        onClick={slotMeta ? scrollToPaymentSection : scrollToBookingSection}
         style={{
           minHeight: 44,
           minWidth: 220,
@@ -331,6 +372,40 @@ function serviceKeysForEstimateSection(section = {}) {
   return keys;
 }
 
+// Which report the showcase card sells (owner ask 2026-07-09): lawn-only
+// estimates get the lawn report (health score + turf trends); any mix with
+// pest/mosquito keeps the pest report with the tech recap video front and
+// center.
+//
+// Deliberately NOT serviceKeysForEstimateSection: that helper scans marketing
+// copy (labels, descriptions, included lines) for substrings, which is the
+// right bias for estimateAddServiceOffer (never offer a service the customer
+// arguably has) but wrong here — the lawn program's own included line
+// "Chinch, sod webworm & turf pest response" would classify every lawn-only
+// estimate as pest. Only structural identity fields decide the variant.
+export function reportShowcaseVariantForServices(services = []) {
+  const keys = new Set();
+  const collectId = (id) => {
+    const text = String(id || '').toLowerCase();
+    if (!text) return;
+    if (text.includes('pest')) keys.add('pest_control');
+    if (text.includes('lawn')) keys.add('lawn_care');
+    if (text.includes('mosquito')) keys.add('mosquito');
+  };
+  (Array.isArray(services) ? services : []).forEach((section) => {
+    if (!section || typeof section !== 'object') return;
+    if (section.isPest) keys.add('pest_control');
+    [section.key, section.service, section.serviceKey].forEach(collectId);
+    (Array.isArray(section.memberKeys) ? section.memberKeys : []).forEach(collectId);
+    (Array.isArray(section.frequencies) ? section.frequencies : []).forEach((frequency) => {
+      collectId(frequency?.serviceCategory);
+    });
+  });
+  return keys.has('lawn_care') && !keys.has('pest_control') && !keys.has('mosquito')
+    ? 'lawn'
+    : 'pest';
+}
+
 export function estimateAddServiceOffer(services = [], serviceMode = 'recurring', membership = null) {
   if (serviceMode !== 'recurring') return null;
   const currentKeys = new Set();
@@ -446,12 +521,14 @@ function Page({ children }) {
       <EstimateGlassTheme active />
       {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
           gateway wrap, owner 2026-07-06) provides the standard chrome. */}
-      {/* Bottom padding: enough that the floating book bar doesn't sit on
-          the last card, without the old 110px dead zone above the footer
-          (owner 2026-07-07: "leave a smaller gap"). */}
-      <div style={{ flex: 1, padding: '32px 20px 48px', maxWidth: 720, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* Bottom padding: minimal — the pre-footer newsletter card is the
+          buffer under the last content card now (owner 2026-07-09: "close
+          the gap"), and it also gives the floating book bar something
+          non-critical to overlap at full scroll. */}
+      <div style={{ flex: 1, padding: '32px 20px 8px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
+      {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
       {/* Standard footer on estimates too (owner 2026-07-06) — same identity/
           contact/socials/app-badge stack as every other customer page. */}
       <BrandFooter />
@@ -462,9 +539,9 @@ function Page({ children }) {
 function SkeletonBlock({ minHeight = null }) {
   return (
     <div style={estimateCard(minHeight ? { minHeight } : {})}>
-      <div style={{ height: 12, width: 120, background: ESTIMATE_CHROME, borderRadius: 4 }} />
-      <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 16 }} />
-      <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 12 }} />
+      <div style={{ height: 12, width: 120, background: ESTIMATE_CHROME, borderRadius: 6 }} />
+      <div style={{ height: 32, width: '60%', background: ESTIMATE_CHROME, borderRadius: 6, marginTop: 16 }} />
+      <div style={{ height: 14, width: '40%', background: ESTIMATE_CHROME, borderRadius: 6, marginTop: 12 }} />
     </div>
   );
 }
@@ -477,28 +554,152 @@ function SkeletonBlock({ minHeight = null }) {
 function HeaderTailSkeleton() {
   return (
     <div aria-hidden="true" style={{ padding: '0 0 24px' }}>
-      <div style={{ height: 16, width: '90%', maxWidth: 480, background: ESTIMATE_CHROME, borderRadius: 4 }} />
-      <div style={{ height: 16, width: '72%', maxWidth: 400, background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 8 }} />
+      <div style={{ height: 16, width: '90%', maxWidth: 480, background: ESTIMATE_CHROME, borderRadius: 6 }} />
+      <div style={{ height: 16, width: '72%', maxWidth: 400, background: ESTIMATE_CHROME, borderRadius: 6, marginTop: 8 }} />
       <div style={{ marginTop: 16, display: 'grid', gap: 8 }}>
         {[120, 180, 140, 220].map((w) => (
-          <div key={w} style={{ height: 13, width: w, background: ESTIMATE_CHROME, borderRadius: 4 }} />
+          <div key={w} style={{ height: 14, width: w, background: ESTIMATE_CHROME, borderRadius: 6 }} />
         ))}
       </div>
-      <div style={{ height: 15, width: 260, maxWidth: '85%', background: ESTIMATE_CHROME, borderRadius: 4, marginTop: 12 }} />
+      <div style={{ height: 15, width: 260, maxWidth: '85%', background: ESTIMATE_CHROME, borderRadius: 6, marginTop: 12 }} />
     </div>
   );
 }
 
-function NotFoundCard() {
+// extensionEligible comes from the /data 404 body: the server only sets it
+// when the token maps to a real, published estimate that died of expiry (and
+// the GATE_ESTIMATE_EXTENSION_REQUEST gate is on) — so garbage URLs never
+// grow a button that can only fail. First click self-serves a 7-day
+// extension (the server texts the refreshed link too); once the lifetime
+// auto-grant is used, later clicks just notify the office. onExtended lets
+// the parent re-fetch /data — the link is live again after an auto-grant.
+function NotFoundCard({ token = null, extensionEligible = false, onExtended = null }) {
+  // idle | sending | extended | requested | failed. Terminal states render
+  // even if a parent re-fetch flips extensionEligible off (a successful
+  // auto-grant makes the estimate viewable again, which does exactly that).
+  const [requestState, setRequestState] = useState('idle');
+  const [newExpiresAt, setNewExpiresAt] = useState(null);
+  // The server reports whether the estimate_extended SMS/email actually went
+  // out (no phone or email on file / opt-out / suppression / gates / template
+  // inactive all block them) — only claim channels that really fired.
+  const [smsSent, setSmsSent] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
+
+  const requestExtension = async () => {
+    if (requestState !== 'idle' && requestState !== 'failed') return;
+    setRequestState('sending');
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/extension-request`, { method: 'POST' });
+      if (!r.ok) throw new Error(`extension_request_failed_${r.status}`);
+      const body = await r.json().catch(() => ({}));
+      if (body.autoExtended === true) {
+        setNewExpiresAt(body.expiresAt || null);
+        setSmsSent(body.smsSent === true);
+        setEmailSent(body.emailSent === true);
+        setRequestState('extended');
+      } else {
+        setRequestState('requested');
+      }
+    } catch {
+      setRequestState('failed');
+    }
+  };
+
+  const freshLinkSentence = smsSent && emailSent
+    ? ' We also texted and emailed you a fresh link.'
+    : smsSent
+      ? ' We also texted you a fresh link.'
+      : emailSent
+        ? ' We also emailed you a fresh link.'
+        : '';
+
+  // ET, matching the SMS and every other estimate-expiry surface — a
+  // West-Coast browser must not show a "through" date a day earlier than
+  // the deadline the text message quotes.
+  const expiryLabel = newExpiresAt
+    ? new Date(newExpiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })
+    : null;
+
+  // A granted extension flips the whole card's story: the estimate is live
+  // again, so the "unavailable / call us" framing would contradict the
+  // outcome the customer just got.
+  const extendedNow = requestState === 'extended';
+
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
-      <div style={{ fontSize: 32 }}></div>
-      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
-        This link may have expired or isn't valid. Call us at{' '}
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
-        and we'll get you sorted.
+      <div style={{ fontSize: 34 }}></div>
+      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
+        {extendedNow ? "You're all set" : 'Estimate unavailable'}
       </div>
+      {!extendedNow ? (
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          This link may have expired or isn't valid. Call us at{' '}
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
+          and we'll get you sorted.
+        </div>
+      ) : null}
+      {token && (extensionEligible || requestState !== 'idle') ? (
+        requestState === 'extended' ? (
+          <>
+            <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+              Your estimate has been extended{expiryLabel ? ` through ${expiryLabel}` : ' by 7 days'}.
+              {freshLinkSentence}
+            </div>
+            {onExtended ? (
+              <button
+                type="button"
+                onClick={onExtended}
+                style={{
+                  minHeight: 48,
+                  border: 0,
+                  borderRadius: 10,
+                  padding: '0 24px',
+                  marginTop: 16,
+                  background: ESTIMATE_BUTTON_BG,
+                  color: COLORS.white,
+                  fontSize: 15,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                View your estimate
+              </button>
+            ) : null}
+          </>
+        ) : requestState === 'requested' ? (
+          <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 20, lineHeight: 1.5, fontWeight: 600 }}>
+            Request sent — we've let our office know you'd like more time on this estimate. We'll reach out shortly.
+          </div>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={requestExtension}
+              disabled={requestState === 'sending'}
+              style={{
+                minHeight: 48,
+                border: 0,
+                borderRadius: 10,
+                padding: '0 24px',
+                marginTop: 20,
+                background: ESTIMATE_BUTTON_BG,
+                color: COLORS.white,
+                fontSize: 15,
+                fontWeight: 800,
+                cursor: requestState === 'sending' ? 'not-allowed' : 'pointer',
+                opacity: requestState === 'sending' ? 0.8 : 1,
+              }}
+            >
+              {requestState === 'sending' ? 'Extending…' : 'Request an extension'}
+            </button>
+            {requestState === 'failed' ? (
+              <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.5 }}>
+                We couldn't extend that just now — give us a call and we'll get it done over the phone.
+              </div>
+            ) : null}
+          </>
+        )
+      ) : null}
     </div>
   );
 }
@@ -526,8 +727,11 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   const firstName = customerFirstName || 'there';
   const headlineText = String(headline || UNIVERSAL_HEADLINE).replace('{first}', firstName);
   const phoneDisplay = formatCustomerPhone(customerPhone);
+  // Name leads the contact block in the headline's own color (owner ask
+  // 2026-07-09, live review screen); email/phone/address follow in the same
+  // face at body size — no more uppercase caption treatment.
+  const nameLine = String(customerName || '').trim();
   const contactLines = [
-    customerName,
     customerEmail,
     phoneDisplay,
     address,
@@ -546,10 +750,6 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   };
   const issuedDisplay = fmtDate(createdAt);
   const expiresDisplay = fmtDate(expiresAt);
-  const dateLine = [
-    issuedDisplay ? `Estimate issued ${issuedDisplay}` : null,
-    expiresDisplay ? `Valid through ${expiresDisplay}` : null,
-  ].filter(Boolean).join(' · ');
   return (
     <div style={{ padding: '8px 0 24px' }}>
       <div style={{ ...HEADER_EYEBROW_STYLE, marginBottom: 8 }}>
@@ -568,28 +768,39 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
         {headlineText}
       </h1>
       {subline ? (
-        <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.55, maxWidth: '62ch' }}>
+        <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, maxWidth: '62ch' }}>
           {subline}
         </p>
       ) : null}
-      {contactLines.length ? (
-        <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
-          {contactLines.map((line) => (
-            <div key={line} style={{ ...HEADER_EYEBROW_STYLE, lineHeight: 1.5 }}>{line}</div>
+      {(nameLine || contactLines.length) ? (
+        /* One uniform block (owner 2026-07-09): email/phone/address align
+           with the name — same face, size, weight, and color. data-gt="" on
+           every line: the glass auto-tier tags small text as caption/fine
+           and uppercases short names as eyebrows, which split this block
+           across different faces — the block styles itself. */
+        /* Slightly tighter + smaller than the 07-09 pass (owner ask
+           2026-07-10): 17px/gap-4 read too heavy against the new
+           per-application price cards. */
+        <div style={{ marginTop: 14, display: 'grid', gap: 2 }}>
+          {[nameLine, ...contactLines].filter(Boolean).map((line) => (
+            <div key={line} data-gt="" style={{ fontSize: 15, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>{line}</div>
           ))}
         </div>
       ) : null}
-      {(slug || dateLine) ? (
-        /* Estimate # + dates at body size (design audit 2026-07-06): the
-           expiry is action-relevant — it should not carry the page's lowest
-           emphasis, and the quote number was not shown anywhere. Dates sit on
-           their own line under the number, same weight (owner ask 07-07). */
+      {(slug || issuedDisplay || expiresDisplay) ? (
+        /* Estimate # + expiration directly under the contact block on every
+           estimate (owner ask 2026-07-09; supersedes the 07-07 "Estimate
+           {slug} · dates" line format). Body size — the expiry is
+           action-relevant and must not carry the page's lowest emphasis. */
         <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.5 }}>
           {slug ? (
-            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate {slug}</strong>
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate #: {slug}</strong>
           ) : null}
-          {dateLine ? (
-            <strong style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>{dateLine}</strong>
+          {issuedDisplay ? (
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate issued: {issuedDisplay}</strong>
+          ) : null}
+          {expiresDisplay ? (
+            <strong data-gt="" style={{ display: 'block', color: ESTIMATE_TEXT, fontWeight: 600 }}>Estimate expiration: {expiresDisplay}</strong>
           ) : null}
         </div>
       ) : null}
@@ -613,9 +824,10 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           {intelligence.eyebrow || copy?.aiEyebrow || 'Waves AI'}
         </div>
         <h2 style={{
-                    fontSize: 24,
+          fontFamily: FONTS.serif,
+          fontSize: 24,
           fontWeight: 500,
-          lineHeight: 1.18,
+          lineHeight: 1.2,
           color: ESTIMATE_TEXT,
           margin: 0,
           letterSpacing: 0,
@@ -628,7 +840,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         margin: satelliteUrl || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
-        lineHeight: 1.55,
+        lineHeight: 1.5,
       }}>
         {intelligence.body || copy?.aiBody || 'We reviewed the available property details and pricing rules before preparing this estimate.'}
       </p>
@@ -651,7 +863,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       ) : null}
 
       {showYourWork?.overlaySatelliteUrl ? (
-        <div style={{ marginTop: 8, fontSize: 12, color: ESTIMATE_MUTED, lineHeight: 1.45 }}>
+        <div style={{ marginTop: 8, fontSize: 12, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
           Red outline: your property boundary from county records.
         </div>
       ) : null}
@@ -659,7 +871,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       {metrics.length ? (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(132px, 1fr))',
+          // 3 metrics = one row of 3 (owner 2026-07-10 — auto-fit orphaned
+          // the third tile onto its own row); any other count keeps the
+          // responsive auto-fit grid (4 wraps 2×2 on phones).
+          gridTemplateColumns: metrics.length === 3
+            ? 'repeat(3, 1fr)'
+            : 'repeat(auto-fit, minmax(132px, 1fr))',
           gap: 12,
           marginTop: 16,
         }}>
@@ -678,7 +895,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                 {metric.label}
               </div>
               <div style={{
-                                fontSize: 18,
+                fontFamily: FONTS.serif,
+                fontSize: 18,
                 fontWeight: 500,
                 color: ESTIMATE_TEXT,
               }}>
@@ -740,7 +958,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                       {fact.label}
                     </div>
                     <div style={{
-                                            fontSize: 18,
+                      fontFamily: FONTS.serif,
+                      fontSize: 18,
                       fontWeight: 500,
                       color: ESTIMATE_TEXT,
                     }}>
@@ -749,7 +968,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                   </div>
                   <span style={{
                     flex: 'none',
-                    padding: '5px 9px',
+                    padding: '4px 8px',
                     borderRadius: 999,
                     background: '#E3F5FD',
                     color: '#065A8C',
@@ -799,7 +1018,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                 padding: '12px 12px',
                 color: '#3F4A65',
                 fontSize: 16,
-                lineHeight: 1.45,
+                lineHeight: 1.5,
               }}
             >
               {signal}
@@ -851,16 +1070,16 @@ function MembershipCard({ membership }) {
     fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700,
   };
   const labelStyle = { color: ESTIMATE_TEXT, fontWeight: 600, fontSize: 15 };
-  const valStyle = { color: '#1F7A4D', fontSize: 14, fontWeight: 600, textAlign: 'right' };
+  const valStyle = { color: W.green, fontSize: 14, fontWeight: 600, textAlign: 'right' };
 
   return (
     <section style={{ ...estimateCard(), display: 'grid', gap: 16 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
-          <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.18, color: ESTIMATE_TEXT, margin: 0 }}>
+          <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.2, color: ESTIMATE_TEXT, margin: 0 }}>
             {hello}
           </h2>
-          <p style={{ margin: '8px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.55 }}>
+          <p style={{ margin: '8px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.5 }}>
             Here&rsquo;s what your WaveGuard membership saves you on this estimate.
           </p>
         </div>
@@ -883,7 +1102,9 @@ function MembershipCard({ membership }) {
         }}>
           Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} bumps your membership from{' '}
           <strong>{membership.upgrade.fromLabel}</strong> up to <strong>{membership.upgrade.toLabel}</strong>
-          {' '}— an extra {membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.
+          {membership.discountAppliesTo === 'new_services_only'
+            ? ` for this estimate. That tier discounts the new services by up to ${membership.tierDiscountPct}%; your current service prices stay unchanged.`
+            : ` — an extra ${membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.`}
         </div>
       ) : null}
 
@@ -937,6 +1158,11 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Abort an in-flight ask on unmount — the AI answer can take several
+  // seconds, and its late resolution must not setState (or flash the call-us
+  // fallback) against an unmounted bar.
+  const askAbortRef = useRef(null);
+  useEffect(() => () => { askAbortRef.current?.abort(); }, []);
   const prompts = Array.isArray(chips) && chips.length > 0
     ? chips.map((chip) => String(chip || '').trim()).filter(Boolean).slice(0, 6)
     : ESTIMATE_ASK_PROMPTS;
@@ -944,6 +1170,8 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   const ask = useCallback(async (prompt) => {
     const q = String(prompt ?? question).trim();
     if (!q || asking) return;
+    const controller = new AbortController();
+    askAbortRef.current = controller;
     setAsking(true);
     setFailed(false);
     setAnswer('Checking...');
@@ -959,16 +1187,19 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           selectedFrequency,
           serviceMode,
         }),
+        signal: controller.signal,
       });
       const body = await response.json().catch(() => ({}));
+      if (controller.signal.aborted) return;
       if (!response.ok) throw new Error(body.error || 'question_failed');
       setAnswer(body.answer || 'I could not answer that from this estimate.');
       setQuestion('');
     } catch {
+      if (controller.signal.aborted) return;
       setFailed(true);
       setAnswer(`I could not answer that right now. Call or text Waves at ${WAVES_PHONE_DISPLAY}.`);
     } finally {
-      setAsking(false);
+      if (!controller.signal.aborted) setAsking(false);
     }
   }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
 
@@ -986,9 +1217,10 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           Ask Waves
         </div>
         <h2 style={{
-                    fontSize: 24,
+          fontFamily: FONTS.serif,
+          fontSize: 24,
           fontWeight: 500,
-          lineHeight: 1.18,
+          lineHeight: 1.2,
           color: ESTIMATE_TEXT,
           margin: 0,
           letterSpacing: 0,
@@ -996,7 +1228,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           {glassCopyActive() ? GLASS_COPY.askTitle : 'Ask Waves'}
         </h2>
         {glassCopyActive() ? (
-          <p style={{ margin: '8px 0 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+          <p style={{ margin: '8px 0 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
             {GLASS_COPY.askExcerpt}
           </p>
         ) : null}
@@ -1061,7 +1293,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             disabled={asking}
             className="gc-section-cta"
             style={{
-              padding: '11px 16px', // >=40px hit height (touch audit 2026-07-06)
+              padding: '12px 16px', // >=40px hit height (touch audit 2026-07-06)
               fontSize: 12,
               fontWeight: 700,
               cursor: asking ? 'not-allowed' : 'pointer',
@@ -1077,13 +1309,13 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
         <div
           aria-live="polite"
           style={{
-            borderLeft: `4px solid ${failed ? COLORS.red : ESTIMATE_BUTTON_BG}`,
+            borderLeft: `4px solid ${failed ? W.red : ESTIMATE_BUTTON_BG}`,
             background: failed ? '#FFF5F5' : '#F8FCFE',
             borderRadius: 10,
             padding: '12px 16px',
             color: ESTIMATE_TEXT,
             fontSize: 14,
-            lineHeight: 1.55,
+            lineHeight: 1.5,
             whiteSpace: 'pre-line',
           }}
         >
@@ -1219,6 +1451,25 @@ function isNonBillableBreakdownRow(item = {}) {
   return Number.isFinite(amount) && amount <= 0;
 }
 
+// One-time lawn work: the one_time_lawn engine row plus the lawn specialty
+// rows whose keys carry no 'lawn' substring (top-dressing / dethatching /
+// plugging) — mirrors serviceCategoryForOneTimeItem's lawn heuristics,
+// INCLUDING its rodent-before-lawn ordering: rodent entry-point plugging
+// (service 'rodent_plugging') is exclusion work, not turf care (codex P2).
+function isLawnOneTimeBreakdownItem(item = {}) {
+  const raw = [item.service, item.label, item.name]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  if (/\brodent|\bexclusion\b|entry point/.test(raw)) return false;
+  // Turf-curative vocabulary (chinch, webworm, weed, fertilizer, fungicide…)
+  // counts as lawn even when the engine row isn't literally named
+  // one_time_lawn — a "Chinch Bug Curative" row must not fall through to the
+  // pest callback copy (codex r2). `fungus gnats` stays a pest.
+  return /\blawn\b|top ?dress|dethatch|\bplugging\b|\bchinch\b|\bsod\s?web\s?worms?\b|\barmy\s?worms?\b|\bgrubs?\b|\bturf\b|\bweed\b|\bfertiliz|\bfungicide\b|\bfungus\b(?!\s*gnats?)|\bfungal\b/.test(raw);
+}
+
 function germanRoachVisitPhrase(visits) {
   const n = Number(visits) || 0;
   const words = { 1: 'One visit', 2: 'Two visits', 3: 'Three visits', 4: 'Four visits' };
@@ -1265,6 +1516,16 @@ export function oneTimePriceCopy(breakdown = {}) {
   // needed" acceptance card below it. Gated on guarantee-ONLY (mirrors the
   // server's isRodentGuaranteeOnlyEstimate shape) so a bundled rodent job
   // keeps the visit copy.
+  // One-time lawn (e.g. a chinch-bug curative quoted beside the program) is a
+  // turf treatment, not a pest-control visit — the default copy's "30-day
+  // callback if pests return" is a pest-service term never ratified for lawn
+  // work, so the lawn branch states the visit terms without it. Gated
+  // lawn-ONLY (like the Bora-Care branch) so mixed quotes keep default copy.
+  const lawnOnly = items.some(isLawnOneTimeBreakdownItem)
+    && items.every((it) => isLawnOneTimeBreakdownItem(it) || isNonBillableBreakdownRow(it));
+  if (lawnOnly) {
+    return 'One lawn treatment for the measured turf, pay on service day. No recurring schedule, no tier discount.';
+  }
   const rodentGuaranteeOnly = items.some((item) => item?.service === 'rodent_guarantee')
     && items.every((item) => item?.service === 'rodent_guarantee' || isNonBillableBreakdownRow(item));
   if (rodentGuaranteeOnly) {
@@ -1297,7 +1558,7 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
         + {fmtMoney(fee.amount)} one-time {fee.label || 'first-visit setup'}
       </div>
       {fee.waivedWithPrepay ? (
-        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.45 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.5 }}>
           {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
         </div>
       ) : null}
@@ -1310,11 +1571,28 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
 // Tap either to switch mode — slider, add-ons, and price card respond
 // to the mode change (one-time hides slider + add-ons, shows one-time
 // price card content).
-function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
+// Labels follow the estimate's service category — a lawn-only estimate must
+// not offer "One-Time Pest Control" (the 07-15 chinch-bug lawn quote rendered
+// pest labels on a lawn program). Bundles and unknown categories keep the
+// legacy pest wording: pest is the anchor service there, and unchanged-by-
+// default keeps every existing pest estimate rendering byte-identical.
+const ONE_TIME_TOGGLE_LABELS = {
+  lawn_care: { recurring: 'Recurring Lawn Program', oneTime: 'One-Time Lawn Treatment' },
+  mosquito: { recurring: 'Recurring Mosquito Program', oneTime: 'One-Time Mosquito Treatment' },
+  tree_shrub: { recurring: 'Recurring Tree & Shrub Care', oneTime: 'One-Time Tree & Shrub Visit' },
+};
+export function oneTimeToggleLabels(serviceCategory) {
+  return ONE_TIME_TOGGLE_LABELS[serviceCategory]
+    || { recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' };
+}
+
+export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false, serviceCategory = null }) {
+  const labels = oneTimeToggleLabels(serviceCategory);
   const pillBase = {
     padding: '12px 16px', borderRadius: 999, fontSize: 14, fontWeight: 600,
-    cursor: 'pointer', border: 'none', textAlign: 'center', flex: 1,
-    transition: 'all 150ms ease',
+    cursor: disabled ? 'wait' : 'pointer', border: 'none', textAlign: 'center', flex: 1,
+    transition: docTransition('background', 'color'),
+    opacity: disabled ? 0.65 : 1,
   };
   return (
     <div style={{
@@ -1325,22 +1603,24 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
     }}>
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onChange('recurring')}
         style={{
           ...pillBase,
           background: mode === 'recurring' ? ESTIMATE_BUTTON_BG : 'transparent',
           color: mode === 'recurring' ? COLORS.white : ESTIMATE_BODY,
         }}
-      >Recurring Pest Control</button>
+      >{labels.recurring}</button>
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onChange('one_time')}
         style={{
           ...pillBase,
           background: mode === 'one_time' ? ESTIMATE_BUTTON_BG : 'transparent',
           color: mode === 'one_time' ? COLORS.white : ESTIMATE_BODY,
         }}
-      >One-Time Pest Control</button>
+      >{labels.oneTime}</button>
     </div>
   );
 }
@@ -1375,7 +1655,7 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
               minHeight: 44,
               border: 'none',
               borderRadius: 10,
-              background: isReceived ? '#166534' : ESTIMATE_BUTTON_BG,
+              background: isReceived ? W.green : ESTIMATE_BUTTON_BG,
               color: COLORS.white,
               fontSize: 15,
               fontWeight: 800,
@@ -1387,7 +1667,9 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
               opacity: isSubmitting ? 0.72 : 1,
             }}
           >
-            <Icon name={isReceived ? 'check' : 'plus'} size={17} strokeWidth={2.4} />
+            {/* No plus glyph on the idle label (owner 2026-07-11) — only the
+                received state keeps its check. */}
+            {isReceived ? <Icon name="check" size={17} strokeWidth={2.4} /> : null}
             {isSubmitting ? 'Sending request...' : isReceived ? 'Request received' : (offer.buttonLabel || `Add ${offer.label}`)}
           </button>
           {isReceived ? (
@@ -1395,11 +1677,11 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
               marginTop: 12,
               background: '#ECFDF5',
               border: '1px solid #86EFAC',
-              color: '#14532D',
+              color: W.green,
               borderRadius: 10,
               padding: '12px 12px',
               fontSize: 14,
-              lineHeight: 1.45,
+              lineHeight: 1.5,
             }}>
               <strong style={{ display: 'block', marginBottom: 2 }}>Request received.</strong>
               {requestState?.message || 'Got it. We are reviewing this service for your property and will follow up with a revised estimate shortly.'}
@@ -1409,12 +1691,12 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
             <div role="alert" style={{
               marginTop: 12,
               background: '#FEF2F2',
-              border: `1px solid ${COLORS.red}`,
-              color: COLORS.red,
+              border: `1px solid ${W.red}`,
+              color: W.red,
               borderRadius: 10,
               padding: '12px 12px',
               fontSize: 14,
-              lineHeight: 1.45,
+              lineHeight: 1.5,
             }}>
               {requestState?.message || `Could not send the request. Call ${WAVES_PHONE_DISPLAY}.`}
             </div>
@@ -1429,22 +1711,40 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
     <div style={estimateCard()}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: FONTS.serif, fontSize: 32, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
+        <span style={{ fontFamily: FONTS.serif, fontSize: 34, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
         {fmtMoney(oneTimePrice)}
         </span>
         <span style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
-      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.5 }}>
         {oneTimePriceCopy(breakdown)}
       </div>
     </div>
   );
 }
 
+// Stable identity for a one-time breakdown row — the exclusion handshake
+// between the embedded per-service rows and the standalone card below.
+// The identity is the FULL row (service + label + amount + quote state),
+// never `service` alone: two rows can share a service (a priced embedded
+// install and a quote-required sibling), and a service-only key would drop
+// the unembedded sibling from the standalone card so its Quote Required row
+// never renders. Serviceless legacy rows (termite "Advance Installation")
+// still key on label+amount. Contribution items are the same row objects as
+// the breakdown items server-side, so fields match on both sides.
+export function oneTimeRowIdentityKey(item = {}) {
+  const label = String(item?.label || item?.name || item?.displayName || '').trim().toLowerCase();
+  const amount = Number(item?.amount ?? item?.price);
+  const quoteState = item?.quoteRequired === true || item?.kind === 'quote_required' ? 'qr' : '';
+  return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
+}
+
 export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
+  // excludeServices accepts plain service keys (setup-fee callers) and
+  // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
-    .filter((item) => !excluded.has(item?.service));
+    .filter((item) => !excluded.has(item?.service) && !excluded.has(oneTimeRowIdentityKey(item)));
   if (items.length === 0) return null;
   // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
   // fed by pricing.firstVisitFees so the note only shows when the server says
@@ -1482,7 +1782,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
             }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
-                  {item.label || 'One-time service'}
+                  {customerOneTimeLabel(item)}
                 </div>
                 {item.detail ? (
                   <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
@@ -1495,14 +1795,14 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                   </div>
                 ) : null}
                 {showPrepayWaiverNote ? (
-                  <div style={{ fontSize: 12, color: COLORS.green, marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
+                  <div style={{ fontSize: 12, color: W.green, marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     * {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
                   </div>
                 ) : null}
               </div>
               <div style={{
                 fontSize: 14, fontWeight: 700,
-                color: isQuoteRequired ? COLORS.red : (isDiscount || isIncluded ? COLORS.green : COLORS.navy),
+                color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
                 whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
               }}>
                 {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
@@ -1518,12 +1818,12 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
         fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
       }}>
         <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
-        <span style={totalIsQuoteRequired ? { color: COLORS.red } : null}>
+        <span style={totalIsQuoteRequired ? { color: W.red } : null}>
           {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
         </span>
       </div>
       {totalIsQuoteRequired ? (
-        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.45 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
           Waves will confirm final pricing before this can be accepted online.
         </div>
       ) : null}
@@ -1604,7 +1904,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{
-                        fontSize: quoteRequired || showLowConfidenceRange ? 32 : PRICE_FONT,
+                        fontSize: quoteRequired || showLowConfidenceRange ? 34 : PRICE_FONT,
             lineHeight: 1,
             color: ESTIMATE_TEXT,
             fontWeight: 500,
@@ -1630,7 +1930,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
             </div>
           ) : null}
           {quoteRequired && quoteReason ? (
-            <div style={{ fontSize: 14, color: '#92400E', marginTop: 12, lineHeight: 1.4, fontWeight: 700, maxWidth: 320 }}>
+            <div style={{ fontSize: 14, color: '#92400E', marginTop: 12, lineHeight: 1.5, fontWeight: 700, maxWidth: 320 }}>
               {quoteReason}
             </div>
           ) : null}
@@ -1638,9 +1938,8 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
             <div style={{
               display: 'inline-block',
               marginTop: 12,
-              padding: '5px 11px',
-              background: '#EEF2FF',
-              color: ESTIMATE_TEXT,
+              padding: '4px 12px',
+              ...waveGuardChipStyle(waveGuardTier),
               borderRadius: 6,
               fontSize: 14,
               fontWeight: 700,
@@ -1661,7 +1960,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
           border: '1px solid #DCFCE7',
           borderRadius: 10,
           background: '#F0FDF4',
-          color: COLORS.green,
+          color: W.green,
           fontSize: 14,
           fontWeight: 800,
           lineHeight: 1.35,
@@ -1670,6 +1969,139 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
           <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoneySigned(-manualDiscountMonthly)} /mo</strong>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+// Plan-level discount summary for a multi-service plan carrying a plan-wide
+// credit (e.g. Referral Credit). The per-service cards quote their WaveGuard-net
+// price PRE credit — the credit is applied to the combined plan, not baked into
+// each row — so this is the one place the customer sees list subtotal → credit →
+// the net they actually pay. Renders ONLY when there's a credit to itemize: the
+// standalone "Recurring total" card was removed (owner directive 2026-07-07), so
+// a no-credit multi-service plan stays summary-free and unchanged.
+export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null }) {
+  if (!combined) return null;
+  // The live discount object (selected row first — the server nulls
+  // combined.manualDiscount whenever the DEFAULT cadence floor-suppresses the
+  // credit — else the default payload's) prices the ranged fallback and
+  // corroborates $0 nets; the itemized amounts come from the selected-cadence
+  // difference below.
+  const liveDiscount = (discount) => (discount && Number(discount.amount) > 0 ? discount : null);
+  const manual = liveDiscount(selectedFrequency?.manualDiscount) || liveDiscount(combined.manualDiscount);
+  // Render gate: ANY evidence the plan carries a manual credit. Combo rows drop
+  // the discount fields and the combinedFrequency overlay keeps only the base
+  // row's, so a credit that's suppressed on the default/base row but live in
+  // the selected combo's net must gate in via the row's suppressed flag or the
+  // payload-level planDiscount — its amount then comes from the diff. A
+  // creditless plan carries none of these signals, so reconciliation drift can
+  // never conjure a discount line out of nothing.
+  const planHasCredit = Boolean(manual)
+    || Boolean(selectedFrequency?.manualDiscount)
+    || selectedFrequency?.manualDiscountSuppressed === true
+    || Boolean(combined.manualDiscount)
+    || Boolean(planDiscount);
+  if (!planHasCredit) return null;
+  const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
+  // Quote-required selection: the rest of the estimate hides exact dollars for a
+  // quote-required row, so there's no exact subtotal/net to itemize here either.
+  if (selectedFrequency?.quoteRequired === true) return null;
+
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  // A $0 net is real — a credit can fully comp the plan, and that's exactly when
+  // the subtotal → credit → "Your price $0" story matters — so only a
+  // negative/non-finite net bails. A zero net must additionally be corroborated
+  // by the credit itself before rendering (below).
+  const netMonthly = Number(selectedFrequency?.monthly ?? combined.monthlySubtotal);
+  if (!Number.isFinite(netMonthly) || netMonthly < 0) return null;
+
+  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
+  const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
+  const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
+  const creditBox = (amount) => (
+    <div style={{
+      ...row,
+      padding: '12px 14px',
+      borderRadius: 10,
+      border: `1px solid ${W.greenLight}`,
+      background: W.successWash,
+      color: W.green,
+      fontWeight: 800,
+      fontSize: 16,
+    }}>
+      <span>{creditLabel}</span>
+      <strong style={num}>{fmtMoneySigned(-amount)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
+    </div>
+  );
+
+  // Credit = the ACTUAL reduction for the SELECTED cadence: the sum of the
+  // pre-credit per-service cards minus the net the accept payload charges.
+  // Deriving it as a difference (rather than reading a credit object) is correct
+  // for every cadence, cap, and discount type by construction, and guarantees the
+  // on-screen subtotal − credit = net reconciles. `preCreditMonthly` is that
+  // per-service sum. Both branches below use this so a ranged plan doesn't show a
+  // stale default-cadence credit either.
+  const subtotalMonthly = round2(Number(preCreditMonthly));
+  const hasServiceSum = subtotalMonthly > 0;
+  const creditFromDiff = hasServiceSum && subtotalMonthly > netMonthly
+    ? round2(subtotalMonthly - netMonthly)
+    : null;
+  // A $0 net renders only when a plan credit corroborates covering the whole
+  // subtotal (1-cent tolerance, same as the split reconciliation): a legacy
+  // payload with a zeroed/missing subtotal and an ordinary credit must not
+  // render as "fully comped". Corroborate against the LARGEST candidate — a
+  // row-level object capped for the BASE cadence must not shadow a payload
+  // planDiscount that fully comps the selected combo.
+  const corroboratingCreditMonthly = Math.max(
+    manualDiscountMonthlyAmount(manual),
+    manualDiscountMonthlyAmount(planDiscount),
+  );
+  if (netMonthly === 0 && corroboratingCreditMonthly < subtotalMonthly - 0.011) return null;
+
+  // Ranged low-confidence (commercial) plan: the page quotes a confirmed-on-site
+  // range, not one exact number — but the credit is applied by accept regardless,
+  // so keep it visible as a credit-only line rather than printing an exact
+  // subtotal/net the rest of the page deliberately avoids. Prefer the selected
+  // cadence's difference. Fall back to the plan credit's own amount ONLY when
+  // the per-service sum is genuinely unavailable — with a sum in hand, a zero
+  // difference means the selected cadence caps/suppresses the credit away, and
+  // the fallback would advertise a credit accept won't apply. Same when the
+  // selected row itself marks the credit suppressed.
+  const lowConfidencePct = Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) || 0;
+  if (lowConfidencePct > 0) {
+    const rangedCredit = hasServiceSum
+      ? creditFromDiff
+      // Row object first (selection-specific, possibly capped), else the
+      // payload planDiscount — the same evidence the render gate accepts, so
+      // gating in via planDiscount alone can still price this line.
+      : (selectedFrequency?.manualDiscountSuppressed === true ? null : manualDiscountMonthlyAmount(manual || planDiscount));
+    if (!(rangedCredit > 0)) return null;
+    return (
+      <section style={estimateCard()}>
+        {creditBox(rangedCredit)}
+        <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+          Applied to your plan — we confirm your exact price with a quick site visit.
+        </div>
+      </section>
+    );
+  }
+
+  // Exact case needs the per-service sum to itemize against.
+  if (!(creditFromDiff > 0)) return null;
+  const creditMonthly = creditFromDiff;
+  // Credit-only card (owner directive 2026-07-11): the plan credit stays
+  // visible, but a multi-service plan never restates a combined monthly or
+  // annual total — per-application pricing on the service cards is the only
+  // customer-facing price. The subtotal/net figures above remain solely as
+  // reconciliation inputs for the credit amount. The service cards are
+  // pre-credit, so the caption points at booking (where accept applies it),
+  // not at the card prices.
+  return (
+    <section style={estimateCard()}>
+      {creditBox(creditMonthly)}
+      <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+        Applied to your plan when you book.
+      </div>
     </section>
   );
 }
@@ -1703,13 +2135,13 @@ function ExistingAppointmentCard({ appointment }) {
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         Existing appointment
       </div>
-      <div style={{ fontSize: 20, fontWeight: 800, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.3 }}>
+      <div style={{ fontSize: 20, fontWeight: 800, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.35 }}>
         {formatAppointmentLabel(appointment)}
       </div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.45 }}>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
         {appointment?.serviceType || 'Service visit'}
       </div>
-      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
         Your visit is already on the schedule. Choose how you want to pay to approve this estimate.
       </div>
     </div>
@@ -1719,14 +2151,38 @@ function ExistingAppointmentCard({ appointment }) {
 // Acceptance-deposit Payment Element modal (flat $49/$99, PR #1660).
 // `intent` is the POST /deposit-intent response: clientSecret, amount,
 // requiredAmount, receivedTotal, paymentIntentId, publishableKey. The PI is
-// card-only server-side, so the Payment Element renders card fields only.
-function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
+// card-only server-side.
+// Surcharge revert (owner ruling 2026-07-13): manual card entry runs the
+// two-step /deposit-quote → /deposit-finalize disclosure (credit cards pay
+// the 2.9% fee, debit/prepaid pay face value); Apple/Google Pay/Link render
+// in an Express Checkout element above the card form and confirm the PI at
+// FACE value — Phase-1, the same wallets-surcharge-free rule as PayPageV2.
+function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
+  const dialogRef = useModalFocus();
   const mountRef = useRef(null);
+  const expressMountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const [expressAvailable, setExpressAvailable] = useState(false);
+  // Pending surcharge quote for the entered card: {quoteToken, base,
+  // surcharge, total}. Set after the pricing tap when a fee applies; the
+  // confirm tap finalizes it. Cleared on any card edit (stale PM).
+  const [quote, setQuote] = useState(null);
+  // The Express Checkout handlers live in a mount-time closure ([intent]
+  // deps) — route success through a ref so a re-created parent handler
+  // (performAccept re-memoizes on its own deps) is never called stale.
+  const onSuccessRef = useRef(onSuccess);
+  useEffect(() => { onSuccessRef.current = onSuccess; }, [onSuccess]);
+
+  // Accept-gate contract: ensureDepositSatisfied live-verifies the PI and
+  // only honors status === 'succeeded' — a processing PI would 402 at
+  // accept. So only succeeded advances; processing shows a pending message,
+  // and re-taps re-check the PI status instead of re-confirming an
+  // in-flight intent.
+  const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
 
   useEffect(() => {
     let cancelled = false;
@@ -1735,13 +2191,85 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
       const stripe = StripeCtor(intent.publishableKey);
       const elements = stripe.elements({
         clientSecret: intent.clientSecret,
+        // Required for the two-step card flow's createPaymentMethod (same
+        // as PayPageV2/StatementPayPage) — without it Stripe won't reliably
+        // create the PM before /deposit-quote (Codex #2705 P1).
+        paymentMethodCreation: 'manual',
         appearance: glassAppearanceActive()
           ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: '#04395E', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
           : { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
       });
-      const paymentElement = elements.create('payment');
+      // Express Checkout — wallets pay the PI at face value (no surcharge;
+      // Phase-1 parity with the invoice pay page). googlePay stays 'auto':
+      // forcing 'always' renders its button on iOS where the popup flow is
+      // blocked and the tap dead-ends (PayPageV2's OR_BIBED_15 trap).
+      const express = elements.create('expressCheckout', {
+        buttonTheme: { applePay: 'black', googlePay: 'black' },
+        buttonType: { applePay: 'buy', googlePay: 'buy' },
+        buttonHeight: 48,
+        paymentMethodOrder: ['applePay', 'googlePay', 'link'],
+        paymentMethods: { googlePay: 'auto' },
+      });
+      express.on('ready', (ev) => {
+        if (!cancelled && ev?.availablePaymentMethods) setExpressAvailable(true);
+      });
+      express.on('confirm', async () => {
+        setError(null);
+        setSubmitting(true);
+        try {
+          // Wallet PREFLIGHT (Codex #2705 r4) — obey the verdict: it
+          // re-checks the live deposit gates AND verifies the PI is at
+          // face value (a failed manual-card finalize can leave it at the
+          // surcharged total; wallets pay face). ok !== true means DO NOT
+          // confirm.
+          const pre = await fetch(`${API_BASE}/public/estimates/${token}/deposit-reset`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paymentIntentId: intent.paymentIntentId }),
+          });
+          const preData = await pre.json().catch(() => ({}));
+          if (pre.status === 409 && preData.exemptReason) {
+            // Gate flipped off / already accepted mid-modal — nothing owed.
+            onSuccessRef.current(null);
+            return;
+          }
+          if (!pre.ok || preData.ok !== true) {
+            setError(preData.error || 'A card verification is still pending on this deposit — finish it, or wait a moment and try again.');
+            setSubmitting(false);
+            return;
+          }
+          const result = await stripe.confirmPayment({
+            elements,
+            confirmParams: { return_url: window.location.href },
+            redirect: 'if_required',
+          });
+          if (result.error) {
+            setError(result.error.message || 'Payment did not go through. Try another card.');
+            setSubmitting(false);
+            return;
+          }
+          const pi = result.paymentIntent;
+          if (pi && pi.status === 'succeeded') {
+            onSuccessRef.current(pi.id);
+            return;
+          }
+          setError(pi && pi.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
+          setSubmitting(false);
+        } catch {
+          setError('Payment did not go through. Try again.');
+          setSubmitting(false);
+        }
+      });
+      if (expressMountRef.current) express.mount(expressMountRef.current);
+
+      // Manual card entry — wallets hidden here (they live above).
+      const paymentElement = elements.create('payment', {
+        wallets: { applePay: 'never', googlePay: 'never' },
+      });
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      // Any edit invalidates a pending quote — the priced PM is stale.
+      paymentElement.on('change', () => { if (!cancelled) setQuote(null); });
       stripeRef.current = stripe;
       elementsRef.current = elements;
     }).catch(() => {
@@ -1750,12 +2278,30 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
     return () => { cancelled = true; };
   }, [intent]);
 
-  // Accept-gate contract: ensureDepositSatisfied live-verifies the PI and
-  // only honors status === 'succeeded' — a processing PI would 402 at
-  // accept. So only succeeded advances; processing shows a pending message,
-  // and re-taps re-check the PI status instead of re-confirming an
-  // in-flight intent.
-  const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
+  // Finalize a quoted card payment server-side (the server re-derives the
+  // amount from the live PM — the quote token is proof of disclosure, not
+  // the pricing authority). 3DS comes back as requiresAction + clientSecret.
+  const finalizeQuoted = useCallback(async (activeQuote) => {
+    const res = await fetch(`${API_BASE}/public/estimates/${token}/deposit-finalize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quoteToken: activeQuote.quoteToken }),
+    });
+    const data = await res.json().catch(() => ({}));
+    // Deposit gate flipped off mid-modal — nothing is owed; proceed to
+    // accept without a PI (the accept gate re-verifies the policy).
+    if (res.status === 409 && data.exemptReason) return null;
+    if (!res.ok) throw new Error(data.error || 'Payment did not go through. Try another card.');
+    if (data.requiresAction && data.clientSecret) {
+      const action = await stripeRef.current.handleNextAction({ clientSecret: data.clientSecret });
+      if (action.error) throw new Error(action.error.message || 'Card verification failed. Try another card.');
+      if (action.paymentIntent?.status === 'succeeded') return action.paymentIntent.id;
+      throw new Error(action.paymentIntent?.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
+    }
+    if (data.status === 'succeeded') return data.paymentIntentId;
+    throw new Error(data.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
+  }, [token]);
+
   const handlePay = useCallback(async () => {
     if (!stripeRef.current || !elementsRef.current) return;
     setSubmitting(true);
@@ -1771,36 +2317,62 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
         setSubmitting(false);
         return;
       }
-      const result = await stripeRef.current.confirmPayment({
-        elements: elementsRef.current,
-        confirmParams: { return_url: window.location.href },
-        redirect: 'if_required',
-      });
-      if (result.error) {
-        setError(result.error.message || 'Payment did not go through. Try another card.');
+      if (quote) {
+        // Second tap — the disclosed total was on the button.
+        const paidId = await finalizeQuoted(quote);
+        onSuccess(paidId);
+        return;
+      }
+      // First tap — price the entered card (credit funding pays the fee;
+      // debit/prepaid quote $0 and finalize on this same tap).
+      // elements.submit() validates + collects the form BEFORE the PM is
+      // created — required for the manual-creation flow (PayPageV2 parity).
+      const { error: submitError } = await elementsRef.current.submit();
+      if (submitError) {
+        setError(submitError.message || 'Check your card details and try again.');
         setSubmitting(false);
         return;
       }
-      const pi = result.paymentIntent;
-      if (pi && pi.status === 'succeeded') {
-        onSuccess(pi.id);
+      const pmResult = await stripeRef.current.createPaymentMethod({ elements: elementsRef.current });
+      if (pmResult.error) {
+        setError(pmResult.error.message || 'Check your card details and try again.');
+        setSubmitting(false);
         return;
       }
-      setError(pi && pi.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
-      setSubmitting(false);
-    } catch {
-      setError('Payment did not go through. Try again.');
+      const res = await fetch(`${API_BASE}/public/estimates/${token}/deposit-quote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentIntentId: intent.paymentIntentId, paymentMethodId: pmResult.paymentMethod.id }),
+      });
+      const priced = await res.json().catch(() => ({}));
+      // Deposit gate flipped off mid-modal — nothing owed; proceed without.
+      if (res.status === 409 && priced.exemptReason) {
+        onSuccess(null);
+        return;
+      }
+      if (!res.ok) throw new Error(priced.error || 'Could not price the deposit payment. Please try again.');
+      if (Number(priced.surcharge) > 0) {
+        setQuote(priced);
+        setSubmitting(false);
+        return; // button relabels to the total; next tap confirms
+      }
+      const paidId = await finalizeQuoted(priced);
+      onSuccess(paidId);
+    } catch (err) {
+      setQuote(null);
+      setError(err?.message || 'Payment did not go through. Try again.');
       setSubmitting(false);
     }
-  }, [intent, onSuccess]);
+  }, [intent, quote, token, finalizeQuoted, onSuccess]);
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"
       onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Reserve your appointment</div>
@@ -1808,29 +2380,31 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
           A {fmtMoney(intent.amount)} deposit holds your spot. It is applied to {creditTarget}.
           {Number(intent.receivedTotal) > 0 ? ` (${fmtMoney(intent.receivedTotal)} already received.)` : ''}
         </div>
+        <div ref={expressMountRef} />
+        {expressAvailable ? (
+          <div style={{ textAlign: 'center', fontSize: 14, color: ESTIMATE_BODY, margin: '10px 0' }}>or pay by card</div>
+        ) : null}
         <div ref={mountRef} />
+        {quote ? (
+          <div aria-live="polite" style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 10 }}>
+            Credit card payments include a {fmtMoney(quote.surcharge)} processing fee — total {fmtMoney(quote.total)}. Debit cards pay {fmtMoney(quote.base)}.
+          </div>
+        ) : null}
         {error ? (
-          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 12 }}>{error}</div>
+          <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
         ) : null}
         <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
           <button
             type="button"
             onClick={handlePay}
             disabled={!ready || submitting}
-            style={{
-              padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
-              border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
-              opacity: !ready || submitting ? 0.6 : 1,
-            }}
-          >{submitting ? 'Processing…' : `Pay ${fmtMoney(intent.amount)} deposit`}</button>
+            style={{ ...estimateCtaStyle, opacity: !ready || submitting ? 0.6 : 1 }}
+          >{submitting ? 'Processing…' : `Pay ${fmtMoney(quote ? quote.total : intent.amount)}${quote ? '' : ' deposit'}`}</button>
           <button
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            style={{
-              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
-              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
-            }}
+            style={estimateSecondaryCtaStyle}
           >Not now</button>
         </div>
       </div>
@@ -1844,6 +2418,7 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
 // charged the final total on completion, and a flat fee only on a no-show /
 // late cancel.
 function CardHoldModal({ intent, onSuccess, onCancel }) {
+  const dialogRef = useModalFocus();
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -1913,42 +2488,36 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"
       onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Hold your appointment</div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           We won&rsquo;t charge you today. Your card is charged the final total after your visit is completed.
           A {feeText} fee applies only if you cancel within {windowText} or aren&rsquo;t home.
-          {' '}Credit cards add a small processing fee; debit and bank cards don&rsquo;t.
+          {' '}{CARD_SURCHARGE_DISCLOSURE}
         </div>
         <div ref={mountRef} />
         {error ? (
-          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.45, marginTop: 12 }}>{error}</div>
+          <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
         ) : null}
         <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
           <button
             type="button"
             onClick={handleSave}
             disabled={!ready || submitting}
-            style={{
-              padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
-              border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
-              opacity: !ready || submitting ? 0.6 : 1,
-            }}
+            style={{ ...estimateCtaStyle, opacity: !ready || submitting ? 0.6 : 1 }}
           >{submitting ? 'Saving…' : 'Save card & hold my spot'}</button>
           <button
             type="button"
             onClick={onCancel}
             disabled={submitting}
-            style={{
-              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
-              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
-            }}
+            style={estimateSecondaryCtaStyle}
           >Not now</button>
         </div>
       </div>
@@ -1956,7 +2525,134 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   );
 }
 
-export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
+// Recurring card-on-file capture (dark until RECURRING_CARD_ON_FILE). Mirrors
+// CardHoldModal — a SetupIntent saves the card, NO money is taken here (the
+// deposit is its own modal) — but the authorization is Auto Pay: after each
+// completed application the saved card is charged automatically. The locked
+// card consent text is rendered verbatim behind a checkbox so the server's
+// consent snapshot records exactly what the customer agreed to.
+function RecurringCardModal({ intent, onSuccess, onCancel }) {
+  const dialogRef = useModalFocus();
+  const mountRef = useRef(null);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [agreed, setAgreed] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadStripeSdk().then((StripeCtor) => {
+      if (cancelled || !mountRef.current) return;
+      const stripe = StripeCtor(intent.publishableKey);
+      const elements = stripe.elements({
+        clientSecret: intent.clientSecret,
+        appearance: glassAppearanceActive()
+          ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: '#04395E', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
+          : { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
+      });
+      const paymentElement = elements.create('payment');
+      paymentElement.mount(mountRef.current);
+      paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      stripeRef.current = stripe;
+      elementsRef.current = elements;
+    }).catch(() => {
+      if (!cancelled) setError('Could not load the secure card form. Check your connection and try again.');
+    });
+    return () => { cancelled = true; };
+  }, [intent]);
+
+  const handleSave = useCallback(async () => {
+    if (!stripeRef.current || !elementsRef.current) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      // Re-tap after a succeeded setup — honor the captured card instead of
+      // re-confirming.
+      const existing = await stripeRef.current.retrieveSetupIntent(intent.clientSecret);
+      if (existing?.setupIntent?.status === 'succeeded') {
+        onSuccess(existing.setupIntent.id);
+        return;
+      }
+      const result = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        confirmParams: { return_url: window.location.href },
+        redirect: 'if_required',
+      });
+      if (result.error) {
+        setError(result.error.message || 'We could not save that card. Try another card.');
+        setSubmitting(false);
+        return;
+      }
+      const si = result.setupIntent;
+      if (si && si.status === 'succeeded') {
+        onSuccess(si.id);
+        return;
+      }
+      setError('That card could not be saved. Try again in a moment.');
+      setSubmitting(false);
+    } catch {
+      setError('We could not save that card. Try again.');
+      setSubmitting(false);
+    }
+  }, [intent, onSuccess]);
+
+  return (
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Secure payment"
+      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
+      data-glass-scrim=""
+      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+    >
+      {/* data-glass="modal": the estimate page always mounts the glass
+          scene, so this dialog picks up the strongest glass surface (owner
+          ask 2026-07-12 — Auto Pay mirrors the glass UI); the inline styles
+          are the non-glass fallback. */}
+      <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+        <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Set up Auto Pay</div>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
+          Save your card to confirm your recurring plan — nothing is charged
+          today. After each completed service, your card is charged that
+          service&rsquo;s amount automatically.
+        </div>
+        <div ref={mountRef} />
+        <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={agreed}
+            onChange={(e) => setAgreed(e.target.checked)}
+            disabled={submitting}
+            style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
+          />
+          <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{CARD_CONSENT_TEXT}</span>
+        </label>
+        {error ? (
+          <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
+        ) : null}
+        <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!ready || !agreed || submitting}
+            style={{ ...estimateCtaStyle, opacity: !ready || !agreed || submitting ? 0.6 : 1 }}
+          >{submitting ? 'Saving…' : 'Agree & save card'}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={submitting}
+            style={estimateSecondaryCtaStyle}
+          >Not now</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -1974,7 +2670,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
         : paymentPreference === 'prepay_annual'
           ? 'Pay the 12-month plan in full'
           : 'Pay at the visit';
-  const confirmLabel = invoiceOnly
+  const confirmLabel = confirmLabelOverride || (invoiceOnly
     ? 'Accept + send invoice'
     : heldForSiteConfirmation
       ? (usingExistingAppointment ? 'Confirm approval' : 'Approve estimate')
@@ -1984,7 +2680,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
         : paymentPreference === 'prepay_annual'
           ? 'Confirm annual prepay'
           : 'Confirm appointment'
-      : 'Confirm booking';
+      : 'Confirm booking');
   const confirmSub = invoiceOnly
     ? 'No appointment needed. Next step creates your invoice and makes secure payment available.'
     : heldForSiteConfirmation
@@ -2025,33 +2721,36 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
                 : `Slot: ${slotId}`}
       </div>
       {!usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
+      {autoPaySlot}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <button
           type="button"
           onClick={onConfirm}
-          style={{
-            padding: '16px 20px', background: ESTIMATE_BUTTON_BG, color: COLORS.white,
-            border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 600, cursor: 'pointer',
-          }}
-        >{confirmLabel}</button>
+          disabled={submitting || confirmDisabled}
+          style={(submitting || confirmDisabled) ? { ...estimateCtaStyle, opacity: 0.65, cursor: submitting ? 'wait' : 'default' } : estimateCtaStyle}
+        >{submitting && submittingLabel ? submittingLabel : confirmLabel}</button>
+        {prefSwitch}
         {confirmSub ? (
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
             {confirmSub}
           </div>
         ) : null}
         {depositNote ? (
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.45, textAlign: 'center' }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
             {depositNote}
           </div>
         ) : null}
         {!usingExistingAppointment ? (
+          // Locked while submitting (Codex #2681 r3 P1): during the inline
+          // card confirmation the phase deliberately stays 'review' — a
+          // Go back here would unmount the Payment Element mid-confirmSetup,
+          // recreating exactly the in-flight Stripe failure inlineConfirmBusy
+          // exists to prevent.
           <button
             type="button"
             onClick={onCancel}
-            style={{
-              padding: '12px 20px', background: 'transparent', color: ESTIMATE_BODY,
-              border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 12, fontSize: 14, fontWeight: 500, cursor: 'pointer',
-            }}
+            disabled={submitting}
+            style={submitting ? { ...estimateSecondaryCtaStyle, opacity: 0.65, cursor: 'default' } : estimateSecondaryCtaStyle}
           >Go back</button>
         ) : null}
       </div>
@@ -2059,7 +2758,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
   );
 }
 
-function SuccessCard({ acceptResult }) {
+export function SuccessCard({ acceptResult, appointmentLabel = null, recurring = false }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoicePayUrl = acceptResult?.invoicePayUrl || null;
@@ -2085,11 +2784,11 @@ function SuccessCard({ acceptResult }) {
       ? `${serviceProgressLabel} is not held up by payment, and you can use the invoice link later.`
       : `${serviceProgressLabel} is not held up by payment.`;
     return (
-      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           {title}
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {invoicePayUrl
             ? (isOneTimeInvoice
                 ? `Payment is optional right now. Your ${invoiceLabel} is ready if you want to pay online.`
@@ -2101,14 +2800,10 @@ function SuccessCard({ acceptResult }) {
         {invoicePayUrl ? (
           <a
             href={invoicePayUrl}
-            style={{
-              display: 'inline-block', marginTop: 16, padding: '16px 20px',
-              background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
-              borderRadius: 12, fontWeight: 600, fontSize: 15,
-            }}
+            style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 15 }}
           >{payNowLabel}</a>
         ) : null}
-        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.45 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
           {deferredPaymentCopy}
         </div>
       </div>
@@ -2117,11 +2812,11 @@ function SuccessCard({ acceptResult }) {
 
   if (nextStep === 'prepay_invoice') {
     return (
-      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           Your annual prepay is approved.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           Your annual prepay{prepayAmountText} is approved. Our team will follow up with the invoice details and confirm the schedule.
         </div>
       </div>
@@ -2132,11 +2827,11 @@ function SuccessCard({ acceptResult }) {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.
     return (
-      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved — no payment needed yet.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           Your Waves account manager will confirm the exact price on a quick site visit, then send your first
           invoice. Nothing is charged until that's done.
         </div>
@@ -2146,23 +2841,24 @@ function SuccessCard({ acceptResult }) {
 
   if (nextStep === 'book_one_time') {
     return (
-      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
           You're approved for a one-time service.
         </div>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {bookingUrl
-            ? 'Check your phone for the booking link, or pick your appointment now.'
+            ? (acceptResult?.alreadyAccepted
+              // Already-accepted retry: /accept returns a fresh booking URL
+              // but does NOT re-send the SMS — don't promise a text that
+              // never went out; the on-screen button is the real path.
+              ? 'This estimate was already accepted — pick your appointment now.'
+              : 'Check your phone for the booking link, or pick your appointment now.')
             : 'Our team will follow up to help schedule your appointment.'}
         </div>
         {bookingUrl ? (
           <a
             href={bookingUrl}
-            style={{
-              display: 'inline-block', marginTop: 16, padding: '16px 20px',
-              background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
-              borderRadius: 12, fontWeight: 600, fontSize: 15,
-            }}
+            style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 15 }}
           >Pick appointment</a>
         ) : null}
       </div>
@@ -2170,14 +2866,44 @@ function SuccessCard({ acceptResult }) {
   }
 
   return (
-    <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${COLORS.green}` }}>
-      <div style={{ fontSize: 40 }}></div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
-        You're booked.
+    // data-glass="card": the booked screen rides the estimate page's glass
+    // scene like the Auto Pay modal (owner ask 2026-07-12); inline styles
+    // stay as the non-glass fallback. Copy pared down (owner ask
+    // 2026-07-12): logo, "You're booked!", the first-visit line, and — for
+    // recurring — the app line with store badges. No check-your-phone line.
+    <div data-glass="card" style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+      <img src="/waves-logo.png" alt="Waves" style={{ height: 40, display: 'block', margin: '0 auto' }} />
+      <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 12 }}>
+        You're booked!
       </div>
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.55 }}>
-        Check your phone for the confirmation text. Our team will confirm the schedule.
-      </div>
+      {appointmentLabel ? (
+        // Date/time only — no "First visit:" prefix (owner ask 2026-07-12).
+        <div style={{ fontSize: 17, fontWeight: 600, color: COLORS.navy, marginTop: 10 }}>
+          {appointmentLabel}
+        </div>
+      ) : null}
+      {acceptResult?.alreadyAccepted ? (
+        // A retry of an already-accepted estimate returns the full success
+        // payload with alreadyAccepted: true — say so plainly.
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          This estimate was already accepted — you're all set.
+        </div>
+      ) : null}
+      {recurring && !isNativeApp() ? (
+        // Hidden inside the native WebView (Codex #2680 r6, mirrors
+        // AppShowcaseCard's guard): outbound store links from within the
+        // installed app are dead weight and an App Store review risk.
+        <>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 14, lineHeight: 1.5 }}>
+            Download the Waves app to track visits, reschedule, and manage your
+            plan anytime.
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 12, marginTop: 14, flexWrap: 'wrap' }}>
+            <StoreBadge url={APP_STORE_URL} label="Download on the App Store"><AppStoreBadge /></StoreBadge>
+            <StoreBadge url={PLAY_STORE_URL} label="Get it on Google Play"><GooglePlayBadge /></StoreBadge>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -2199,6 +2925,24 @@ export function DraftPreviewBanner() {
         This is the exact page the customer will get. Booking, payment, and
         requests stay disabled until the estimate is sent.
       </div>
+    </div>
+  );
+}
+
+// Shared failure banner for the reserve/accept/deposit/card-hold flow.
+// Accept-path failures land the customer back in the REVIEW phase, not just
+// configure, so both branches must render it — a review-phase 500 used to
+// show nothing at all.
+function EstimateErrorBanner({ error }) {
+  if (!error) return null;
+  return (
+    <div style={{
+      background: '#fee', borderRadius: 12, padding: 12,
+      border: `1px solid ${W.red}`, marginBottom: 16,
+      color: W.red, fontSize: 14,
+    }}>
+      Something went wrong: {error}. Try again or call{' '}
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
     </div>
   );
 }
@@ -2240,7 +2984,7 @@ function AcceptanceModeCard({ acceptance }) {
         <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
           No appointment needed.
         </div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
           This renews your annual guarantee coverage — there is no service visit to
           schedule. Accept below and we will send your invoice by text and email.
         </div>
@@ -2256,7 +3000,7 @@ function AcceptanceModeCard({ acceptance }) {
         <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
           Approve online — we handle the scheduling.
         </div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
           No appointment to pick here: after you approve, a Waves team member reaches out to
           schedule your commercial service, and your account manager confirms the exact price
           on a quick site visit before your first invoice.
@@ -2283,18 +3027,8 @@ function AcceptanceModeCard({ acceptance }) {
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>{title}</div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>{body}</div>
-      <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-        display: 'inline-block',
-        marginTop: 16,
-        padding: '12px 20px',
-        background: ESTIMATE_BUTTON_BG,
-        color: COLORS.white,
-        borderRadius: 10,
-        textDecoration: 'none',
-        fontSize: 14,
-        fontWeight: 700,
-      }}>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{body}</div>
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={estimateCallCtaStyle}>
         {acceptance.ctaLabel || 'Call Waves'}
       </a>
     </div>
@@ -2321,26 +3055,241 @@ function ReviewBeforeBookingCard({ reason }) {
           ? 'Waves will confirm & schedule your trenching'
           : 'Waves will confirm & schedule this service'}
       </div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55 }}>
+      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
         {isTrenching
           ? 'Your price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you — access, exact footage, product, and warranty — then schedules your visit, so it can’t be self-booked online.'
           : 'A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.'}
       </div>
-      <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-        display: 'inline-block',
-        marginTop: 16,
-        padding: '12px 20px',
-        background: ESTIMATE_BUTTON_BG,
-        color: COLORS.white,
-        borderRadius: 10,
-        textDecoration: 'none',
-        fontSize: 14,
-        fontWeight: 700,
-      }}>
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={estimateCallCtaStyle}>
         Call Waves to confirm — {WAVES_PHONE_DISPLAY}
       </a>
       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
         Prefer we reach out? We’ll follow up to confirm and schedule your visit. You pay on service day; no card or deposit now.
+      </div>
+    </div>
+  );
+}
+
+// Service-related card headlines (owner directive 2026-07-10): every service
+// box leads with copy about ITS service — the generic "Same protection" line
+// only survives as the fallback for unmapped/bundle sections. Pest keeps its
+// original line.
+const SERVICE_CARD_HEADLINES = {
+  pest_control: 'Pest Protection by Waves — whatever\u2019s getting inside, it stops here',
+  mosquito: 'Mosquito Defense by Waves — evenings outside, mosquito-free',
+  termite_bait: 'Termite Defense by Waves — protecting the biggest investment you own',
+  lawn_care: 'Lawn Care by Waves — pick the program that fits your turf',
+  tree_shrub: 'Tree & Shrub Care by Waves — ornamental protection through the seasons',
+  foam_recurring: 'Targeted Foam Treatment by Waves — recurring protection at the source',
+  rodent_bait: 'Rodent Defense by Waves — exterior stations monitored on schedule',
+  palm_injection: 'Palm Care by Waves — injection care timed to your palms',
+};
+
+// One-time work that belongs to a service renders INSIDE that service's box
+// (owner directive 2026-07-10: the Advance Installation lives with Termite
+// Bait Monitoring, not in a detached card). Plain charges only — quote-
+// required and waiver rows stay on the standalone breakdown card paths.
+// Per-service "send me the full details" row (GATE_SERVICE_DETAILS_PDF,
+// renderFlags.showServiceDetailsRequest). Customer-initiated transactional
+// send to the contact info ALREADY on the estimate — the destination is
+// never chosen client-side. Only services with a packet defined server-side
+// render the row (SERVICE_DETAILS_KEYS mirrors SERVICE_DETAILS_COPY).
+const SERVICE_DETAILS_KEYS = new Set(['pest_control', 'mosquito', 'termite_bait', 'lawn_care', 'tree_shrub']);
+
+// Universally-recognized icons for the details-packet actions (inline SVG,
+// currentColor — same pattern as QuestionsEscapeHatch's ChatIcon). The pills
+// are icon-ONLY (owner 2026-07-11) — the label lives in aria-label/title.
+function PdfDocIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M8 13h8M8 17h5" />
+    </svg>
+  );
+}
+function EnvelopeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <path d="m22 7-10 6L2 7" />
+    </svg>
+  );
+}
+function ChatBubbleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+// Details-packet action pill — the page's gold CTA treatment (gc-section-cta),
+// icon-only: square-ish padding keeps a ≥44px tap target without a text label.
+const DETAILS_ACTION_STYLE = (disabled) => ({
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  padding: '12px 16px', fontSize: 14, fontWeight: 700,
+  textDecoration: 'none',
+  pointerEvents: disabled ? 'none' : 'auto', opacity: disabled ? 0.6 : 1,
+});
+
+function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false, preview = false }) {
+  const [state, setState] = useState({ status: 'idle', channel: null, message: '' });
+  if (!SERVICE_DETAILS_KEYS.has(serviceKey)) return null;
+  const send = async (channel) => {
+    // Staff draft preview mirrors the customer layout for parity but never
+    // fires a real send: the estimate hasn't reached the customer yet, and
+    // the PDF endpoint 404s on drafts by design. The buttons render inert.
+    if (preview || state.status === 'sending') return;
+    setState({ status: 'sending', channel, message: '' });
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/service-details/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: serviceKey, channel }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.ok) {
+        setState({ status: 'error', channel, message: body.error || 'Could not send right now — call or text us and we\u2019ll get it to you.' });
+        return;
+      }
+      setState({ status: 'sent', channel, message: '' });
+    } catch {
+      setState({ status: 'error', channel, message: 'Could not send right now — call or text us and we\u2019ll get it to you.' });
+    }
+  };
+  const sentLabel = state.channel === 'email'
+    ? `Sent! Check ${customerEmail || 'your email'}.`
+    : 'Sent! Check your texts for the link.';
+  return (
+    <div style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14, textAlign: 'center' }}>
+      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.45, marginBottom: 10 }}>
+        Want the fine print? Get the full details PDF.
+      </div>
+      {state.status === 'sent' ? (
+        <div style={{ fontSize: 14, fontWeight: 700, color: W.green }}>
+          <span aria-hidden="true" style={{ marginRight: 6 }}>&#10003;</span>{sentLabel}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {/* Direct view — opens the same tokenized PDF the send flows
+              deliver, in a new tab where the browser's own print / download
+              / share (incl. the mobile share sheet) take over. Rendered
+              first so customers aren't forced through a send to read it.
+              All three actions wear the page's gold CTA pill
+              (gc-section-cta) as icon-only buttons (owner 2026-07-11) —
+              the intro line above supplies the context, aria-label/title
+              carry the action name. */}
+          <a
+            className="gc-section-cta"
+            href={preview ? undefined : `${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf`}
+            target={preview ? undefined : '_blank'}
+            rel={preview ? undefined : 'noopener noreferrer'}
+            onClick={preview ? (e) => e.preventDefault() : undefined}
+            aria-label="View the PDF"
+            title="View the PDF"
+            style={{ ...DETAILS_ACTION_STYLE(preview ? false : disabled), ...(preview ? { cursor: 'pointer' } : null) }}
+          >
+            <PdfDocIcon />
+          </a>
+          {customerEmail ? (
+            <button
+              type="button"
+              className="gc-section-cta"
+              disabled={!preview && (disabled || state.status === 'sending')}
+              onClick={preview ? undefined : () => send('email')}
+              aria-label="Email me the PDF"
+              title="Email me the PDF"
+              style={DETAILS_ACTION_STYLE(preview ? false : (disabled || state.status === 'sending'))}
+            >
+              <EnvelopeIcon />
+            </button>
+          ) : null}
+          {customerPhone ? (
+            <button
+              type="button"
+              className="gc-section-cta"
+              disabled={!preview && (disabled || state.status === 'sending')}
+              onClick={preview ? undefined : () => send('sms')}
+              aria-label="Text me the link"
+              title="Text me the link"
+              style={DETAILS_ACTION_STYLE(preview ? false : (disabled || state.status === 'sending'))}
+            >
+              <ChatBubbleIcon />
+            </button>
+          ) : null}
+          {preview ? (
+            <div style={{ flexBasis: '100%', fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4, fontStyle: 'italic' }}>
+              Preview only. This is exactly what the customer sees; the buttons become active once the estimate is sent.
+            </div>
+          ) : null}
+        </div>
+      )}
+      {state.status === 'error' ? (
+        <div style={{ fontSize: 14, color: W.noticeText, fontWeight: 600, marginTop: 8 }}>{state.message}</div>
+      ) : null}
+    </div>
+  );
+}
+
+// Customer-facing one-time labels: product names mean nothing to customers —
+// "Advance Installation" / "Trelona Installation" render as "Termite Bait
+// Installation" (owner 2026-07-10); the detail line keeps stations/LF.
+function customerOneTimeLabel(item = {}) {
+  const label = String(item.label || '').trim();
+  const isTermiteInstall = item.service === 'termite_bait_installation'
+    || /\b(advance|trelona)\s+installation\b/i.test(label);
+  if (isTermiteInstall) return 'Termite Bait Installation';
+  return label || 'One-time service';
+}
+
+function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
+  const items = Array.isArray(contribution?.items)
+    ? contribution.items.filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
+    : [];
+  if (!items.length) return null;
+  const lead = variant === 'lead';
+  // Owner copy (2026-07-10, investment framing): the termite install price
+  // reads as a sentence, not a bare figure — "$639 gets every station in the
+  // ground." Only the lead-variant termite install gets sentence treatment.
+  const isTermiteInstall = (item) => item?.service === 'termite_bait_installation'
+    || /\binstallation\b/i.test(String(item?.label || ''));
+  return (
+    <div style={lead
+      ? { margin: '16px 0 4px' }
+      : { borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+      {/* No "One-time services" header inside a service box (owner
+          2026-07-10) — the rows speak for themselves. */}
+      <div style={{ display: 'grid', gap: 10 }}>
+        {items.map((item, i) => {
+          const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
+          if (lead && isTermiteInstall(item)) {
+            return (
+              <div key={`${item.service || item.label || 'item'}-${i}`}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
+                {item.detail ? (
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                ) : null}
+                <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+                  {amount} gets every station in the ground.
+                </div>
+              </div>
+            );
+          }
+          return (
+            <div key={`${item.service || item.label || 'item'}-${i}`} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'start' }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
+                {item.detail ? (
+                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                ) : null}
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                {amount}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -2361,6 +3310,8 @@ export function ServiceSection({
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
   ctaSlotMeta = null,
+  oneTimeEmbed = null,
+  serviceDetailsRequest = null,
 }) {
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -2392,58 +3343,108 @@ export function ServiceSection({
   // describe their applications here and nowhere else). Bundle boxes stay
   // checklist-free (owner directive), so single-service layouts only.
 
+  // The synthetic unsplittable multi-service section (key 'bundle') keeps
+  // waveGuardTierEligible=true whenever ANY member service is eligible, but
+  // badging it would resurrect the deleted plan-level badge on the whole
+  // "Recurring services" card (owner directive: recurring pest + mosquito
+  // lines badge individually ONLY) — real per-service sections only.
+  const sectionTierEligible = section?.waveGuardTierEligible !== false && section?.key !== 'bundle';
+  const showTierBadge = !!waveGuardTier && sectionTierEligible;
   return (
     <section>
       {/* Frequency choice + price live in ONE shadow-box card, same
           treatment as every other section (owner: "all boxes should
           render like" the Waves AI card). */}
-      <div style={estimateCard()}>
+      <div style={estimateCard({ position: 'relative' })}>
+        {/* WaveGuard membership badge pinned to the box's top-right corner
+            (owner directive 2026-07-10 — was inline next to the price). */}
+        {showTierBadge ? (
+          <span style={{
+            position: 'absolute', top: 16, right: 16,
+            display: 'inline-block', padding: '4px 12px',
+            ...waveGuardChipStyle(waveGuardTier),
+            borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
+            whiteSpace: 'nowrap',
+          }}>
+            WaveGuard {glassCopyActive() ? glassTierDisplay(waveGuardTier) : waveGuardTier}
+          </span>
+        ) : null}
         {servicesLength > 1 ? (
           <h3 style={{
             fontSize: 18,
             color: ESTIMATE_TEXT,
             margin: '0 0 16px',
+            // Keep clear of the absolutely-positioned corner badge — sized
+            // for the widest chip ("WaveGuard Platinum" at 14px/700 + pill
+            // padding + the 16px corner inset).
+            paddingRight: showTierBadge ? 170 : 0,
             fontWeight: 800,
           }}>
             {displayServiceLabel(section.label) || 'Service'}
           </h3>
         ) : null}
 
+        {/* Every service box leads with its own service-related headline —
+            the "HOW OFTEN?" eyebrow is gone and no-selector services
+            (termite monitoring) get a headline too (owner 2026-07-10). */}
+        <h2 style={{
+          fontSize: 20, fontWeight: 500, lineHeight: 1.2,
+          color: '#04395E', margin: '0 0 4px',
+          // Same corner-badge clearance as the h3 above; only needed when
+          // this headline is the first line in the card (single-service).
+          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 170,
+        }}>
+          {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
+        </h2>
         {showSlider ? (
-          <div>
-            {/* Section header for the cadence choice (owner 2026-07-06). */}
-            <div style={{
-              fontSize: 12, fontWeight: 700, color: '#475569',
-              textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
-            }}>
-              How often?
+          <GlassFrequencyPills
+            frequencies={frequencies}
+            selected={selectedFrequencyKey}
+            onChange={(next) => onFrequencyChange(section.key, next)}
+            disabled={disabled}
+          />
+        ) : null}
+
+        {/* Termite reads install-first (owner copy 2026-07-10, investment
+            framing): stations go in once, then the bridge line hands off to
+            the monitoring price so the two figures read as ONE plan. */}
+        {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
+          <>
+            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" />
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '14px 0 0' }}>
+              Monitoring is what keeps them working:
             </div>
-            <h2 style={{
-                            fontSize: 20, fontWeight: 500, lineHeight: 1.25,
-              color: '#1B2C5B', margin: '0 0 4px',
-            }}>
-              {/* The pest-branded line is pest-only — a lawn/mosquito/termite
-                  cadence selector labeled "Pest Protection" reads like the
-                  wrong quote, so every other section (incl. the synthetic
-                  'bundle' key, slug null) keeps the generic wording (codex
-                  rd3). */}
-              {sectionSlug === 'pest_control'
-                ? 'Pest Protection by Waves — ride the wave that fits your home.'
-                : 'Same protection — pick the rhythm that fits your home.'}
-            </h2>
-            <GlassFrequencyPills
-              frequencies={frequencies}
-              selected={selectedFrequencyKey}
-              onChange={(next) => onFrequencyChange(section.key, next)}
-              disabled={disabled}
-            />
-          </div>
+          </>
         ) : null}
 
         {current ? (
           <PriceCard
             frequency={current}
-            waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
+            // Every eligible section badges its own card — multi-service
+            // plans no longer hoist one plan-level badge (owner directive
+            // 2026-07-10). The server's waveGuardTierEligible flag keeps
+            // palm/rodent cards badge-free, and the synthetic 'bundle'
+            // fallback section never badges (see sectionTierEligible).
+            waveGuardTier={sectionTierEligible ? waveGuardTier : null}
+            // The card corner carries the badge now — PriceCard keeps the
+            // tier only for its per-row service tags.
+            showTierBadge={false}
+            // Every recurring service bills per application (owner directive
+            // 2026-07-11) — all real service cards lead with the
+            // per-application price, not just pest/mosquito/termite. PriceCard
+            // still falls back to the cadence rate when no unambiguous
+            // per-application price exists (multi-row bundles, flat-monthly
+            // monitoring, ranged or quote-required pricing).
+            //
+            // The synthetic unsplittable 'bundle' section is excluded: it
+            // carries the combined recurring total, but a legacy bundle can
+            // itemize only ONE member service as a treatment row (an
+            // unitemized lawn slice — see server buildServiceSection key
+            // 'bundle'). PriceCard would then read that lone row as the whole
+            // bundle's per-application headline and understate the plan vs the
+            // cadence total accept/billing charges, so the bundle card keeps
+            // its combined /mo total.
+            preferPerApplicationPrice={section.key !== 'bundle'}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -2452,6 +3453,30 @@ export function ServiceSection({
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
             showGuarantee={servicesLength === 1}
+          />
+        ) : null}
+
+        {/* One-time work belonging to THIS service lives inside its service
+            box — multi-service plans no longer detach it into a separate card
+            (owner 2026-07-10). Termite renders its install ABOVE the price
+            (lead variant above); everything else trails the price block. */}
+        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} />}
+
+        {serviceDetailsRequest ? (
+          <ServiceDetailsRequestRow
+            token={serviceDetailsRequest.token}
+            // RAW section key, not the glass slug: the slug normalizes
+            // commercial keys (commercial_mosquito → mosquito) into buttons
+            // whose POST the server rejects — it checks the estimate's
+            // canonical recurring keys. Unsupported keys hide the row.
+            serviceKey={section.key}
+            customerEmail={serviceDetailsRequest.customerEmail}
+            customerPhone={serviceDetailsRequest.customerPhone}
+            // Only the submit-phase lock disables the request — the
+            // mirror-section cadence lock (section `disabled`) must not.
+            disabled={serviceDetailsRequest.disabled === true}
+            // Staff draft preview: render for parity, but inert (no sends).
+            preview={serviceDetailsRequest.preview === true}
           />
         ) : null}
 
@@ -2487,11 +3512,22 @@ export function ServiceSection({
   );
 }
 
+// Phases where slot (re)selection must be inert: 'submitting' has a
+// reserve/accept in flight, 'review' holds a live reservation, 'success' is
+// booked. 'configure' / 'slot_conflict' / 'reservation_expired' stay out of
+// this set — those render the picker for the customer to (re)pick a slot,
+// and every path back to them clears the reservation first.
+const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']);
+
 export default function EstimateViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  // Set from the /data 404 body — true only when the server confirms this
+  // token is a real published estimate that expired (see NotFoundCard).
+  const [extensionEligible, setExtensionEligible] = useState(false);
   // Staff draft preview (?adminPreview=1 — opened from the estimate tool's
   // "Customer View" / the estimates list's Preview). Makes the /data fetch
   // attach the staff session's Bearer token so the server will serve an
@@ -2522,7 +3558,21 @@ export default function EstimateViewPage() {
   // the data endpoint loads.
   const [serviceMode, setServiceMode] = useState('recurring');
   const [paymentPreference, setPaymentPreference] = useState(null);
-  const [ctaPhase, setCtaPhase] = useState('configure');
+  const [ctaPhase, setCtaPhaseState] = useState('configure');
+  // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
+  // started before a phase change — e.g. a SlotPicker AI slot search —
+  // captures the OLD phase in its closure: when it resolved mid-submission
+  // (or after the page entered review with a live reservation) its
+  // selectSlot(null) passed the state guard and cleared the slot the
+  // in-flight accept / held reservation was committing. The ref object is
+  // stable across renders, so even a stale callback reads the live value.
+  // Every phase transition goes through setCtaPhase below, keeping the ref
+  // in lockstep on all submit/exit paths.
+  const ctaPhaseRef = useRef('configure');
+  const setCtaPhase = useCallback((phase) => {
+    ctaPhaseRef.current = phase;
+    setCtaPhaseState(phase);
+  }, []);
   const [reservation, setReservation] = useState(null);
   const [acceptResult, setAcceptResult] = useState(null);
   const [error, setError] = useState(null);
@@ -2537,6 +3587,48 @@ export default function EstimateViewPage() {
   // open; the succeeded SetupIntent id rides to accept via the ref.
   const [cardHoldIntent, setCardHoldIntent] = useState(null);
   const cardHoldSetupIntentIdRef = useRef(null);
+  // Live-ref accept lock (same reasoning as ctaPhaseRef): performAccept is
+  // also reached with ctaPhaseRef already 'submitting' (handleConfirm's
+  // deposit/card-hold exempt fall-through), so it carries its own synchronous
+  // single-flight latch — a double-invoke must not double-PUT /accept.
+  const acceptInFlightRef = useRef(false);
+  // Recurring card-on-file (dark until RECURRING_CARD_ON_FILE).
+  // recurringCardIntent holds the live POST /recurring-card-intent response
+  // while the Auto Pay capture modal is open.
+  const [recurringCardIntent, setRecurringCardIntent] = useState(null);
+  // Ref mirror for async guards (r3 P2): the inline pre-mint's fetch can
+  // resolve AFTER the customer confirmed via the modal fallback — the
+  // resolve-time check needs the live modal state, not its closure snapshot.
+  const recurringCardIntentOpenRef = useRef(false);
+  const recurringCardSetupIntentIdRef = useRef(null);
+  // Server said RECURRING_CARD_REQUIRED but our /data snapshot predates the
+  // requirement (flag flipped mid-session, or an exemption changed between
+  // /data and /accept) — force the capture branch on the next confirm so the
+  // customer isn't stuck re-submitting the same 402 until a full reload.
+  const recurringCardForceRef = useRef(false);
+  // Seamless single-screen booking (owner 2026-07-12): when the review card
+  // owes an Auto Pay card, the Payment Element renders INLINE in the review
+  // (one tap saves the card and books). inlineCardIntent holds the pre-minted
+  // SetupIntent; the ref drives confirmSetup from the combined CTA. The modal
+  // stays as the fallback (inline mint failure, stale-402 force path).
+  const [inlineCardIntent, setInlineCardIntent] = useState(null);
+  const [inlineCardState, setInlineCardState] = useState({ ready: false, agreed: false });
+  const inlineCaptureRef = useRef(null);
+  const inlineIntentMintRef = useRef(false);
+  // Inline confirmSetup in flight: drives the CTA's submitting state WITHOUT
+  // leaving the 'review' phase (leaving it would unmount the Payment
+  // Element mid-confirm). Ref = synchronous double-tap latch.
+  const [inlineConfirmBusy, setInlineConfirmBusy] = useState(false);
+  const inlineConfirmBusyRef = useRef(false);
+  // Server said DEPOSIT_REQUIRED while our refs say the card lane owns the
+  // accept — the lane lost (flag kill / exemption change); force the
+  // deposit consult on the next confirm (server 409-exempts if it's wrong).
+  const depositRequiredOverrideRef = useRef(false);
+  // One review_viewed event per review entry, not per re-render.
+  const reviewViewedRef = useRef(false);
+  // One auto-advance per slot selection: going Back from review must land on
+  // the configure page, not bounce straight back into review.
+  const autoAdvancedSlotRef = useRef(null);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
@@ -2569,7 +3661,12 @@ export default function EstimateViewPage() {
       // captured card isn't lost on the redirect and we don't re-mint a hold.
       const siFromRedirect = params.get('setup_intent');
       if (siFromRedirect && params.get('redirect_status') === 'succeeded') {
+        // Only one SetupIntent flow is ever live per accept (one-time → card
+        // hold; recurring → Auto Pay card), so restore the id into BOTH refs —
+        // accept sends each in its own field and the server pins trust to the
+        // intent's purpose metadata, so the wrong-lane echo is ignored.
         cardHoldSetupIntentIdRef.current = siFromRedirect;
+        recurringCardSetupIntentIdRef.current = siFromRedirect;
       }
       if (piFromRedirect || siFromRedirect) {
         ['payment_intent', 'payment_intent_client_secret', 'setup_intent', 'setup_intent_client_secret', 'redirect_status']
@@ -2638,8 +3735,28 @@ export default function EstimateViewPage() {
     return selectedFrequencyForSection(primarySection, selected);
   }, [services, selected]);
   const addServiceOffer = useMemo(
-    () => estimateAddServiceOffer(services, serviceMode, data?.estimate?.membership),
-    [services, serviceMode, data?.estimate?.membership]
+    // Accepted estimates always evaluate the offer in recurring terms (owner
+    // ask 2026-07-09): the accepted page upsells the next recurring service
+    // regardless of which mode the customer originally booked. data?.cta —
+    // the destructured `cta` binding doesn't exist until after the early
+    // returns below.
+    () => estimateAddServiceOffer(
+      services,
+      data?.cta?.terminalState === 'accepted' ? 'recurring' : serviceMode,
+      data?.estimate?.membership,
+    ),
+    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership]
+  );
+  // Download PDF / Share / Print / Portal Login at the top of every estimate
+  // render (owner ask 2026-07-09, live review screen) — the same shared bar
+  // as the report/pay/receipt/contract pages. The PDF endpoint streams the
+  // same proposal generator as the admin download and the emailed attachment.
+  const estimateActionBar = (
+    <DocumentActionBar
+      pdfUrl={`${API_BASE}/estimates/${token}/pdf`}
+      pdfFileName="Waves_Estimate.pdf"
+      shareTitle="Your Waves estimate"
+    />
   );
 
   useEffect(() => {
@@ -2656,6 +3773,7 @@ export default function EstimateViewPage() {
     // skeleton — a failed refresh used to leave the skeleton up forever
     // because nothing on the error path reset `loading`.
     if (!isRefresh) setLoading(true);
+    setLoadError(false);
     const params = [];
     if (isRefresh) params.push('refresh=1');
     let fetchOpts;
@@ -2670,7 +3788,10 @@ export default function EstimateViewPage() {
     }
     const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, fetchOpts);
     if (r.status === 404) {
+      const notFoundBody = await r.json().catch(() => ({}));
+      setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
       setNotFound(true);
+      setLoadError(false);
       setLoading(false);
       return;
     }
@@ -2679,6 +3800,11 @@ export default function EstimateViewPage() {
       throw new Error(`estimate fetch failed: ${r.status}`);
     }
     initialViewCountedRef.current = true;
+    // A load can succeed AFTER a 404 set notFound — the expired-screen
+    // extension auto-grant revives the estimate and re-fetches — so clear
+    // the dead-end state or the loaded data would render the NotFoundCard.
+    setNotFound(false);
+    setExtensionEligible(false);
     const body = await r.json();
     // Glass COPY default: set the module state BEFORE setData so every
     // glassCopyActive() consumer sees it on the render that paints the loaded
@@ -2728,7 +3854,7 @@ export default function EstimateViewPage() {
     let cancelled = false;
     loadEstimate().catch(() => {
       if (!cancelled) {
-        setNotFound(true);
+        setLoadError(true);
         setLoading(false);
       }
     });
@@ -2766,6 +3892,12 @@ export default function EstimateViewPage() {
   }, [reservation]);
 
   const onToggleAddOn = useCallback(async (sectionKey, key) => {
+    // Live-ref submit lock (mirror of the SlotPicker onSelect guards): the
+    // disabled prop freezes the rendered toggles, but a callback retained
+    // from before the submit — or a keyboard/synthetic change that skips the
+    // disabled attribute — must not reprice the estimate underneath an
+    // in-flight reserve/accept.
+    if (ctaPhaseRef.current === 'submitting') return;
     // Draft preview: PUT /preferences persists into estimate_data, and the
     // server 400s a draft anyway (isEstimateAcceptActive) — but its "no
     // longer active" message reads like a broken draft. Explain instead.
@@ -2946,6 +4078,11 @@ export default function EstimateViewPage() {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
       return;
     }
+    // Synchronous single-flight guard: React state (`processing`-style flags)
+    // lags a double-tap in the same frame — the ref flips before any await,
+    // so a second entry can never double-PUT /accept.
+    if (acceptInFlightRef.current) return;
+    acceptInFlightRef.current = true;
     setCtaPhase('submitting');
     setError(null);
     try {
@@ -2961,6 +4098,7 @@ export default function EstimateViewPage() {
           serviceCadences: serviceCadences || undefined,
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
           cardHoldSetupIntentId: cardHoldSetupIntentIdRef.current || undefined,
+          recurringCardSetupIntentId: recurringCardSetupIntentIdRef.current || undefined,
         }),
       });
       if (!r.ok) {
@@ -2969,6 +4107,12 @@ export default function EstimateViewPage() {
           // Ledger disagrees with what we collected (refund or partial under
           // us) — drop the cached PI; the next confirm mints a fresh top-up.
           depositPaymentIntentIdRef.current = null;
+          // The server is authoritative: a DEPOSIT_REQUIRED means the card
+          // lane does NOT supersede this accept (kill-switch flip after the
+          // inline capture, exemption change) — the captured SetupIntent ref
+          // must not keep suppressing the deposit consult or every retry
+          // loops on this same 402 (Codex #2681 r6 P2).
+          depositRequiredOverrideRef.current = true;
           throw new Error(body.error || 'A deposit is required to confirm your booking.');
         }
         if (r.status === 402 && body.code === 'CARD_HOLD_REQUIRED') {
@@ -2976,6 +4120,18 @@ export default function EstimateViewPage() {
           // confirm re-opens the capture modal and mints a fresh SetupIntent.
           cardHoldSetupIntentIdRef.current = null;
           throw new Error(body.error || 'Add a card to hold your appointment to confirm this visit.');
+        }
+        if (r.status === 402 && body.code === 'RECURRING_CARD_REQUIRED') {
+          // The Auto Pay card couldn't be verified — drop it so the next
+          // confirm re-opens the capture modal. The server is authoritative:
+          // force the capture branch even if our /data policy snapshot is
+          // stale and still says no card is owed. The inline capture's
+          // SetupIntent failed that verification too — drop it so the force
+          // path mints fresh through the modal instead of replaying it.
+          recurringCardSetupIntentIdRef.current = null;
+          recurringCardForceRef.current = true;
+          setInlineCardIntent(null);
+          throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
           if (/estimate is no longer active/i.test(body.error || '')) {
@@ -3014,6 +4170,11 @@ export default function EstimateViewPage() {
       setAcceptResult(body);
       setCtaPhase('success');
       setReservation(null);
+      // Funnel telemetry — estimate.id only, never the bearer token.
+      track(FUNNEL_EVENTS.ESTIMATE_ACCEPTED, {
+        estimate_id: data?.estimate?.id || null,
+        recurring: serviceMode !== 'one_time',
+      });
       // Booking-confirmed celebration — visual-only and isolated: the accept
       // has already succeeded, so an animation failure (e.g. a WebView
       // without Element.animate) must never surface as a booking error.
@@ -3023,8 +4184,10 @@ export default function EstimateViewPage() {
     } catch (err) {
       setError(err.message);
       setCtaPhase('review');
+    } finally {
+      acceptInFlightRef.current = false;
     }
-  }, [adminDraftPreview, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
+  }, [adminDraftPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -3032,6 +4195,17 @@ export default function EstimateViewPage() {
   // Dark-safe: depositPolicy.required is false while ESTIMATE_DEPOSIT_REQUIRED
   // is off, so this falls straight through to performAccept.
   const handleConfirm = useCallback(async () => {
+    // Live-ref submit lock (mirror of the onToggleAddOn/SlotPicker guards):
+    // a double-tap on Confirm must not double-enter the flow — the second
+    // entry would re-mint a deposit/card-hold intent and re-PUT /accept.
+    if (ctaPhaseRef.current === 'submitting') return;
+    // A fresh 409 exemption from a card/hold intent endpoint that does NOT
+    // itself supersede the deposit (feature_disabled after a kill-switch
+    // flip, payer_check_uncertain during a lookup outage, …) means the
+    // stale /data flags must not suppress the deposit step — consult
+    // /deposit-intent and let the server's live resolution decide (it
+    // 409-exempts when the lane/hold genuinely supersedes) (Codex #2680 r4).
+    let depositConsultForced = false;
     // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). When a card
     // is required to book this one-time visit and none is captured yet, mint
     // the SetupIntent and open the capture modal; accept continues from the
@@ -3049,7 +4223,10 @@ export default function EstimateViewPage() {
         });
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && body.exemptReason) {
-          // Policy says no hold owed — fall through to accept.
+          // Policy says no hold owed — fall through to accept. 'saved_method'
+          // means the hold still stands (a saved card backs it); any other
+          // exemption removes the hold, so the deposit may be owed again.
+          if (body.exemptReason !== 'saved_method') depositConsultForced = true;
         } else if (!r.ok) {
           throw new Error(body.error || 'Could not start the card hold. Please try again.');
         } else {
@@ -3063,16 +4240,117 @@ export default function EstimateViewPage() {
         return;
       }
     }
+    // Seamless inline Auto Pay (owner 2026-07-12): when the Payment Element
+    // is embedded in the review card, this single tap saves the card AND
+    // books — confirm the SetupIntent first, then continue into the standard
+    // preflights (the modal branch below is skipped once the ref is set; it
+    // remains the fallback for inline mint failure and the stale-402 force
+    // path, which drops inlineCardIntent so this branch can't replay a
+    // rejected SetupIntent).
+    if (serviceMode !== 'one_time' && !recurringCardSetupIntentIdRef.current
+        && !recurringCardForceRef.current
+        && paymentPreference !== 'prepay_annual'
+        && inlineCardIntent && inlineCaptureRef.current) {
+      if (!inlineCaptureRef.current.isReady()) {
+        setError('Enter your card details and check the Auto Pay authorization to confirm your booking.');
+        return;
+      }
+      // The phase STAYS 'review' while Stripe confirms (Codex #2681 r2 P1):
+      // flipping to 'submitting' here unmounts the review branch and the
+      // mounted Payment Element mid-confirmSetup. inlineConfirmBusy drives
+      // the CTA's disabled/label state instead; the ref is the synchronous
+      // double-tap latch (ctaPhaseRef still reads 'review' during the await).
+      if (inlineConfirmBusyRef.current) return;
+      inlineConfirmBusyRef.current = true;
+      setInlineConfirmBusy(true);
+      setError(null);
+      let cardResult;
+      try {
+        cardResult = await inlineCaptureRef.current.confirmSetup();
+      } finally {
+        inlineConfirmBusyRef.current = false;
+        setInlineConfirmBusy(false);
+      }
+      if (!cardResult.ok) {
+        setError(cardResult.error || 'We could not save that card. Try another card.');
+        return;
+      }
+      recurringCardSetupIntentIdRef.current = cardResult.setupIntentId;
+      track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
+    }
+    // Recurring card-on-file (dark until RECURRING_CARD_ON_FILE). When this
+    // recurring accept owes an Auto Pay card and none is captured yet, mint
+    // the SetupIntent and open the capture modal; the modal's onSuccess
+    // re-enters handleConfirm so the deposit step (still owed alongside the
+    // card) runs next. Prepay-annual is exempt — the server re-resolves with
+    // the actual preference either way.
+    const recurringCardPolicy = data?.recurringCardPolicy;
+    if (serviceMode !== 'one_time' && !recurringCardSetupIntentIdRef.current
+        && (recurringCardForceRef.current
+          || (recurringCardPolicy?.required && paymentPreference !== 'prepay_annual'))) {
+      setCtaPhase('submitting');
+      setError(null);
+      try {
+        const r = await fetch(`${API_BASE}/public/estimates/${token}/recurring-card-intent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.exemptReason) {
+          // Policy says no card owed — fall through to the deposit/accept.
+          // Only saved_method_consented / autopay_already_active keep the
+          // lane active at the accept gate (deposit stays superseded); any
+          // other exemption deactivates the lane server-side.
+          if (!['saved_method_consented', 'autopay_already_active'].includes(body.exemptReason)) {
+            depositConsultForced = true;
+          }
+        } else if (!r.ok) {
+          throw new Error(body.error || 'Could not start the card setup. Please try again.');
+        } else {
+          recurringCardIntentOpenRef.current = true;
+          setRecurringCardIntent(body);
+          setCtaPhase('review');
+          return; // modal takes over; confirm continues from onSuccess
+        }
+      } catch (err) {
+        setError(err.message);
+        setCtaPhase('review');
+        return;
+      }
+    }
     const depositPolicy = data?.depositPolicy;
     // requiredForOneTime: a site-confirmation-held estimate zeroes `required`
     // (its recurring accept collects nothing) but a one-time switch still owes
     // that mode's deposit — keep consulting /deposit-intent, which re-resolves
     // per mode and 409-exempts when nothing is owed.
-    const depositRequired = depositPolicy?.required
-      || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime);
+    // Card lane supersedes the deposit ("$0 today"): /data already reports
+    // required:false when the lane is active, but a stale snapshot (flag
+    // flipped mid-session) or a just-captured card must not open the
+    // deposit modal — /deposit-intent and the accept gate both 409/exempt
+    // it server-side regardless. PREPAY is NOT the card lane (Codex #2680
+    // r2): the server exempts prepay from the card policy but still
+    // requires its deposit, so suppressing it here would 402-loop the
+    // prepay checkout.
+    const recurringCardLaneActive = serviceMode !== 'one_time'
+      && paymentPreference !== 'prepay_annual'
+      && (data?.recurringCardPolicy?.required || !!recurringCardSetupIntentIdRef.current);
+    // One-time: a REQUIRED card hold supersedes the deposit server-side
+    // whether it is satisfied by a captured SetupIntent OR a saved consented
+    // card (the /card-hold-intent 409 'saved_method' path sets no ref) —
+    // never pre-collect a deposit the accept gate will refuse (Codex #2680
+    // r2).
+    const oneTimeHoldSupersedes = serviceMode === 'one_time' && !!data?.cardHoldPolicy?.requiredForOneTime;
+    const depositRequired = !recurringCardLaneActive && !oneTimeHoldSupersedes && (depositPolicy?.required
+      || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime)
+      // Card-lane supersede zeroes `required` on /data, but a prepay accept
+      // sits OUTSIDE the lane and still owes its deposit — requiredForPrepay
+      // preserves it (Codex #2680 r3; /deposit-intent re-resolves with the
+      // prepay preference and mints normally).
+      || (paymentPreference === 'prepay_annual' && depositPolicy?.requiredForPrepay));
     // Prepay-annual owes the deposit too — it credits against the annual
     // invoice minted at accept; the server accept gate re-verifies either way.
-    if (depositRequired && !depositPaymentIntentIdRef.current) {
+    if ((depositRequired || depositConsultForced || depositRequiredOverrideRef.current) && !depositPaymentIntentIdRef.current) {
       setCtaPhase('submitting');
       setError(null);
       try {
@@ -3098,7 +4376,7 @@ export default function EstimateViewPage() {
       }
     }
     await performAccept();
-  }, [data, paymentPreference, serviceMode, token, performAccept]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -3116,15 +4394,152 @@ export default function EstimateViewPage() {
 
   const handleCardHoldCancel = useCallback(() => setCardHoldIntent(null), []);
 
+  // Unlike the card-hold success (which goes straight to accept — the hold
+  // supersedes the deposit), the Auto Pay card rides ALONGSIDE the deposit:
+  // re-enter handleConfirm so the deposit preflight runs next.
+  const handleRecurringCardSuccess = useCallback(async (setupIntentId) => {
+    recurringCardSetupIntentIdRef.current = setupIntentId;
+    recurringCardIntentOpenRef.current = false;
+    setRecurringCardIntent(null);
+    track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
+    await handleConfirm();
+  }, [data, handleConfirm]);
+
+  const handleRecurringCardCancel = useCallback(() => {
+    recurringCardIntentOpenRef.current = false;
+    setRecurringCardIntent(null);
+  }, []);
+
+  // Stable identity (Codex #2681 r2 P1): an inline arrow here re-created the
+  // handler every render, and the capture's onStateChange effect re-fired on
+  // that new identity with a fresh state object — render loop to max depth.
+  // Functional bail-out keeps identical states from re-rendering at all.
+  const handleInlineCardState = useCallback((st) => {
+    setInlineCardState((prev) => (
+      prev.ready === st.ready && prev.agreed === st.agreed && !!prev.loadFailed === !!st.loadFailed
+        ? prev
+        : st
+    ));
+    // Stripe.js load failure: drop the inline capture so the CTA reverts to
+    // the plain confirm — handleConfirm's modal branch then mints fresh and
+    // opens RecurringCardModal, which has its own retry UX. The mint guard
+    // ref stays set, so the inline form never thrashes.
+    if (st.loadFailed) setInlineCardIntent(null);
+  }, []);
+
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');
     setReservation(null);
     setPaymentPreference(null);
-    // Don't clear selectedSlotId — the customer may want to retry with
-    // the same slot if the reservation call succeeded. Reservation row
-    // still exists server-side for up to 15 min; the commit-on-accept
-    // is idempotent.
+    setError(null);
+    // Don't clear selectedSlotId — the customer usually goes back to tweak
+    // something and continues with the same slot. The hold stays live
+    // server-side (up to 15 min) and is intentionally NOT released here:
+    // continuing re-POSTs /reserve, which is idempotent for the customer's
+    // own same-slot hold (returns/refreshes it) and supersedes it when a
+    // different slot is picked. A /reserve 409 therefore still means a
+    // genuine conflict (someone else holds the slot) and keeps its
+    // slot_conflict handling.
   }, []);
+
+  // Entering review (and success) swaps the tall configure page for a much
+  // shorter layout, but the browser keeps the old scroll offset — the
+  // customer who tapped a payment option ~2000px down was left staring at
+  // the footer while "Confirm booking" rendered far above the viewport, a
+  // dead end they read as "approve does nothing". Bring the active step to
+  // them on each phase entry (re-entry after an accept error re-surfaces
+  // the confirm card too).
+  useEffect(() => {
+    if (ctaPhase === 'review' && reservation) {
+      const el = document.getElementById(REVIEW_SECTION_ID);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (ctaPhase === 'success') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [ctaPhase, reservation]);
+
+  // Seamless single-screen booking (owner 2026-07-12). All UX below is gated
+  // on the RECURRING_CARD_ON_FILE flag (recurringCardPolicy.enforced) so the
+  // live experience is unchanged until Adam lights it.
+  const seamlessAutoPay = data?.recurringCardPolicy?.enforced === true;
+  const inlineAutoPayActive = seamlessAutoPay
+    && serviceMode !== 'one_time'
+    && paymentPreference !== 'prepay_annual'
+    && data?.recurringCardPolicy?.required === true;
+
+  // Pre-mint the Auto Pay SetupIntent as the review renders so the Payment
+  // Element is interactive by the time the customer reads the card. A mint
+  // failure (or a saved-card 409 exemption) is non-fatal: confirm falls into
+  // the existing modal branch, which re-mints or 409-falls-through.
+  useEffect(() => {
+    if (ctaPhase !== 'review' || !reservation) return;
+    if (!inlineAutoPayActive || inlineCardIntent) return;
+    if (recurringCardSetupIntentIdRef.current || recurringCardForceRef.current) return;
+    if (inlineIntentMintRef.current) return;
+    inlineIntentMintRef.current = true;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/public/estimates/${token}/recurring-card-intent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+        });
+        const body = await r.json().catch(() => ({}));
+        // Staleness re-check at RESOLVE time (r3 P2): a confirm tapped before
+        // this pre-mint resolved fell back to the modal path with its own
+        // intent — accepting this late response would render the inline
+        // element AND the modal for the same SetupIntent. Refs carry the
+        // live state; the closure's snapshots are stale by definition here.
+        if (recurringCardIntentOpenRef.current
+          || recurringCardSetupIntentIdRef.current
+          || recurringCardForceRef.current
+          || ctaPhaseRef.current !== 'review') return;
+        if (r.ok && body?.clientSecret) {
+          setInlineCardIntent(body);
+          track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_STARTED, { estimate_id: data?.estimate?.id || null });
+        }
+      } catch { /* modal fallback at confirm */ }
+    })();
+  }, [ctaPhase, reservation, inlineAutoPayActive, inlineCardIntent, token, serviceMode, paymentPreference, data]);
+
+  // Funnel telemetry: one review_viewed per review entry (estimate.id only —
+  // never the bearer token).
+  useEffect(() => {
+    if (ctaPhase !== 'review' || !reservation) {
+      // Any phase that lands the customer back in the booking flow is a
+      // fresh funnel entry — slot conflicts and expired reservations
+      // re-enter review via a NEW reservation and must count again
+      // (Codex #2681 r1 P3). 'submitting' stays excluded: a failed accept
+      // returning to review is the same review visit, not a new one.
+      if (ctaPhase === 'configure' || ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired') {
+        reviewViewedRef.current = false;
+      }
+      return;
+    }
+    if (reviewViewedRef.current) return;
+    reviewViewedRef.current = true;
+    track(FUNNEL_EVENTS.ESTIMATE_REVIEW_VIEWED, {
+      estimate_id: data?.estimate?.id || null,
+      recurring: serviceMode !== 'one_time',
+      card_step: inlineAutoPayActive,
+    });
+  }, [ctaPhase, reservation, serviceMode, inlineAutoPayActive, data]);
+
+  // Preference preselect (owner-approved 2026-07-12): for a standard
+  // recurring booking under the flag, tapping a slot IS the payment choice —
+  // pay per application is the default and the review card offers the
+  // annual-prepay switch. One advance per slot selection: Back from review
+  // lands on configure (with the payment buttons visible) instead of
+  // bouncing straight back into review.
+  useEffect(() => {
+    if (!seamlessAutoPay || serviceMode === 'one_time') return;
+    if (ctaPhase !== 'configure' || !selectedSlotId) return;
+    if (adminDraftPreview || existingAppointment || invoiceOnlyAccept || manualScheduleAccept) return;
+    if (data?.estimate?.billByInvoice || data?.estimate?.siteConfirmationHold) return;
+    if (autoAdvancedSlotRef.current === selectedSlotId) return;
+    autoAdvancedSlotRef.current = selectedSlotId;
+    handlePaymentChoice('pay_at_visit');
+  }, [seamlessAutoPay, serviceMode, ctaPhase, selectedSlotId, adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, data, handlePaymentChoice]);
 
   const handleAddServiceRequest = useCallback(async () => {
     // Draft preview: don't file a real bundle inquiry (it notifies the team)
@@ -3172,8 +4587,40 @@ export default function EstimateViewPage() {
       </Page>
     );
   }
+  if (loadError) {
+    return (
+      <Page>
+        <Header customerFirstName={null} address={null} />
+        <PublicLoadError resource="estimate" onRetry={() => loadEstimate().catch(() => {
+          setLoadError(true);
+          setLoading(false);
+        })} />
+      </Page>
+    );
+  }
   if (notFound || !data) {
-    return <Page><NotFoundCard /></Page>;
+    return (
+      <Page>
+        <NotFoundCard
+          token={token}
+          extensionEligible={extensionEligible}
+          onExtended={() => {
+            // Refresh semantics, NOT a first load: the initial 404 never
+            // marked the view counted, so a bare loadEstimate() would flip
+            // loading=true — swapping this card for the skeleton, stranding
+            // the skeleton forever on a network rejection, and losing the
+            // "You're all set" state on a 5xx. As a refresh the card stays
+            // up until /data actually 200s (then the live estimate renders
+            // in place); on failure nothing changes and the card—with its
+            // success copy and retry button—survives. The server counts the
+            // revived estimate's first real view regardless (?refresh=1 is
+            // only honored once viewed_at is set).
+            initialViewCountedRef.current = true;
+            loadEstimate().catch(() => {});
+          }}
+        />
+      </Page>
+    );
   }
 
   const { estimate, pricing, cta } = data;
@@ -3272,28 +4719,18 @@ export default function EstimateViewPage() {
   const isLockedMirrorSection = (section) => (
     comboModeActive && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
   );
-  // Live price for the glass sticky book bar — it must quote exactly what
-  // the cards quote. Bundles: combinedFrequency.monthly IS the bundle's
-  // monthly total (accept charges this /mo number) — no cadence multiply.
-  // Single service: the cadence price PriceCard renders.
-  const stickyBarPrice = (() => {
-    const HIDDEN = { label: null, period: null };
-    if (services.length > 1) {
-      const monthly = combinedFrequency?.monthly;
-      if (combinedFrequency?.quoteRequired === true || monthly == null) return HIDDEN;
-      // Narrow low-confidence commercial estimates price as a $low–$high
-      // RANGE on the cards; a fixed bar quoting one exact number would
-      // contradict them mid-booking, so it stays hidden for ranged pricing.
-      if (Number(combinedFrequency?.lowConfidenceRangePct) > 0) return HIDDEN;
-      return { label: fmtMoney(Math.round(Number(monthly) * 100) / 100), period: '/mo' };
-    }
-    const src = currentFrequency;
-    if (!src || src.quoteRequired === true || src.monthly == null) return HIDDEN;
-    if (Number(src.lowConfidenceRangePct) > 0) return HIDDEN;
-    const billingKey = src.billingFrequencyKey || src.key;
-    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
-    const period = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
-    return { label: fmtMoney(Math.round(Number(src.monthly) * intervalMonths * 100) / 100), period };
+  // Render gate for the glass sticky book bar. The bar displays NO price
+  // (owner 2026-07-10) — this only decides whether the selection is PRICED:
+  // quote-required and ranged (low-confidence commercial) selections keep
+  // the bar hidden, everything else keeps its approve CTA. Multi-service
+  // plans gate off the combined frequency's priced-ness WITHOUT computing a
+  // displayable total (owner 2026-07-11: no combined totals anywhere;
+  // codex 2639 r1: hiding the bar itself for multi-service was a bug).
+  const stickyBarPriced = (() => {
+    const src = services.length > 1 ? combinedFrequency : currentFrequency;
+    if (!src || src.quoteRequired === true || src.monthly == null) return false;
+    if (Number(src.lowConfidenceRangePct) > 0) return false;
+    return true;
   })();
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
@@ -3303,7 +4740,7 @@ export default function EstimateViewPage() {
   // read-only recap on an accepted estimate, so reopening an accepted link
   // still shows the services + pricing the customer booked (legacy parity).
   // `readOnly` disables every selector (incl. the add-on toggles) and drops
-  // booking-only extras (app-showcase upsell, one-time add-on pickers).
+  // booking-only extras (one-time add-on pickers).
   // `modeOverride` pins the recap to the mode actually accepted — the live
   // `serviceMode` can derive 'recurring' for a one-time acceptance on a mixed
   // estimate, so the accepted recap passes `acceptedServiceMode`.
@@ -3321,19 +4758,9 @@ export default function EstimateViewPage() {
     if (mode === 'recurring') {
       return (
         <>
-          {/* Multi-service plans show the WaveGuard tier ONCE, above the
-              boxes on the left — not repeated in every card. */}
-          {services.length > 1 && waveGuardTier && combinedTierEligible ? (
-            <div style={{ marginBottom: 12 }}>
-              <span style={{
-                display: 'inline-block', padding: '5px 11px',
-                background: '#EEF2FF', color: COLORS.blueDeeper,
-                borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
-              }}>
-                WaveGuard {glassContent ? glassTierDisplay(waveGuardTier) : waveGuardTier}
-              </span>
-            </div>
-          ) : null}
+          {/* The plan-level WaveGuard badge is gone (owner directive
+              2026-07-10) — the membership shows on each eligible service's
+              own card (recurring pest / mosquito) instead. */}
 
           {/* Multi-service plans stack vertically (owner directive) —
               each service keeps its own boxed price section. */}
@@ -3376,6 +4803,17 @@ export default function EstimateViewPage() {
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
+                // Multi-service plans embed each service's one-time work in
+                // its own box; single-service keeps the afterPrice breakdown.
+                oneTimeEmbed={services.length > 1 ? section.oneTimeContribution : null}
+                // Details-packet request buttons (GATE_SERVICE_DETAILS_PDF
+                // kill switch, on by default). The staff draft preview shows
+                // the row for customer-view parity but in an inert `preview`
+                // state (no real sends, no draft PDF); the read-only accepted
+                // recap still omits it entirely.
+                serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly
+                  ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: adminDraftPreview }
+                  : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
                 // Glass removes the customize section everywhere — including
@@ -3389,7 +4827,32 @@ export default function EstimateViewPage() {
 
           {/* The combined "Recurring total" card was removed (owner directive
               2026-07-07) — the per-service boxes and the sticky book bar carry
-              the bundle's monthly price. */}
+              the bundle's monthly price. It returns ONLY to itemize a plan-wide
+              credit (e.g. Referral Credit) and show the net: the per-service
+              cards are pre-credit, so without this the credit + final price
+              would never appear on a split multi-service plan. Renders nothing
+              when there's no credit, so no-credit bundles stay unchanged. */}
+          {services.length > 1 ? (
+            <PlanTotalSummary
+              combined={pricing.combinedRecurring}
+              selectedFrequency={combinedFrequency}
+              // Payload-level plan credit: gate/label evidence for selections
+              // whose row-level discount fields are unavailable (combo overlays
+              // keep only the base row's) — survives unless EVERY priced
+              // frequency suppresses the credit.
+              planDiscount={pricing.manualDiscount || null}
+              // Sum of the per-service cards at their SELECTED cadence — these are
+              // pre-credit (WaveGuard-net), so subtotal − net = the actual credit.
+              // Mirrors each ServiceSection's frequency resolution.
+              preCreditMonthly={services.reduce((sum, s) => {
+                if (!s?.isRecurring) return sum;
+                const freqs = Array.isArray(s.frequencies) ? s.frequencies : [];
+                const cur = freqs.find((f) => f.key === selected[s.key]) || freqs[0] || null;
+                const m = Number(cur?.monthly);
+                return sum + (Number.isFinite(m) ? m : 0);
+              }, 0)}
+            />
+          ) : null}
 
           {/* One guarantee line for the whole plan — not one per box. */}
           {services.length > 1 ? (
@@ -3412,9 +4875,25 @@ export default function EstimateViewPage() {
               breakdown={pricing.oneTimeBreakdown}
               // Mirror of the single-service path: keep glass-suppressed
               // setup fees in the breakdown so the total stays honest.
-              excludeServices={(pricing.firstVisitFees || [])
-                .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
-                .map((fee) => fee.service)}
+              // Items embedded inside their own service box
+              // (section.oneTimeContribution) are excluded — this card only
+              // keeps one-time work that has no rendered service section,
+              // and hides entirely when nothing is left.
+              excludeServices={[
+                ...(pricing.firstVisitFees || [])
+                  .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
+                  .map((fee) => fee.service),
+                // Identity keys, not bare service strings — embedded rows
+                // without a `service` (label-normalized termite installs)
+                // must still be excluded or they'd total twice. Mirror
+                // SectionOneTimeBlock's quote-required filter: rows it
+                // refuses to render never actually embed, so excluding them
+                // here would make the required work vanish from the page
+                // entirely instead of showing its "Quote Required" row.
+                ...services.flatMap((s) => (s?.oneTimeContribution?.items || [])
+                  .filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
+                  .map((item) => oneTimeRowIdentityKey(item))),
+              ]}
               prepayWaivedServices={prepayWaivedServices}
             />
           ) : null}
@@ -3441,6 +4920,12 @@ export default function EstimateViewPage() {
                   addOns={frequency?.addOns || []}
                   selectedKeys={selectedAddOns[section.key] || new Set()}
                   onToggle={(key) => onToggleAddOn(section.key, key)}
+                  // This one-time configure layout is what renders while
+                  // ctaPhase is 'submitting' (reserve/accept in flight) — a
+                  // toggle mid-submit would reprice the booking underneath
+                  // the request. readOnly is false on this branch, so this
+                  // is exactly the submit lock.
+                  disabled={cardsDisabled}
                 />
               );
             })
@@ -3458,24 +4943,54 @@ export default function EstimateViewPage() {
     // non-default-frequency booking — better to show just the terminal card
     // than a wrong recap. (New accepts always persist it.) Declined/expired
     // keep just the terminal card too.
-    const showAcceptedRecap = cta.terminalState === 'accepted' && !!estimate.acceptedServiceMode;
     // A commercial proposal is quote_required by design but its terminal card
     // says "Your formal proposal is ready." — the generic "in the works" hero
     // would contradict it, so proposals get their own status statement.
     const stateHero = cta.terminalState === 'quote_required' && isCommercialProposal
       ? { h1: 'Hello {first}, your formal proposal is ready.', eyebrow: 'Your commercial proposal' }
       : TERMINAL_HERO[cta.terminalState] || null;
+    if (cta.terminalState === 'accepted') {
+      // Accepted = concise onboarding page (owner ask 2026-07-09): booked
+      // hero, the booked-visit card, the Waves app invite, and the
+      // add-service upsell. The sales machinery — contact/estimate-# block,
+      // AI price-intelligence, pricing recap, report showcase, reviews, GBP
+      // proof — is deliberately GONE: they already said yes, and the PDF in
+      // the action bar carries the what-did-I-agree-to reference.
+      return (
+        <Page>
+          {adminDraftPreview ? <DraftPreviewBanner /> : null}
+          {/* Doc tools ABOVE the hero on every estimate (owner 2026-07-09). */}
+          {estimateActionBar}
+          <Header
+            customerFirstName={estimate.customerFirstName}
+            serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, estimate.acceptedServiceMode || null)}
+            headline={stateHero?.h1 || headline}
+            eyebrowOverride={stateHero ? stateHero.eyebrow : null}
+          />
+          <TerminalStateCard
+            state="accepted"
+            customerFirstName={estimate.customerFirstName}
+            address={estimate.address}
+            // Booked + upcoming visit → show the date, not "we'll follow up".
+            appointmentLabel={existingAppointment ? formatAppointmentLabel(existingAppointment) : null}
+            appointmentServiceType={existingAppointment?.serviceType || null}
+          />
+          <AppShowcaseCard />
+          <EstimateAddServiceRequestCard
+            offer={addServiceOffer}
+            requestState={addServiceRequestState}
+            onRequest={handleAddServiceRequest}
+          />
+        </Page>
+      );
+    }
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
+        {estimateActionBar}
         <Header
           {...headerContactProps}
-          serviceLabel={getServiceLabel(
-            currentFrequency,
-            estimate,
-            pricing,
-            cta.terminalState === 'accepted' ? estimate.acceptedServiceMode || null : null,
-          )}
+          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
           headline={stateHero?.h1 || headline}
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
@@ -3497,15 +5012,8 @@ export default function EstimateViewPage() {
           quoteReason={quoteRequiredReason}
           isProposal={isCommercialProposal}
           proposalPdfEmailed={proposalPdfEmailed}
-          // Booked + upcoming visit → show the date, not "we'll follow up".
-          appointmentLabel={cta.terminalState === 'accepted' && existingAppointment
-            ? formatAppointmentLabel(existingAppointment)
-            : null}
-          appointmentServiceType={cta.terminalState === 'accepted' ? existingAppointment?.serviceType || null : null}
         />
-        {showAcceptedRecap ? renderQuoteDetailCards(true, estimate.acceptedServiceMode || serviceMode) : null}
         <AppShowcaseCard />
-        <ReportShowcaseCard />
         <CustomerReviews />
         <GoogleProfilesCard />
       </Page>
@@ -3515,6 +5023,7 @@ export default function EstimateViewPage() {
   if (ctaPhase === 'success') {
     return (
       <Page>
+        {estimateActionBar}
         <Header
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
@@ -3522,7 +5031,18 @@ export default function EstimateViewPage() {
           headline={TERMINAL_HERO.accepted.h1}
           eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
         />
-        <SuccessCard acceptResult={acceptResult} />
+        <SuccessCard
+          acceptResult={acceptResult}
+          // First-visit line (owner ask 2026-07-12, re-confirmed): the slot
+          // the customer just booked (kept in state through accept) or their
+          // validated existing appointment.
+          appointmentLabel={existingAppointment
+            ? formatAppointmentLabel(existingAppointment)
+            : (selectedSlotMeta?.date
+              ? `${new Date(`${selectedSlotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${selectedSlotMeta.time ? ` · ${selectedSlotMeta.time}` : ''}`
+              : null)}
+          recurring={serviceMode !== 'one_time'}
+        />
       </Page>
     );
   }
@@ -3560,6 +5080,7 @@ export default function EstimateViewPage() {
     return (
       <Page>
         {adminDraftPreview ? <DraftPreviewBanner /> : null}
+        {estimateActionBar}
         <Header
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
@@ -3571,7 +5092,6 @@ export default function EstimateViewPage() {
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
         <AppShowcaseCard />
-        <ReportShowcaseCard />
         <CustomerReviews />
         <GoogleProfilesCard />
       </Page>
@@ -3581,6 +5101,7 @@ export default function EstimateViewPage() {
   return (
     <Page>
       {adminDraftPreview ? <DraftPreviewBanner /> : null}
+      {estimateActionBar}
       <Header
         {...headerContactProps}
         serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
@@ -3605,7 +5126,12 @@ export default function EstimateViewPage() {
               <ExistingAppointmentCard appointment={existingAppointment} />
               <PaymentPreferenceButtons
                 onSelect={handlePaymentChoice}
-                disabled={adminDraftPreview}
+                // Locked while an accept or the inline card confirmation is
+                // in flight (Codex #2681 r4): a preference switch here
+                // unmounts the inline Payment Element mid-confirmSetup and
+                // the in-flight handleConfirm closure would book the OLD
+                // choice the UI no longer shows.
+                disabled={adminDraftPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 setupFee={pricing.setupFee || null}
@@ -3617,6 +5143,15 @@ export default function EstimateViewPage() {
               />
             </>
           ) : null}
+          {/* Anchor sits directly on the confirm card — in the existing-
+              appointment mode the appointment + payment cards stack above
+              ReviewPhase, and anchoring the group leaves the confirm action
+              below the fold on mobile (Codex #2545). */}
+          <div id={REVIEW_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+          {/* Inside the scroll anchor so a failed confirm scrolls the error
+              into view along with the confirm card. Cleared on every retry
+              (performAccept/handleConfirm) and on Go back (handleReviewCancel). */}
+          <EstimateErrorBanner error={error} />
           <ReviewPhase
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
@@ -3625,24 +5160,70 @@ export default function EstimateViewPage() {
             secondsRemaining={countdownSeconds}
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
+            submitting={ctaPhase === 'submitting' || inlineConfirmBusy}
             invoiceMode={!!estimate.billByInvoice}
             invoiceOnly={invoiceOnlyAccept}
             siteConfirmationHold={!!estimate.siteConfirmationHold}
             manualScheduling={!!reservation?.manualScheduling}
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
-              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
+              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. ${CARD_SURCHARGE_DISCLOSURE}`
               : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime))
                 ? (invoiceOnlyAccept
                   ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`
                   : paymentPreference === 'prepay_annual'
                     ? `A ${fmtMoney(data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your annual prepay invoice.`
-                    : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`)
-                : null)}
+                    : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.${serviceMode !== 'one_time' && data?.recurringCardPolicy?.required ? ' You’ll also save a card for Auto Pay — after each completed service, it’s charged automatically.' : ''}`)
+                // Deposit retired (card-on-file booking spec): the Auto Pay
+                // disclosure must stand on its own once no deposit is owed —
+                // the recurring accept is "$0 today, charged per application".
+                // When the capture renders INLINE, its own copy carries the
+                // Auto Pay disclosure — keep only the surcharge line here.
+                : (serviceMode !== 'one_time' && data?.recurringCardPolicy?.required && paymentPreference !== 'prepay_annual'
+                  ? (inlineAutoPayActive && inlineCardIntent
+                    ? CARD_SURCHARGE_DISCLOSURE
+                    : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`)
+                  : null))}
+            autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
+              <InlineAutoPayCapture
+                ref={inlineCaptureRef}
+                intent={inlineCardIntent}
+                loadStripeSdk={loadStripeSdk}
+                glassActive={!!glassContent}
+                busy={inlineConfirmBusy}
+                onStateChange={handleInlineCardState}
+              />
+            ) : null}
+            confirmLabelOverride={inlineAutoPayActive && inlineCardIntent ? 'Confirm booking & save card' : null}
+            confirmDisabled={inlineAutoPayActive && inlineCardIntent
+              ? !(inlineCardState.ready && inlineCardState.agreed)
+              : false}
+            submittingLabel={seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null}
+            prefSwitch={seamlessAutoPay && !existingAppointment && serviceMode !== 'one_time'
+              && !estimate.billByInvoice && !estimate.siteConfirmationHold
+              && (pricing.annualPrepayEligible === true || pricing.setupFee?.waivedWithPrepay)
+              ? (
+                <button
+                  type="button"
+                  onClick={() => setPaymentPreference(paymentPreference === 'prepay_annual' ? 'pay_at_visit' : 'prepay_annual')}
+                  // Also locked during the inline card confirmation (r3 P2):
+                  // the in-flight handleConfirm closure carries the OLD
+                  // preference — a mid-await switch would book against a
+                  // billing choice the customer just changed away from.
+                  disabled={ctaPhase === 'submitting' || inlineConfirmBusy}
+                  style={{ background: 'none', border: 'none', padding: 0, fontSize: 14, color: COLORS.navy, textDecoration: 'underline', cursor: 'pointer', justifySelf: 'center' }}
+                >
+                  {paymentPreference === 'prepay_annual'
+                    ? 'Switch back to pay per application'
+                    : 'Prefer to pay the year up front? Switch to annual prepay'}
+                </button>
+              ) : null}
           />
+          </div>
           {depositIntent ? (
             <DepositModal
               intent={depositIntent}
+              token={token}
               onSuccess={handleDepositSuccess}
               onCancel={handleDepositCancel}
               creditTarget={paymentPreference === 'prepay_annual' ? 'your annual prepay invoice' : 'your first invoice'}
@@ -3653,6 +5234,13 @@ export default function EstimateViewPage() {
               intent={cardHoldIntent}
               onSuccess={handleCardHoldSuccess}
               onCancel={handleCardHoldCancel}
+            />
+          ) : null}
+          {recurringCardIntent ? (
+            <RecurringCardModal
+              intent={recurringCardIntent}
+              onSuccess={handleRecurringCardSuccess}
+              onCancel={handleRecurringCardCancel}
             />
           ) : null}
           {aiPanelBlock}
@@ -3671,6 +5259,11 @@ export default function EstimateViewPage() {
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
+              serviceCategory={estimate.serviceCategory}
+              // The configure layout is what renders while ctaPhase is
+              // 'submitting' (reserve/accept in flight) — a mode flip
+              // mid-submit would clear the slot the request is committing.
+              disabled={ctaPhase === 'submitting'}
               onChange={(m) => {
                 reserveAttemptRef.current += 1;
                 setServiceMode(m);
@@ -3704,20 +5297,39 @@ export default function EstimateViewPage() {
 
           <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {canShowSlotPicker ? (
-              <SlotPicker
-                token={token}
-                askToken={estimate.askToken}
-                selectedSlotId={selectedSlotId}
-                onSelect={setSelectedSlotId}
-                onSelectMeta={setSelectedSlotMeta}
-                selectedSlotFallbackMeta={selectedSlotMeta}
-                licenseNumber={estimate.licenseNumber}
-                refreshSignal={slotsRefreshSignal}
-                serviceMode={serviceMode}
-                selectedFrequency={selectedFrequency}
-                onFirstSlotDate={setFirstSlotDate}
-                cityLabel={estimateCity}
-              />
+              // SlotPicker takes no disabled prop, so freeze it from out here
+              // while a reserve/accept is in flight (ctaPhase 'submitting'
+              // renders this configure layout): pointer-events blocks taps,
+              // the guarded handlers block keyboard selection, and the wrapper
+              // stays mounted either way so the slot fetch doesn't restart.
+              // The handler guards read ctaPhaseRef, NOT ctaPhase — a slot
+              // search started before the submit retains a callback with the
+              // old phase in its closure, and only the ref stays live there.
+              // They reject on every locked phase, not just 'submitting': a
+              // pre-reserve search can also resolve after the page enters
+              // review (or after a failed accept returns to review), where
+              // its selectSlot(null) would clear the slot behind the
+              // still-live reservation.
+              <div
+                aria-disabled={ctaPhase === 'submitting' || undefined}
+                style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
+              >
+                <SlotPicker
+                  token={token}
+                  askToken={estimate.askToken}
+                  selectedSlotId={selectedSlotId}
+                  onSelect={(slotId) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotId(slotId); }}
+                  onSelectMeta={(meta) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotMeta(meta); }}
+                  selectedSlotFallbackMeta={selectedSlotMeta}
+                  licenseNumber={estimate.licenseNumber}
+                  refreshSignal={slotsRefreshSignal}
+                  serviceMode={serviceMode}
+                  selectedFrequency={selectedFrequency}
+                  onFirstSlotDate={setFirstSlotDate}
+                  cityLabel={estimateCity}
+                  quickPick={seamlessAutoPay}
+                />
+              </div>
             ) : (
               <AcceptanceModeCard acceptance={acceptance} />
             )}
@@ -3751,36 +5363,29 @@ export default function EstimateViewPage() {
           ) : null}
 
           {(existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
-            <PaymentPreferenceButtons
-              onSelect={handlePaymentChoice}
-              // Draft preview: dead from first render (Codex rd 1), not just
-              // guarded on click — but rendered, so staff still see the exact
-              // payment options the customer will get. Forcing cta.canAccept
-              // false server-side would fall through to the null-terminal
-              // "expired" card and destroy the preview's purpose.
-              disabled={adminDraftPreview || ctaPhase === 'submitting'}
-              serviceMode={serviceMode}
-              oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-              setupFee={pricing.setupFee || null}
-              annualPrepayEligible={pricing.annualPrepayEligible === true}
-              invoiceMode={!!estimate.billByInvoice}
-              invoiceOnly={invoiceOnlyAccept}
-              siteConfirmationHold={!!estimate.siteConfirmationHold}
-              selectedFrequency={combinedFrequency}
-              cardHold={data?.cardHoldPolicy || null}
-            />
-          ) : null}
-
-          {error ? (
-            <div style={{
-              background: '#fee', borderRadius: 12, padding: 12,
-              border: `1px solid ${COLORS.red}`, marginBottom: 16,
-              color: COLORS.red, fontSize: 14,
-            }}>
-              Something went wrong: {error}. Try again or call{' '}
-              <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.red }}>{WAVES_PHONE_DISPLAY}</a>.
+            <div id={PAYMENT_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+              <PaymentPreferenceButtons
+                onSelect={handlePaymentChoice}
+                // Draft preview: dead from first render (Codex rd 1), not just
+                // guarded on click — but rendered, so staff still see the exact
+                // payment options the customer will get. Forcing cta.canAccept
+                // false server-side would fall through to the null-terminal
+                // "expired" card and destroy the preview's purpose.
+                disabled={adminDraftPreview || ctaPhase === 'submitting'}
+                serviceMode={serviceMode}
+                oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
+                setupFee={pricing.setupFee || null}
+                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                invoiceMode={!!estimate.billByInvoice}
+                invoiceOnly={invoiceOnlyAccept}
+                siteConfirmationHold={!!estimate.siteConfirmationHold}
+                selectedFrequency={combinedFrequency}
+                cardHold={data?.cardHoldPolicy || null}
+              />
             </div>
           ) : null}
+
+          <EstimateErrorBanner error={error} />
 
           {/* Glass-ordered tail (approved section positioning): why-price-
               custom with its lock-in CTA, reviews with the join CTA, the app
@@ -3797,12 +5402,12 @@ export default function EstimateViewPage() {
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} style={{ justifyContent: 'center' }} />
                   : null}
               />
-              {/* GBP proof directly after the review quotes; the report
-                  showcase directly after the app card it extends. This
-                  branch's approved reviews-before-app order is preserved. */}
+              {/* GBP proof directly after the review quotes. The report
+                  showcase card was removed from the estimate page entirely
+                  (owner 2026-07-11). This branch's approved reviews-before-app
+                  order is preserved. */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              <ReportShowcaseCard />
               {/* GBP proof directly above Ask Waves (owner 2026-07-06). */}
               <GoogleProfilesCard />
               <EstimateAskBar
@@ -3829,7 +5434,6 @@ export default function EstimateViewPage() {
       {glassContent && !(ctaPhase === 'review' && reservation) ? null : (
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
-          <ReportShowcaseCard />
           <CustomerReviews />
           <GoogleProfilesCard />
         </>
@@ -3839,10 +5443,9 @@ export default function EstimateViewPage() {
           would cover the confirm/cancel buttons. */}
       {glassContent && canShowSlotPicker && serviceMode === 'recurring' && !(ctaPhase === 'review' && reservation) ? (
         <GlassStickyBookBar
-          priceLabel={stickyBarPrice.label}
-          periodLabel={stickyBarPrice.period}
+          show={stickyBarPriced}
           slotMeta={selectedSlotMeta}
-          onApprove={scrollToBookingSection}
+          onApprove={selectedSlotMeta ? scrollToPaymentSection : scrollToBookingSection}
         />
       ) : null}
     </Page>

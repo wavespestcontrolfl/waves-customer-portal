@@ -145,6 +145,11 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
   return {
     enabled: false,
     synthesized: true,
+    // Synthesized fallbacks serve ANY estimate (incl. the customer-facing
+    // /api/estimates/:token/pdf download) — a residential quote must not be
+    // headed "Commercial Service Proposal". Authored proposals keep their
+    // stored title (the commercial modal's default).
+    title: 'Service Proposal',
     buildings: [{ name: estimate.address || 'Service location', note: null, lineItems }],
   };
 }

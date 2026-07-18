@@ -15,10 +15,10 @@ server-side env booleans. PostHog flags are reserved for *new* funnel A/B tests.
 | astro | `src/components/PostHogAnalytics.astro` (loader, consent-gated), `src/lib/analytics/events.ts` (taxonomy + `track()`), `src/components/CookieBanner.tsx` (now drops a `.wavespestcontrol.com` consent cookie), `BaseLayout.astro` (mounts loader), instrumentation in `EstimateForm/LeadForm/QuoteForm/SliderForm` |
 | portal | `client/src/lib/analytics/posthog.js` (loader, path-scoped), `client/src/lib/analytics/events.js` (taxonomy + `track()`), `client/src/components/analytics/PublicFunnelTracking.jsx` (self-gating consent + boot, mounted in `App.jsx`), instrumentation in `PublicBookingPage.jsx`, CSP opened in `server/index.js` |
 
-Scope guard: PostHog initializes **only** on the public acquisition routes —
-`/book`, `/estimate`, and the public service-slug quote pages `/estimate/<slug>`
-(slugs in `lib/serviceEstimateSlugs.js`, mirrored from
-`server/config/service-estimate-slugs.js`). It never loads on `/admin`, `/tech`,
+Scope guard: portal PostHog initializes for the retained `/book` acquisition
+route and for explicit, cookieless tokenized-estimate events. Public estimate
+and quote pages permanently redirect to the marketing site, whose own PostHog
+loader owns their pageviews. Portal tracking never loads on `/admin`, `/tech`,
 the authenticated customer portal, or any **tokenized** customer page
 (`/pay/:token`, a customer `/estimate/:token`, `/book/:token`) — those render
 customer PII. A `before_send` hard-gate drops any event/replay snapshot fired

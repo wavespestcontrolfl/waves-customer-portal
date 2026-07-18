@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
+import { isNativeApp, nativePushPermissionState, requestNativePushPermission } from '../native/nativePush.js';
+import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -13,6 +15,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [notifications, setNotifications] = useState([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [tab, setTab] = useState('account'); // 'account' | 'whats_new'
   // Web Push enable state — only relevant for admin bell. The strip
   // shows when the current device hasn't subscribed to push yet, and
@@ -32,11 +35,28 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     'Content-Type': 'application/json',
   });
 
+  // Customer requests go through the shared api client: customer access
+  // tokens expire after 15 minutes and only the client can rotate the
+  // refresh session on a 401 (and it rejects on error responses, so a 401
+  // body is never mistaken for an empty notification list). The admin bell
+  // keeps its separate raw-fetch flow — admin auth is a different token.
+  const requestJson = (path, options = {}) => {
+    if (type !== 'admin') return api.request(path, options);
+    return fetch(`${API_BASE}${path}`, { ...options, headers: getHeaders() })
+      .then((r) => {
+        if (!r.ok) {
+          const err = new Error(`Request failed (${r.status})`);
+          err.status = r.status;
+          throw err;
+        }
+        return r.json();
+      });
+  };
+
   // Poll unread count every 30 seconds
   useEffect(() => {
     const fetchCount = () => {
-      fetch(`${API_BASE}${basePath}/unread-count`, { headers: getHeaders() })
-        .then(r => r.json())
+      requestJson(`${basePath}/unread-count`)
         .then(d => setUnreadCount(d.count || 0))
         .catch(() => {});
     };
@@ -90,21 +110,41 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
   // Probe Web Push state when the panel opens (admin only). Re-runs on
   // each open so a user who enabled push elsewhere doesn't see a stale
-  // "Enable push" strip. Customer bell skips this — only admins get
-  // operational push.
+  // "Enable push" strip. Admins get operational Web Push. In the native
+  // customer app this strip is the ONLY push opt-in surface — startup never
+  // prompts for permission (nativePush.js delegates that explicit gesture
+  // here), so without it a fresh install could never grant APNs permission.
+  // Customer web stays strip-free.
+  const showPushStrip = (type === 'admin' || isNativeApp()) && !pushOn;
   useEffect(() => {
-    if (!open || type !== 'admin') return;
-    isPushEnabled({
-      apiBase: API_BASE,
-      token: localStorage.getItem(tokenKey),
-      verifyServer: true,
-    }).then(setPushOn).catch(() => setPushOn(false));
+    if (!open) return;
+    if (type === 'admin') {
+      isPushEnabled({
+        apiBase: API_BASE,
+        token: localStorage.getItem(tokenKey),
+        verifyServer: true,
+      }).then(setPushOn).catch(() => setPushOn(false));
+      return;
+    }
+    if (isNativeApp()) {
+      nativePushPermissionState()
+        .then((state) => setPushOn(state === 'granted'))
+        .catch(() => setPushOn(false));
+    }
   }, [open, type]);
 
   const handleEnablePush = async () => {
     setPushEnabling(true);
     setPushError(null);
     try {
+      if (type === 'customer' && isNativeApp()) {
+        const result = await requestNativePushPermission();
+        if (result !== 'granted') {
+          throw new Error('Notifications are off. Enable them for Waves in your device Settings, then try again.');
+        }
+        setPushOn(true);
+        return;
+      }
       // Pass apiBase so push enrollment hits the same backend the rest
       // of the bell talks to. Without this, ensurePushSubscription
       // defaults to '/api' and breaks in any deployment where the
@@ -121,14 +161,25 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     }
   };
 
-  // Load notifications when opened
+  // Load notifications when opened. A failed load is recorded — rendering
+  // "No notifications yet" (or stale rows) for an outage would present a
+  // broken inbox as a confirmed-empty one. Monotonic sequence: reopening
+  // while a request is in flight starts a new one, and only the latest
+  // issued request may write — a slow older failure must not hide a newer
+  // successful list behind the retry screen.
+  const loadSeqRef = useRef(0);
   const loadNotifications = async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
+    setLoadFailed(false);
     try {
-      const r = await fetch(`${API_BASE}${basePath}?limit=30`, { headers: getHeaders() });
-      const d = await r.json();
+      const d = await requestJson(`${basePath}?limit=30`);
+      if (seq !== loadSeqRef.current) return;
       setNotifications(d.notifications || []);
-    } catch {}
+    } catch {
+      if (seq !== loadSeqRef.current) return;
+      setLoadFailed(true);
+    }
     setLoading(false);
   };
 
@@ -138,13 +189,19 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   };
 
   const markRead = async (id) => {
-    await fetch(`${API_BASE}${basePath}/${id}/read`, { method: 'PUT', headers: getHeaders() }).catch(() => {});
+    // Only reflect the read state the server actually accepted — a rejected
+    // write (expired token the refresh couldn't save) must not clear badges.
+    try {
+      await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
+    } catch { return; }
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
     setUnreadCount(prev => Math.max(0, prev - 1));
   };
 
   const markAllRead = async () => {
-    await fetch(`${API_BASE}${basePath}/read-all`, { method: 'PUT', headers: getHeaders() }).catch(() => {});
+    try {
+      await requestJson(`${basePath}/read-all`, { method: 'PUT' });
+    } catch { return; }
     setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
     setUnreadCount(0);
   };
@@ -183,7 +240,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const colors = isDark
     ? { bg: '#FFFFFF', border: '#E2E8F0', text: '#334155', muted: '#64748B', teal: '#0A7EC2', unreadBg: '#F0F7FC', white: '#0F172A', badge: '#C0392B' }
     // Customer palette = glass tokens (#04395E ink, #0A7EC2 accent) — the
-    // old marketing #1B2C5B/#009CDE rendered inside the glassed portal panel.
+    // old marketing navy/#009CDE rendered inside the glassed portal panel.
     : { bg: '#FFFFFF', border: 'rgba(4,57,94,0.14)', text: '#04395E', muted: '#64748B', teal: '#0A7EC2', unreadBg: 'rgba(10,126,194,0.10)', white: '#FFFFFF', badge: '#C8102E' };
 
   return (
@@ -286,7 +343,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             {/* Enable Push strip — admin only, shown when not yet
                 subscribed on this device. iOS reminder is folded into
                 the error message that ensurePushSubscription throws. */}
-            {type === 'admin' && !pushOn && (
+            {showPushStrip && (
               <PushEnableStrip
                 enabling={pushEnabling}
                 error={pushError}
@@ -298,7 +355,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 scroll from chaining to the page behind it on iOS. */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: '#71717A', fontSize: 14 }}>Loading…</div>}
-              {!loading && tab === 'account' && notifications.length === 0 && (
+              {!loading && loadFailed && tab === 'account' && (
+                <div style={{ padding: 60, textAlign: 'center' }}>
+                  <div style={{ fontSize: 14, color: '#71717A' }}>Notifications couldn&apos;t be loaded.</div>
+                  <button type="button" onClick={loadNotifications} style={{
+                    marginTop: 12, padding: '8px 14px', borderRadius: 8, border: '1px solid #D8D0C0',
+                    background: '#fff', color: '#04395E', fontSize: 14, fontWeight: 800, cursor: 'pointer',
+                  }}>Try again</button>
+                </div>
+              )}
+              {!loading && !loadFailed && tab === 'account' && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <div style={{ fontSize: 14, color: '#71717A' }}>No notifications yet</div>
                 </div>
@@ -308,7 +374,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{ fontSize: 14, color: '#71717A' }}>Nothing new right now</div>
                 </div>
               )}
-              {!loading && tab === 'account' && notifications.map(n => (
+              {!loading && !loadFailed && tab === 'account' && notifications.map(n => (
                 <div key={n.id}
                   onClick={async () => {
                     if (!n.read_at) await markRead(n.id);
@@ -387,7 +453,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
 
             {/* Enable Push strip — admin only, shown when not yet
                 subscribed on this device. */}
-            {type === 'admin' && !pushOn && (
+            {showPushStrip && (
               <PushEnableStrip
                 enabling={pushEnabling}
                 error={pushError}
@@ -398,7 +464,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             {/* Notification List */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
               {loading && <div style={{ padding: 40, textAlign: 'center', color: colors.muted }}>Loading...</div>}
-              {!loading && notifications.length === 0 && (
+              {!loading && loadFailed && (
+                <div style={{ padding: 60, textAlign: 'center' }}>
+                  <div style={{ fontSize: 14, color: colors.muted }}>Notifications couldn&apos;t be loaded.</div>
+                  <button type="button" onClick={loadNotifications} style={{
+                    marginTop: 12, padding: '8px 14px', borderRadius: 8, border: `1px solid ${colors.border || '#D8D0C0'}`,
+                    background: 'transparent', color: colors.text || colors.muted, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                  }}>Try again</button>
+                </div>
+              )}
+              {!loading && !loadFailed && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke={colors.muted} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 12 }}>
                     <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
@@ -407,7 +482,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{ fontSize: 14, color: colors.muted }}>No notifications yet</div>
                 </div>
               )}
-              {!loading && groupByTime(notifications).map(([group, items]) => (
+              {!loading && !loadFailed && groupByTime(notifications).map(([group, items]) => (
                 <div key={group}>
                   <div style={{
                     padding: '8px 20px', fontSize: 11, fontWeight: 700, color: colors.muted,

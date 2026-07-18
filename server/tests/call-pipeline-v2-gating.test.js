@@ -939,6 +939,21 @@ describe('name_email_mismatch in routing', () => {
   });
 });
 
+// Call-dictated email flags (call-recording-processor bridge) carry the same
+// read-back-confirm job as name_email_mismatch / email_bounce_reverify —
+// unmapped they defaulted to service_unknown and sat with the billing noise.
+describe('email dictation flags route to name_review', () => {
+  test('email_unverified maps to name_review triage category', () => {
+    const item = buildTriageItem({ callLogId: 'x', flag: 'email_unverified', extraction: { meta: { call_summary: 's' } } });
+    expect(item.category).toBe('name_review');
+  });
+
+  test('email_invalid maps to name_review triage category', () => {
+    const item = buildTriageItem({ callLogId: 'x', flag: 'email_invalid', extraction: { meta: { call_summary: 's' } } });
+    expect(item.category).toBe('name_review');
+  });
+});
+
 // Advisory identity flags emitted by the enforce path too (survive DRIVES_ROUTING
 // promotion), but ADVISORY = they reach Needs Review without blocking auto-route.
 describe('advisory identity flags (missing_last_name / rental_or_tenant_occupied)', () => {

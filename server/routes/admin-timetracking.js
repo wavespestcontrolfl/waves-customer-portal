@@ -3,8 +3,35 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
+const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
+const {
+  addStaffWorkDays,
+  staffWorkDate,
+  staffWorkDateSql,
+} = require('../utils/staff-time-work-date');
+const {
+  MAX_STAFF_EMAIL_LENGTH,
+  canonicalStaffEmail,
+} = require('../utils/staff-identity');
+
+const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
+
+function staffAnalyticsDateRange({ startDate, endDate } = {}, now = new Date()) {
+  const today = staffWorkDate(now);
+  return {
+    start: startDate || addStaffWorkDays(today, -30),
+    end: endDate || today,
+  };
+}
+
+function applyStaffEntryWorkDateRange(query, start, end) {
+  return query.whereRaw(
+    `${STAFF_ENTRY_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`,
+    [start, end],
+  );
+}
 
 // Pure calendar arithmetic on YYYY-MM-DD strings — no timezone enters
 // because we never read hours. Use this anywhere we need a "+ N days
@@ -17,39 +44,6 @@ function addCalendarDaysToYMD(ymd, days) {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
-// Convert a SQL DATE column to YYYY-MM-DD WITHOUT going through the
-// ET shift. pg+knex returns DATE as either a Date at UTC midnight or
-// a YYYY-MM-DD string; both yield the same calendar day via
-// toISOString().slice(0,10), unlike etDateString(new Date(d)) which
-// would push UTC midnight back to the prior ET day.
-function dateColumnToYMD(value) {
-  if (value == null) return null;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return String(value).slice(0, 10);
-}
-
-// When an admin mutates time data on a week the tech has already
-// signed (PUT/DELETE entries, daily reject/reopen, dispute), the
-// previous attestation no longer reflects the on-record hours. Clear
-// the sign-off so the tech has to re-sign after seeing the corrected
-// data. No-ops on already-approved weeks (admin-side approval is the
-// terminal lock; we don't reach into a locked row from here).
-async function clearTechSignoffForWeek(technicianId, ymd, trx) {
-  if (!technicianId || !ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
-  // ymd MUST be a YYYY-MM-DD string. Callers convert timestamps via
-  // etDateString(new Date(timestamp)) and DATE columns via the
-  // dateColumnToYMD helper — passing a Date directly would re-introduce
-  // the UTC-midnight-vs-ET confusion (Mon UTC-midnight is Sun in ET,
-  // so etDateString would shift the wrong way for a DATE column while
-  // being correct for a real timestamp).
-  const weekStart = etWeekStart(parseETDateTime(`${ymd}T12:00`));
-  await (trx || db)('time_weekly_summary')
-    .where({ technician_id: technicianId, week_start: weekStart })
-    .whereNot({ status: 'approved' })
-    .whereNotNull('tech_signed_at')
-    .update({ tech_signed_at: null, tech_signature: null, updated_at: new Date() });
-}
-
 // Authentication is router-wide; authorization is per-route. The
 // previous setup mounted requireTechOrAdmin at the router level, but
 // that pattern is harder to audit when individual routes also stack
@@ -59,41 +53,42 @@ async function clearTechSignoffForWeek(technicianId, ymd, trx) {
 // requireTechOrAdmin, admin-only payroll/PII paths get requireAdmin.
 router.use(adminAuthenticate);
 
-// Allowlist of `technicians` columns safe to expose to tech-role
-// callers (other techs hitting GET /technicians for a roster view).
-// Allowlist over denylist — an unknown future column added to the
-// table (auth tokens, password resets, anything HR adds) defaults to
-// "not exposed" instead of "leaked until somebody updates the
-// denylist." password_hash specifically lives on this table.
-const PUBLIC_TECH_FIELDS = [
+// Positive response allowlists for `technicians`. Authentication state lives
+// on the same row as the team/payroll profile, so returning `technicians.*`
+// and deleting known secrets is unsafe: future auth columns would otherwise
+// become API fields by default.
+const TECH_ROSTER_RESPONSE_FIELDS = [
   'id', 'name', 'phone', 'email', 'role',
   'active', 'auto_flip_enabled',
   'avatar_url',
   'created_at', 'updated_at',
 ];
 
-function sanitizeTechForNonAdmin(tech) {
+const ADMIN_TECH_RESPONSE_FIELDS = [
+  ...TECH_ROSTER_RESPONSE_FIELDS,
+  'pay_rate', 'hire_date', 'job_title', 'employment_type',
+  'address', 'dob', 'emergency_contact_name',
+  'emergency_contact_phone', 'ssn_last4',
+  'fl_applicator_license', 'license_expiry', 'license_categories',
+  'applicator_printed_name',
+  'bouncie_imei', 'bouncie_vin', 'vehicle_name',
+];
+
+function pickTechResponseFields(tech, fields) {
+  if (!tech) return tech;
   const out = {};
-  for (const f of PUBLIC_TECH_FIELDS) {
+  for (const f of fields) {
     if (f in tech) out[f] = tech[f];
   }
   return out;
 }
 
-// Fields that should never leave the server in any response, even to
-// admin callers. password_hash exists on the technicians row for
-// portal-side auth — clients have no business case for receiving it
-// and a leaked hash makes offline brute-force possible against any
-// JWT-revoked rotation. Apply this stripper at every admin response
-// path that returns a raw `technicians.*` row (insert/update returning,
-// .first() lookups). Non-admin paths already exclude it via the
-// PUBLIC_TECH_FIELDS allowlist.
-const NEVER_RETURN_TECH_FIELDS = ['password_hash'];
-function stripPrivateTechFields(tech) {
-  if (!tech) return tech;
-  const out = { ...tech };
-  for (const f of NEVER_RETURN_TECH_FIELDS) delete out[f];
-  return out;
+function sanitizeTechForNonAdmin(tech) {
+  return pickTechResponseFields(tech, TECH_ROSTER_RESPONSE_FIELDS);
+}
+
+function sanitizeTechForAdmin(tech) {
+  return pickTechResponseFields(tech, ADMIN_TECH_RESPONSE_FIELDS);
 }
 
 // Authoritative admin check — reads from req.technician.role (the
@@ -105,53 +100,11 @@ function isAdminCaller(req) {
   return !!(req.technician && req.technician.role === 'admin');
 }
 
-// Auto-create tables if missing
-async function ensureTables() {
-  if (!(await db.schema.hasTable('time_entries'))) {
-    await db.schema.createTable('time_entries', t => {
-      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
-      t.uuid('technician_id').notNullable(); t.string('entry_type', 20).defaultTo('shift');
-      t.string('status', 20).defaultTo('active'); t.timestamp('clock_in').notNullable();
-      t.timestamp('clock_out'); t.decimal('duration_minutes', 8, 2); t.uuid('job_id'); t.uuid('customer_id');
-      t.decimal('clock_in_lat', 10, 7); t.decimal('clock_in_lng', 10, 7);
-      t.decimal('clock_out_lat', 10, 7); t.decimal('clock_out_lng', 10, 7);
-      t.string('service_type', 50); t.string('pay_type', 20).defaultTo('regular');
-      t.text('notes'); t.text('edit_reason'); t.string('edited_by', 100);
-      t.string('source', 20).defaultTo('tech_app'); t.timestamps(true, true);
-    });
-    logger.info('[timetracking] Auto-created time_entries table');
-  }
-  if (!(await db.schema.hasTable('time_entry_daily_summary'))) {
-    await db.schema.createTable('time_entry_daily_summary', t => {
-      t.increments('id'); t.uuid('technician_id').notNullable(); t.date('work_date').notNullable();
-      t.decimal('total_shift_minutes', 8, 2).defaultTo(0); t.decimal('total_job_minutes', 8, 2).defaultTo(0);
-      t.decimal('total_drive_minutes', 8, 2).defaultTo(0); t.decimal('total_break_minutes', 8, 2).defaultTo(0);
-      t.integer('job_count').defaultTo(0); t.decimal('overtime_minutes', 8, 2).defaultTo(0);
-      t.decimal('utilization_pct', 5, 2); t.decimal('revenue_generated', 10, 2).defaultTo(0);
-      t.string('status', 20).defaultTo('pending'); t.timestamps(true, true);
-      t.unique(['technician_id', 'work_date']);
-    });
-    logger.info('[timetracking] Auto-created time_entry_daily_summary table');
-  }
-  if (!(await db.schema.hasTable('time_weekly_summary'))) {
-    await db.schema.createTable('time_weekly_summary', t => {
-      t.increments('id'); t.uuid('technician_id').notNullable(); t.date('week_start').notNullable();
-      t.date('week_end').notNullable(); t.decimal('total_shift_minutes', 8, 2).defaultTo(0);
-      t.decimal('regular_minutes', 8, 2).defaultTo(0); t.decimal('overtime_minutes', 8, 2).defaultTo(0);
-      t.integer('days_worked').defaultTo(0); t.integer('job_count').defaultTo(0);
-      t.string('status', 20).defaultTo('pending'); t.timestamps(true, true);
-      t.unique(['technician_id', 'week_start']);
-    });
-    logger.info('[timetracking] Auto-created time_weekly_summary table');
-  }
-}
-
 // ---------------------------------------------------------------------------
 // GET /  — Dashboard: who's clocked in, today's labor, weekly stats
 // ---------------------------------------------------------------------------
 router.get('/', requireTechOrAdmin, async (req, res, next) => {
   try {
-    await ensureTables();
     const today = etDateString(new Date());
 
     // Active shifts
@@ -298,13 +251,6 @@ router.put('/entries/:id', requireAdmin, async (req, res, next) => {
     const { clock_in, clock_out, entry_type, notes, edit_reason } = req.body;
     if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
 
-    // Capture the pre-edit clock_in so we can also invalidate the
-    // OLD week's sign-off when an admin moves an entry across week
-    // boundaries — both the source and destination weeks have changed
-    // totals, so neither tech attestation should survive.
-    const prior = await db('time_entries')
-      .where({ id: req.params.id })
-      .first('technician_id', 'clock_in');
     const updated = await timeTracking.adminEditEntry(req.params.id, {
       clock_in,
       clock_out,
@@ -313,24 +259,6 @@ router.put('/entries/:id', requireAdmin, async (req, res, next) => {
       edit_reason,
       edited_by: req.technicianId,
     });
-    if (updated && updated.technician_id) {
-      // clock_in is a TIMESTAMP — convert to its ET calendar day
-      // before passing to the YMD-only helper.
-      const updatedYmd = etDateString(new Date(updated.clock_in));
-      await clearTechSignoffForWeek(updated.technician_id, updatedYmd);
-      // If the entry moved across weeks OR was reassigned to a
-      // different tech, the SOURCE tech's source week also has
-      // changed totals — clear that with the prior tech_id, not the
-      // new one. (Passing updated.technician_id here would clear the
-      // wrong row on a reassignment.)
-      if (prior && prior.clock_in && prior.technician_id && (
-        String(prior.clock_in) !== String(updated.clock_in) ||
-        prior.technician_id !== updated.technician_id
-      )) {
-        const priorYmd = etDateString(new Date(prior.clock_in));
-        await clearTechSignoffForWeek(prior.technician_id, priorYmd);
-      }
-    }
     res.json(updated);
   } catch (err) {
     next(err);
@@ -347,11 +275,6 @@ router.delete('/entries/:id', requireAdmin, async (req, res, next) => {
       reason: reason || 'Admin voided',
       voided_by: req.technicianId,
     });
-    if (voided && voided.technician_id) {
-      // clock_in is a TIMESTAMP — convert to its ET calendar day.
-      const voidedYmd = etDateString(new Date(voided.clock_in));
-      await clearTechSignoffForWeek(voided.technician_id, voidedYmd);
-    }
     res.json(voided);
   } catch (err) {
     next(err);
@@ -371,126 +294,26 @@ router.get('/daily', requireAdmin, async (req, res, next) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Helpers — audit + SMS for approval actions
-// ---------------------------------------------------------------------------
-async function recordApprovalAudit(summary, action, adminId, reason) {
-  try {
-    await db('timesheet_approvals').insert({
-      daily_summary_id: summary.id,
-      technician_id: summary.technician_id,
-      work_date: summary.work_date,
-      action,
-      admin_id: adminId || null,
-      reason: reason || null,
-      prior_status: summary.status || null,
-    });
-  } catch (e) {
-    logger.error(`[timetracking] approval audit failed: ${e.message}`);
-  }
-}
-
-async function notifyTechOfApproval(summary, action, reason) {
-  try {
-    const tech = await db('technicians').where({ id: summary.technician_id }).first();
-    if (!tech?.phone) return;
-    const dateStr = new Date(summary.work_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-    const hrs = ((summary.total_shift_minutes || 0) / 60).toFixed(2);
-    const TwilioService = require('../services/twilio');
-    let body;
-    if (action === 'approved') {
-      body = `Waves: Your timesheet for ${dateStr} (${hrs} hrs) has been approved.`;
-    } else if (action === 'rejected') {
-      body = `Waves: Your timesheet for ${dateStr} needs a correction${reason ? ` — ${reason}` : ''}. Open the tech app to review and resubmit.`;
-    } else {
-      body = `Waves: Your timesheet for ${dateStr} has been reopened.`;
-    }
-    await TwilioService.sendSMS(tech.phone, body);
-  } catch (e) {
-    logger.error(`[timetracking] tech SMS failed: ${e.message}`);
-  }
+function retiredDailyApproval(_req, res) {
+  return res.status(410).json({
+    error: 'Legacy daily approval/export endpoints are retired. Use weekly approved snapshots.',
+  });
 }
 
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/approve — approve a daily summary
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/approve', requireAdmin, async (req, res, next) => {
-  try {
-    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
-    if (!prior) return res.status(404).json({ error: 'Summary not found' });
-    const [updated] = await db('time_entry_daily_summary')
-      .where({ id: req.params.id })
-      .update({
-        status: 'approved',
-        approved_by: req.technicianId,
-        approved_at: new Date(),
-        updated_at: new Date(),
-      })
-      .returning('*');
-    await recordApprovalAudit(prior, 'approved', req.technicianId, null);
-    notifyTechOfApproval(updated, 'approved');
-    res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
+router.put('/daily/:id/approve', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reject — reject a daily summary with reason
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reject', requireAdmin, async (req, res, next) => {
-  try {
-    const { reason } = req.body || {};
-    if (!reason || !reason.trim()) {
-      return res.status(400).json({ error: 'reason required' });
-    }
-    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
-    if (!prior) return res.status(404).json({ error: 'Summary not found' });
-    const [updated] = await db('time_entry_daily_summary')
-      .where({ id: req.params.id })
-      .update({
-        status: 'rejected',
-        approved_by: req.technicianId,
-        approved_at: new Date(),
-        notes: reason,
-        updated_at: new Date(),
-      })
-      .returning('*');
-    await recordApprovalAudit(prior, 'rejected', req.technicianId, reason);
-    // work_date is a SQL DATE column — format directly as YMD so we
-    // don't shift through ET (UTC midnight Date would drop a day).
-    await clearTechSignoffForWeek(updated.technician_id, dateColumnToYMD(updated.work_date));
-    notifyTechOfApproval(updated, 'rejected', reason);
-    res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
+router.put('/daily/:id/reject', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reopen — return an approved/rejected summary to pending
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reopen', requireAdmin, async (req, res, next) => {
-  try {
-    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
-    if (!prior) return res.status(404).json({ error: 'Summary not found' });
-    const [updated] = await db('time_entry_daily_summary')
-      .where({ id: req.params.id })
-      .update({
-        status: 'pending',
-        approved_by: null,
-        approved_at: null,
-        updated_at: new Date(),
-      })
-      .returning('*');
-    await recordApprovalAudit(prior, 'reopened', req.technicianId, req.body?.reason || null);
-    await clearTechSignoffForWeek(updated.technician_id, dateColumnToYMD(updated.work_date));
-    notifyTechOfApproval(updated, 'reopened');
-    res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
+router.put('/daily/:id/reopen', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // GET /daily/:id/history — approval audit trail for a summary
@@ -518,33 +341,7 @@ router.get('/daily/:id/history', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /daily/bulk-approve — approve multiple daily summaries
 // ---------------------------------------------------------------------------
-router.post('/daily/bulk-approve', requireAdmin, async (req, res, next) => {
-  try {
-    const { ids } = req.body;
-    if (!ids || !Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ error: 'ids array required' });
-    }
-    const priors = await db('time_entry_daily_summary')
-      .whereIn('id', ids).where('status', 'pending').select('*');
-    const count = await db('time_entry_daily_summary')
-      .whereIn('id', ids)
-      .where('status', 'pending')
-      .update({
-        status: 'approved',
-        approved_by: req.technicianId,
-        approved_at: new Date(),
-        updated_at: new Date(),
-      });
-    // Audit + notify each
-    for (const prior of priors) {
-      await recordApprovalAudit(prior, 'approved', req.technicianId, null);
-      notifyTechOfApproval({ ...prior, status: 'approved' }, 'approved');
-    }
-    res.json({ approved: count });
-  } catch (err) {
-    next(err);
-  }
-});
+router.post('/daily/bulk-approve', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // GET /weekly — weekly summaries
@@ -560,54 +357,9 @@ router.get('/weekly', requireAdmin, async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /payroll-export — CSV export for a week
+// GET /payroll-export — retired daily export (weekly approved snapshots only)
 // ---------------------------------------------------------------------------
-router.get('/payroll-export', requireAdmin, async (req, res, next) => {
-  try {
-    const { weekStart } = req.query;
-    if (!weekStart) return res.status(400).json({ error: 'weekStart required (YYYY-MM-DD, Monday)' });
-
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekEnd.getDate() + 6);
-    const weekEndStr = weekEnd.toISOString().split('T')[0];
-
-    const dailies = await db('time_entry_daily_summary')
-      .where('work_date', '>=', weekStart)
-      .where('work_date', '<=', weekEndStr)
-      .leftJoin('technicians', 'time_entry_daily_summary.technician_id', 'technicians.id')
-      .select('time_entry_daily_summary.*', 'technicians.name as tech_name')
-      .orderBy(['technicians.name', 'work_date']);
-
-    // Build CSV
-    const headers = [
-      'Tech Name', 'Date', 'Shift Hours', 'Job Hours', 'Drive Hours', 'Break Hours',
-      'Admin Hours', 'OT Hours', 'Jobs', 'Revenue', 'RPMH', 'Utilization %', 'Status',
-    ];
-    const rows = dailies.map(d => [
-      d.tech_name,
-      d.work_date,
-      (parseFloat(d.total_shift_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.total_job_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.total_drive_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.total_break_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.total_admin_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.overtime_minutes || 0) / 60).toFixed(2),
-      d.job_count,
-      parseFloat(d.revenue_generated || 0).toFixed(2),
-      parseFloat(d.rpmh_actual || 0).toFixed(2),
-      parseFloat(d.utilization_pct || 0).toFixed(1),
-      d.status,
-    ]);
-
-    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="payroll_${weekStart}.csv"`);
-    res.send(csv);
-  } catch (err) {
-    next(err);
-  }
-});
+router.get('/payroll-export', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // GET /analytics — actual vs estimated, utilization, RPMH, overtime
@@ -615,17 +367,19 @@ router.get('/payroll-export', requireAdmin, async (req, res, next) => {
 router.get('/analytics', requireAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate, technicianId } = req.query;
-    const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
-    const end = endDate || etDateString();
+    const now = new Date();
+    const { start, end } = staffAnalyticsDateRange({ startDate, endDate }, now);
 
     // Actual vs estimated by service type
-    let svcQuery = db('time_entries')
-      .where('time_entries.entry_type', 'job')
-      .where('time_entries.status', '!=', 'voided')
-      .whereNotNull('time_entries.duration_minutes')
-      .whereNotNull('time_entries.job_id')
-      .where('time_entries.clock_in', '>=', start)
-      .where('time_entries.clock_in', '<=', end + ' 23:59:59')
+    let svcQuery = applyStaffEntryWorkDateRange(
+      db('time_entries')
+        .where('time_entries.entry_type', 'job')
+        .where('time_entries.status', '!=', 'voided')
+        .whereNotNull('time_entries.duration_minutes')
+        .whereNotNull('time_entries.job_id'),
+      start,
+      end,
+    )
       .leftJoin('scheduled_services', 'time_entries.job_id', 'scheduled_services.id')
       .select(
         db.raw("COALESCE(time_entries.service_type, scheduled_services.service_type, 'Unknown') as svc_type"),
@@ -659,7 +413,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
     const utilizationByTech = await utilQuery;
 
     // RPMH by tech (recent weeks)
-    const fourWeeksAgo = new Date(Date.now() - 28 * 24 * 3600 * 1000).toISOString().split('T')[0];
+    const fourWeeksAgo = addStaffWorkDays(staffWorkDate(now), -28);
     const rpmhByTech = await db('time_weekly_summary')
       .where('week_start', '>=', fourWeeksAgo)
       .leftJoin('technicians', 'time_weekly_summary.technician_id', 'technicians.id')
@@ -676,7 +430,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
 
     // Weekly overtime trend
     const overtimeTrend = await db('time_weekly_summary')
-      .where('week_start', '>=', new Date(Date.now() - 12 * 7 * 24 * 3600 * 1000).toISOString().split('T')[0])
+      .where('week_start', '>=', addStaffWorkDays(staffWorkDate(now), -12 * 7))
       .leftJoin('technicians', 'time_weekly_summary.technician_id', 'technicians.id')
       .select(
         'technicians.name as tech_name',
@@ -704,15 +458,16 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
 router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
-    const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
-    const end = endDate || etDateString();
+    const { start, end } = staffAnalyticsDateRange({ startDate, endDate });
 
-    const comparison = await db('time_entries')
-      .where('time_entries.entry_type', 'job')
-      .where('time_entries.status', '!=', 'voided')
-      .whereNotNull('time_entries.duration_minutes')
-      .where('time_entries.clock_in', '>=', start)
-      .where('time_entries.clock_in', '<=', end + ' 23:59:59')
+    const comparison = await applyStaffEntryWorkDateRange(
+      db('time_entries')
+        .where('time_entries.entry_type', 'job')
+        .where('time_entries.status', '!=', 'voided')
+        .whereNotNull('time_entries.duration_minutes'),
+      start,
+      end,
+    )
       .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
       .leftJoin('scheduled_services', 'time_entries.job_id', 'scheduled_services.id')
       .select(
@@ -742,7 +497,7 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 // admin tokens get the full rows. Keeping the route accessible to
 // techs preserves the pre-existing dispatch/team-roster use cases
 // without exposing each coworker's wage, DOB, address, etc.
-router.get('/technicians', requireTechOrAdmin, async (req, res, next) => {
+async function listTechnicians(req, res, next) {
   try {
     const techs = await db('technicians').orderBy('active', 'desc').orderBy('name');
     // Presign photo_s3_key into avatar_url for the response. After
@@ -757,11 +512,13 @@ router.get('/technicians', requireTechOrAdmin, async (req, res, next) => {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
       };
-      return callerIsAdmin ? stripPrivateTechFields(row) : sanitizeTechForNonAdmin(row);
+      return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
     }));
     res.json({ technicians: enriched });
   } catch (err) { next(err); }
-});
+}
+
+router.get('/technicians', requireTechOrAdmin, listTechnicians);
 
 // Map camelCase payroll-profile fields from the client to snake_case
 // columns. Each mapping is conditional — undefined leaves the column
@@ -787,19 +544,80 @@ function applyPayrollProfileFields(updates, body) {
   }
 }
 
+// Staff emails are authentication identifiers. Store one canonical form so
+// login/reset lookups cannot diverge on casing or surrounding whitespace.
+function normalizeTechnicianEmail(value) {
+  if (value === undefined) return { value: undefined };
+  if (value === null) return { value: null };
+  if (typeof value !== 'string') return { error: 'Email must be a string or null' };
+
+  if (!value.trim()) return { value: null };
+  const email = canonicalStaffEmail(value);
+  if (!email) {
+    return { error: `Email must be a valid address of ${MAX_STAFF_EMAIL_LENGTH} characters or fewer` };
+  }
+  return { value: email };
+}
+
+async function findTechnicianByCanonicalEmail(connection, email, excludeId) {
+  if (!email) return null;
+  let query = connection('technicians')
+    .whereNotNull('email')
+    .whereRaw('LOWER(BTRIM(email)) = ?', [email]);
+  if (excludeId) query = query.whereNot('id', excludeId);
+  return query.first('id');
+}
+
+// The staff table is small and identity mutations are rare. Serialize them to
+// make canonical-email uniqueness and last-admin checks race-safe.
+async function lockTechnicianMutations(trx) {
+  await trx.raw('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE');
+}
+
+function disconnectRevokedStaffSessions(technicianId, reason) {
+  try {
+    const { disconnectStaffSockets } = require('../sockets');
+    disconnectStaffSockets(technicianId, reason);
+  } catch (error) {
+    logger.error(`[team] Live-session disconnect failed for technician id=${technicianId} (${error.message})`);
+  }
+}
+
+async function deactivationBlocker(trx, target, actorId) {
+  if (!target.active) return null;
+  if (target.id === actorId) return 'You cannot deactivate your own staff account';
+  if (target.role !== 'admin') return null;
+
+  const otherActiveAdmin = await trx('technicians')
+    .where({ role: 'admin', active: true })
+    .whereNot('id', target.id)
+    .first('id');
+  if (!otherActiveAdmin) return 'The final active admin cannot be deactivated';
+  return null;
+}
+
 // POST /technicians — add a new technician. Admin only because the
 // payload now carries payroll/PII fields (pay_rate, DOB, address,
 // SSN-4, emergency contact). Pre-existing route protection was
 // requireTechOrAdmin; tightening to requireAdmin since we widened
 // the body shape.
-router.post('/technicians', requireAdmin, async (req, res, next) => {
+async function createTechnician(req, res, next) {
   try {
-    const { name, phone, email, autoFlipEnabled } = req.body;
-    if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+    const body = req.body || {};
+    const { name, phone, email, autoFlipEnabled } = body;
+    if (typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+    const normalizedEmail = normalizeTechnicianEmail(email);
+    if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
+    if (!normalizedEmail.value) {
+      return res.status(400).json({ error: 'An active technician requires a valid staff email' });
+    }
+
     const insertRow = {
       name: name.trim(),
       phone: phone || null,
-      email: email || null,
+      email: normalizedEmail.value ?? null,
       active: true,
     };
     // Honor the create-form's auto-flip checkbox. Without this, an
@@ -809,39 +627,139 @@ router.post('/technicians', requireAdmin, async (req, res, next) => {
     // the tech out. Falsy explicit value → false; undefined → leave
     // it to the column DEFAULT.
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
-    applyPayrollProfileFields(insertRow, req.body);
-    const [tech] = await db('technicians').insert(insertRow).returning('*');
+    applyPayrollProfileFields(insertRow, body);
+
+    const outcome = await db.transaction(async (trx) => {
+      await lockTechnicianMutations(trx);
+      if (insertRow.email && await findTechnicianByCanonicalEmail(trx, insertRow.email)) {
+        return { conflict: true };
+      }
+      const [tech] = await trx('technicians').insert(insertRow).returning('*');
+      return { tech };
+    });
+    if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
+
+    const { tech } = outcome;
     // Log id + structural state only; the row now carries payroll/PII
     // so names stay out of logs per AGENTS.md.
     logger.info(`[team] Added technician id=${tech.id} (auto_flip_enabled=${tech.auto_flip_enabled})`);
-    res.json({ success: true, technician: stripPrivateTechFields(tech) });
-  } catch (err) { next(err); }
-});
+    return res.json({ success: true, technician: sanitizeTechForAdmin(tech) });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
+    return next(err);
+  }
+}
+
+router.post('/technicians', requireAdmin, createTechnician);
 
 // PUT /technicians/:id — update a technician. Admin only — same
 // reasoning as POST: techs must not be able to edit their own (or
 // anyone else's) pay rate, DOB, SSN, address, or emergency contact.
-router.put('/technicians/:id', requireAdmin, async (req, res, next) => {
+async function updateTechnician(req, res, next) {
   try {
-    const { name, phone, email, active, autoFlipEnabled } = req.body;
-    const updates = {};
-    if (name !== undefined) updates.name = name.trim();
-    if (phone !== undefined) updates.phone = phone;
-    if (email !== undefined) updates.email = email;
-    if (active !== undefined) updates.active = active;
-    // Per-tech auto-flip opt-out (Phase 2E). When false, the geofence
-    // EXIT auto-flip pipeline skips this tech entirely with
-    // action_taken='auto_flip_skipped_tech_disabled'. Default TRUE on
-    // the column so existing rows keep current behavior.
-    if (autoFlipEnabled !== undefined) updates.auto_flip_enabled = !!autoFlipEnabled;
-    applyPayrollProfileFields(updates, req.body);
-    updates.updated_at = new Date();
-    await db('technicians').where({ id: req.params.id }).update(updates);
-    const tech = await db('technicians').where({ id: req.params.id }).first();
+    const body = req.body || {};
+    const { name, phone, email, active, autoFlipEnabled } = body;
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+      return res.status(400).json({ error: 'Name cannot be empty' });
+    }
+    if (active !== undefined && typeof active !== 'boolean') {
+      return res.status(400).json({ error: 'active must be a boolean' });
+    }
+    const normalizedEmail = normalizeTechnicianEmail(email);
+    if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
+
+    const outcome = await db.transaction(async (trx) => {
+      // Every Staff identity writer takes the table lock before a row lock.
+      // Keeping one global order avoids deadlocks with password reset/register.
+      await lockTechnicianMutations(trx);
+      const target = await trx('technicians')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!target) return { notFound: true };
+
+      const storedEmail = canonicalStaffEmail(target.email);
+      const resultingEmail = email === undefined ? storedEmail : normalizedEmail.value;
+      const resultingActive = active === undefined ? Boolean(target.active) : active;
+      if (resultingActive && !resultingEmail) return { missingEmail: true };
+
+      if (active === false) {
+        const blocker = await deactivationBlocker(trx, target, req.technicianId);
+        if (blocker) return { blocker };
+        const activeTimer = await trx('time_entries')
+          .where({ technician_id: target.id, status: 'active' })
+          .forUpdate()
+          .first('id');
+        if (activeTimer) return { activeTimer: true };
+      }
+      if (normalizedEmail.value && await findTechnicianByCanonicalEmail(
+        trx,
+        normalizedEmail.value,
+        target.id,
+      )) {
+        return { conflict: true };
+      }
+
+      const updates = {};
+      if (name !== undefined) updates.name = name.trim();
+      if (phone !== undefined) updates.phone = phone || null;
+      if (email !== undefined) updates.email = normalizedEmail.value;
+      if (active !== undefined) updates.active = active;
+
+      const activeChanged = active !== undefined && active !== Boolean(target.active);
+      const emailChanged = email !== undefined && normalizedEmail.value !== storedEmail;
+      const credentialsChanged = activeChanged || emailChanged;
+      if (credentialsChanged) {
+        updates.auth_token_version = Number(target.auth_token_version || 0) + 1;
+        updates.password_reset_token_hash = null;
+        updates.password_reset_expires_at = null;
+        updates.password_reset_requested_at = null;
+      }
+      if (autoFlipEnabled !== undefined) updates.auto_flip_enabled = !!autoFlipEnabled;
+      applyPayrollProfileFields(updates, body);
+      updates.updated_at = new Date();
+      await trx('technicians').where({ id: target.id }).update(updates);
+
+      const revokeAccess = credentialsChanged || active === false;
+      if (revokeAccess) await PushService.deactivateStaffUser(target.id, trx);
+      const tech = await trx('technicians').where({ id: target.id }).first();
+      return {
+        tech,
+        revokeAccess,
+        revocationReason: active === false
+          ? 'account_deactivated'
+          : activeChanged
+            ? 'account_status_changed'
+            : 'email_changed',
+      };
+    });
+
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.missingEmail) {
+      return res.status(400).json({ error: 'An active technician requires a valid staff email' });
+    }
+    if (outcome.blocker) return res.status(409).json({ error: outcome.blocker });
+    if (outcome.activeTimer) {
+      return res.status(409).json({
+        error: 'Close every active time entry before deactivating this staff account',
+        code: 'ACTIVE_TIME_ENTRIES',
+      });
+    }
+    if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
+
+    const { tech } = outcome;
+    if (outcome.revokeAccess) {
+      disconnectRevokedStaffSessions(tech.id, outcome.revocationReason);
+    }
     logger.info(`[team] Updated technician id=${tech.id} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
-    res.json({ success: true, technician: stripPrivateTechFields(tech) });
-  } catch (err) { next(err); }
-});
+    return res.json({ success: true, technician: sanitizeTechForAdmin(tech) });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
+    return next(err);
+  }
+}
+
+router.put('/technicians/:id', requireAdmin, updateTechnician);
 
 // GET /technicians/:id/earnings — hours × pay_rate breakdown for a
 // window. OT pays at 1.5×. Falls back to $35/hr if pay_rate is unset
@@ -1024,7 +942,7 @@ router.post(
       const { resolveTechPhotoUrl } = require('../services/tech-photo');
       updated.avatar_url = await resolveTechPhotoUrl(updated.photo_s3_key, updated.avatar_url);
 
-      const responseRow = isAdminCaller(req) ? stripPrivateTechFields(updated) : sanitizeTechForNonAdmin(updated);
+      const responseRow = isAdminCaller(req) ? sanitizeTechForAdmin(updated) : sanitizeTechForNonAdmin(updated);
       res.json({ success: true, technician: responseRow });
     } catch (err) {
       logger.error(`[team] Tech photo upload failed: ${err.message}`);
@@ -1033,69 +951,65 @@ router.post(
   }
 );
 
-// DELETE /technicians/:id — hard delete the technician row.
-// If related records exist (time entries, assignments) the DB FK
-// will error; the client surfaces that message. Admin only — the
-// row now carries payroll/PII and the ?force=true branch can purge
-// related records, so tech-role tokens have no business calling
-// this.
-router.delete('/technicians/:id', requireAdmin, async (req, res, next) => {
-  const force = String(req.query.force || '') === 'true';
+// DELETE /technicians/:id — compatibility alias for deactivation. A staff id
+// is historical identity for time, payroll, jobs, compliance, and audit rows;
+// even ?force=true must never turn this endpoint into a data purge.
+async function deactivateTechnician(req, res, next) {
   try {
-    if (!force) {
-      const deleted = await db('technicians').where({ id: req.params.id }).del();
-      if (!deleted) return res.status(404).json({ error: 'Technician not found' });
-      logger.info(`[team] Deleted technician: ${req.params.id}`);
-      return res.json({ success: true });
-    }
+    const outcome = await db.transaction(async (trx) => {
+      await lockTechnicianMutations(trx);
+      const target = await trx('technicians')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!target) return { notFound: true };
 
-    // Force delete — cascade-clean every FK reference using information_schema.
-    const techId = req.params.id;
-    const tech = await db('technicians').where({ id: techId }).first();
-    if (!tech) return res.status(404).json({ error: 'Technician not found' });
+      const blocker = await deactivationBlocker(trx, target, req.technicianId);
+      if (blocker) return { blocker };
+      const activeTimer = await trx('time_entries')
+        .where({ technician_id: target.id, status: 'active' })
+        .forUpdate()
+        .first('id');
+      if (activeTimer) return { activeTimer: true };
 
-    const fks = await db.raw(`
-      SELECT tc.table_name, kcu.column_name, c.is_nullable
-      FROM information_schema.table_constraints tc
-      JOIN information_schema.key_column_usage kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-      JOIN information_schema.constraint_column_usage ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-      JOIN information_schema.columns c
-        ON c.table_name = tc.table_name
-       AND c.column_name = kcu.column_name
-       AND c.table_schema = tc.table_schema
-      WHERE tc.constraint_type = 'FOREIGN KEY'
-        AND ccu.table_name = 'technicians'
-        AND ccu.column_name = 'id'
-    `);
-
-    const purged = [];
-    await db.transaction(async (trx) => {
-      for (const row of fks.rows) {
-        const { table_name, column_name, is_nullable } = row;
-        if (is_nullable === 'YES') {
-          const n = await trx(table_name).where({ [column_name]: techId }).update({ [column_name]: null });
-          purged.push({ table: table_name, column: column_name, action: 'nulled', rows: n });
-        } else {
-          const n = await trx(table_name).where({ [column_name]: techId }).del();
-          purged.push({ table: table_name, column: column_name, action: 'deleted', rows: n });
-        }
+      if (target.active) {
+        await trx('technicians').where({ id: target.id }).update({
+          active: false,
+          auth_token_version: Number(target.auth_token_version || 0) + 1,
+          password_reset_token_hash: null,
+          password_reset_expires_at: null,
+          password_reset_requested_at: null,
+          updated_at: new Date(),
+        });
       }
-      await trx('technicians').where({ id: techId }).del();
+      await PushService.deactivateStaffUser(target.id, trx);
+      const tech = target.active
+        ? await trx('technicians').where({ id: target.id }).first()
+        : target;
+      return { tech, changed: Boolean(target.active) };
     });
 
-    logger.warn(`[team] FORCE deleted technician ${tech.email || techId}: ${JSON.stringify(purged)}`);
-    res.json({ success: true, forced: true, cleaned: purged });
-  } catch (err) {
-    if (err.code === '23503' && !force) {
-      return res.status(409).json({ error: 'Technician has linked records (time entries or jobs). Deactivate instead, or retry with ?force=true to purge related data.' });
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.blocker) return res.status(409).json({ error: outcome.blocker });
+    if (outcome.activeTimer) {
+      return res.status(409).json({
+        error: 'Close every active time entry before deactivating this staff account',
+        code: 'ACTIVE_TIME_ENTRIES',
+      });
     }
-    next(err);
+    disconnectRevokedStaffSessions(outcome.tech.id, 'account_deactivated');
+    if (outcome.changed) logger.info(`[team] Deactivated technician id=${outcome.tech.id}`);
+    return res.json({
+      success: true,
+      deactivated: true,
+      technician: sanitizeTechForAdmin(outcome.tech),
+    });
+  } catch (err) {
+    return next(err);
   }
-});
+}
+
+router.delete('/technicians/:id', requireAdmin, deactivateTechnician);
 
 // =============================================================================
 // COMPANY DOCUMENTS — admin-only internal docs (SOPs, onboarding, offer letters)
@@ -1249,4 +1163,16 @@ router.delete('/documents/:id', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router._test = {
+  STAFF_ENTRY_WORK_DATE_SQL,
+  applyStaffEntryWorkDateRange,
+  staffAnalyticsDateRange,
+};
+
 module.exports = router;
+module.exports._handlers = {
+  createTechnician,
+  deactivateTechnician,
+  listTechnicians,
+  updateTechnician,
+};

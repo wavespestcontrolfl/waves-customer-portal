@@ -165,7 +165,11 @@ function buildTreeShrubInsightCards({
       headline: `${group.label}: ${gstatus === 'needs_attention' ? 'needs a closer look' : 'one item to watch'}`,
       whatWeSaw: group.finding || 'We noted something worth monitoring in this area.',
       whyItMatters: 'Tracking issues by plant group lets us treat the right area, not the whole property.',
-      wavesAction: group.wavesAction || 'Treated this area today and will continue monitoring it.',
+      // Only claim a treatment when one actually happened this visit — an
+      // inspection-only visit must not report "Treated this area today".
+      wavesAction: group.wavesAction || (treatmentKinds.length
+        ? 'Treated this area today and will continue monitoring it.'
+        : 'Inspected this area today and will continue monitoring it.'),
       nextVisitPlan: 'Recheck this area next visit.',
     });
   }
@@ -193,9 +197,14 @@ function buildTreeShrubInsightCards({
       headline: 'Your landscape plants are in good shape',
       whatWeSaw: 'Foliage, color, and pest pressure all look healthy today.',
       whyItMatters: 'Your plants are responding well to the protective program.',
-      wavesAction: has('fertilizer') || has('systemic')
-        ? 'Completed today’s scheduled treatment and documented the visit.'
-        : 'Completed today’s scheduled treatment and continued preventive monitoring.',
+      // "Completed today's scheduled treatment" only when something was
+      // actually applied — an inspection-only visit must not contradict the
+      // inspection-only peaceOfMind line above it (codex P2 #2824 r3).
+      wavesAction: treatmentKinds.length
+        ? (has('fertilizer') || has('systemic')
+          ? 'Completed today’s scheduled treatment and documented the visit.'
+          : 'Completed today’s scheduled treatment and continued preventive monitoring.')
+        : 'Completed a full inspection today and documented the visit.',
       nextVisitPlan: 'Keep the program steady and keep monitoring each visit.',
     });
   }

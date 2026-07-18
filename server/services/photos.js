@@ -14,6 +14,17 @@ const s3Client = new S3Client({
 
 const PhotoService = {
   /**
+   * TTL for presigned VIEW urls on customer-dwell surfaces — tokenized
+   * report/track/document pages and the logged-in portal. URLs are minted
+   * per page-load, so this only has to cover in-page DWELL (backgrounded
+   * tabs, lazy-loaded photo sliders), not link age: 5–15 minute links left
+   * swiped-to report slides blank once the customer had the page open a
+   * while (owner-reported 2026-07-11). 24h covers any realistic session
+   * while keeping a leaked URL's reach bounded.
+   */
+  CUSTOMER_DWELL_TTL_SECONDS: 24 * 60 * 60,
+
+  /**
    * Generate a presigned URL for uploading a photo from the field
    * Tech's mobile app uploads directly to S3 via this URL
    */
@@ -39,6 +50,26 @@ const PhotoService = {
     const command = new GetObjectCommand({
       Bucket: config.s3.bucket,
       Key: s3Key,
+    });
+
+    return getSignedUrl(s3Client, command, { expiresIn });
+  },
+
+  /**
+   * Generate a short-lived URL that downloads an existing private object.
+   * The filename is forced through S3's signed response headers so customer
+   * documents do not inherit an opaque object-key name.
+   */
+  async getDownloadUrl(s3Key, fileName = 'document', expiresIn = 900) {
+    const safeName = String(fileName || 'document')
+      .replace(/[\r\n"\\]/g, '_')
+      .replace(/[^\x20-\x7E]/g, '_')
+      .trim()
+      .slice(0, 180) || 'document';
+    const command = new GetObjectCommand({
+      Bucket: config.s3.bucket,
+      Key: s3Key,
+      ResponseContentDisposition: `attachment; filename="${safeName}"`,
     });
 
     return getSignedUrl(s3Client, command, { expiresIn });

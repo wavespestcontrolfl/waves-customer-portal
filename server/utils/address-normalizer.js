@@ -39,6 +39,8 @@ const STREET_SUFFIX_ALIASES = {
   highway: 'HWY',
   hwy: 'HWY',
   loop: 'LOOP',
+  // Google's geocoder abbreviates Loop as "Lp" (USPS keeps LOOP unabbreviated)
+  lp: 'LOOP',
   pass: 'PASS',
   path: 'PATH',
   run: 'RUN',
@@ -107,7 +109,7 @@ const STREET_SPLIT_SUFFIX_ALIAS_KEYS = [
   'trail', 'trl',
   'parkway', 'pkwy',
   'highway', 'hwy',
-  'loop',
+  'loop', 'lp',
   'pass',
   'path',
   'run',
@@ -551,7 +553,9 @@ function normalizeLeadAddress(input = {}) {
 function formatAddress(parts = {}) {
   const clean = (value) => (value == null ? '' : String(value).trim());
   const region = [clean(parts.state), clean(parts.zip)].filter(Boolean).join(' ');
-  return [clean(parts.line1), clean(parts.city), region].filter(Boolean).join(', ');
+  return [clean(parts.line1), clean(parts.line2), clean(parts.city), region]
+    .filter(Boolean)
+    .join(', ');
 }
 
 module.exports = {

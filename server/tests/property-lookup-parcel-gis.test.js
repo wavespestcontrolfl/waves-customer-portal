@@ -318,16 +318,28 @@ describe('cadastral evidence record', () => {
   });
 });
 
-describe('GIS trust gate (canUseParcelGis)', () => {
+describe('GIS trust gate (canUseParcelGis / parcelGisPrecision)', () => {
   const base = { lat: 27.5, lng: -82.5, partialMatch: false, locationType: 'ROOFTOP' };
+  const { parcelGisPrecision } = aiPrivate;
 
-  it('requires a confident rooftop point', () => {
+  it('accepts rooftop and interpolated points, rejects everything weaker', () => {
     expect(canUseParcelGis(base)).toBe(true);
-    expect(canUseParcelGis({ ...base, locationType: 'RANGE_INTERPOLATED' })).toBe(false);
+    // RANGE_INTERPOLATED is a brand-new plat's typical geocode — allowed to
+    // TRY the point lookup; the trio keeps the parcel only on a positive
+    // situs house-number match (see the situs-number-guard suite).
+    expect(canUseParcelGis({ ...base, locationType: 'RANGE_INTERPOLATED' })).toBe(true);
     expect(canUseParcelGis({ ...base, locationType: 'APPROXIMATE' })).toBe(false);
+    expect(canUseParcelGis({ ...base, locationType: 'GEOMETRIC_CENTER' })).toBe(false);
     expect(canUseParcelGis({ ...base, partialMatch: true })).toBe(false);
     expect(canUseParcelGis({ ...base, lat: NaN })).toBe(false);
     expect(canUseParcelGis(null)).toBe(false);
+  });
+
+  it('reports the precision tier the trio keys its acceptance rule on', () => {
+    expect(parcelGisPrecision(base)).toBe('rooftop');
+    expect(parcelGisPrecision({ ...base, locationType: 'RANGE_INTERPOLATED' })).toBe('interpolated');
+    expect(parcelGisPrecision({ ...base, locationType: 'APPROXIMATE' })).toBeNull();
+    expect(parcelGisPrecision({ ...base, partialMatch: true })).toBeNull();
   });
 });
 

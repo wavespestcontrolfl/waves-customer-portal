@@ -7,7 +7,30 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // service_request.quote_requested / quote_promised, triage flags
 // multi_property_call + quote_promised. All optional: 1.0.0 payloads
 // still validate.
-const SCHEMA_VERSION = '1.1.0';
+// 1.2.0: additive — top-level secondary_contact (a second person named as a
+// party to the service: realtor's buyer, landlord's tenant, spouse). Optional
+// and nullable: 1.0.0 / 1.1.0 payloads still validate.
+// 1.3.0: additive — top-level other_parties_mentioned (call named more people
+// than the one secondary_contact), triage flag
+// existing_appointment_coordination, primary_service_category bed_bug/wdo,
+// pest_type no_see_ums/flies_gnats/scorpions/moles/love_bugs/bats,
+// severity_signal swarmers_seen. All optional/enum-widening: older payloads
+// still validate.
+// 1.4.0: additive — top-level secondary_contacts ARRAY (up to 3 other
+// parties; first entry mirrors secondary_contact for older readers).
+// Optional/nullable: older payloads still validate.
+// 1.5.0: additive — top-level call_nature + recommended_disposition enums
+// (zero-triage disposition layer), spam_verdict object (content-signal input
+// to the layered spam classifier; never a discard decision alone), language.
+// All optional/nullable: 1.0.0–1.4.0 payloads still validate.
+// 1.6.0: additive — secondary_contact(.s[]).is_billing_party boolean (the
+// paying third party for call→payer Bill-To linkage). Optional; older payloads
+// (which lack it) still validate.
+// 1.7.0: additive enum widening (multi-party extraction gap 2026-07-11 —
+// WDO/realtor/lender arranger calls produced NO secondary_contact):
+// caller.relationship_to_property gains real_estate_agent + lender;
+// secondary_contact(.s[]).role gains lender. Older payloads still validate.
+const SCHEMA_VERSION = '1.7.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

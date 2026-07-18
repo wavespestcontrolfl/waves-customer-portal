@@ -16,14 +16,23 @@
  * Contract: docs/design/specialty-service-completion-contract.md
  */
 
-const { PROJECT_TYPES, isValidProjectType } = require('../project-types');
+const {
+  PROJECT_TYPES,
+  isValidProjectType,
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+} = require('../project-types');
 
 // v2: rodent_trapping sectioned checklist fields (chips/count types,
 // owner spec 2026-06-12). Snapshots are immutable — v1 snapshots keep
 // rendering with their persisted labels.
 const SCHEMA_VERSION = 2;
 const COPY_MAP_VERSION = 2;
-const SUMMARY_TEMPLATE_VERSION = 2;
+// Summary template v3: the generic non-gauge default composition of
+// buildTodaysResult accepts the tech-reviewed AI report copy as the body
+// (bodySource 'technician_report'); zero states and every owner story keep
+// template copy, and template-only output is unchanged from v2.
+const SUMMARY_TEMPLATE_VERSION = 3;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -242,7 +251,9 @@ const CUSTOMER_FIELD_LABELS = {
   inspection_scope: 'Areas we checked',
   areas_treated: 'Areas we treated',
   treatment_areas: 'Areas we treated',
-  rooms_treated: 'Areas we treated',
+  // rooms_treated / entry_points_observed are defined once, later in this
+  // map — earlier duplicates were dead (last-key-wins) and tripped
+  // no-dupe-keys once this file was touched.
   harborage_locations: 'Where activity was concentrated',
   conducive_conditions: 'Conditions to address',
   treatment_performed: 'What we did',
@@ -254,7 +265,6 @@ const CUSTOMER_FIELD_LABELS = {
   followup_plan: 'Next steps',
   daily_check_plan: 'Next steps',
   entry_points_found: 'Entry points we found',
-  entry_points_observed: 'Entry points we found',
   traps_set: 'Traps in place',
   species: 'What we found',
   target_animal: 'What we found',
@@ -280,6 +290,13 @@ const CUSTOMER_FIELD_LABELS = {
   palm_count: 'Palms treated',
   linear_feet_or_stations: 'Linear feet / stations',
   gallons_or_amount: 'Amount applied',
+  // Termite Phase-3 compliance fields (owner signoff 2026-07-13):
+  // FS 482.226 report content + FAC 5E-14 application detail.
+  areas_not_inspected: 'Areas not inspected',
+  inspection_notice_affixed: 'Inspection notice posted',
+  percent_solution: 'Solution strength',
+  epa_registration: 'EPA registration no.',
+  posted_notice: 'Posted notice placed',
   evidence_observed: 'Evidence observed today',
   traps_checked: 'Traps checked',
   captures: 'Captures',
@@ -681,13 +698,28 @@ const REQUIRED_FINDINGS_FIELDS = {
   ],
   wildlife_trapping: ['target_animal'],
   bed_bug: ['evidence_level', 'treatment_method'],
-  termite_inspection: ['termite_type', 'activity_status'],
+  // FS 482.226 report content (Codex P1 on the Phase-3 fields): the two
+  // compliance answers are required, not optional — a blank field is
+  // silently skipped from the immutable customer report, which is exactly
+  // the omission the statute forbids. "None" is a truthful
+  // areas_not_inspected answer when everything visible was inspected.
+  termite_inspection: [
+    'termite_type', 'activity_status',
+    'areas_not_inspected', 'inspection_notice_affixed',
+  ],
   termite_treatment: [
     'target_termite',
     'treatment_method',
     'products_used',
     'linear_feet_or_stations',
     'gallons_or_amount',
+    // FAC 5E-14 / FS 482.2265 (Codex P1): every product has an EPA reg.
+    // no., and posted_notice carries its own 'Not applicable' option, so
+    // both are always answerable. percent_solution is conditionally
+    // required (liquid-dilution methods only) in validateTypedFindings —
+    // "% solution" does not describe bait or cartridge work.
+    'epa_registration',
+    'posted_notice',
   ],
   termite_bait_station: ['stations_checked', 'termite_activity', 'bait_consumption'],
   rodent_bait_station: ['stations_checked', 'bait_consumption'],
@@ -1225,6 +1257,39 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     }
   }
 
+  // Termite treatment: % solution is FAC 5E-14 application detail for
+  // liquid-dilution work, so it is required exactly when the recorded
+  // method is one — bait station and cartridge visits have no dilution to
+  // report, and 'Other' is unknowable (Codex P1 on the Phase-3 fields).
+  // The method lists are shared with the schema requiredUnless metadata
+  // and the project send-readiness gate (project-types.js).
+  if (type === 'termite_treatment') {
+    const method = String(values.treatment_method || '');
+    if (enforceRequired && TERMITE_LIQUID_DILUTION_METHODS.includes(method)
+      && String(values.percent_solution ?? '').trim() === '') {
+      missing.push('percent_solution');
+    }
+    // FS 482.2265: perimeter/exterior applications carry the posted-notice
+    // duty, so 'Not applicable'/'No' beside a perimeter method is a
+    // contradiction the immutable report must not record (Codex P2 r2).
+    // Gated on enforceRequired: a mid-visit draft may truthfully hold the
+    // pre-posting state; the completion cannot.
+    const postedNotice = String(values.posted_notice || '');
+    if (enforceRequired && TERMITE_PERIMETER_METHODS.includes(method)
+      && postedNotice && postedNotice !== 'Yes') {
+      errors.push(`Posted notice "${postedNotice}" contradicts the ${method} application — exterior/perimeter treatments require the posted notice: place it and select "Yes"`);
+    }
+  }
+  // FS 482.226: the Phase-3 field exists so the report states the
+  // inspection notice WAS affixed — 'No' is a blocking exception, not a
+  // sendable answer (Codex P2 r2). Same enforceRequired gating as above:
+  // affixing is in the tech's control at visit time, so completion demands
+  // it done, while a draft may record the not-yet state.
+  if (type === 'termite_inspection' && enforceRequired
+    && String(values.inspection_notice_affixed || '') === 'No') {
+    errors.push('The inspection notice must be affixed before the report can be completed — affix the notice and select "Yes"');
+  }
+
   if (enforceRequired) {
     // chips store a comma-joined selection — a value like "," has no real
     // selections but a plain trim check would accept it (Codex P2). A
@@ -1242,7 +1307,7 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   return { ok: errors.length === 0 && missing.length === 0, errors, missing };
 }
 
-function validateNextStepChips(chips, projectType = null, values = null) {
+function validateNextStepChips(chips, projectType = null, values = null, context = {}) {
   if (chips == null) return { ok: true, chips: [] };
   if (!Array.isArray(chips)) return { ok: false, error: 'nextStepChips must be an array' };
   if (chips.length > MAX_NEXT_STEP_CHIPS) {
@@ -1257,6 +1322,15 @@ function validateNextStepChips(chips, projectType = null, values = null) {
       return { ok: false, error: `Next-step chip not available for this service: ${key}` };
     }
     if (!normalized.includes(key)) normalized.push(key);
+  }
+  // Two-treatment package, first visit (context set by the completion
+  // route): the included follow-up is owed regardless of findings, so "No
+  // further action is needed right now." can never land in the immutable
+  // report beside a completion response demanding the second visit (Codex
+  // r3 on the 20260712300000 cutover). The chip stays available on the
+  // included follow-up visit itself.
+  if (context.packageFollowupPending && normalized.includes('No action needed')) {
+    return { ok: false, error: 'Next-step chip "No action needed" contradicts this service\'s included follow-up visit — select a follow-up next step instead' };
   }
   // "No action needed" beside confirmed/suspected flea activity contradicts
   // the report's mandatory aftercare story — the chip sentence ("No further
@@ -1642,6 +1716,12 @@ function buildTodaysResult({
   chips = [],
   activity = null,
   visitSequence = 1,
+  // Tech-reviewed AI report copy (the completion form's "Generate AI report"
+  // output, parsed + banned-copy-screened by the complete route via
+  // technician-report-copy.js). Only the generic non-gauge default
+  // composition below uses it — zero states and every owner-specified story
+  // branch keep their approved wording.
+  technicianReportBody = null,
 }) {
   const indicator = ACTIVITY_INDICATORS[projectType];
   // Sectioned-checklist types compose "what we did" from their selections
@@ -2002,7 +2082,11 @@ function buildTodaysResult({
     };
   }
 
-  // Non-gauge types (one-shot treatments + pest inspection).
+  // Non-gauge types (one-shot treatments + pest inspection). The zero state
+  // deliberately keeps the template body even when AI report copy exists
+  // (Codex P2 #2709): the draft can predate a late flip of the activity
+  // select to "None observed", and a body describing activity under the
+  // "No active signs" headline would contradict the tech's typed zero.
   const zeroSeverity = ['None observed', 'No activity'].includes(
     String(values.severity || values.activity_level || '')
   );
@@ -2013,13 +2097,20 @@ function buildTodaysResult({
       nextStep,
     };
   }
+  // The default composition has no owner-mandated body story, so it is the
+  // one place the technician's reviewed AI report copy replaces the template
+  // body (the one-time pest family — re-services, cleanouts, bee/wasp,
+  // tick — lands here on any non-zero activity). Headline stays
+  // deterministic; bodySource is stamped only when the AI copy is used so
+  // template snapshots stay byte-identical.
   return {
     // The label suffix reads awkwardly in a headline ("Palm Injection
     // Summary completed today") — the approved golden-fixture style is
     // "Palm Injection Treatment completed today."
     headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today.`,
-    body: `${whatWeDid} ${nextStep}`,
+    body: `${technicianReportBody || whatWeDid} ${nextStep}`,
     nextStep,
+    ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
   };
 }
 
@@ -2040,6 +2131,7 @@ function buildTypedReportSnapshot({
   visitSequence = 1,
   activity = null,
   photoSummary = null,
+  technicianReportBody = null,
 }) {
   const config = PROJECT_TYPES[projectType];
   if (!config) return null;
@@ -2059,10 +2151,18 @@ function buildTypedReportSnapshot({
     const value = values[field.key];
     if (value == null || value === '') continue;
     // chips persist a comma-joined selection — map each element through
-    // the copy map individually so per-chip customer wording applies.
-    const customerValueLabel = field.type === 'chips'
+    // the copy map individually so per-chip customer wording applies. The
+    // mapped PARTS also persist on the item (D1): the report renders chips
+    // from this authoritative array only — a client-side comma split would
+    // shred single-select customer labels that contain commas ("Older,
+    // inactive damage only"), and mapped chip labels may themselves carry
+    // commas. Legacy snapshots without the array render as prose.
+    const customerValueParts = field.type === 'chips'
       ? String(value).split(',').map((s) => s.trim()).filter(Boolean)
-        .map((part) => customerLabelForValue(field.key, part)).join(', ')
+        .map((part) => customerLabelForValue(field.key, part))
+      : null;
+    const customerValueLabel = customerValueParts
+      ? customerValueParts.join(', ')
       : customerLabelForValue(field.key, value);
     items.push({
       fieldKey: field.key,
@@ -2070,6 +2170,7 @@ function buildTypedReportSnapshot({
       customerLabel: customerLabelForField(field.key, field.label),
       value,
       customerValueLabel,
+      ...(customerValueParts && customerValueParts.length ? { customerValueParts } : {}),
     });
   }
 
@@ -2080,6 +2181,7 @@ function buildTypedReportSnapshot({
     chips: nextStepChips,
     activity,
     visitSequence,
+    technicianReportBody,
   });
 
   return {
@@ -2158,11 +2260,11 @@ function findingsSchemaForType(projectType, { serviceKey = null } = {}) {
         options: f.options || null,
         placeholder: f.placeholder || null,
         required: (REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key),
-        // Conditional requirement ({ field, value }): required exactly when
-        // the named sibling field holds a non-empty value other than
-        // `value`. Served so the client pre-submit gate mirrors the server
-        // enforcement instead of discovering it as a post-submit 422
-        // (Codex P2).
+        // Conditional requirement ({ field, value } or { field, values }):
+        // required exactly when the named sibling field holds a non-empty
+        // value other than `value` / outside `values`. Served so the client
+        // pre-submit gate mirrors the server enforcement instead of
+        // discovering it as a post-submit 422 (Codex P2).
         requiredUnless: f.requiredUnless || null,
         // internal fields are tech-facing compliance entries — validated and
         // stored, but excluded from the customer-facing snapshot findings.

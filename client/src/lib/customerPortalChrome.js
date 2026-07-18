@@ -1,6 +1,5 @@
 const PUBLIC_ROUTE_PREFIXES = [
   '/book',
-  '/button-examples',
   '/contract',
   '/estimate',
   '/newsletter',
@@ -11,7 +10,6 @@ const PUBLIC_ROUTE_PREFIXES = [
   '/report',
   '/review',
   '/track',
-  '/track-preview',
 ];
 
 export function isLoginOrCustomerPortalPath(pathname = '/') {

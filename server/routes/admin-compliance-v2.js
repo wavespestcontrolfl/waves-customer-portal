@@ -2,7 +2,49 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const ComplianceService = require('../services/compliance');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LICENSE_UPDATE_FIELDS = new Set([
+  'fl_applicator_license',
+  'license_expiry',
+  'license_categories',
+]);
+
+function validDateOnly(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day;
+}
+
+function parseLicenseCategories(value) {
+  if (value == null) return null;
+  if (!Array.isArray(value) || value.length > 20) return undefined;
+  const categories = [];
+  for (const item of value) {
+    if (typeof item !== 'string') return undefined;
+    const category = item.trim();
+    if (!category || category.length > 100) return undefined;
+    if (!categories.includes(category)) categories.push(category);
+  }
+  return categories;
+}
+
+function licenseResponse(tech) {
+  let licenseCategories = tech.license_categories;
+  if (typeof licenseCategories === 'string') {
+    try { licenseCategories = JSON.parse(licenseCategories); } catch { licenseCategories = null; }
+  }
+  return {
+    id: tech.id,
+    license: tech.fl_applicator_license,
+    licenseExpiry: tech.license_expiry,
+    licenseCategories,
+  };
+}
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -100,26 +142,61 @@ router.get('/licenses', async (req, res, next) => {
 });
 
 // PUT /api/admin/compliance-v2/licenses/:techId — update tech license
-router.put('/licenses/:techId', async (req, res, next) => {
+async function updateLicense(req, res, next) {
   try {
-    const { fl_applicator_license, license_expiry, license_categories } = req.body;
+    const techId = String(req.params.techId || '');
+    if (!UUID_RE.test(techId)) {
+      return res.status(400).json({ error: 'Invalid technician id' });
+    }
+
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ error: 'License update body must be an object' });
+    }
+    const fields = Object.keys(body);
+    if (!fields.length || fields.some((field) => !LICENSE_UPDATE_FIELDS.has(field))) {
+      return res.status(400).json({ error: 'Only license fields may be updated' });
+    }
+
     const updates = {};
-    if (fl_applicator_license !== undefined) updates.fl_applicator_license = fl_applicator_license;
-    if (license_expiry !== undefined) updates.license_expiry = license_expiry;
-    if (license_categories !== undefined) updates.license_categories = JSON.stringify(license_categories);
+    if (body.fl_applicator_license !== undefined) {
+      if (body.fl_applicator_license !== null && typeof body.fl_applicator_license !== 'string') {
+        return res.status(400).json({ error: 'fl_applicator_license must be a string or null' });
+      }
+      const license = typeof body.fl_applicator_license === 'string'
+        ? body.fl_applicator_license.trim()
+        : '';
+      if (license.length > 50) {
+        return res.status(400).json({ error: 'fl_applicator_license must be 50 characters or fewer' });
+      }
+      updates.fl_applicator_license = license || null;
+    }
+    if (body.license_expiry !== undefined) {
+      const expiry = body.license_expiry;
+      if (expiry !== null && expiry !== '' && (typeof expiry !== 'string' || !validDateOnly(expiry))) {
+        return res.status(400).json({ error: 'license_expiry must be a valid YYYY-MM-DD date or null' });
+      }
+      updates.license_expiry = expiry || null;
+    }
+    if (body.license_categories !== undefined) {
+      const categories = parseLicenseCategories(body.license_categories);
+      if (categories === undefined) {
+        return res.status(400).json({ error: 'license_categories must be an array of short, non-empty strings or null' });
+      }
+      updates.license_categories = categories === null ? null : JSON.stringify(categories);
+    }
 
     const [tech] = await db('technicians')
-      .where({ id: req.params.techId })
+      .where({ id: techId })
       .update(updates)
-      .returning('*');
+      .returning(['id', 'fl_applicator_license', 'license_expiry', 'license_categories']);
     if (!tech) return res.status(404).json({ error: 'Technician not found' });
 
-    // password_hash lives on the technicians row and has no business
-    // being in any client response — strip before returning. Same
-    // guard the admin-timetracking endpoints apply.
-    delete tech.password_hash;
-    res.json({ success: true, technician: tech });
+    res.json({ success: true, technician: licenseResponse(tech) });
   } catch (err) { next(err); }
-});
+}
+
+router.put('/licenses/:techId', requireAdmin, updateLicense);
 
 module.exports = router;
+module.exports._handlers = { updateLicense };

@@ -1,11 +1,20 @@
 const express = require('express');
 const router = express.Router();
+const Sentry = require('@sentry/node');
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const CustomerCredit = require('../services/customer-credit');
 const TwilioService = require('../services/twilio');
-const { generateToken, generateRefreshToken, authenticate } = require('../middleware/auth');
+const {
+  authenticate,
+  createRefreshSession,
+  generateToken,
+  reissueRefreshSessionForProperty,
+  revokeCustomerRefreshSessions,
+  revokeRefreshSession,
+  rotateRefreshSession,
+} = require('../middleware/auth');
 const logger = require('../services/logger');
 
 // =========================================================================
@@ -236,6 +245,11 @@ router.post('/send-code', sendCodeLimiter, async (req, res, next) => {
         await TwilioService.sendVerificationCode(phone);
       } catch (smsErr) {
         logger.error(`[auth] sendVerificationCode failed for customer ${customer.id}: ${smsErr.message}`);
+        // The uniform response (anti-enumeration) swallows this from the
+        // Express error path, so report explicitly — a misconfigured or
+        // down Verify service must not be invisible to error monitoring
+        // while every customer's login quietly fails.
+        Sentry.captureException(smsErr);
       }
     } else {
       logger.info(`[auth] send-code attempted for unknown phone (ip=${req.ip})`);
@@ -282,8 +296,9 @@ router.post('/verify-code', verifyCodeLimiter, async (req, res, next) => {
     }
 
     const accountId = accountIdForCustomer(customer);
-    const token = generateToken(customer.id, accountId);
-    const refreshToken = generateRefreshToken(customer.id, accountId);
+    const refreshSession = await createRefreshSession(customer.id, accountId);
+    const token = generateToken(customer.id, accountId, refreshSession.familyId);
+    const refreshToken = refreshSession.refreshToken;
 
     logger.info(`[auth] customer login success: id=${customer.id}`);
 
@@ -306,37 +321,22 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
     const { refreshToken } = req.body;
     if (!refreshToken) return res.status(400).json({ error: 'Refresh token required' });
 
-    const jwt = require('jsonwebtoken');
-    const config = require('../config');
-
-    let decoded;
-    try {
-      decoded = jwt.verify(refreshToken, config.jwt.secret);
-    } catch {
-      return res.status(401).json({ error: 'Invalid refresh token' });
-    }
-
-    if (decoded.type !== 'refresh' || !decoded.customerId) {
-      return res.status(401).json({ error: 'Invalid refresh token' });
-    }
-
-    const customer = await db('customers').where({ id: decoded.customerId, active: true }).whereNull('deleted_at').first();
-    if (!customer) return res.status(401).json({ error: 'Invalid refresh token' });
-
-    const accountId = decoded.accountId || accountIdForCustomer(customer);
-
-    if (decoded.accountId) {
-      const customerAccountId = accountIdForCustomer(customer);
-      if (String(decoded.accountId) !== String(customerAccountId)) {
-        return res.status(401).json({ error: 'Invalid refresh token' });
+    const rotated = await rotateRefreshSession(refreshToken);
+    if (!rotated.ok) {
+      if (rotated.code === 'REFRESH_TOKEN_ALREADY_ROTATED') {
+        return res.status(409).json({
+          error: 'Refresh token was already rotated by this session',
+          code: rotated.code,
+        });
       }
+      const code = rotated.code === 'REFRESH_TOKEN_REUSED'
+        ? 'REFRESH_TOKEN_REUSED'
+        : 'INVALID_REFRESH_TOKEN';
+      return res.status(401).json({ error: 'Invalid refresh token', code });
     }
 
-    // Rotate: issue a new access AND refresh token tied to the same account
-    // and currently selected service property.
-    const newToken = generateToken(customer.id, accountId);
-    const newRefreshToken = generateRefreshToken(customer.id, accountId);
-    res.json({ token: newToken, refreshToken: newRefreshToken });
+    const newToken = generateToken(rotated.customer.id, rotated.accountId, rotated.familyId);
+    res.json({ token: newToken, refreshToken: rotated.refreshToken });
   } catch (err) {
     // Every invalid-token case returns an explicit 401 above — anything
     // landing here is an infrastructure failure (DB hiccup, etc). Answering
@@ -344,6 +344,27 @@ router.post('/refresh', refreshLimiter, async (req, res, next) => {
     // wipe it; a 5xx tells them to keep the token and retry.
     // The error middleware logs req.body — redact the live 30-day bearer
     // credential before it reaches the logs.
+    if (req.body && req.body.refreshToken) {
+      req.body = { ...req.body, refreshToken: '[redacted]' };
+    }
+    return next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/auth/logout — revoke the refresh-token family for this device
+// =========================================================================
+// Access-token auth is intentionally not required: logout still needs to work
+// after an access token expires or after the client clears local access state.
+// The signed, hashed refresh credential is the authority to revoke its family.
+router.post('/logout', refreshLimiter, async (req, res, next) => {
+  try {
+    const refreshToken = String(req.body?.refreshToken || '');
+    if (refreshToken) await revokeRefreshSession(refreshToken, 'logout');
+    // Non-enumerating and idempotent: stale/invalid credentials are already
+    // logged out from the caller's perspective.
+    return res.json({ success: true });
+  } catch (err) {
     if (req.body && req.body.refreshToken) {
       req.body = { ...req.body, refreshToken: '[redacted]' };
     }
@@ -431,8 +452,9 @@ router.post('/select-property', authenticate, async (req, res, next) => {
   try {
     const schema = Joi.object({
       customerId: Joi.string().uuid().required(),
+      refreshToken: Joi.string().max(4096).required(),
     });
-    const { customerId } = await schema.validateAsync(req.body);
+    const { customerId, refreshToken: currentRefreshToken } = await schema.validateAsync(req.body);
 
     const target = await db('customers')
       .where({ id: customerId, active: true })
@@ -447,8 +469,18 @@ router.post('/select-property', authenticate, async (req, res, next) => {
       return res.status(403).json({ error: 'Property is not available for this account' });
     }
 
-    const token = generateToken(target.id, currentAccountId);
-    const refreshToken = generateRefreshToken(target.id, currentAccountId);
+    const refreshSession = await reissueRefreshSessionForProperty(
+      currentRefreshToken,
+      target.id,
+      currentAccountId,
+      req.customerId,
+      req.authSessionId,
+    );
+    if (refreshSession.ok === false) {
+      return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    }
+    const token = generateToken(target.id, currentAccountId, refreshSession.familyId);
+    const refreshToken = refreshSession.refreshToken;
 
     res.json({
       token,
@@ -486,6 +518,10 @@ router.delete('/account', authenticate, async (req, res, next) => {
       query.where('id', customerId);
     }
     const deletedProfiles = await query.update({ deleted_at: db.fn.now() });
+
+    // Account deletion terminates every portal refresh session for the account
+    // so another device cannot mint a fresh access token after deletion.
+    await revokeCustomerRefreshSessions(customerId, accountId, 'account_deleted');
 
     logger.warn(`[auth] account self-deletion: customer=${customerId} account=${accountId} profiles=${deletedProfiles}`);
 

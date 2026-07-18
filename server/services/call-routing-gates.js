@@ -29,9 +29,17 @@ function computeAddressHash(serviceAddress) {
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
 }
 
-function checkTcpaConsent(extraction) {
+// opts.impliedConsent (gated, INBOUND calls only): a customer who called US,
+// requested service, and agreed to a time has an established business
+// relationship and implied consent for a TRANSACTIONAL confirmation (not
+// marketing). A do-not-contact request always overrides. Owner directive
+// 2026-07-10: don't hold an inbound booker's confirmation over a missing
+// explicit "yes you can text me."
+function checkTcpaConsent(extraction, opts = {}) {
   if (!extraction || !extraction.consent) {
-    return { canSms: false, canEmail: true, reason: 'no_consent_data' };
+    return opts.impliedConsent
+      ? { canSms: true, canEmail: true, reason: 'implied_consent_inbound' }
+      : { canSms: false, canEmail: true, reason: 'no_consent_data' };
   }
 
   const consent = extraction.consent;
@@ -42,6 +50,10 @@ function checkTcpaConsent(extraction) {
 
   if (consent.sms_consent_given === true) {
     return { canSms: true, canEmail: true, reason: 'sms_consent_given' };
+  }
+
+  if (opts.impliedConsent) {
+    return { canSms: true, canEmail: true, reason: 'implied_consent_inbound' };
   }
 
   return { canSms: false, canEmail: true, reason: 'sms_consent_not_given' };
@@ -91,28 +103,122 @@ function buildTriageItem({
     low_confidence_address: 'address_review',
     address_unverified: 'address_review',
     address_validation_unavailable: 'address_review',
+    // MODEL flag — fail-open books past it for a known customer, so its
+    // advisory card must land in the address-review lane, not service_unknown.
+    address_unverifiable: 'address_review',
     ambiguous_scheduling: 'time_ambiguous',
     reschedule_or_cancel: 'time_ambiguous',
+    // Gate-rejection reason strings double as flags on the Needs Review row —
+    // unmapped they filed under service_unknown, so a caller who said
+    // "Tuesday, first slot" was buried with billing questions instead of
+    // showing up as a booking that needs a time.
+    not_confirmed: 'time_ambiguous',
+    confirmed_without_start_time: 'time_ambiguous',
+    cancellation_request: 'time_ambiguous',
+    after_hours_emergency: 'time_ambiguous',
+    existing_appointment_coordination: 'time_ambiguous',
+    auto_booking_skipped_after_approval: 'time_ambiguous',
+    existing_appointment_same_date: 'time_ambiguous',
+    // Several live bookings plausibly match the call (same service line
+    // within a day of the discussed date) — a human picks which one the
+    // call belongs to instead of the AI inserting a duplicate.
+    ambiguous_existing_appointment: 'time_ambiguous',
+    // The call was attached to a human's existing booking, so the promised
+    // follow-up treatment was NOT auto-booked — the office books visit 2.
+    attached_booking_followup_unbooked: 'time_ambiguous',
+    auto_booking_previously_cancelled: 'time_ambiguous',
+    // Pending booking created from an OUTBOUND callback — office confirms the
+    // appointment (and any card/payer) before it's treated as booked.
+    outbound_booking_review: 'time_ambiguous',
+    multi_property_call: 'address_review',
     caller_not_authorized: 'customer_field_conflict',
     hoa_common_area_requires_approval: 'customer_field_conflict',
     commercial_requires_quote: 'customer_field_conflict',
     prior_complaint_unresolved: 'customer_field_conflict',
     sms_consent_missing: 'customer_field_conflict',
+    // Booked appointment whose confirmation SMS was HELD (implied consent
+    // covers only the inbound ANI and the ANI was undialable) — the office
+    // confirms the number and sends the confirmation manually.
+    implied_consent_non_ani_recipient: 'customer_field_conflict',
     low_extraction_confidence: 'service_unknown',
     spam_or_wrong_number: 'service_unknown',
     caller_phone_missing: 'customer_field_conflict',
     do_not_contact_requested: 'customer_field_conflict',
     lead_creation_failed: 'customer_field_conflict',
     name_email_mismatch: 'name_review',
+    // Hard bounce on a call-captured email → audio re-verification proposed
+    // candidates for the owner's read-back confirm (email-bounce-reverify.js).
+    email_bounce_reverify: 'name_review',
+    // Call-dictated email flags (call-recording-processor bridge): the card
+    // carries the as-heard address, candidates, and the read-back question —
+    // the same contact-confirm job as the two name_review flags above.
+    email_unverified: 'name_review',
+    email_invalid: 'name_review',
     voicemail: 'service_unknown',
     // Shadow address/identity bridge reasons (deriveCallReviewBridge).
     missing_last_name: 'name_review',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
     address_recovered: 'address_review',
+    address_readback: 'address_review',
+    secondary_contact_captured: 'customer_field_conflict',
+    secondary_contact_is_existing_customer: 'customer_field_conflict',
+    shared_phone_ambiguous: 'customer_field_conflict',
+    unassigned_auto_booking: 'time_ambiguous',
+    // AI extraction retry budget exhausted (call-recording-processor) — the
+    // call has NO extraction, so nothing downstream (lead/customer/route
+    // decision) exists; this card is the only surface it gets.
+    extraction_failed_permanent: 'service_unknown',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;
+
+  // secondary_contact_captured items are only useful if the row carries the
+  // contact to confirm. Several sites insert this flag (the enforce-mode
+  // deterministic-flags loop first, the processor's payload-rich insert
+  // second) and the open-row unique index makes the FIRST insert win — so
+  // attach the extraction's own secondary_contact here, where every insert
+  // site flows through, instead of relying on the caller to pass it.
+  const flagPayload = (flag === 'secondary_contact_captured' && extraction?.secondary_contact)
+    ? {
+      secondary_contact: extraction.secondary_contact,
+      // Full multi-party list (1.4.0) so the card shows EVERY named party.
+      ...(Array.isArray(extraction?.secondary_contacts) && extraction.secondary_contacts.length > 1
+        ? { secondary_contacts: extraction.secondary_contacts }
+        : {}),
+      // 4th+ parties exist beyond the array — cue the office to re-listen.
+      ...(extraction?.other_parties_mentioned === true ? { other_parties_mentioned: true } : {}),
+    }
+    : {};
+
+  // Multi-property cards previously carried no addresses — the one surface
+  // built to tell the office "there's a second property" required transcript
+  // archaeology to learn WHICH property.
+  if (flag === 'multi_property_call' && Array.isArray(extraction?.property?.additional_properties) && extraction.property.additional_properties.length) {
+    flagPayload.additional_properties = extraction.property.additional_properties;
+  }
+
+  // Scheduling-shaped cards carry the model's captured window fields so the
+  // office can book "Tuesday, first slot" from the card instead of re-listening
+  // — these fields were extracted all along but had zero readers.
+  const SCHEDULING_PAYLOAD_FLAGS = new Set([
+    'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
+    'reschedule_or_cancel', 'cancellation_request',
+    'existing_appointment_coordination', 'auto_booking_skipped_after_approval',
+  ]);
+  if (SCHEDULING_PAYLOAD_FLAGS.has(flag) && extraction?.scheduling) {
+    const s = extraction.scheduling;
+    flagPayload.scheduling_window = {
+      status: s.status ?? null,
+      confirmed_start_at: s.confirmed_start_at ?? null,
+      requested_date_range_start: s.requested_date_range_start ?? null,
+      requested_date_range_end: s.requested_date_range_end ?? null,
+      preferred_time_of_day: s.preferred_time_of_day ?? null,
+      callback_window_start: s.callback_window_start ?? null,
+      callback_window_end: s.callback_window_end ?? null,
+      scheduling_notes_raw: s.scheduling_notes_raw ?? null,
+    };
+  }
 
   return {
     call_log_id: callLogId,
@@ -125,6 +231,7 @@ function buildTriageItem({
       flag,
       confidence: extraction?.confidence?.overall,
       scheduling_status: extraction?.scheduling?.status,
+      ...flagPayload,
       ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),
     }),
     created_at: new Date(),

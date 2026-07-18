@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
@@ -12,8 +13,8 @@ import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
-import { parseSections } from "../ProjectReportViewPage";
-import { COLORS, FONTS } from "../../theme-brand";
+import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
+
 
 /**
  * Projects — post-service inspection / documentation reports.
@@ -23,34 +24,96 @@ import { COLORS, FONTS } from "../../theme-brand";
  * customer-facing /report/project/:token link.
  */
 
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  heading: "#09090B",
-  text: "#27272A",
-  muted: "#71717A",
-  accent: "#18181B",
-  accentHover: "#27272A",
-  success: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  inputBorder: "#D4D4D8",
-  pill: "#F4F4F5",
-};
 
 const MONO = "'JetBrains Mono', monospace";
-const ESTIMATE_BG = "#FAF8F3";
-const ESTIMATE_BORDER = "#E7E2D7";
-const ESTIMATE_INPUT_BORDER = "#CFE7F5";
-const ESTIMATE_INPUT_BG = "#F8FCFE";
-const ESTIMATE_TEXT = COLORS.blueDeeper;
-const ESTIMATE_MUTED = "#6B7280";
 
+// C2 restyle: native confirm()/prompt() replaced with the shared Dialog
+// primitives. ask(message) resolves true/false; ask(message, { input:
+// "<placeholder>" }) renders a required text field and resolves the entered
+// string, or null on cancel. Messages keep their \n structure (pre-line).
+function useConfirmDialog() {
+  const [pending, setPending] = useState(null);
+  const [inputValue, setInputValue] = useState("");
+  // The resolver lives in a ref and the close handler is stable —
+  // Dialog's focus effect is keyed on onClose, so an inline handler that
+  // changes identity per keystroke would refocus the panel and blur the
+  // prompt input on every character (Codex P2).
+  const pendingRef = useRef(null);
+  const ask = useCallback(
+    (message, opts = {}) =>
+      new Promise((resolve) => {
+        setInputValue("");
+        pendingRef.current = { message, ...opts, resolve };
+        setPending(pendingRef.current);
+      }),
+    [],
+  );
+  const settle = useCallback((result) => {
+    if (pendingRef.current) pendingRef.current.resolve(result);
+    pendingRef.current = null;
+    setPending(null);
+  }, []);
+  const handleCancel = useCallback(() => {
+    settle(pendingRef.current && pendingRef.current.input ? null : false);
+  }, [settle]);
+  // Dialog focuses its panel via setTimeout on open — an autoFocus attribute
+  // loses that race, so the prompt input claims focus just after it.
+  const inputRef = useRef(null);
+  useEffect(() => {
+    if (!pending || !pending.input) return undefined;
+    const t = setTimeout(() => inputRef.current && inputRef.current.focus(), 50);
+    return () => clearTimeout(t);
+  }, [pending]);
+  const element = pending ? (
+    <Dialog open size="sm" onClose={handleCancel}>
+      <DialogBody>
+        <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
+          {pending.message}
+        </div>
+        {pending.input && (
+          <input
+            ref={inputRef}
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder={pending.input}
+            style={{ ...inputStyle, marginTop: 12 }}
+          />
+        )}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={handleCancel}>
+          Cancel
+        </Button>
+        <Button
+          onClick={() => settle(pending.input ? inputValue.trim() : true)}
+          disabled={pending.input ? !inputValue.trim() : false}
+        >
+          {pending.confirmLabel || "Confirm"}
+        </Button>
+      </DialogFooter>
+    </Dialog>
+  ) : null;
+  return [ask, element];
+}
+
+// C1/C2 restyle: the detail pane's chrome constants now carry the V2 zinc
+// ramp (whites/greys/black — owner direction). Names kept so the ~200
+// consumer sites need no churn; the embedded CustomerProjectReportPreview
+// deliberately does NOT read these — it mimics the customer-facing report.
+const ESTIMATE_BG = "#FFFFFF";
+const ESTIMATE_BORDER = "#E4E4E7";
+const ESTIMATE_INPUT_BORDER = "#D4D4D8";
+const ESTIMATE_INPUT_BG = "#FFFFFF";
+const ESTIMATE_TEXT = "#18181B";
+const ESTIMATE_MUTED = "#71717A";
+
+// Status pills ride the shared Badge on the zinc ramp — sent is the "done"
+// state (strong), draft/closed stay neutral; alert-fg is reserved for
+// genuine alerts (stale WDO drafts, send blockers), never status decoration.
 const STATUS_STYLES = {
-  draft: { bg: "#FEF3C7", fg: "#92400E", label: "Draft" },
-  sent: { bg: "#DCFCE7", fg: "#166534", label: "Sent" },
-  closed: { bg: "#E4E4E7", fg: "#52525B", label: "Closed" },
+  draft: { tone: "neutral", label: "Draft" },
+  sent: { tone: "strong", label: "Sent" },
+  closed: { tone: "neutral", label: "Closed" },
 };
 
 const TYPE_LABELS = {
@@ -72,6 +135,8 @@ const TYPE_LABELS = {
 };
 const WDO_TYPE = "wdo_inspection";
 const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
+const OFFICIAL_TERMITE_DOCUMENT_TYPES = new Set([WDO_TYPE, CERTIFICATE_TYPE]);
+const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
@@ -87,7 +152,6 @@ const PROJECT_TYPES_WITH_PREP_GUIDES = new Set([
   "rodent_exclusion",
   "rodent_trapping",
   "mosquito_event",
-  "pre_treatment_termite_certificate",
 ]);
 const BOOK_URL = "https://www.wavespestcontrol.com/book/";
 const REQUIRED_RECOMMENDATION_SECTION_HEADINGS = [
@@ -279,7 +343,7 @@ function closeoutBillingLabel(billing = {}) {
     if (billing.invoiceId) return `Invoice ready ${money(billing.amount)}`;
     return `Billing resolved ${money(billing.amount)}`;
   }
-  return `Billing required ${money(billing.amount)}`;
+  return `Invoice not sent ${money(billing.amount)}`;
 }
 
 function closeoutFollowupLabel(followup = {}) {
@@ -405,6 +469,52 @@ function evaluateProjectReadiness({
       },
     );
   }
+  // Termite Phase-3 compliance content — mirrors the server's
+  // evaluateProjectSendReadiness (Codex P2 r3 on #2703) so the readiness
+  // panel names the missing statutory fields instead of showing "ready"
+  // and then failing with a generic 422 on send. Method lists mirror
+  // TERMITE_PERIMETER_METHODS / TERMITE_LIQUID_DILUTION_METHODS in
+  // project-types.js.
+  // hard: true mirrors the server's non-overridable hardMissing gate — the
+  // send flows must NOT offer the override path for these (Codex P3 r4).
+  if (project?.project_type === "termite_inspection") {
+    required.push(
+      {
+        label: 'Areas not inspected / why ("None" if all visible areas were inspected)',
+        ok: hasMeaningfulValue(findings?.areas_not_inspected),
+        hard: true,
+      },
+      {
+        label: 'Inspection notice affixed ("Yes" required)',
+        ok: String(findings?.inspection_notice_affixed || "") === "Yes",
+        hard: true,
+      },
+    );
+  }
+  if (project?.project_type === "termite_treatment") {
+    const method = String(findings?.treatment_method || "");
+    const isPerimeter = ["Liquid perimeter", "Trenching"].includes(method);
+    required.push(
+      { label: "Treatment method", ok: hasMeaningfulValue(method), hard: true },
+      { label: "EPA reg. no.", ok: hasMeaningfulValue(findings?.epa_registration), hard: true },
+      {
+        label: isPerimeter
+          ? 'Posted notice placed ("Yes" required for exterior/perimeter applications)'
+          : "Posted notice placed",
+        ok: isPerimeter
+          ? String(findings?.posted_notice || "") === "Yes"
+          : hasMeaningfulValue(findings?.posted_notice),
+        hard: true,
+      },
+    );
+    if (["Spot treatment", "Liquid perimeter", "Trenching", "Wood treatment"].includes(method)) {
+      required.push({
+        label: "% solution",
+        ok: hasMeaningfulValue(findings?.percent_solution),
+        hard: true,
+      });
+    }
+  }
   if (isCertificate) {
     required.push(
       {
@@ -464,6 +574,9 @@ function evaluateProjectReadiness({
   return {
     required,
     missing: required.filter((item) => !item.ok),
+    // Mirrors the server's hardMissing — compliance blockers the send
+    // routes 422 on regardless of override_reason.
+    hardMissing: required.filter((item) => !item.ok && item.hard),
     quality,
   };
 }
@@ -763,6 +876,15 @@ function CustomerProjectReportPreview({
   const findingsEntries = suppressFindingsForNarrative ? [] : Object.entries(findings || {}).filter(
     ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );
+  // Same compliance-block rule as the public page (preview == final,
+  // Codex P2 r4): when the narrative suppresses the raw findings, the
+  // termite Phase-3 answers still render in their own record block.
+  const complianceSection = TERMITE_COMPLIANCE_SECTIONS[project.project_type] || null;
+  const complianceEntries = (suppressFindingsForNarrative && complianceSection)
+    ? complianceSection.fields
+      .map(([key, label]) => [label, findings?.[key]])
+      .filter(([, v]) => hasMeaningfulValue(formatProjectPreviewValue(v)))
+    : [];
   const visiblePhotos = (photos || []).slice(0, 4);
   const address = customerAddressLine(project);
   const metaRows = [
@@ -884,6 +1006,43 @@ function CustomerProjectReportPreview({
                   >
                     <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 2 }}>
                       {projectFieldLabel(typeCfg, key)}
+                    </div>
+                    <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                      {formatProjectPreviewValue(value)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {complianceEntries.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 900,
+                  color: "#1B2C5B",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}
+              >
+                {complianceSection.eyebrow}
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {complianceEntries.map(([label, value]) => (
+                  <div
+                    key={label}
+                    style={{
+                      padding: "9px 10px",
+                      borderRadius: 9,
+                      background: "#F0F7FC",
+                      border: "1px solid #D7E3EA",
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 2 }}>
+                      {label}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
                       {formatProjectPreviewValue(value)}
@@ -1039,37 +1198,19 @@ export default function ProjectsPage() {
   const selected = projects.find((p) => p.id === selectedId);
 
   return (
-    <div
-      style={{
-        maxWidth: 1300,
-        margin: "0 auto",
-        color: D.text,
-        fontFamily: "'Roboto', Arial, sans-serif",
-      }}
-    >
+    <div className="max-w-[1300px] mx-auto text-ink-primary">
       {" "}
       <AdminCommandHeader
-        title="Projects"
+        title="Jobs"
         icon={ClipboardList}
         action={{
-          label: "New Project",
+          label: "New Job",
           icon: Plus,
           onClick: () => setCreateMode("general"),
         }}
       />
       {/* Filters */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 8,
-          marginBottom: 12,
-          background: D.card,
-          padding: "10px 12px",
-          borderRadius: 10,
-          border: `1px solid ${D.border}`,
-        }}
-      >
+      <div className="flex flex-wrap gap-2 mb-3 bg-white px-3 py-2.5 rounded-sm border-hairline border-zinc-200">
         <FilterSelect
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
@@ -1115,19 +1256,10 @@ export default function ProjectsPage() {
         >
           {showRegularProjects &&
             (loading ? (
-              <div style={{ padding: 24, color: D.muted }}>Loading…</div>
+              <div className="p-6 text-13 text-zinc-500">Loading…</div>
             ) : regularProjects.length === 0 ? (
-              <div
-                style={{
-                  padding: 24,
-                  background: D.card,
-                  borderRadius: 10,
-                  border: `1px dashed ${D.border}`,
-                  color: D.muted,
-                  textAlign: "center",
-                }}
-              >
-                No projects match these filters.
+              <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-13 text-zinc-500 text-center">
+                No jobs match these filters.
               </div>
             ) : (
               regularProjects.map((p) => (
@@ -1145,7 +1277,6 @@ export default function ProjectsPage() {
               projects={wdoProjects}
               selectedId={selectedId}
               onSelect={setSelectedId}
-              onCreate={() => setCreateMode("wdo")}
             />
           )}
         </div>
@@ -1167,13 +1298,20 @@ export default function ProjectsPage() {
         <CreateProjectModal
           theme="light"
           allowAiDraft
-          defaultProjectType={createMode === "wdo" ? WDO_TYPE : ""}
+          defaultProjectType=""
           allowedProjectTypes={
-            createMode === "wdo"
-              ? [WDO_TYPE]
-              : GENERAL_PROJECT_TYPES.filter(
-                  (key) => !typesRegistry?.[key]?.appointmentManaged,
+            /* linkedCreationOnly (WDO, pre-treat cert — owner ruling
+               2026-07-13) create from their scheduled visit, never ad hoc.
+               FAIL CLOSED while the registry is loading/unavailable (Codex
+               P2): an unfiltered list here would override the modal's own
+               registry filtering and resurrect the linked-only lanes. */
+            typesRegistry
+              ? GENERAL_PROJECT_TYPES.filter(
+                  (key) =>
+                    !typesRegistry?.[key]?.appointmentManaged &&
+                    !typesRegistry?.[key]?.linkedCreationOnly,
                 )
+              : []
           }
           onClose={() => setCreateMode(null)}
           onCreated={(p) => {
@@ -1187,7 +1325,7 @@ export default function ProjectsPage() {
   );
 }
 
-function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
+function WdoReportsSection({ projects, selectedId, onSelect }) {
   const urgentCount = projects.filter((p) => {
     if (p.status === "sent" || p.status === "closed") return false;
     const created = p.created_at ? new Date(p.created_at).getTime() : 0;
@@ -1195,84 +1333,31 @@ function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
   }).length;
 
   return (
-    <section
-      style={{
-        marginTop: 18,
-        paddingTop: 16,
-        borderTop: `1px solid ${D.border}`,
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-      }}
-    >
+    <section className="mt-4 pt-4 border-t border-hairline border-zinc-200 flex flex-col gap-2">
       {" "}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          gap: 10,
-        }}
-      >
+      <div className="flex items-start justify-between gap-2.5">
         {" "}
         <div>
           {" "}
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 800,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-            }}
-          >
+          <div className="text-11 font-medium text-zinc-500 uppercase tracking-label">
             WDO Inspection Reports
           </div>{" "}
-          <div style={{ fontSize: 13, color: D.text, marginTop: 3 }}>
+          <div className="text-13 text-ink-primary mt-1">
             Real-estate reports, realtor sharing, and closing-sensitive
             documentation.
           </div>
           {urgentCount > 0 && (
-            <div
-              style={{
-                fontSize: 11,
-                color: D.amber,
-                marginTop: 4,
-                fontWeight: 700,
-              }}
-            >
+            <div className="text-11 text-alert-fg font-medium mt-1">
               {urgentCount} draft{urgentCount === 1 ? "" : "s"} older than 24h
             </div>
           )}
         </div>{" "}
-        <button
-          type="button"
-          onClick={onCreate}
-          style={{
-            ...btnSecondary,
-            padding: "7px 10px",
-            fontSize: 11,
-            fontWeight: 800,
-            whiteSpace: "nowrap",
-            textTransform: "uppercase",
-            letterSpacing: "0.04em",
-          }}
-        >
-          + New WDO
-        </button>{" "}
+        {/* + New WDO removed (owner ruling 2026-07-13): WDO reports are
+            created from their scheduled visit in Dispatch / the tech
+            portal, never ad hoc. */}
       </div>
       {projects.length === 0 ? (
-        <div
-          style={{
-            padding: 18,
-            background: D.card,
-            borderRadius: 10,
-            border: `1px dashed ${D.border}`,
-            color: D.muted,
-            fontSize: 12,
-            textAlign: "center",
-          }}
-        >
+        <div className="p-4 bg-white rounded-sm border border-dashed border-zinc-300 text-12 text-zinc-500 text-center">
           No WDO reports match these filters.
         </div>
       ) : (
@@ -1291,27 +1376,17 @@ function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
 }
 
 function FilterSelect({ value, onChange, children }) {
+  // Shared Select primitive (its own caret) — width hugs the content like
+  // the old inline select instead of the primitive's block default.
   return (
-    <select
+    <Select
+      size="sm"
       value={value}
       onChange={onChange}
-      style={{
-        padding: "6px 28px 6px 12px",
-        borderRadius: 8,
-        fontSize: 13,
-        fontWeight: 600,
-        color: value ? D.text : D.muted,
-        background: D.card,
-        border: `1px solid ${D.inputBorder}`,
-        cursor: "pointer",
-        appearance: "none",
-        backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717A' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
-        backgroundRepeat: "no-repeat",
-        backgroundPosition: "right 10px center",
-      }}
+      className={`sm:!w-auto cursor-pointer ${value ? "text-ink-primary" : "text-zinc-500"}`}
     >
       {children}
-    </select>
+    </Select>
   );
 }
 
@@ -1321,91 +1396,31 @@ function ProjectRow({ project, active, onSelect, compactType }) {
     <button
       type="button"
       onClick={onSelect}
-      style={{
-        textAlign: "left",
-        width: "100%",
-        cursor: "pointer",
-        background: D.card,
-        border: `1px solid ${active ? D.accent : D.border}`,
-        borderRadius: 10,
-        padding: "12px 14px",
-        display: "flex",
-        gap: 12,
-        alignItems: "flex-start",
-      }}
+      className={`text-left w-full cursor-pointer bg-white rounded-sm p-3 flex gap-3 items-start border ${
+        active ? "border-zinc-900 ring-1 ring-zinc-900" : "border-hairline border-zinc-200 hover:border-zinc-400"
+      }`}
     >
       {" "}
-      <div
-        style={{
-          flexShrink: 0,
-          width: 48,
-          height: 48,
-          borderRadius: 8,
-          background: D.pill,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontFamily: MONO,
-          fontSize: 11,
-          fontWeight: 700,
-          color: D.heading,
-        }}
-      >
+      <div className="flex-shrink-0 w-12 h-12 rounded-sm bg-zinc-100 flex items-center justify-center font-mono text-11 font-medium text-ink-primary">
         {compactType || TYPE_LABELS[project.project_type] || "Proj"}
       </div>{" "}
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="flex-1 min-w-0">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-          }}
-        >
+        <div className="flex items-center justify-between gap-2">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: D.heading,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            }}
-          >
+          <div className="text-14 font-medium text-ink-primary whitespace-nowrap overflow-hidden text-ellipsis">
             {project.customer_name || "Customer"}
           </div>{" "}
-          <span
-            style={{
-              fontSize: 10,
-              fontWeight: 700,
-              padding: "2px 8px",
-              borderRadius: 999,
-              background: status.bg,
-              color: status.fg,
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
-              whiteSpace: "nowrap",
-            }}
-          >
+          <Badge tone={status.tone} className="whitespace-nowrap">
             {status.label}
-          </span>{" "}
+          </Badge>{" "}
         </div>{" "}
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+        <div className="text-12 text-zinc-500 mt-0.5">
           {project.title ||
             TYPE_LABELS[project.project_type] ||
             project.project_type}
         </div>{" "}
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            marginTop: 6,
-            fontSize: 11,
-            color: D.muted,
-          }}
-        >
+        <div className="flex gap-2.5 mt-1.5 text-11 text-zinc-500">
           {" "}
           <span>
             {fmtDate(project.project_date || project.created_at)}
@@ -1423,13 +1438,20 @@ function ProjectRow({ project, active, onSelect, compactType }) {
   );
 }
 
-function ProjectDetail({
+// Named export: DispatchPageV2 and the tech portal mount this same editor
+// in an overlay so project-backed visits (WDO, pre-treat cert) open their
+// report in place from the schedule — the pest-completion interaction
+// (owner ask 2026-07-13). Self-contained: fetches its own project by id.
+export function ProjectDetail({
   projectId,
   typesRegistry,
   onClose,
   onChanged,
   canAdminActions = false,
+  reloadKey = 0,
+  onDirtyChange,
 }) {
+  const [confirmAsk, confirmDialog] = useConfirmDialog();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1446,11 +1468,22 @@ function ProjectDetail({
   const [aiUseComms, setAiUseComms] = useState(true);
   const [aiUsePhotos, setAiUsePhotos] = useState(true);
   const [productCatalog, setProductCatalog] = useState([]);
+  // "Pay before you get the report" — default ON when the server offers the
+  // option (WDO + gate enabled + not yet delivered).
+  const [holdReportUntilPaid, setHoldReportUntilPaid] = useState(true);
 
   async function load(options = {}) {
-    const { preserveEdits = false } = options;
-    setLoading(true);
-    setError("");
+    const { preserveEdits = false, background = false } = options;
+    // background: refresh without tripping the full-editor loading swap —
+    // the render gate is `loading || !project`, so a loud reload behind a
+    // mounted, possibly-dirty editor replaced the whole form with a
+    // "Loading project…" card and invited a no-confirm backdrop close
+    // (house review on #2717). Background failures also stay quiet: the
+    // decision-time preview re-fetch in handleClose still guards closeout.
+    if (!background) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const [projectRes, activityRes] = await Promise.all([
         adminFetch(`/admin/projects/${projectId}`),
@@ -1481,16 +1514,46 @@ function ProjectDetail({
       }
       setDelivery(d.project.delivery_channels || null);
     } catch (e) {
-      setError(e.message || "Could not load project");
-      setData(null);
+      // A background/preserveEdits refresh must never blank or error-swap a
+      // mounted editor (Codex r11 P2 + house review): keep the stale data,
+      // and only surface the failure when this was a foreground load.
+      if (!background) setError(e.message || "Could not load project");
+      if (!preserveEdits) setData(null);
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }
 
   useEffect(() => {
-    load(); /* eslint-disable-next-line */
+    load();
+    // The drawer instance survives across projects (dispatch overlay) — an
+    // unchecked hold must not silently carry over to the next WDO.
+    setHoldReportUntilPaid(true);
   }, [projectId]);
+
+  // Host-driven data refresh (Codex r10 P2 on #2717): after an in-editor
+  // payment detour (Details → checkout) resolves billing, the mounted
+  // editor kept its stale closeoutPreview and left Close project disabled
+  // — the decision-time preview fetch never runs off a disabled button.
+  // preserveEdits keeps unsaved findings/recommendations intact;
+  // background keeps the loading gate from swapping the form out.
+  // The ref makes this fire only on post-mount CHANGES: the host's key is
+  // a page-lifetime counter bumped by pest checkouts too, so an effect
+  // keyed on truthiness double-loaded every mount after the session's
+  // first payment (house review).
+  const consumedReloadKeyRef = useRef(reloadKey);
+  useEffect(() => {
+    if (reloadKey === consumedReloadKeyRef.current) return;
+    consumedReloadKeyRef.current = reloadKey;
+    load({ preserveEdits: true, background: true });
+  }, [reloadKey]);
+
+  // Host-visible dirty signal (Codex r14 P2 on #2717): the dispatch
+  // overlay's backdrop close needs to know when discarding would lose
+  // unsaved edits — this editor keeps them only in component state.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const project = data?.project;
   const typeCfg =
@@ -1507,6 +1570,12 @@ function ProjectDetail({
   // WDO reports can't be sent until the licensee signature is captured.
   const wdoNeedsSignature =
     project?.project_type === WDO_TYPE && !project?.wdo_signature?.signed;
+  // Payment hold: server-computed availability (official termite document +
+  // gate on + not sent) and the live state driving the release hint.
+  const reportHoldAvailable = !!project?.report_payment_hold_available;
+  const reportHeld = ["held", "releasing"].includes(
+    String(project?.report_hold_status || ""),
+  );
 
   useEffect(() => {
     if (!typeCfg?.findingsFields || !hasCatalogBackedProjectFields(typeCfg.findingsFields) || productCatalog.length) return;
@@ -1584,33 +1653,44 @@ function ProjectDetail({
       recommendations: editRecs,
       projectDate: editProjectDate,
     });
+    // Non-overridable compliance blockers (mirrors the server's hardMissing
+    // 422): stop here instead of walking the admin into the override prompt
+    // and a dead-end rejection (Codex P3 r4).
+    if (readiness.hardMissing.length) {
+      setError(
+        `Required compliance fields must be completed before this report can send: ${readiness.hardMissing
+          .map((item) => item.label)
+          .join("; ")}`,
+      );
+      return;
+    }
     if (readiness.missing.length || readiness.quality.length) {
       const lines = [
         ...readiness.missing.map((item) => `Missing: ${item.label}`),
         ...readiness.quality.map((item) => `Review: ${item}`),
       ];
       if (
-        !confirm(
+        !(await confirmAsk(
           `This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`,
-        )
+          { confirmLabel: "Send anyway" },
+        ))
       )
         return;
     }
     let overrideReason = "";
     if (readiness.missing.length) {
       overrideReason =
-        window
-          .prompt(
-            "Enter the admin override reason for sending this incomplete report:",
-          )
-          ?.trim() || "";
+        (await confirmAsk(
+          "Enter the admin override reason for sending this incomplete report:",
+          { input: "Override reason", confirmLabel: "Continue" },
+        )) || "";
       if (!overrideReason) return;
     }
     const actionLabel =
       project.status === "sent"
         ? "Resend report to customer?"
         : "Send report to customer? This generates a public link and marks the project as Sent.";
-    if (!confirm(actionLabel)) return;
+    if (!(await confirmAsk(actionLabel, { confirmLabel: "Send" }))) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -1685,14 +1765,32 @@ function ProjectDetail({
       recommendations: editRecs,
       projectDate: editProjectDate,
     });
+    // Non-overridable compliance blockers (mirrors the server's hardMissing
+    // 422): stop here instead of walking the admin into the override prompt
+    // and a dead-end rejection (Codex P3 r4).
+    if (readiness.hardMissing.length) {
+      setError(
+        `Required compliance fields must be completed before this report can send: ${readiness.hardMissing
+          .map((item) => item.label)
+          .join("; ")}`,
+      );
+      return;
+    }
     let overrideReason = "";
     if (readiness.missing.length) {
       const lines = readiness.missing.map((item) => `Missing: ${item.label}`);
-      if (!confirm(`This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`)) return;
+      if (!(await confirmAsk(`This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`, { confirmLabel: "Send anyway" }))) return;
       overrideReason =
-        window.prompt("Enter the admin override reason for sending this incomplete report:")?.trim() || "";
+        (await confirmAsk(
+          "Enter the admin override reason for sending this incomplete report:",
+          { input: "Override reason", confirmLabel: "Continue" },
+        )) || "";
       if (!overrideReason) return;
     }
+    // Resolved once per send: the toggle only renders when the server offers
+    // the hold (WDO + gate on + not delivered), so a hidden toggle never
+    // silently holds a non-eligible project.
+    const sendHold = reportHoldAvailable && holdReportUntilPaid && project.status !== "closed";
     setSaving(true);
     setError("");
     setNotice("");
@@ -1701,7 +1799,11 @@ function ProjectDetail({
       // dry_run first so the operator can confirm the invoice amount.
       const preview = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
         method: "POST",
-        body: { dry_run: true, ...(overrideReason ? { override_reason: overrideReason } : {}) },
+        body: {
+          dry_run: true,
+          ...(sendHold ? { hold_report_until_paid: true } : {}),
+          ...(overrideReason ? { override_reason: overrideReason } : {}),
+        },
       });
       const pv = await readJsonResponse(preview, "Could not prepare invoice");
       const inv = pv.invoice || {};
@@ -1723,18 +1825,21 @@ function ProjectDetail({
         routing.recipient ? `Email to: ${routing.recipient}` : null,
         routing.billing_copy ? `Billing copy (same email): ${routing.billing_copy}` : null,
         routing.report_copies?.length
-          ? `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
+          ? sendHold
+            ? `Report-only copy after payment, no invoice: ${routing.report_copies.join(", ")}`
+            : `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
           : null,
       ]
         .filter(Boolean)
         .join("\n");
-      if (
-        !confirm(
-          `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
-            `The customer gets one email (${emailContents}) and one text (report + pay links).` +
-            (routingLines ? `\n\n${routingLines}` : ""),
-        )
-      ) {
+      const confirmMessage = sendHold
+        ? `${verb} invoice${invoiceLabel} for ${amount} and hold the ${reportNoun} until it's paid?\n\n` +
+          `The customer gets the invoice + pay link now — no report. The FDACS-13645 report is emailed automatically the moment the invoice is paid.` +
+          (routingLines ? `\n\n${routingLines}` : "")
+        : `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
+          `The customer gets one email (${emailContents}) and one text (report + pay links).` +
+          (routingLines ? `\n\n${routingLines}` : "");
+      if (!(await confirmAsk(confirmMessage, { confirmLabel: verb }))) {
         setSaving(false);
         return;
       }
@@ -1744,6 +1849,7 @@ function ProjectDetail({
           // Only an existing invoice carries an id from the preview; a new WDO
           // (id null) routes to the server's locked create path on send.
           ...(inv.id ? { invoice_id: inv.id } : {}),
+          ...(sendHold ? { hold_report_until_paid: true } : {}),
           ...(overrideReason ? { override_reason: overrideReason } : {}),
         },
       });
@@ -1752,6 +1858,10 @@ function ProjectDetail({
       setDelivery(d.channels || null);
       if (d.sent === false) {
         setError(`Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim());
+      } else if (d.report_held) {
+        setNotice(
+          `Invoice ${d.invoice?.invoice_number || ""} sent — report held; it delivers automatically once the invoice is paid. ${deliverySummary(d.channels)}`.trim(),
+        );
       } else {
         setNotice(
           `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
@@ -1775,7 +1885,7 @@ function ProjectDetail({
       setError("No default prep guide is configured for this project type.");
       return;
     }
-    if (!confirm("Send the prep guide email for this project?")) return;
+    if (!(await confirmAsk("Send the prep guide email for this project?", { confirmLabel: "Send" }))) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -1800,7 +1910,7 @@ function ProjectDetail({
       setError("Admin access required to send portal invites.");
       return;
     }
-    if (!confirm("Send a customer portal invite email for this project?")) return;
+    if (!(await confirmAsk("Send a customer portal invite email for this project?", { confirmLabel: "Send" }))) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -1831,9 +1941,10 @@ function ProjectDetail({
     if (
       editRecs &&
       editRecs.trim() &&
-      !confirm(
+      !(await confirmAsk(
         "Replace the current Recommendations text with an AI-drafted version?\n\nThe tech's original notes will still be used as context for the AI.",
-      )
+        { confirmLabel: "Replace" },
+      ))
     )
       return;
     setAiWriting(true);
@@ -1892,20 +2003,36 @@ function ProjectDetail({
       setError("Admin access required to close projects.");
       return;
     }
-    if (billingBlocksClose) {
+    // Re-check the closeout preview at decision time (Codex r6 P3 on
+    // #2717): the mounted preview goes stale when the linked visit is
+    // cancelled/no-showed out-of-band (e.g. the schedule's overlaid
+    // appointment sheet while this editor stays mounted), so the gates
+    // below would promise "complete linked service" and then 409. Only
+    // the preview is refreshed — data/edit state stay untouched so
+    // unsaved edits survive; falls back to the mounted preview if the
+    // fetch fails.
+    let preview = closeoutPreview;
+    try {
+      const pr = await adminFetch(`/admin/projects/${projectId}`);
+      const pd = await readJsonResponse(pr, "Could not refresh closeout preview");
+      if (pd?.closeoutPreview) preview = pd.closeoutPreview;
+    } catch {
+      /* keep the mounted preview */
+    }
+    if (preview?.billing?.required && !preview?.billing?.resolved) {
       setError(
-        `${closeoutBillingLabel(closeoutPreview.billing)}. Create or collect the invoice before closing this project.`,
+        `${closeoutBillingLabel(preview.billing)}. Create or collect the invoice before closing this project.`,
       );
       return;
     }
-    if (followupBlocksClose) {
+    if (preview?.followup?.unsupported) {
       setError(
         "Auto-schedule follow-up is not available yet. Change the follow-up policy to alert or schedule the follow-up manually before closing.",
       );
       return;
     }
-    if (previewBlocksClose) {
-      const status = closeoutPreview?.serviceCompletion?.status;
+    if (preview?.canClose === false) {
+      const status = preview?.serviceCompletion?.status;
       setError(
         status
           ? `This project cannot close while the linked service is ${status}.`
@@ -1914,20 +2041,20 @@ function ProjectDetail({
       return;
     }
     const closeoutLines = [
-      closeoutPreview?.serviceCompletion?.willCompleteService
-        ? `Service: complete ${closeoutPreview.serviceCompletion.serviceType || "linked service"}`
+      preview?.serviceCompletion?.willCompleteService
+        ? `Service: complete ${preview.serviceCompletion.serviceType || "linked service"}`
         : null,
-      closeoutPreview?.billing ? `Billing: ${closeoutBillingLabel(closeoutPreview.billing)}` : null,
-      closeoutPreview?.followup ? `Follow-up: ${closeoutFollowupLabel(closeoutPreview.followup)}` : null,
-      closeoutPreview?.portal
-        ? `Portal: ${closeoutPreview.portal.attached ? "attached" : "token-only"}`
+      preview?.billing ? `Billing: ${closeoutBillingLabel(preview.billing)}` : null,
+      preview?.followup ? `Follow-up: ${closeoutFollowupLabel(preview.followup)}` : null,
+      preview?.portal
+        ? `Portal: ${preview.portal.attached ? "attached" : "token-only"}`
         : null,
     ].filter(Boolean);
     const confirmText = [
       "Close this project? It stays accessible but is filtered out of Sent view.",
       closeoutLines.length ? `\n${closeoutLines.join("\n")}` : "",
     ].join("");
-    if (!confirm(confirmText))
+    if (!(await confirmAsk(confirmText, { confirmLabel: "Close project" })))
       return;
     setSaving(true);
     setError("");
@@ -1937,8 +2064,6 @@ function ProjectDetail({
         method: "POST",
       });
       const d = await readJsonResponse(r, "Could not close project");
-      await load();
-      onChanged?.();
       const serviceText = d.serviceCompleted ? " Service marked completed." : "";
       const portalText = d.portalAttached
         ? " Report attached to the customer portal."
@@ -1950,7 +2075,20 @@ function ProjectDetail({
         : d.followup?.alert?.existingAlertId
           ? " Existing follow-up alert kept."
           : "";
+      // Notice BEFORE the host signal (house review): on a filtered Jobs
+      // list onChanged's refetch can drop this project and unmount the
+      // panel — a later setNotice would land on an unmounted component and
+      // the operator would never see the close confirmation.
       setNotice(`Project closed.${serviceText}${portalText}${followupText}`);
+      // Close also completes the linked visit — tell the host so schedule
+      // embeds can retire their visit snapshot (DispatchPageV2 Details
+      // handoff, Codex P1 on #2717). Emitted BEFORE the project reload:
+      // during that await the host still rendered the Details pill off
+      // the stale active snapshot, and a quick tap could cancel the
+      // just-completed visit (Codex r10 P1). Consumers that take no args
+      // (loadProjects) are unaffected by the earlier emission.
+      onChanged?.({ visitCompleted: !!d.serviceCompleted });
+      await load();
     } catch (e) {
       if (e.payload?.code === "project_completion_billing_required") {
         setError(
@@ -1969,7 +2107,7 @@ function ProjectDetail({
   }
 
   async function handlePhotoDelete(photoId) {
-    if (!confirm("Remove this photo?")) return;
+    if (!(await confirmAsk("Remove this photo?", { confirmLabel: "Remove" }))) return;
     setError("");
     setNotice("");
     try {
@@ -2078,11 +2216,11 @@ function ProjectDetail({
     return (
       <div
         style={{
-          background: D.card,
-          border: `1px solid ${D.border}`,
-          borderRadius: 10,
+          background: "#FFFFFF",
+          border: `1px solid #E4E4E7`,
+          borderRadius: 6,
           padding: 24,
-          color: D.muted,
+          color: "#71717A",
         }}
       >
         {loading ? "Loading project…" : error || "Project unavailable."}
@@ -2092,6 +2230,7 @@ function ProjectDetail({
 
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
   const idPrefix = `project-${projectId}`;
+  const isOfficialTermiteDocument = OFFICIAL_TERMITE_DOCUMENT_TYPES.has(project.project_type);
   const fieldInputId = (key) => `${idPrefix}-finding-${key}`;
   const readiness = evaluateProjectReadiness({
     project: { ...project, title: editTitle },
@@ -2103,16 +2242,21 @@ function ProjectDetail({
 
   return (
     <div
+      data-official-document-editor={isOfficialTermiteDocument ? project.project_type : undefined}
       style={{
         background: ESTIMATE_BG,
         border: `1px solid ${ESTIMATE_BORDER}`,
-        borderRadius: 16,
+        borderRadius: 6,
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
         boxShadow: "0 10px 30px rgba(27, 44, 91, 0.08)",
+        fontFamily: isOfficialTermiteDocument ? ROBOTO_FONT : undefined,
       }}
     >
+      {isOfficialTermiteDocument && (
+        <style>{`[data-official-document-editor] *, [data-official-document-editor] input, [data-official-document-editor] select, [data-official-document-editor] textarea, [data-official-document-editor] button { font-family: ${ROBOTO_FONT} !important; }`}</style>
+      )}
       {/* Header */}
       <div
         style={{
@@ -2121,7 +2265,7 @@ function ProjectDetail({
           justifyContent: "space-between",
           padding: "20px 24px",
           borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-          background: COLORS.white,
+          background: "#FFFFFF",
         }}
       >
         {" "}
@@ -2133,19 +2277,19 @@ function ProjectDetail({
               color: ESTIMATE_MUTED,
               textTransform: "uppercase",
               letterSpacing: "0.12em",
-              fontWeight: 800,
+              fontWeight: 500,
             }}
           >
             {typeCfg?.label || project.project_type} · {project.customer_name}
           </div>{" "}
           <div
             style={{
-              fontFamily: FONTS.serif,
-              fontSize: 32,
+              fontSize: 24,
               fontWeight: 500,
+              letterSpacing: "-0.01em",
               color: ESTIMATE_TEXT,
               marginTop: 4,
-              lineHeight: 1.1,
+              lineHeight: 1.15,
               overflowWrap: "anywhere",
             }}
           >
@@ -2161,26 +2305,13 @@ function ProjectDetail({
             }}
           >
             {" "}
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 700,
-                padding: "2px 8px",
-                borderRadius: 999,
-                background: status.bg,
-                color: status.fg,
-                textTransform: "uppercase",
-                letterSpacing: 0.5,
-              }}
-            >
-              {status.label}
-            </span>{" "}
-            <span style={{ fontSize: 11, color: D.muted }}>
+            <Badge tone={status.tone}>{status.label}</Badge>{" "}
+            <span style={{ fontSize: 11, color: "#71717A" }}>
               Inspection {fmtDate(project.project_date || project.created_at)}{" "}
               by {project.tech_name || "—"}
             </span>
             {project.sent_at && (
-              <span style={{ fontSize: 11, color: D.muted }}>
+              <span style={{ fontSize: 11, color: "#71717A" }}>
                 · Sent {fmtDate(project.sent_at)}
               </span>
             )}
@@ -2192,7 +2323,7 @@ function ProjectDetail({
           style={{
             background: "transparent",
             border: "none",
-            color: D.muted,
+            color: "#71717A",
             fontSize: 22,
             cursor: "pointer",
             padding: "0 8px",
@@ -2220,15 +2351,15 @@ function ProjectDetail({
           <div
             style={{
               padding: "10px 12px",
-              background: "#ECFDF5",
-              border: `1px solid #A7F3D0`,
-              borderRadius: 8,
+              background: "#FAFAFA",
+              border: `1px solid #E4E4E7`,
+              borderRadius: 6,
               fontSize: 12,
-              color: D.heading,
+              color: "#09090B",
             }}
           >
             {" "}
-            <div style={{ fontWeight: 700, marginBottom: 4 }}>
+            <div style={{ fontWeight: 500, marginBottom: 4 }}>
               Customer-facing report
             </div>{" "}
             <div
@@ -2239,7 +2370,7 @@ function ProjectDetail({
                 href={sentLink}
                 target="_blank"
                 rel="noreferrer"
-                style={{ color: "#065F46" }}
+                style={{ color: "#18181B" }}
               >
                 {sentLink}
               </a>{" "}
@@ -2262,8 +2393,8 @@ function ProjectDetail({
           <div
             style={{
               padding: "10px 12px",
-              background: D.pill,
-              border: `1px solid ${D.border}`,
+              background: "#F4F4F5",
+              border: `1px solid #E4E4E7`,
               borderRadius: 8,
               display: "flex",
               justifyContent: "space-between",
@@ -2273,10 +2404,10 @@ function ProjectDetail({
           >
             {" "}
             <div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
+              <div style={{ fontSize: 12, fontWeight: 500, color: "#09090B" }}>
                 FDACS-13645 WDO form
               </div>
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+              <div style={{ fontSize: 11, color: "#71717A", marginTop: 2 }}>
                 Preview the filled report exactly as it will be filed.
               </div>
               <a
@@ -2285,7 +2416,7 @@ function ProjectDetail({
                 rel="noreferrer"
                 style={{
                   fontSize: 11,
-                  color: D.muted,
+                  color: "#71717A",
                   textDecoration: "underline",
                   marginTop: 4,
                   display: "inline-block",
@@ -2306,11 +2437,11 @@ function ProjectDetail({
                   padding: "7px 10px",
                   borderRadius: 6,
                   fontSize: 11,
-                  fontWeight: 800,
-                  color: D.heading,
+                  fontWeight: 500,
+                  color: "#09090B",
                   cursor: "pointer",
-                  background: D.card,
-                  border: `1px solid ${D.inputBorder}`,
+                  background: "#FFFFFF",
+                  border: `1px solid #D4D4D8`,
                 }}
               >
                 View filled form
@@ -2352,7 +2483,17 @@ function ProjectDetail({
               setEditProjectDate(e.target.value);
               setDirty(true);
             }}
-            style={inputStyle}
+            // iOS WebKit gives date inputs an intrinsic shadow-DOM width that
+            // can exceed width:100% — clamp it and drop the native appearance
+            // so the field tracks the container like the sibling text inputs
+            // (same fix as CreateProjectModal, #2806).
+            style={{
+              ...inputStyle,
+              WebkitAppearance: "none",
+              appearance: "none",
+              minWidth: 0,
+              maxWidth: "100%",
+            }}
           />{" "}
         </div>
         {project.project_type === WDO_TYPE && (
@@ -2371,21 +2512,41 @@ function ProjectDetail({
             onEvidencePhotoSelected={handleEvidencePhotoSelected}
             disabled={saving || aiWriting}
             palette={{
-              card: D.card,
-              bg: D.pill,
-              border: D.border,
-              heading: D.heading,
-              text: D.text,
-              muted: D.muted,
-              accent: D.accent,
+              card: "#FFFFFF",
+              bg: "#F4F4F5",
+              border: "#E4E4E7",
+              heading: "#09090B",
+              text: "#27272A",
+              muted: "#71717A",
+              accent: "#18181B",
               accentText: "#fff",
-              red: D.red,
+              red: "#991B1B",
             }}
           />
         )}
         {/* Type-specific findings */}
-        {typeCfg?.findingsFields?.map((field) => (
+        {typeCfg?.findingsFields?.map((field, fieldIndex) => (
           <div key={field.key}>
+            {/* Sectioned schemas (WDO, pre-treat cert): header above the
+                first field of each section — same scan-in-groups pattern as
+                the typed CompletionPanel and CreateProjectModal. */}
+            {field.section &&
+              field.section !== typeCfg.findingsFields[fieldIndex - 1]?.section && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 500,
+                    letterSpacing: "0.06em",
+                    textTransform: "uppercase",
+                    color: "#27272A",
+                    margin: "20px 0 10px",
+                    paddingBottom: 6,
+                    borderBottom: "1px solid #E4E4E7",
+                  }}
+                >
+                  {field.section}
+                </div>
+              )}
             {" "}
             <div
               style={{
@@ -2396,12 +2557,14 @@ function ProjectDetail({
                 marginBottom: 6,
               }}
             >
-              <Label
-                htmlFor={fieldInputId(field.key)}
-                style={{ marginBottom: 0 }}
-              >
-                {field.label}
-              </Label>
+              {field.label !== field.section && (
+                <Label
+                  htmlFor={fieldInputId(field.key)}
+                  style={{ marginBottom: 0 }}
+                >
+                  {field.label}
+                </Label>
+              )}
               {project.project_type === WDO_TYPE &&
                 field.key === "property_address" &&
                 formatProjectCustomerAddress(project) && (
@@ -2411,9 +2574,9 @@ function ProjectDetail({
                     style={{
                       background: "transparent",
                       border: "none",
-                      color: D.accent,
+                      color: "#18181B",
                       fontSize: 11,
-                      fontWeight: 800,
+                      fontWeight: 500,
                       cursor: "pointer",
                       padding: 0,
                       whiteSpace: "nowrap",
@@ -2469,10 +2632,10 @@ function ProjectDetail({
                   padding: "4px 10px",
                   borderRadius: 6,
                   fontSize: 11,
-                  fontWeight: 700,
-                  background: aiWriting ? D.muted : D.card,
-                  color: D.heading,
-                  border: `1px solid ${D.inputBorder}`,
+                  fontWeight: 500,
+                  background: aiWriting ? "#71717A" : "#FFFFFF",
+                  color: "#09090B",
+                  border: `1px solid #D4D4D8`,
                   cursor: aiWriting || saving ? "default" : "pointer",
                   display: "inline-flex",
                   alignItems: "center",
@@ -2493,7 +2656,7 @@ function ProjectDetail({
                 gap: 10,
                 margin: "0 0 8px",
                 fontSize: 11,
-                color: D.muted,
+                color: "#71717A",
               }}
             >
               {" "}
@@ -2553,11 +2716,11 @@ function ProjectDetail({
                 style={{
                   padding: "5px 8px",
                   borderRadius: 6,
-                  border: `1px solid ${D.inputBorder}`,
-                  background: D.card,
-                  color: D.heading,
+                  border: `1px solid #D4D4D8`,
+                  background: "#FFFFFF",
+                  color: "#09090B",
                   fontSize: 11,
-                  fontWeight: 700,
+                  fontWeight: 500,
                   cursor: "pointer",
                 }}
               >
@@ -2589,8 +2752,8 @@ function ProjectDetail({
                 padding: "6px 12px",
                 borderRadius: 6,
                 fontSize: 12,
-                fontWeight: 700,
-                background: D.accent,
+                fontWeight: 500,
+                background: "#18181B",
                 color: "#fff",
                 cursor: "pointer",
               }}
@@ -2629,7 +2792,7 @@ function ProjectDetail({
               style={{
                 padding: "20px 0",
                 fontSize: 12,
-                color: D.muted,
+                color: "#71717A",
                 textAlign: "center",
               }}
             >
@@ -2640,8 +2803,8 @@ function ProjectDetail({
         {canAdminActions && closeoutPreview && project.status !== "closed" && (
           <div
             style={{
-              border: `1px solid ${closeoutBlocksClose ? "#FCA5A5" : D.border}`,
-              background: closeoutBlocksClose ? "#FEF2F2" : "#F8FAFC",
+              border: `1px solid ${closeoutBlocksClose ? "#FCA5A5" : "#E4E4E7"}`,
+              background: closeoutBlocksClose ? "#FEF2F2" : "#FAFAFA",
               borderRadius: 8,
               padding: 12,
             }}
@@ -2651,7 +2814,7 @@ function ProjectDetail({
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
-                color: D.heading,
+                color: "#09090B",
                 fontSize: 13,
                 fontWeight: 850,
                 marginBottom: 8,
@@ -2669,10 +2832,10 @@ function ProjectDetail({
               }}
             >
               <div>
-                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
                   Service
                 </div>
-                <div style={{ color: D.heading, fontWeight: 800 }}>
+                <div style={{ color: "#09090B", fontWeight: 500 }}>
                   {closeoutPreview.serviceCompletion?.willCompleteService
                     ? `Complete ${closeoutPreview.serviceCompletion.serviceType || "linked service"}`
                     : closeoutPreview.serviceCompletion?.linked
@@ -2681,47 +2844,47 @@ function ProjectDetail({
                 </div>
               </div>
               <div>
-                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
                   Billing
                 </div>
                 <div
                   style={{
-                    color: billingBlocksClose ? D.red : D.heading,
-                    fontWeight: 800,
+                    color: billingBlocksClose ? "#991B1B" : "#09090B",
+                    fontWeight: 500,
                   }}
                 >
                   {closeoutBillingLabel(closeoutPreview.billing)}
                 </div>
               </div>
               <div>
-                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
                   Follow-up
                 </div>
-                <div style={{ color: followupBlocksClose ? D.red : D.heading, fontWeight: 800 }}>
+                <div style={{ color: followupBlocksClose ? "#991B1B" : "#09090B", fontWeight: 500 }}>
                   {closeoutFollowupLabel(closeoutPreview.followup)}
                 </div>
               </div>
               <div>
-                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
                   Report
                 </div>
-                <div style={{ color: D.heading, fontWeight: 800 }}>
+                <div style={{ color: "#09090B", fontWeight: 500 }}>
                   {closeoutPreview.portal?.attached ? "Portal attached" : "Token-only"}
                 </div>
               </div>
             </div>
             {billingBlocksClose && (
-              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
-                Resolve billing before closing. The project can stay in review until the invoice or prepaid coverage exists.
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
+                Use the completion action to charge an authorized card on file, or send the invoice and hold the customer&apos;s {project.project_type === CERTIFICATE_TYPE ? "certificate" : "report"} until payment.
               </div>
             )}
             {followupBlocksClose && (
-              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
                 Auto-schedule follow-up is not wired yet. Use alert follow-up or schedule the return manually before closing.
               </div>
             )}
             {previewBlocksClose && !billingBlocksClose && !followupBlocksClose && (
-              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
                 This project cannot close from the linked service’s current state.
               </div>
             )}
@@ -2729,7 +2892,11 @@ function ProjectDetail({
         )}
         <ProjectHistoryPanel activity={data.activity || []} />{" "}
       </div>
-      {canAdminActions && project.project_type === WDO_TYPE && project.status !== "closed" && (
+      {/* Signature capture is a FIELD action — the licensee signs at the
+          inspection, and POST /:id/wdo-signature is requireTechOrAdmin — so
+          it is deliberately NOT behind canAdminActions (Codex P2 on the
+          tech in-place embed). Send/PDF/close stay admin-gated. */}
+      {project.project_type === WDO_TYPE && project.status !== "closed" && (
         <div style={{ padding: "0 16px" }}>
           <WdoSignaturePad
             projectId={project.id}
@@ -2740,11 +2907,36 @@ function ProjectDetail({
           />
         </div>
       )}
+      {reportHeld && (
+        <div style={{ padding: "0 16px 12px" }}>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: "1px solid #FCD34D",
+              background: "#FFFBEB",
+              color: "#92400E",
+              fontSize: 13,
+              fontWeight: 500,
+            }}
+          >
+            Report held — the customer has the invoice and pay link, and the
+            report is emailed automatically the moment the invoice is paid.
+            &ldquo;Send report&rdquo; delivers it now and clears the hold.
+            {project.report_hold_last_error ? (
+              <div style={{ marginTop: 6, color: "#991B1B", fontWeight: 750 }}>
+                Last automatic release attempt failed:{" "}
+                {project.report_hold_last_error}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
       {/* Footer actions */}
       <div
         style={{
           padding: "12px 16px",
-          borderTop: `1px solid ${D.border}`,
+          borderTop: `1px solid #E4E4E7`,
           display: "flex",
           gap: 10,
           flexWrap: "wrap",
@@ -2752,7 +2944,32 @@ function ProjectDetail({
           alignItems: "center",
         }}
       >
-        {canAdminActions && (
+        {canAdminActions && reportHoldAvailable && project.status !== "closed" && (
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              fontSize: 13,
+              color: "#3F3F46",
+              fontWeight: 500,
+              cursor: "pointer",
+              marginRight: "auto",
+            }}
+            title={project.project_type === WDO_TYPE
+              ? "Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
+              : "Send the invoice + pay link now; the pre-treatment certificate is delivered automatically once the invoice is paid"}
+          >
+            <input
+              type="checkbox"
+              checked={holdReportUntilPaid}
+              onChange={(e) => setHoldReportUntilPaid(e.target.checked)}
+              disabled={saving}
+            />
+            Hold report until invoice is paid
+          </label>
+        )}
+        {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
             onClick={handleSendPortalInvite}
@@ -2769,7 +2986,7 @@ function ProjectDetail({
             Portal invite
           </button>
         )}
-        {canAdminActions && (
+        {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
             onClick={handleSendPrepGuide}
@@ -2794,7 +3011,7 @@ function ProjectDetail({
             disabled={saving || closeoutBlocksClose}
             title={
               billingBlocksClose
-                ? "Resolve billing before closing"
+                ? "Send the invoice before closing"
                 : followupBlocksClose
                   ? "Resolve follow-up automation before closing"
                   : previewBlocksClose
@@ -2804,7 +3021,7 @@ function ProjectDetail({
             style={{ ...btnSecondary, opacity: saving || closeoutBlocksClose ? 0.5 : 1 }}
           >
             {billingBlocksClose
-              ? "Resolve billing first"
+              ? "Send invoice first"
               : followupBlocksClose
                 ? "Resolve follow-up first"
                 : previewBlocksClose
@@ -2841,13 +3058,21 @@ function ProjectDetail({
               onClick={handleSend}
               disabled={saving || wdoNeedsSignature}
               style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
-              title={wdoNeedsSignature ? "Capture the licensee signature first" : undefined}
+              title={
+                wdoNeedsSignature
+                  ? "Capture the licensee signature first"
+                  : reportHeld
+                    ? "Deliver the report now — this releases the payment hold"
+                    : undefined
+              }
             >
-              Send report
+              {reportHeld ? "Send report now (release hold)" : "Send report"}
             </button>
           )}
         {canAdminActions &&
-          (project.project_type === WDO_TYPE || project.service_record_id) &&
+          (project.project_type === WDO_TYPE ||
+            project.project_type === CERTIFICATE_TYPE ||
+            project.service_record_id) &&
           project.status !== "closed" && (
             <button
               type="button"
@@ -2857,15 +3082,22 @@ function ProjectDetail({
               title={
                 wdoNeedsSignature
                   ? "Capture the licensee signature first"
-                  : project.project_type === WDO_TYPE
-                    ? "Send the filled FDACS-13645 report and an invoice together via email + text"
+                  : reportHoldAvailable
+                    ? holdReportUntilPaid
+                      ? project.project_type === WDO_TYPE
+                        ? "Send the invoice and payment link now; release the FDACS-13645 report automatically after payment"
+                        : "Send the invoice and payment link now; release the pre-treatment certificate automatically after payment"
+                      : "Send the report and an invoice together via email + text"
                     : "Send the report and an invoice together via email + text"
               }
             >
-              Send report + invoice
+              {reportHoldAvailable && holdReportUntilPaid
+                ? "Send invoice & hold report"
+                : "Send report + invoice"}
             </button>
           )}
       </div>{" "}
+      {confirmDialog}
     </div>
   );
 }
@@ -2877,6 +3109,10 @@ const PROJECT_ACTIVITY_LABELS = {
   project_report_resent: "Resent",
   project_report_with_invoice_sent: "Report + invoice sent",
   project_report_with_invoice_failed: "Report + invoice failed",
+  project_invoice_sent_report_held: "Invoice sent — report held",
+  project_invoice_report_hold_failed: "Invoice send failed (hold)",
+  project_report_released_after_payment: "Report released (paid)",
+  project_report_release_blocked: "Report release blocked",
   project_prep_guide_sent: "Prep guide sent",
   project_prep_guide_failed: "Prep guide failed",
   project_portal_invite_sent: "Portal invite sent",
@@ -2908,8 +3144,8 @@ function ProjectHistoryPanel({ activity }) {
       <div
         style={{
           fontSize: 14,
-          fontWeight: 800,
-          color: D.heading,
+          fontWeight: 500,
+          color: "#09090B",
           marginBottom: 8,
         }}
       >
@@ -2918,7 +3154,7 @@ function ProjectHistoryPanel({ activity }) {
       {activity.length > 0 ? (
         <div
           style={{
-            border: `1px solid ${D.border}`,
+            border: `1px solid #E4E4E7`,
             borderRadius: 8,
             overflow: "hidden",
           }}
@@ -2928,8 +3164,8 @@ function ProjectHistoryPanel({ activity }) {
               key={item.id || `${item.action}-${item.created_at}-${idx}`}
               style={{
                 padding: "10px 12px",
-                borderTop: idx === 0 ? "none" : `1px solid ${D.border}`,
-                background: D.card,
+                borderTop: idx === 0 ? "none" : `1px solid #E4E4E7`,
+                background: "#FFFFFF",
               }}
             >
               {" "}
@@ -2945,15 +3181,15 @@ function ProjectHistoryPanel({ activity }) {
                 <div style={{ minWidth: 0 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 800, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: "#09090B" }}
                   >
                     {PROJECT_ACTIVITY_LABELS[item.action] || item.action}
                   </div>{" "}
-                  <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
+                  <div style={{ fontSize: 14, color: "#71717A", marginTop: 2 }}>
                     {item.description || "Project activity recorded."}
                   </div>
                   {item.actor_name && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                    <div style={{ fontSize: 14, color: "#71717A", marginTop: 4 }}>
                       By {item.actor_name}
                     </div>
                   )}
@@ -2962,7 +3198,7 @@ function ProjectHistoryPanel({ activity }) {
                   style={{
                     flexShrink: 0,
                     fontSize: 14,
-                    color: D.muted,
+                    color: "#71717A",
                     textAlign: "right",
                   }}
                 >
@@ -2973,7 +3209,7 @@ function ProjectHistoryPanel({ activity }) {
           ))}
         </div>
       ) : (
-        <div style={{ padding: "12px 0", fontSize: 14, color: D.muted }}>
+        <div style={{ padding: "12px 0", fontSize: 14, color: "#71717A" }}>
           No activity recorded yet.
         </div>
       )}
@@ -3008,9 +3244,9 @@ function PhotoThumb({ photo, projectId, onDelete }) {
     <div
       style={{
         position: "relative",
-        background: D.pill,
+        background: "#F4F4F5",
         borderRadius: 8,
-        border: `1px solid ${D.border}`,
+        border: `1px solid #E4E4E7`,
         overflow: "hidden",
         aspectRatio: "1/1",
       }}
@@ -3038,7 +3274,7 @@ function PhotoThumb({ photo, projectId, onDelete }) {
             alignItems: "center",
             justifyContent: "center",
             fontSize: 11,
-            color: D.muted,
+            color: "#71717A",
           }}
         >
           {loadFailed ? "Photo unavailable" : "Loading…"}
@@ -3054,7 +3290,7 @@ function PhotoThumb({ photo, projectId, onDelete }) {
           background: "rgba(0,0,0,0.55)",
           color: "#fff",
           fontSize: 10,
-          fontWeight: 600,
+          fontWeight: 500,
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -3100,10 +3336,12 @@ function ReadinessPanel({ readiness }) {
   return (
     <div
       style={{
+        // V2 monochrome: complete = neutral zinc; blockers gate the send,
+        // so the incomplete state carries the genuine-alert tint.
         padding: "10px 12px",
-        background: complete && !hasQualityNotes ? "#ECFDF5" : "#FFFBEB",
-        border: `1px solid ${complete && !hasQualityNotes ? "#A7F3D0" : "#FDE68A"}`,
-        borderRadius: 8,
+        background: complete && !hasQualityNotes ? "#FAFAFA" : "#FEF2F2",
+        border: `1px solid ${complete && !hasQualityNotes ? "#E4E4E7" : "#FECACA"}`,
+        borderRadius: 6,
       }}
     >
       {" "}
@@ -3118,10 +3356,10 @@ function ReadinessPanel({ readiness }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: "#09090B" }}>
             Pre-send review
           </div>{" "}
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+          <div style={{ fontSize: 11, color: "#71717A", marginTop: 2 }}>
             {complete
               ? "Required report details are present."
               : `${readiness.missing.length} required item${readiness.missing.length === 1 ? "" : "s"} still need attention.`}
@@ -3131,8 +3369,8 @@ function ReadinessPanel({ readiness }) {
           style={{
             flexShrink: 0,
             fontSize: 10,
-            fontWeight: 800,
-            color: complete && !hasQualityNotes ? "#065F46" : "#92400E",
+            fontWeight: 500,
+            color: complete && !hasQualityNotes ? "#3F3F46" : "#991B1B",
             textTransform: "uppercase",
             letterSpacing: 0.5,
           }}
@@ -3153,9 +3391,9 @@ function ReadinessPanel({ readiness }) {
             key={item.label}
             style={{
               fontSize: 11,
-              color: item.ok ? "#166534" : "#92400E",
-              background: item.ok ? "#F0FDF4" : "#FEF3C7",
-              border: `1px solid ${item.ok ? "#BBF7D0" : "#FDE68A"}`,
+              color: item.ok ? "#3F3F46" : "#991B1B",
+              background: item.ok ? "#FAFAFA" : "#FEF2F2",
+              border: `1px solid ${item.ok ? "#E4E4E7" : "#FECACA"}`,
               borderRadius: 6,
               padding: "5px 7px",
             }}
@@ -3176,7 +3414,7 @@ function ReadinessPanel({ readiness }) {
           {readiness.quality.map((note) => (
             <div
               key={note}
-              style={{ fontSize: 11, color: "#92400E", lineHeight: 1.4 }}
+              style={{ fontSize: 11, color: "#71717A", lineHeight: 1.4 }}
             >
               Review: {note}
             </div>
@@ -3192,11 +3430,13 @@ function Alert({ tone = "success", children }) {
   return (
     <div
       style={{
+        // V2 monochrome: confirmations are neutral zinc; alert red is
+        // reserved for genuine errors.
         padding: "9px 12px",
-        background: isError ? "#FEF2F2" : "#ECFDF5",
-        border: `1px solid ${isError ? "#FECACA" : "#A7F3D0"}`,
-        borderRadius: 8,
-        color: isError ? D.red : "#065F46",
+        background: isError ? "#FEF2F2" : "#FAFAFA",
+        border: `1px solid ${isError ? "#FECACA" : "#E4E4E7"}`,
+        borderRadius: 6,
+        color: isError ? "#991B1B" : "#3F3F46",
         fontSize: 12,
         lineHeight: 1.45,
       }}
@@ -3213,8 +3453,8 @@ function DeliveryPanel({ channels, status }) {
     <div
       style={{
         padding: "10px 12px",
-        background: D.pill,
-        border: `1px solid ${D.border}`,
+        background: "#F4F4F5",
+        border: `1px solid #E4E4E7`,
         borderRadius: 8,
       }}
     >
@@ -3222,8 +3462,8 @@ function DeliveryPanel({ channels, status }) {
       <div
         style={{
           fontSize: 12,
-          fontWeight: 800,
-          color: D.heading,
+          fontWeight: 500,
+          color: "#09090B",
           marginBottom: 8,
         }}
       >
@@ -3243,8 +3483,8 @@ function DeliveryPanel({ channels, status }) {
             {" "}
             <span
               style={{
-                color: D.text,
-                fontWeight: 700,
+                color: "#27272A",
+                fontWeight: 500,
                 textTransform: "uppercase",
               }}
             >
@@ -3252,7 +3492,7 @@ function DeliveryPanel({ channels, status }) {
             </span>{" "}
             <span
               style={{
-                color: result?.ok ? D.success : D.red,
+                color: result?.ok ? "#15803D" : "#991B1B",
                 textAlign: "right",
               }}
             >
@@ -3271,7 +3511,7 @@ function Label({ children, style, htmlFor }) {
       htmlFor={htmlFor}
       style={{
         fontSize: 12,
-        fontWeight: 800,
+        fontWeight: 500,
         color: ESTIMATE_MUTED,
         textTransform: "uppercase",
         letterSpacing: "0.12em",
@@ -3287,38 +3527,37 @@ function Label({ children, style, htmlFor }) {
 
 const inputStyle = {
   width: "100%",
-  minHeight: 48,
+  minHeight: 44,
   background: ESTIMATE_INPUT_BG,
   color: ESTIMATE_TEXT,
   border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
-  borderRadius: 10,
-  padding: "12px 14px",
-  fontSize: 15,
-  fontWeight: 500,
+  borderRadius: 4,
+  padding: "10px 12px",
+  fontSize: 14,
+  fontWeight: 400,
   boxSizing: "border-box",
-  fontFamily: FONTS.body,
   outline: "none",
 };
 
 const btnPrimary = {
-  minHeight: 48,
+  minHeight: 44,
   padding: "0 18px",
-  borderRadius: 10,
+  borderRadius: 4,
   fontSize: 14,
-  fontWeight: 700,
-  background: ESTIMATE_TEXT,
+  fontWeight: 500,
+  background: "#18181B",
   color: "#fff",
   border: "none",
   cursor: "pointer",
 };
 const btnSecondary = {
-  minHeight: 48,
+  minHeight: 44,
   padding: "0 16px",
-  borderRadius: 10,
+  borderRadius: 4,
   fontSize: 14,
-  fontWeight: 600,
-  background: COLORS.white,
+  fontWeight: 500,
+  background: "#FFFFFF",
   color: ESTIMATE_TEXT,
-  border: `1px solid ${ESTIMATE_BORDER}`,
+  border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
   cursor: "pointer",
 };

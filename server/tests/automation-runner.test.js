@@ -74,19 +74,23 @@ describe('automation runner rendering', () => {
     expect(rendered.text).toBe('Hi Taylor, your estimate is ready.');
   });
 
-  test('renders newsletter automation content with newsletter chrome and unsubscribe text', () => {
+  test('renders marketing automation content with service chrome but keeps the unsubscribe footer', () => {
     const rendered = renderAutomationStepContent({
       template: { asm_group: 'newsletter' },
-      htmlBody: '<p>Hi {{first_name}}, here is the newsletter.</p>',
-      textBody: 'Hi {{first_name}}, here is the newsletter.',
+      htmlBody: '<p>Hi {{first_name}}, thanks for your interest in Waves.</p>',
+      textBody: 'Hi {{first_name}}, thanks for your interest in Waves.',
       customer: { first_name: 'Taylor', email: 'taylor@example.com' },
       asmGroupId: 101,
     });
 
-    expect(rendered.html).toContain('The Waves Newsletter');
+    // Newsletter chrome is reserved for actual newsletter sends — marketing
+    // drips (new_lead/cold_lead/referral_nudge) wear the service shell.
+    expect(rendered.html).not.toContain('The Waves Newsletter');
     expect(rendered.html).toContain('Hi Taylor');
+    // Still a commercial email on the marketing ASM group: the visible
+    // unsubscribe link must survive the wrapper swap.
     expect(rendered.html).toContain('<%asm_group_unsubscribe_raw_url%>');
-    expect(rendered.text).toContain('Hi Taylor, here is the newsletter.');
+    expect(rendered.text).toContain('Hi Taylor, thanks for your interest in Waves.');
     expect(rendered.text).toContain('Unsubscribe: <%asm_group_unsubscribe_raw_url%>');
   });
 });
@@ -225,5 +229,143 @@ describe('automation runner suppression guardrails', () => {
       status: 'cancelled',
       next_send_at: null,
     }));
+  });
+});
+
+describe('automation runner prep sequence delivery stamp', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.fn = { now: jest.fn(() => 'NOW()') };
+  });
+
+  function queuesForSend({ templateKey, stampChain }) {
+    const queues = {
+      automation_enrollments: [
+        chain({
+          first: {
+            id: 'enrollment-1',
+            status: 'active',
+            template_key: templateKey,
+            customer_id: 'cust-1',
+            current_step: 0,
+            email: 'megan@example.com',
+            first_name: 'Megan',
+            last_name: 'Example',
+          },
+        }),
+        chain({}),
+      ],
+      automation_templates: [
+        chain({ first: { key: templateKey, name: templateKey, asm_group: 'service' } }),
+      ],
+      automation_steps: [
+        chain({
+          result: [{
+            id: 'step-1',
+            step_order: 0,
+            subject: 'Your prep guide',
+            html_body: '<p>Prep steps for {{first_name}}</p>',
+            text_body: 'Prep steps',
+            from_email: 'automations@wavespestcontrol.com',
+            enabled: true,
+          }],
+        }),
+      ],
+      automation_step_sends: [
+        chain({ returning: [{ id: 'send-1' }] }),
+        chain({}),
+      ],
+      email_suppressions: [chain({ result: [] })],
+    };
+    if (stampChain) queues.scheduled_services = [stampChain];
+    return queues;
+  }
+
+  test('a delivered step-0 prep guide stamps the token-bearing visit rows', async () => {
+    const stampChain = chain({});
+    setDbQueues(queuesForSend({ templateKey: 'flea', stampChain }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    const result = await sendStep('enrollment-1');
+
+    expect(result.sent).toBe(true);
+    expect(stampChain.where).toHaveBeenCalledWith({ customer_id: 'cust-1', prep_template_key: 'prep.flea' });
+    expect(stampChain.update).toHaveBeenCalledWith({ prep_sent_at: 'NOW()' });
+  });
+
+  test('non-prep sequences never touch the visit rows', async () => {
+    // No scheduled_services queue: a stamp attempt would throw
+    // "Unexpected db table" and fail this test.
+    setDbQueues(queuesForSend({ templateKey: 'cold_lead' }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    const result = await sendStep('enrollment-1');
+
+    expect(result.sent).toBe(true);
+  });
+});
+
+describe('automation runner enrollment reactivation', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  test('reactivating a prior enrollment refreshes the denormalized contact fields', async () => {
+    const { enrollCustomer } = require('../services/automation-runner');
+    const reactivateUpdate = chain({
+      returning: [{ id: 'enr-1', status: 'active' }],
+    });
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'flea', name: 'Flea Treatment', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [
+        // Prior COMPLETED enrollment carrying the customer's OLD email.
+        chain({ first: { id: 'enr-1', status: 'completed', email: 'old@example.com' } }),
+        reactivateUpdate,
+      ],
+    });
+
+    const result = await enrollCustomer({
+      templateKey: 'flea',
+      customer: { id: 'cust-1', email: 'NEW@Example.com', first_name: 'Megan', last_name: 'Example' },
+    });
+
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-1' });
+    // The scheduler sends to the ROW's email — the manual re-send must go to
+    // the customer's current address, not the stale denormalized one.
+    expect(reactivateUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'active',
+      current_step: 0,
+      email: 'new@example.com',
+      first_name: 'Megan',
+      last_name: 'Example',
+    }));
+  });
+});
+
+describe('automation runner scheduler tick', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  test('processDueSteps only picks enrollments on ENABLED templates (tab toggle = in-flight hold)', async () => {
+    const { processDueSteps } = require('../services/automation-runner');
+    sendgrid.isConfigured.mockReturnValue(true);
+    const dueChain = chain({ result: [] });
+    dueChain.join = jest.fn(() => dueChain);
+    dueChain.select = jest.fn(() => Promise.resolve([]));
+    setDbQueues({ 'automation_enrollments as e': [dueChain] });
+
+    const result = await processDueSteps();
+
+    expect(result).toEqual({ processed: 0 });
+    // Disabled templates are excluded at pick time, so toggling an automation
+    // off in the Automations tab immediately holds its in-flight enrollments.
+    expect(dueChain.join).toHaveBeenCalledWith('automation_templates as t', 't.key', 'e.template_key');
+    expect(dueChain.where).toHaveBeenCalledWith('t.enabled', true);
   });
 });

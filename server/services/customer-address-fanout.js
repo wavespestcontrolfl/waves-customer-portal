@@ -26,7 +26,14 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { formatAddress, normalizeStreetLine, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+const {
+  formatAddress,
+  normalizeStreetLine,
+  normalizeUnitLine,
+  splitStreetLineUnit,
+  unitLineValueKey,
+  UNIT_DESIGNATORS,
+} = require('../utils/address-normalizer');
 
 // Deliverable estimate states — mirrors SENDABLE_ESTIMATE_STATUSES in
 // routes/admin-estimates.js (scheduled/sending/send_failed rows still produce
@@ -48,6 +55,28 @@ function addressMatchKey(value) {
   return String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Keep the structurally important tail (unit + place) intact when a snapshot
+// column is narrower than the customer fields. Only the street line is
+// shortened; silently chopping the formatted string could drop the unit and
+// point the lead/estimate at a different door.
+function formatAddressBounded(parts, maxLength) {
+  const line1 = String(parts?.line1 || '').trim();
+  const tail = formatAddress({
+    line2: parts?.line2,
+    city: parts?.city,
+    state: parts?.state,
+    zip: parts?.zip,
+  });
+  if (!line1) return tail.slice(0, maxLength);
+  if (!tail) return line1.slice(0, maxLength).trimEnd();
+  const separator = ', ';
+  const line1Budget = Math.max(0, maxLength - separator.length - tail.length);
+  const boundedLine1 = line1.slice(0, line1Budget).trimEnd();
+  return boundedLine1
+    ? `${boundedLine1}${separator}${tail}`
+    : tail.slice(0, maxLength);
+}
+
 // A comma segment that is a secondary-unit designator ("Apt 2", "# 4",
 // "Suite 200", "Floor 2", "Space 12") — a snapshot carrying one refers to a
 // distinct unit even when its street segment matches the customer's unitless
@@ -56,7 +85,21 @@ function addressMatchKey(value) {
 // ", FL 34211" segment ("floor" spelled out still counts). trlr/rm are USPS
 // designators the shared list doesn't carry.
 const UNIT_SEGMENT_DESIGNATORS = [...UNIT_DESIGNATORS].filter((d) => d !== 'fl').concat(['trlr', 'rm']);
-const UNIT_SEGMENT_RE = new RegExp(`^\\s*(?:${UNIT_SEGMENT_DESIGNATORS.join('|')}|#)\\.?\\s*#?\\s*[\\w-]+\\s*$`, 'i');
+const UNIT_SEGMENT_PREFIX_RE = new RegExp(`^\\s*(?:${UNIT_SEGMENT_DESIGNATORS.join('|')}|#)\\.?\\s*#?\\s*\\S+`, 'i');
+
+function unitKey(value) {
+  return unitLineValueKey(normalizeUnitLine(value));
+}
+
+function snapshotStreetAndUnit(snapshot) {
+  const segments = String(snapshot ?? '').split(',').map((segment) => segment.trim());
+  const inline = splitStreetLineUnit(segments[0]);
+  const unitSegment = segments.slice(1).find((segment) => UNIT_SEGMENT_PREFIX_RE.test(segment));
+  return {
+    street: inline.unit ? inline.street : segments[0],
+    unit: unitSegment || inline.unit || '',
+  };
+}
 
 // A tail segment carrying no city information (state, zip, country) — used
 // to find the city segment of a full single-line snapshot.
@@ -80,11 +123,17 @@ const NON_CITY_TAIL_RE = /^\s*(?:fl|florida)?\s*(?:\d{5}(?:-\d{4})?)?\s*(?:usa|u
 // only when the data actually says they differ.
 function snapshotMatchesContact(snapshot, contact) {
   if (!contact) return false;
-  const lineKey = addressMatchKey(normalizeStreetLine(contact.address_line1));
+  const contactParts = splitStreetLineUnit(contact.address_line1);
+  const contactStreet = contactParts.unit ? contactParts.street : contact.address_line1;
+  const contactUnit = contact.address_line2 || contactParts.unit || '';
+  const lineKey = addressMatchKey(normalizeStreetLine(contactStreet));
   if (!lineKey) return false;
   const segments = String(snapshot ?? '').split(',');
-  if (segments.slice(1).some((seg) => UNIT_SEGMENT_RE.test(seg))) return false;
-  const segKey = addressMatchKey(normalizeStreetLine(segments[0]));
+  const snapshotParts = snapshotStreetAndUnit(snapshot);
+  const snapshotUnitKey = unitKey(snapshotParts.unit);
+  const contactUnitKey = unitKey(contactUnit);
+  if (snapshotUnitKey !== contactUnitKey) return false;
+  const segKey = addressMatchKey(normalizeStreetLine(snapshotParts.street));
   if (!segKey || segKey !== lineKey) return false;
   if (segments.length === 1) return true; // bare street line — nothing more to check
 
@@ -100,7 +149,9 @@ function snapshotTailPlace(snapshot) {
   if (segments.length === 1) return null;
   const tail = segments.slice(1).join(' ');
   const zip = (tail.match(/\b(\d{5})(?:-\d{4})?\b/) || [])[1] || null;
-  const citySeg = segments.slice(1).find((seg) => seg.trim() && !NON_CITY_TAIL_RE.test(seg)) || '';
+  const citySeg = segments.slice(1).find((seg) => (
+    seg.trim() && !NON_CITY_TAIL_RE.test(seg) && !UNIT_SEGMENT_PREFIX_RE.test(seg)
+  )) || '';
   const city = citySeg.replace(/\b(?:fl|florida)\b/gi, '').replace(/\b\d{5}(?:-\d{4})?\b/g, '');
   return { zip, city };
 }
@@ -142,9 +193,15 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     snapshotMatchesContact(snapshot, before) || snapshotMatchesContact(snapshot, after);
 
   const now = new Date();
-  const fullAddress = formatAddress({
-    line1: after.address_line1, city: after.city, state: after.state, zip: after.zip,
-  }).slice(0, 300);
+  const addressParts = {
+    line1: after.address_line1, line2: after.address_line2, city: after.city, state: after.state, zip: after.zip,
+  };
+  const fullAddress = formatAddressBounded(addressParts, 300);
+  const leadFullAddress = formatAddressBounded(addressParts, 255);
+  const streetAddress = formatAddressBounded({
+    line1: after.address_line1,
+    line2: after.address_line2,
+  }, 255);
 
   // The updates re-assert the open/terminal predicates from the selects: a
   // concurrent accept/archive/close landing between select and update must
@@ -173,14 +230,19 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // rewriting one with just the street line would drop its embedded
   // city/state/zip. Full-string snapshots get the rebuilt full address (which
   // needs city+zip, same rule as estimates below); street-line snapshots get
-  // the street line.
+  // the street line plus unit. A comma is not enough to identify a full
+  // snapshot because a unit-only snapshot is also "street, unit".
   const matched = leadRows.filter((r) => leadMatchesContact(r, before) || leadMatchesContact(r, after));
+  const hasSnapshotPlace = (row) => {
+    const place = snapshotTailPlace(row.address);
+    return !!(place && (place.zip || addressMatchKey(place.city)));
+  };
   const leadGroups = [
-    { rows: matched.filter((r) => !String(r.address || '').includes(',')), address: after.address_line1 },
+    { rows: matched.filter((r) => !hasSnapshotPlace(r)), address: streetAddress },
     // leads.address is varchar(255) (default knex string) — an oversized full
     // string would throw INSIDE the caller's transaction and roll back the
     // whole customer edit.
-    { rows: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')) : [], address: fullAddress.slice(0, 255) },
+    { rows: hasCityZip ? matched.filter(hasSnapshotPlace) : [], address: leadFullAddress },
   ];
   for (const group of leadGroups) {
     // city/zip are patched only when the customer row actually HAS them — a
@@ -255,7 +317,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
           .map((x) => addressMatchKey(String(x).replace(/\bflorida\b/gi, 'fl')))
           .join('|');
       };
-      const proposalTarget = fullAddress.slice(0, 200);
+      const proposalTarget = formatAddressBounded(addressParts, 200);
       const proposalAlreadyTarget = proposalTargetKey(proposalCurrent) === proposalTargetKey(proposalTarget);
       const patchPropertyAddress = !!(proposalCurrent && !proposalAlreadyTarget && matchesCustomerAddress(proposalCurrent));
       // Synthesized-fallback proposals also carry the address as a BUILDING
@@ -325,4 +387,10 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   return counts;
 }
 
-module.exports = { addressMatchKey, snapshotMatchesContact, snapshotMatchesLine1, propagateCustomerAddressChange };
+module.exports = {
+  addressMatchKey,
+  formatAddressBounded,
+  snapshotMatchesContact,
+  snapshotMatchesLine1,
+  propagateCustomerAddressChange,
+};

@@ -31,6 +31,7 @@ const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
 const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
+const { describeHeroForAlt } = require('../content/hero-alt-vision');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
 const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
@@ -161,7 +162,6 @@ const DEFAULT_BLOG_AUTHOR = Object.freeze({
   name: 'Adam Benetti',
   role: 'Founder & Lead Technician',
   fdacs_license: 'JB351547',
-  years_swfl: 12,
   bio_url: '/about/authors/adam-benetti',
 });
 const DEFAULT_TECHNICAL_REVIEWER = Object.freeze({
@@ -259,7 +259,6 @@ async function buildFrontmatter(post) {
       name: author.name,
       role: author.role,
       fdacs_license: author.fdacs_license || undefined,
-      years_swfl: author.years_swfl || undefined,
       bio_url: author.bio_url,
     } : undefined,
     technically_reviewed_by: reviewer ? {
@@ -364,8 +363,8 @@ function normalizeAuthorBlock(value, fallback) {
   const out = { name, role, bio_url: bioUrl };
   const fdacs = String(source.fdacs_license || fallback.fdacs_license || '').trim();
   if (/^JB\d{4,}$/.test(fdacs)) out.fdacs_license = fdacs;
-  const years = Number.isInteger(source.years_swfl) ? source.years_swfl : fallback.years_swfl;
-  if (Number.isInteger(years) && years >= 0) out.years_swfl = years;
+  // No tenure field: the old years_swfl emission was a fabricated "12" (owner
+  // ruling 2026-07-09 — real figure is 3, and tenure is not displayed anywhere).
   return out;
 }
 
@@ -883,28 +882,21 @@ async function publishAstro(postId) {
     await gh.createBranch(branch);
     branchCreated = true;
 
-    if (heroImage?.buffer) {
-      const heroPath = `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`;
-      const existingHero = await gh.getFile(heroPath);
-      await gh.putBinary({
-        path: heroPath,
-        buffer: heroImage.buffer,
-        message: `chore(blog): add hero image for ${slug}`,
-        branch,
-        sha: existingHero ? existingHero.sha : undefined,
-      });
-    }
-
-    // 3. Markdown file
-    // If the file already exists on main (republish), pass its SHA so the
-    // branch commit is an update instead of a conflict.
-    const existing = await gh.getFile(filePath);
-    const fileCommit = await gh.putFile({
-      path: filePath,
-      content: markdown,
-      message: `feat(blog): publish ${slug}`,
+    // 3. Hero + markdown in ONE commit (git data API). Splitting them into
+    // per-file Contents API commits let Cloudflare register the branch
+    // deployment against the hero commit instead of the head, which starves
+    // the PR poller's head==deployment gate (PR #374, 2026-07-15). The tree
+    // write replaces existing paths unconditionally, so a republish needs no
+    // per-file SHA.
+    const fileCommit = await gh.commitFiles({
       branch,
-      sha: existing ? existing.sha : undefined,
+      message: `feat(blog): publish ${slug}`,
+      files: [
+        ...(heroImage?.buffer
+          ? [{ path: `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`, buffer: heroImage.buffer }]
+          : []),
+        { path: filePath, content: markdown },
+      ],
     });
 
     // 4. PR
@@ -1211,6 +1203,7 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
   const agentVerified = await verifiedCommittedHeroSrc(frontmatter?.hero_image?.src);
   if (agentVerified) return { src: agentVerified, buffer: null };
 
+  let generated;
   try {
     const img = await generateHeroBuffer({
       title: frontmatter.title,
@@ -1219,7 +1212,7 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       slug,
     });
     const buffer = await compressToWebp(img.buffer);
-    return {
+    generated = {
       src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`,
       repoPath: `${ASTRO_HERO_DIR}/${slug}/hero.webp`,
       buffer,
@@ -1229,6 +1222,18 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
     heroErr.code = 'BLOG_HERO_IMAGE_FAILED';
     throw heroErr;
   }
+
+  // Describe the image we just generated so the stamped alt matches what the
+  // generator actually rendered — the writer authored its alt before any
+  // image existed, and an image/alt mismatch is a recurring Codex P2 that
+  // parks the PR (remediation is body-only and cannot touch frontmatter).
+  // Outside the fail-closed block above: fail-open, null keeps the writer alt.
+  generated.alt = await describeHeroForAlt({
+    buffer: generated.buffer,
+    title: frontmatter.title,
+    keyword: frontmatter.primary_keyword,
+  });
+  return generated;
 }
 
 async function publishOrUpdatePage(draft, brief = {}) {
@@ -1353,7 +1358,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // never a silent hero-less publish. Resolution happens BEFORE the branch is
   // cut so a hero failure can't orphan a branch/PR.
   const hero = await resolveAutonomousHero({ frontmatter, slug, existingFile });
-  stampAutonomousHero(frontmatter, hero.src, heroAlt);
+  stampAutonomousHero(frontmatter, hero.src, hero.alt || heroAlt);
 
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.
@@ -1362,34 +1367,22 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const markdown = fm.stringify(frontmatter, `${body}\n`);
 
   await gh.createBranch(branch);
-  if (hero.buffer) {
-    // Same-branch hero commit (mirrors publishAstro): the PR carries both the
-    // markdown and the bytes its frontmatter references, so preview and live
-    // can never reference a hero that isn't merged atomically with the post.
-    const existingHero = await gh.getFile(hero.repoPath);
-    await gh.putBinary({
-      path: hero.repoPath,
-      buffer: hero.buffer,
-      message: `chore(blog): add hero image for ${slug}`,
-      branch,
-      sha: existingHero ? existingHero.sha : undefined,
-    });
-  }
-  const fileCommit = await gh.putFile({
-    path: filePath,
-    content: markdown,
-    message: `feat(blog): publish ${slug}`,
+  // ONE commit for hero bytes + markdown (+ legacy .md removal). The hero
+  // still ships on the same branch as the frontmatter that references it
+  // (mirrors publishAstro), but atomically: the multi-commit version of this
+  // block pushed 2–3 commits seconds apart, Cloudflare Pages could register
+  // the branch deployment against the first one, and the autonomous
+  // PR poller's fail-closed head==deployment gate then starved the PR
+  // forever on `preview_build_stale_commit` (PR #374, 2026-07-15).
+  const fileCommit = await gh.commitFiles({
     branch,
-    sha: existingFile && !isLegacyMd ? existingFile.file.sha : undefined,
+    message: `feat(blog): publish ${slug}`,
+    files: [
+      ...(hero.buffer ? [{ path: hero.repoPath, buffer: hero.buffer }] : []),
+      { path: filePath, content: markdown },
+    ],
+    deletes: isLegacyMd ? [existingFile.path] : [],
   });
-  if (isLegacyMd) {
-    await gh.deleteFile({
-      path: existingFile.path,
-      message: `chore(blog): migrate ${slug} to .mdx`,
-      branch,
-      sha: existingFile.file.sha,
-    });
-  }
 
   const pr = await gh.createPr({
     head: branch,
@@ -1756,6 +1749,12 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       return { already_merged: true, pr_number: pr.number, live_url: isUnpublish ? null : liveUrlForPost(post) };
     }
     if (pr.state !== 'open') {
+      // Closed without merging (operator closed it on GitHub): pages-poll has
+      // no finalizeClosed equivalent, so this retry path is the scheduler
+      // lane's only observation of the closed PR — retire its remediation
+      // row here or it reads as a live park forever.
+      const { markPrTerminal } = require('../content/codex-remediation');
+      await markPrTerminal(pr.number, 'closed');
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
     }
     // Callers that gated on an EXTERNAL signal (pages-poll: "the branch's
@@ -1944,6 +1943,13 @@ async function mergedHeroRef(slug) {
 }
 
 async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
+  // The PR left the open state — retire its codex_remediation_state row so
+  // stale 'parked'/'remediating' rows over merged PRs don't read as live
+  // park telemetry. Fail-soft bookkeeping (markPrTerminal never throws).
+  if (post.astro_pr_number) {
+    const { markPrTerminal } = require('../content/codex-remediation');
+    await markPrTerminal(post.astro_pr_number, 'merged');
+  }
   if (isUnpublish) {
     await db('blog_posts').where({ id: postId }).update({
       astro_status: 'draft',

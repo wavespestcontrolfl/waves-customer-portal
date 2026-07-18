@@ -15,6 +15,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/content/opportunity-queue', () => ({
   getById: jest.fn(),
   peek: jest.fn(),
+  // intercept-brief-seeder destructures _internals.maxClaimAttempts at load —
+  // omitting it makes the whole suite fail to require (TypeError), not skip.
+  _internals: { maxClaimAttempts: jest.fn(() => 5) },
 }));
 
 const db = require('../models/db');
@@ -92,7 +95,6 @@ describe('content-brief-builder operator-intercept injection', () => {
       name: 'Adam Benetti',
       role: 'Founder & Lead Technician',
       fdacs_license: 'JB351547',
-      years_swfl: 12,
       bio_url: '/about/authors/adam-benetti',
     });
     expect(op.byline.emphasis).toMatch(/Augusta National/);

@@ -2544,7 +2544,7 @@ export default function PricingLogicPanel() {
             )}
 
           {/* Audit log on relevant tabs */}
-          {["global", "waveguard"].includes(activeTab) && <AuditLog />}
+          {["global", "waveguard", "lawn"].includes(activeTab) && <AuditLog />}
         </>
       )}
     </div>

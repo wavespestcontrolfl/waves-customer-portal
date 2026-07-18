@@ -1,6 +1,7 @@
 import React from 'react';
 import { estimateCard } from './cardStyles';
 import { fmtMoney } from '../../lib/money';
+import { CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 import { W } from './tokens';
 
 /**
@@ -18,6 +19,25 @@ import { W } from './tokens';
  */
 
 const ACTION_BG = W.blueDeeper;
+
+// Quantified card-fee disclosure for every point where the customer consents
+// to a card on file. The "up to X%" phrase is extracted VERBATIM from the
+// canonical, versioned consent copy (lib/paymentMethodConsentText.js — the
+// client mirror of server/services/payment-method-consent-text.js, which is
+// version-locked to the server surcharge policy in
+// server/services/stripe-pricing.js / computeChargeAmount). Never hardcode a
+// percentage here and never derive one from a second client-side rate
+// constant (lib/cardSurcharge.js is charge-preview MATH, not disclosure
+// copy): AGENTS.md classifies a disclosure figure drifting from the server
+// policy as a P0. When the rate changes, the consent module bumps its
+// version and this copy follows automatically.
+const SURCHARGE_RATE_PHRASE = (CARD_CONSENT_TEXT.match(/up to \d+(?:\.\d+)?%/) || [])[0];
+export const CARD_SURCHARGE_DISCLOSURE = SURCHARGE_RATE_PHRASE
+  ? `A credit card surcharge of ${SURCHARGE_RATE_PHRASE} may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.`
+  // Fail-safe: if the consent copy is ever reworded so the phrase can't be
+  // extracted, disclose unquantified rather than a possibly-stale number.
+  // (The unit test asserts extraction works, so CI catches the rewording.)
+  : 'A credit card surcharge may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.';
 
 
 function billingIntervalMonths(frequency = {}) {
@@ -118,7 +138,7 @@ export default function PaymentPreferenceButtons({
   const optionNote = {
     fontSize: 14,
     color: W.textCaption,
-    lineHeight: 1.45,
+    lineHeight: 1.5,
     marginTop: 8,
     padding: '0 2px',
     textAlign: 'center',
@@ -140,10 +160,13 @@ export default function PaymentPreferenceButtons({
       : hasFirstVisitInvoice
         ? 'first application invoice'
         : 'invoice';
+  // 'a setup invoice' but 'an invoice' — the bare fallback label starts with
+  // a vowel, so pick the article from the label instead of hardcoding 'a'.
+  const payPerApplicationInvoiceArticle = /^[aeiou]/i.test(payPerApplicationInvoiceLabel) ? 'an' : 'a';
 
   const payPerApplicationLabel = isOneTime ? 'Book visit' : 'Pay per application';
   const fineprint = offerPrepay
-    ? `Choose pay per application with a ${payPerApplicationInvoiceLabel} after confirmation, or annual prepay to approve the 12-month plan up front with setup included.`
+    ? `Choose pay per application with ${payPerApplicationInvoiceArticle} ${payPerApplicationInvoiceLabel} after confirmation, or annual prepay to approve the 12-month plan up front with setup included.`
     : invoiceMode
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
@@ -162,7 +185,7 @@ export default function PaymentPreferenceButtons({
   if (invoiceMode) {
     return (
       <div style={estimateCard()}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+        <div style={{ fontSize: 14, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
           {oneTimeBooking ? 'Book your visit' : 'Accept your estimate'}
         </div>
@@ -199,7 +222,7 @@ export default function PaymentPreferenceButtons({
     const windowText = `${cardHold?.cancelWindowHours != null ? cardHold.cancelWindowHours : 24} hours`;
     return (
       <div style={estimateCard()}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+        <div style={{ fontSize: 14, fontWeight: 600, color: W.textCaption,
           textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
           {holdRequired ? 'Hold your appointment' : 'Book your visit'}
         </div>
@@ -215,7 +238,7 @@ export default function PaymentPreferenceButtons({
 
         <div style={{ fontSize: 12, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
           {holdRequired
-            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
+            ? `We don't charge you today. Your card is charged the final total after your visit is completed. A ${feeText} fee applies only if you cancel within ${windowText} or aren't home. ${CARD_SURCHARGE_DISCLOSURE}`
             : fineprint}
         </div>
       </div>
@@ -224,7 +247,7 @@ export default function PaymentPreferenceButtons({
 
   return (
     <div style={estimateCard()}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: W.textCaption,
+      <div style={{ fontSize: 14, fontWeight: 600, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 16 }}>
         {isOneTime ? 'Book your visit' : 'Reserve your spot'}
       </div>
@@ -257,7 +280,7 @@ export default function PaymentPreferenceButtons({
                     alignItems: 'baseline',
                     fontSize: 14,
                     color: W.navy,
-                    lineHeight: 1.4,
+                    lineHeight: 1.35,
                     marginBottom: 8,
                   }}
                 >
@@ -282,7 +305,7 @@ export default function PaymentPreferenceButtons({
                   <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(invoiceTotal)}</strong>
                 </div>
               ) : null}
-              <div style={{ fontSize: 13, color: W.textCaption, lineHeight: 1.45, marginTop: 12 }}>
+              <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 12 }}>
                 No payment is charged on this page. After confirmation, we open the invoice
                 {invoiceTotal > 0 ? ` for ${fmtMoney(invoiceTotal)}` : ''} so you can pay in-flow.
                 {Number(oneTimeExtrasTotal) > 0

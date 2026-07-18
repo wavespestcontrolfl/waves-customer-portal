@@ -120,5 +120,81 @@ describe('service coverage normalization', () => {
     expect(normalizeCoverageStatus('bait_replaced')).toBe('completed');
     expect(normalizeCoverageStatus('station_checked')).toBe('checked');
     expect(normalizeCoverageStatus('inspection_completed')).toBe('inspected');
+    // the plain form — \binspect\b never matched "inspected", which silently
+    // classified inspected areas as completed (audit 2026-07-16)
+    expect(normalizeCoverageStatus('inspected')).toBe('inspected');
+    expect(normalizeCoverageStatus('not_serviced')).toBe('not_serviced');
+    expect(normalizeCoverageStatus('needs_follow_up')).toBe('needs_follow_up');
+  });
+
+  // 2026-07-16 audit: coverage copy/counts fabricated completion. An
+  // inspected/skipped/not-serviced/follow-up area must never be described or
+  // counted as completed work.
+  describe('coverage never fabricates completion', () => {
+    function pestCoverage(locations) {
+      return normalizeServiceCoverage({
+        serviceRecordId: 'service-1',
+        serviceLine: 'pest',
+        serviceType: 'Quarterly Pest Control Service',
+        serviceAreas: [],
+        zones: [],
+        serviceLocations: locations,
+      }, DEFAULT_SERVICE_COVERAGE_CONFIG);
+    }
+
+    test('an inspected area is described as inspected, not "service completed"', () => {
+      const coverage = pestCoverage([
+        { id: 'loc-1', name: 'Perimeter', status: 'inspected' },
+        { id: 'loc-2', name: 'Entry Points', status: 'inspected' },
+      ]);
+      expect(coverage.items[0].customerDescription).toBe('Perimeter inspected.');
+      expect(coverage.items[1].customerDescription).toBe('Entry Points inspected.');
+      expect(coverage.items.every((item) => !/completed|treated/i.test(item.customerDescription))).toBe(true);
+      expect(coverage.summary).toMatchObject({ completedCount: 0, inspectedCount: 2 });
+    });
+
+    test('a lawn area that was only inspected does not claim "Lawn treatment completed."', () => {
+      const coverage = normalizeServiceCoverage({
+        serviceRecordId: 'service-2',
+        serviceLine: 'lawn',
+        serviceType: 'Lawn Care Treatment Program',
+        serviceAreas: [],
+        zones: [],
+        serviceLocations: [{ id: 'loc-1', name: 'Back Lawn', status: 'inspected' }],
+      }, DEFAULT_SERVICE_COVERAGE_CONFIG);
+      expect(coverage.items[0].customerDescription).toBe('Back Lawn inspected.');
+    });
+
+    test('skipped and not-serviced areas count as skipped, never completed', () => {
+      const coverage = pestCoverage([
+        { id: 'loc-1', name: 'Back Gate Zone', status: 'skipped', skippedReason: 'heavy rain' },
+        { id: 'loc-2', name: 'Detached Shed', status: 'not_serviced' },
+        { id: 'loc-3', name: 'Garage', status: 'needs_follow_up' },
+      ]);
+      expect(coverage.items[0].customerDescription).toBe('Service was skipped because heavy rain.');
+      expect(coverage.items[1].customerDescription).toBe('This area was not serviced on this visit.');
+      expect(coverage.items[2].customerDescription).toBe('Technician flagged this area for follow-up.');
+      expect(coverage.summary).toMatchObject({
+        completedCount: 0,
+        skippedCount: 2,
+        needsAttentionCount: 1,
+      });
+    });
+
+    test('termite station semantics survive the reorder', () => {
+      const coverage = normalizeServiceCoverage({
+        serviceRecordId: 'service-3',
+        serviceLine: 'termite',
+        serviceType: 'Termite Bait Station Program',
+        serviceAreas: [],
+        zones: [],
+        serviceLocations: [
+          { id: 'loc-1', name: 'Station 4', status: 'station_checked' },
+          { id: 'loc-2', name: 'Crawlspace', status: 'inspection_completed' },
+        ],
+      }, DEFAULT_SERVICE_COVERAGE_CONFIG);
+      expect(coverage.items[0].customerDescription).toBe('Station checked.');
+      expect(coverage.items[1].customerDescription).toBe('Inspection completed.');
+    });
   });
 });

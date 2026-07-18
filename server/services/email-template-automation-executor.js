@@ -835,6 +835,21 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
       provider_message_id: result.message?.provider_message_id || null,
       deduped: !!result.deduped,
     });
+    // Prep guides: a CONFIRMED send stamps the visit's prep_sent_at (the
+    // tracker's "prep actually went out" proof) and aligns the rendered
+    // guide to the delivered template. Queue time is too early — a queued
+    // run can still skip, suppress, or fail right here. Fail-soft: a stamp
+    // hiccup never fails a run that already sent.
+    if (status === 'sent'
+      && String(claimedRun.entity_type || '') === 'scheduled_service'
+      && String(claimedRun.template_key || '').startsWith('prep.')) {
+      try {
+        const { markServicePrepSent } = require('./project-email');
+        await markServicePrepSent(claimedRun.entity_id, claimedRun.template_key);
+      } catch (stampErr) {
+        logger.warn(`[email-template-automations] prep_sent_at stamp failed for service ${claimedRun.entity_id}: ${stampErr.message}`);
+      }
+    }
     return updated || { ...running, status };
   } catch (err) {
     if (attemptNumber < retryPolicy.maxAttempts) {

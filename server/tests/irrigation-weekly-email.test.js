@@ -29,6 +29,7 @@ const { fetchServiceWeekWeather } = require('../services/service-report/applicat
 const {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
+  findEligibleCustomers,
   fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
@@ -541,5 +542,49 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(summary.failed).toBe(1);
     expect(summary.sent).toBe(1);
+  });
+
+  test('audience selection compiles the opt-out and eligibility clauses (real knex)', async () => {
+    // The sweep tests above inject candidate rows past a no-op builder, so
+    // they cannot notice a deleted WHERE clause. Compile the real query with
+    // knex and pin every load-bearing audience clause — this is what stands
+    // between the sweep and emailing customers who opted out.
+    const realKnex = require('knex')({ client: 'pg' });
+    const originalRaw = db.raw;
+    let captured;
+    try {
+      db.mockImplementation((table) => {
+        const b = realKnex(table);
+        if (String(table).startsWith('customers')) captured = b;
+        // Compile-only: resolve instead of executing (no DB in unit tests).
+        b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+        return b;
+      });
+      db.raw = realKnex.raw.bind(realKnex);
+
+      await findEligibleCustomers({ now: NOW });
+      const { sql, bindings } = captured.toSQL();
+
+      // Portal-wide email kill switch and the seasonal-tips opt-out (this
+      // email IS a seasonal tip). IS DISTINCT FROM keeps missing-prefs rows in.
+      expect(sql).toContain('np.email_enabled IS DISTINCT FROM false');
+      expect(sql).toContain('np.seasonal_tips IS DISTINCT FROM false');
+      // Live customers with a contactable email + mappable coordinates only.
+      expect(sql).toContain('"c"."active" = ?');
+      expect(bindings).toContain(true);
+      expect(sql).toContain('"c"."deleted_at" is null');
+      expect(sql).toContain('"c"."email" is not null');
+      // Irrigation targeting: a configured system with a real weekly target.
+      expect(sql).toContain('"pp"."irrigation_system" = ?');
+      expect(sql).toContain('"pp"."irrigation_inches_per_week" is not null');
+      expect(sql).toContain('"pp"."irrigation_inches_per_week" > ?');
+      // Lawn-membership gate: turf profile, real WaveGuard tier (non-membership
+      // markers excluded), lawn_type, or a CURRENT lawn service.
+      expect(sql).toMatch(/NOT IN \('none', 'onetime', 'na', 'no', 'notset', 'commercial'\)/);
+      expect(sql).toContain('exists');
+      expect(sql).toContain('"scheduled_services"');
+    } finally {
+      db.raw = originalRaw;
+    }
   });
 });

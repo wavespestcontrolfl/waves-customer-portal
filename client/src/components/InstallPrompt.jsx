@@ -43,10 +43,11 @@ export default function InstallPrompt() {
   async function handleInstall() {
     if (!deferredPrompt) return;
     deferredPrompt.prompt();
-    const result = await deferredPrompt.userChoice;
-    if (result.outcome === 'accepted') {
-      setShow(false);
-    }
+    await deferredPrompt.userChoice;
+    // The captured beforeinstallprompt event is single-use: whether the
+    // customer accepted or dismissed, the Install button can never work
+    // again this session — leaving the banner up would offer a dead button.
+    setShow(false);
     setDeferredPrompt(null);
   }
 
@@ -105,7 +106,7 @@ export default function InstallPrompt() {
           }}>Add Waves to Home Screen</p>
           <p style={{
             margin: '2px 0 0', fontSize: 14, fontWeight: 500,
-            color: '#1B2C5B',
+            color: '#04395E',
             fontFamily: FONTS.heading,
           }}>
             Quick access to your portal
@@ -114,7 +115,7 @@ export default function InstallPrompt() {
 
         <button onClick={handleInstall} style={{
           background: 'linear-gradient(135deg, rgba(255,222,120,0.85), rgba(244,176,20,0.75)), rgba(240,165,0,0.5)',
-          color: '#1B2C5B',
+          color: '#04395E',
           border: '1px solid rgba(255,238,180,0.92)',
           borderRadius: 999,
           padding: '9px 16px',
@@ -131,7 +132,7 @@ export default function InstallPrompt() {
         <button onClick={dismiss} aria-label="Dismiss install prompt" style={{
           background: 'none',
           border: 'none',
-          color: '#1B2C5B',
+          color: '#04395E',
           fontSize: 18,
           cursor: 'pointer',
           padding: '0 4px',

@@ -300,6 +300,33 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   const auditNotes = notes == null || notes === '' ? null : String(notes);
 
   async function doWrites(t) {
+    // A pending outbound-callback booking (AI call pipeline, held for office
+    // review) must NOT advance to a day-of / operational status until the office
+    // confirms it — en_route fires the customer tracking SMS, completed mints an
+    // invoice, etc. Guarded HERE (the one shared status writer) so EVERY caller
+    // — dispatch, tech-track, admin-schedule — is covered, not just some routes.
+    // Only 'confirmed' / 'cancelled' / 'skipped' are allowed out of the pending
+    // review state — confirm approves it, cancel/skip reject it (the dispatch
+    // Skip action). Any other (en_route/on_site/completed/etc.) is blocked.
+    if (!['confirmed', 'cancelled', 'skipped'].includes(toStatus)) {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+      const guardRow = await t('scheduled_services')
+        .where({ id: jobId })
+        .first('source_action', 'status', 'customer_confirmed');
+      if (guardRow
+        && guardRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && guardRow.status === 'pending'
+        && !guardRow.customer_confirmed) {
+        // Typed operational conflict, not a plain Error: shared-writer callers
+        // (tech-track en-route/on-site, dispatch, admin-schedule) allow
+        // 'pending' as a source status, so this is an EXPECTED block for them
+        // — they translate the code to a 409, same as the 'not in state' race.
+        // A bare Error here bubbled to Express as a 500.
+        const guardErr = new Error(`transitionJobStatus: ${jobId} is a pending outbound-review booking awaiting office confirmation (cannot ${toStatus})`);
+        guardErr.code = 'OUTBOUND_REVIEW_UNCONFIRMED';
+        throw guardErr;
+      }
+    }
     // Atomic guard: only update if the row is currently in fromStatus.
     // 0-row update means a racing transition already advanced past it
     // (or fromStatus is wrong). Either way, we abort — the audit log
@@ -404,8 +431,32 @@ function emitToAdmins(payload) {
   io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
 }
 
+// Terminal visit statuses are one-way (#2717 server hardening). The status
+// routes read fromStatus fresh from the row, and transitionJobStatus has no
+// transition matrix — only the atomic WHERE guard — so without a route-level
+// check a stale board on another device could flip a completed compliance
+// visit to cancelled hours after the work was done. no_show keeps its own
+// bespoke guards in the routes (distinct codes/messages predate this).
+//
+// Scope: this conflicts ONLY on a DIFFERENT target status. A same-status
+// re-send deliberately passes through (returns null) so the route reruns
+// its idempotent post-commit machinery — retrying `cancelled` after a
+// partial failure must still re-drive invoice voiding / reminder handling /
+// track cancellation, exactly as it did before this guard existed
+// (Codex P2 on #2732). Reactivating a visit means booking a new one — no
+// un-cancel flow exists in the portal.
+const ONE_WAY_FROM_STATUSES = new Set(['completed', 'cancelled', 'skipped']);
+
+function evaluateTerminalTransition(fromStatus, toStatus) {
+  const from = String(fromStatus || '').toLowerCase();
+  if (!ONE_WAY_FROM_STATUSES.has(from)) return null;
+  if (String(toStatus || '').toLowerCase() === from) return null;
+  return { conflict: true, status: from };
+}
+
 module.exports = {
   transitionJobStatus,
+  evaluateTerminalTransition,
   CUSTOMER_EVENT,
   ADMIN_EVENT,
   ADMIN_ROOM,

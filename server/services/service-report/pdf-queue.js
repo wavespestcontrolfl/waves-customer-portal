@@ -10,6 +10,10 @@ const {
   reportPdfStorageKey,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
+const { summaryCopySignature } = require('./technician-report-copy');
+const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
+const { pestReportV2PdfSignature } = require('./pest-report-v2');
+const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { alertServiceReportPdfFailed } = require('./failure-alerts');
 const {
   emitPdfRenderTerminalFailure,
@@ -47,19 +51,24 @@ async function loadServiceRecordForPdf(recordId, knex = db) {
   return knex('service_records')
     .where({ 'service_records.id': recordId })
     .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+    .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
     .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
     .select(
       'service_records.*',
       'customers.first_name',
       'customers.last_name',
-      'customers.address_line1',
-      'customers.address_line2',
-      'customers.city',
-      'customers.state',
-      'customers.zip',
+      // PDF address/map follow the visit's stamped service address when
+      // present — a phone-booked rental report must not render the primary
+      // home (codex round-9 P2). Coords: stamped visit coords first, the
+      // primary home only for non-divergent stamps.
+      knex.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+      knex.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+      knex.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+      knex.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+      knex.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
       'customers.has_left_google_review',
-      'customers.latitude as customer_latitude',
-      'customers.longitude as customer_longitude',
+      knex.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+      knex.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
       'technicians.name as technician_name',
       'technicians.photo_url as technician_photo_url',
       'technicians.avatar_url as technician_avatar_url',
@@ -91,6 +100,17 @@ async function renderAndStoreServiceReportPdf(recordId, {
     ? await loadActiveConfig(knex).catch(() => null)
     : providedPestPressureConfig;
   let visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
+  // Summary-copy key component (see reports-public direct PDF route): a
+  // technician-report-driven summary changes the storage key so stale
+  // generic-summary PDFs re-render. Immutable per record — no race re-check.
+  const summarySignature = summaryCopySignature(service);
+  // Mosquito V2 key component (see reports-public direct PDF route): a gate
+  // flip must re-render cached mosquito-report PDFs. Env + service line only —
+  // immutable per render, no race re-check.
+  const mosquitoV2Signature = mosquitoReportV2PdfSignature(service);
+  // Same for PEST_REPORT_V2 — the pest gate predates this key component, so
+  // pest PDFs cached pre-dashboard re-render once on next view.
+  const pestV2Signature = pestReportV2PdfSignature(service);
   let pdf;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
@@ -121,7 +141,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
     visibilitySignature = latestVisibilitySignature;
   }
   try {
-    const key = await putReportPdf(recordId, pdf, { visibilitySignature });
+    const key = await putReportPdf(recordId, pdf, {
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
+    });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
   } catch (err) {
@@ -140,10 +162,19 @@ async function renderAndStoreServiceReportPdf(recordId, {
 }
 
 async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } = {}) {
-  const service = await knex('service_records').where({ id: recordId }).first('id', 'pdf_storage_key');
+  // technician_notes + service_data ride along for the summary-copy key
+  // component, service_type/service_line for the mosquito-V2 component —
+  // the expected key must match what renderAndStore writes.
+  const service = await knex('service_records')
+    .where({ id: recordId })
+    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line');
   const pestPressureConfig = await loadActiveConfig(knex).catch(() => null);
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
-  const expectedPdfStorageKey = service?.id ? reportPdfStorageKey(service.id, { visibilitySignature }) : null;
+  const expectedPdfStorageKey = service?.id
+    ? reportPdfStorageKey(service.id, {
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service),
+    })
+    : null;
   const stored = service?.pdf_storage_key === expectedPdfStorageKey
     ? await getHealthyStoredReportPdf(service.pdf_storage_key)
     : null;

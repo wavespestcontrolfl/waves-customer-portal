@@ -66,7 +66,10 @@ export function PressureHistoryChart({ history, cadence }) {
     (history || [])
       .map((row) => {
         const t = Date.parse(`${row.serviceDate}T12:00:00`);
-        return Number.isFinite(t) ? { t, score: Number(row.score) } : null;
+        const score = Number(row.score);
+        // Number(null) === 0 — a null-score history row must drop, not chart
+        // as a false 0 dip (audit 2026-07-16)
+        return Number.isFinite(t) && row.score != null && Number.isFinite(score) ? { t, score } : null;
       })
       .filter(Boolean)
       .sort((a, b) => a.t - b.t)
@@ -120,16 +123,16 @@ export function PressureHistoryChart({ history, cadence }) {
               axisLine={false}
               width={20}
             />
-            <Area type="monotone" dataKey="score" stroke="none" fill="#0B3A66" fillOpacity={0.08} isAnimationActive={false} />
+            <Area type="monotone" dataKey="score" stroke="none" fill="#04395E" fillOpacity={0.08} isAnimationActive={false} />
             <Line
               type="monotone"
               dataKey="score"
-              stroke="#0B3A66"
+              stroke="#04395E"
               strokeWidth={2.5}
               strokeLinecap="round"
               strokeLinejoin="round"
-              dot={{ r: 4, fill: '#FFFFFF', stroke: '#0B3A66', strokeWidth: 2 }}
-              activeDot={{ r: 5, fill: '#FFFFFF', stroke: '#0B3A66', strokeWidth: 2 }}
+              dot={{ r: 4, fill: '#FFFFFF', stroke: '#04395E', strokeWidth: 2 }}
+              activeDot={{ r: 5, fill: '#FFFFFF', stroke: '#04395E', strokeWidth: 2 }}
               isAnimationActive={false}
             />
           </ComposedChart>
@@ -145,27 +148,45 @@ export function PressureHistoryChart({ history, cadence }) {
 }
 
 export function MeterSvg({ score, label, noun = 'Pest Pressure' }) {
-  const safeScore = score === null || score === undefined ? 0 : Math.max(0, Math.min(MAX_SCORE, Number(score)));
+  // Treat '' and non-numeric the same as null: Number('') === 0 would render
+  // a real 0 score, and NaN would emit invalid SVG attributes + an "NaN out
+  // of 5" aria-label (audit 2026-07-16) — matching the V2 toScore() rule.
+  const numeric = score !== null && score !== undefined && score !== '' && Number.isFinite(Number(score));
+  const safeScore = numeric ? Math.max(0, Math.min(MAX_SCORE, Number(score))) : 0;
   const pct = (safeScore / MAX_SCORE) * 100;
   const labelName = label && label.name ? label.name : 'No score';
-  const ariaLabel = score === null || score === undefined
+  const ariaLabel = !numeric
     ? `${noun} score not yet available.`
     : `${noun} ${safeScore.toFixed(1)} out of 5, labelled ${labelName}.`;
 
   return (
     <div role="img" aria-label={ariaLabel} style={{ width: '100%' }}>
-      <svg viewBox="0 0 200 24" preserveAspectRatio="none" style={{ width: '100%', height: 18, display: 'block' }}>
-        <rect x="0" y="9" width="200" height="6" rx="3" fill="#E5E7EB" />
-        {score !== null && score !== undefined ? (
-          <rect x="0" y="9" width={Math.max(2, (pct / 100) * 200)} height="6" rx="3" fill="#0B3A66" />
+      {/* Plain divs, not a preserveAspectRatio="none" SVG: stretching a fixed
+          viewBox to the container width rendered the round marker as an
+          ellipse. Percentage-positioned divs keep the thumb circular at any
+          width. */}
+      <div style={{ position: 'relative', width: '100%', height: 18 }}>
+        <div style={{ position: 'absolute', left: 0, right: 0, top: 6, height: 6, borderRadius: 3, background: '#E5E7EB' }} />
+        {numeric ? (
+          <div style={{ position: 'absolute', left: 0, top: 6, height: 6, borderRadius: 3, background: '#04395E', width: `max(2px, ${pct}%)` }} />
         ) : null}
         {[0, 50, 100].map((tickPct) => (
-          <rect key={tickPct} x={tickPct === 100 ? 198 : tickPct === 0 ? 0 : (tickPct / 100) * 200 - 1} y="6" width="2" height="12" rx="1" fill="#94A3B8" />
+          <div
+            key={tickPct}
+            style={{
+              position: 'absolute', top: 3, width: 2, height: 12, borderRadius: 1, background: '#94A3B8',
+              left: `${tickPct}%`, transform: tickPct === 0 ? 'none' : tickPct === 100 ? 'translateX(-100%)' : 'translateX(-50%)',
+            }}
+          />
         ))}
-        {score !== null && score !== undefined ? (
-          <circle cx={(pct / 100) * 200} cy="12" r="6" fill="#FFFFFF" stroke="#0B3A66" strokeWidth="2" />
+        {numeric ? (
+          <div style={{
+            position: 'absolute', top: '50%', left: `${pct}%`, transform: 'translate(-50%, -50%)',
+            width: 12, height: 12, borderRadius: 999, background: '#FFFFFF',
+            border: '2px solid #04395E', boxSizing: 'border-box',
+          }} />
         ) : null}
-      </svg>
+      </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 11, color: '#64748B', fontFamily: "'Inter', system-ui, sans-serif" }}>
         <span>0</span>
         <span>2.5</span>
@@ -176,7 +197,10 @@ export function MeterSvg({ score, label, noun = 'Pest Pressure' }) {
 }
 
 export function TrendChip({ trend, delta }) {
-  const meta = TREND_META[trend] || TREND_META.stable;
+  // an unknown/absent trend must not assert "Stable" — render nothing,
+  // like the V2 TrendArrow (audit 2026-07-16)
+  const meta = TREND_META[trend];
+  if (!meta) return null;
   const tone = TONE_STYLES[meta.tone];
   const { Icon } = meta;
   const deltaText = trendDeltaText(trend, delta);

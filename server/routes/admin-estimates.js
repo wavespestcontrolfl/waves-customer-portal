@@ -35,7 +35,9 @@ const { markEstimateManuallyAccepted } = require('../services/estimate-manual-ac
 const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
+  estimateReviseBlock,
   estimateViewUrl,
+  reviseAdminEstimate,
 } = require('../services/admin-estimate-persistence');
 const {
   inferEstimateServiceInterest,
@@ -214,16 +216,23 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
-function moneySummary(estimate = {}) {
+function moneySummary(estimate = {}, { allowTotals = false } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
   const annualTotal = parseFloat(estimate.annual_total || estimate.annualTotal || 0);
   const oneTimeTotal = parseFloat(estimate.onetime_total || estimate.oneTimeTotal || estimate.onetimeTotal || 0);
   if (monthlyTotal > 0) {
-    return annualTotal > 0
-      ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr`
-      : `$${monthlyTotal.toFixed(0)}/mo`;
+    // Commercial proposals (allowTotals) keep annual framing — boards budget
+    // annually; the owner exempted them (2026-07-11). Residential emails
+    // never restate monthly/annual totals: the linked estimate leads with
+    // per-application pricing.
+    if (allowTotals) {
+      return annualTotal > 0
+        ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
+        : `$${monthlyTotal.toFixed(2)}/mo`;
+    }
+    return 'Priced per application — full breakdown inside';
   }
-  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
+  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
   return '';
 }
 
@@ -249,7 +258,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   return {
     first_name: firstName,
     estimate_url: viewUrl,
-    price_summary: priceLine || moneySummary(estimate),
+    price_summary: priceLine || moneySummary(estimate, { allowTotals: proposalMode }),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
     next_step_summary: proposalMode
@@ -258,11 +267,26 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   };
 }
 
-function assertEstimateSendable(estimate) {
+function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } = {}) {
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
     err.statusCode = 400;
     throw err;
+  }
+  // Estimator-engine YELLOW drafts carry review reasons (fallback sqft
+  // sources, comps outliers, constraint flags) the operator must see before
+  // the first send — without this gate they read as ordinary priced drafts.
+  // Green lanes stay one-click; a draft that already went out (sent_at) was
+  // already reviewed, so resends/follow-ups don't re-prompt.
+  {
+    const engineReview = parseEstimateData(estimate.estimate_data || estimate.estimateData)?.estimatorEngine;
+    if (engineReview?.lane === 'yellow' && !estimate.sent_at && !engineReviewAcknowledged) {
+      const reasons = (engineReview.laneReasons || []).join('; ');
+      const err = new Error(`This AI draft is flagged for review${reasons ? ` (${reasons})` : ''}. Open AI Draft Review on the estimate, then confirm the send.`);
+      err.statusCode = 409;
+      err.code = 'ENGINE_REVIEW_REQUIRED';
+      throw err;
+    }
   }
   // Some rows have no share token (quote-wizard mirrors, legacy imports).
   // Without this gate the customer link is built by template literal and the
@@ -401,7 +425,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   const html = wrapEmail({
     preheader: proposalMode
       ? 'Your Waves commercial proposal is attached.'
-      : (priceLine ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
+      : (priceLine && priceLine.startsWith('$') ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
     heading,
     intro,
     ctaHref: viewUrl,
@@ -473,6 +497,85 @@ router.post('/', async (req, res, next) => {
   }
 });
 
+// PUT /api/admin/estimates/:id — revise an existing estimate in place. Same
+// body + server-authoritative pricing pipeline as create, but the row keeps
+// its id/token/status/expiry/linkage so the link the customer already has
+// starts showing the updated quote. Blocked once the estimate leaves the
+// editable window (accepted/declined/expired/sending/price-locked/archived)
+// and for commercial proposals (their editor is PUT /:id/proposal).
+router.put('/:id', async (req, res, next) => {
+  try {
+    // dryRun runs every guard + the full pricing pipeline without writing, so
+    // the builder can confirm a server reprice with the operator BEFORE the
+    // edit publishes to the customer's live link.
+    const dryRun = req.body?.dryRun === true;
+    const { estimate } = await reviseAdminEstimate({
+      estimateId: req.params.id,
+      body: req.body,
+      technicianId: req.technicianId,
+      technician: req.technician,
+      dryRun,
+    });
+    if (!dryRun) {
+      logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
+    }
+    res.json({
+      dryRun: dryRun || undefined,
+      id: estimate.id,
+      token: estimate.token,
+      viewUrl: estimateViewUrl(estimate.token),
+      status: estimate.status,
+      monthlyTotal: estimate.monthly_total != null ? Number(estimate.monthly_total) : null,
+      annualTotal: estimate.annual_total != null ? Number(estimate.annual_total) : null,
+      onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
+      pricingAuthority: estimate.pricing_authority || null,
+      pricingDrift: estimate.pricing_drift || null,
+    });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// GET /api/admin/estimates/:id/edit-source — everything the estimate builder
+// needs to reopen an existing estimate for in-place editing: the saved builder
+// inputs + engine profile (when the estimate was authored in the builder), the
+// live contact columns, and the same editability verdict the revise write
+// enforces. `inputs` is null for rows created outside the builder (lead
+// auto-send / agent drafts) — the client falls back to contact-only seeding.
+router.get('/:id/edit-source', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const estData = parseEstimateData(estimate.estimate_data) || {};
+    const block = estimateReviseBlock(estimate, estData);
+    const inputs = estData.inputs && typeof estData.inputs === 'object' && !Array.isArray(estData.inputs)
+      ? estData.inputs
+      : null;
+    const engineProfile = estData.engineRequest?.profile && typeof estData.engineRequest.profile === 'object'
+      ? estData.engineRequest.profile
+      : null;
+    res.json({
+      id: estimate.id,
+      status: estimate.status,
+      editable: !block,
+      blockReason: block ? block.message : null,
+      customerId: estimate.customer_id,
+      customerName: estimate.customer_name,
+      customerPhone: estimate.customer_phone,
+      customerEmail: estimate.customer_email,
+      address: estimate.address,
+      notes: estimate.notes,
+      serviceInterest: estimate.service_interest,
+      showOneTimeOption: !!estimate.show_one_time_option,
+      billByInvoice: !!estimate.bill_by_invoice,
+      satelliteUrl: estimate.satellite_url,
+      inputs,
+      engineProfile,
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/estimates/:id/send — send via SMS and/or email (immediate or scheduled)
 router.post('/:id/send', async (req, res, next) => {
   try {
@@ -482,16 +585,12 @@ router.post('/:id/send', async (req, res, next) => {
     const sendMethod = req.body?.sendMethod || 'both';
     const scheduledAt = req.body?.scheduledAt || null;
     const idempotencyKey = req.body?.idempotencyKey || req.body?.idempotency_key || req.body?.sendAttemptId || null;
+    const engineReviewAcknowledged = req.body?.acknowledgeEngineReview === true;
 
     if (!['sms', 'email', 'both'].includes(sendMethod)) {
       return res.status(400).json({ error: 'Invalid sendMethod' });
     }
-    assertEstimateSendable(estimate);
-
-    if (!['sms', 'email', 'both'].includes(sendMethod)) {
-      return res.status(400).json({ error: 'Invalid sendMethod' });
-    }
-    assertEstimateSendable(estimate);
+    assertEstimateSendable(estimate, { engineReviewAcknowledged });
 
     if (scheduledAt) {
       const scheduledTime = new Date(scheduledAt);
@@ -553,7 +652,7 @@ router.post('/:id/send', async (req, res, next) => {
 
     let result;
     try {
-      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey });
+      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey, engineReviewAcknowledged });
     } catch (e) {
       await releaseSendClaim();
       throw e;
@@ -570,7 +669,9 @@ router.post('/:id/send', async (req, res, next) => {
     }
     res.json({ success: true, ...result });
   } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    // err.code rides along so the client can distinguish the engine-review
+    // gate (ENGINE_REVIEW_REQUIRED → confirm-and-retry) from other 4xx.
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
 });
@@ -582,7 +683,13 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     err.statusCode = 400;
     throw err;
   }
-  assertEstimateSendable(estimate);
+  // A row in 'scheduled'/'sending' already cleared the request-time gate
+  // (the operator acknowledged the engine review when scheduling/clicking) —
+  // the cron leg must not bounce it at execution time.
+  assertEstimateSendable(estimate, {
+    engineReviewAcknowledged: options.engineReviewAcknowledged === true
+      || ['scheduled', 'sending'].includes(String(estimate.status || '')),
+  });
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const nextExpiresAt = estimateExpiresAt(now);
@@ -612,9 +719,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     ? await shortenOrPassthrough(longUrl, { ...linkMeta, channel: 'email' })
     : longUrl;
   const firstName = estimate.customer_name?.split(' ')[0] || 'there';
-  const monthlyTotal = parseFloat(estimate.monthly_total || 0);
-  const annualTotal = parseFloat(estimate.annual_total || 0);
-  const priceLine = monthlyTotal > 0 ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr` : '';
+  // Residential sends use the compliant summary (codex 2642 r1: the old
+  // "$X/mo · $Y/yr" priceLine bypassed moneySummary's residential branch).
+  // Commercial proposals rebuild their own totals line below (freshPriceLine).
+  const priceLine = moneySummary(estimate);
 
   // Commercial proposal PDF — attached to the delivery email only when the
   // operator has authored a multi-building proposal (proposal.enabled). A
@@ -730,16 +838,19 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             // blank for a one-time-only proposal — so summarize from the same
             // totals the PDF prints.
             const pt = computeProposalTotals(normalizeProposal(freshEstimate));
+            // Cents on every figure (owner 2026-07-11; codex 2642 r3 — the
+            // whole-dollar Math.round here bypassed the cents rule).
+            const centsMoney = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
             const parts = [];
-            if (pt.monthlyEquivalent > 0) parts.push(`$${Math.round(pt.monthlyEquivalent).toLocaleString()}/mo`);
-            if (pt.annualRecurring > 0) parts.push(`$${Math.round(pt.annualRecurring).toLocaleString()}/yr recurring`);
-            if (pt.oneTime > 0) parts.push(`$${Math.round(pt.oneTime).toLocaleString()} one-time`);
-            if (pt.firstYearTotal > 0) parts.push(`first-year total $${Math.round(pt.firstYearTotal).toLocaleString()}`);
+            if (pt.monthlyEquivalent > 0) parts.push(`${centsMoney(pt.monthlyEquivalent)}/mo`);
+            if (pt.annualRecurring > 0) parts.push(`${centsMoney(pt.annualRecurring)}/yr recurring`);
+            if (pt.oneTime > 0) parts.push(`${centsMoney(pt.oneTime)} one-time`);
+            if (pt.firstYearTotal > 0) parts.push(`first-year total ${centsMoney(pt.firstYearTotal)}`);
             freshPriceLine = parts.join(' · ');
           } else {
             const fm = parseFloat(freshEstimate.monthly_total || 0);
             const fa = parseFloat(freshEstimate.annual_total || 0);
-            freshPriceLine = fm > 0 ? `$${fm.toFixed(0)}/mo · $${fa.toLocaleString()}/yr` : priceLine;
+            freshPriceLine = fm > 0 ? `$${fm.toFixed(2)}/mo · $${fa.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr` : priceLine;
           }
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
@@ -791,6 +902,20 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     last_send_error: null,
     updated_at: db.fn.now(),
   };
+  const deliveryStatePatch = {
+    deliveryState: {
+      attemptedAt: now().toISOString(),
+      sentChannels,
+      failedChannels,
+      channels,
+    },
+  };
+  // Delivery outcomes must survive even if snapshot construction fails;
+  // partial-send retry state is operational data, not part of pricing QA.
+  updatePayload.estimate_data = db.raw(
+    "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+    [JSON.stringify(deliveryStatePatch)],
+  );
   // Persist only the send-time pricing snapshot, merged into estimate_data via
   // a jsonb || merge rather than a full overwrite, so it replaces just the
   // `sendSnapshot` (+ proposalDelivery) keys and preserves any concurrently
@@ -804,7 +929,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     // authored proposal) so a proposal save committing mid-send isn't clobbered
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
     // never a nested write, so the `||` merge can't drop the proposal itself.
-    const mergePatch = { sendSnapshot: snapshot.sendSnapshot || {} };
+    const mergePatch = {
+      sendSnapshot: snapshot.sendSnapshot || {},
+      ...deliveryStatePatch,
+    };
     if (proposalEnabledForDelivery) {
       mergePatch.proposalDelivery = {
         stampedAt: now().toISOString(),
@@ -1237,6 +1365,17 @@ router.get('/', async (req, res, next) => {
           isCommercialProposal: estData?.proposal?.enabled === true,
           confirmedAppointment,
           automation: leadEstimateAutomationSummary(estData),
+          // Estimator-engine drafts keep their operator review material in
+          // estimate_data (the notes COLUMN is customer-visible via the
+          // public endpoint) — surface it here so the admin list can render
+          // the lane + review reasons.
+          estimatorEngine: estData?.estimatorEngine
+            ? {
+              lane: estData.estimatorEngine.lane || null,
+              laneReasons: estData.estimatorEngine.laneReasons || [],
+              reviewNotes: estData.estimatorEngine.reviewNotes || null,
+            }
+            : null,
           pricingRisk: pricingRiskById.get(e.id) || null,
           riskTypeNeedsReview: commercialRiskTypeReviewNeeded(estData),
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,
@@ -1270,7 +1409,34 @@ router.get('/:id/proposal', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     const proposal = normalizeProposal(estimate);
-    res.json({ proposal, totals: computeProposalTotals(proposal) });
+    res.json({
+      proposal,
+      totals: computeProposalTotals(proposal),
+      // Estimate summary for the standalone proposal-builder page, which loads
+      // by id without the pipeline list. Additive — older consumers only read
+      // `proposal`/`totals`.
+      estimate: {
+        id: estimate.id,
+        status: estimate.status,
+        customerName: estimate.customer_name,
+        customerId: estimate.customer_id,
+        customerEmail: estimate.customer_email,
+        customerPhone: estimate.customer_phone,
+        address: estimate.address,
+        token: estimate.token,
+        sentAt: estimate.sent_at,
+        viewedAt: estimate.viewed_at,
+        acceptedAt: estimate.accepted_at,
+        expiresAt: estimate.expires_at,
+        archivedAt: estimate.archived_at,
+        priceLockedAt: estimate.price_locked_at,
+        billByInvoice: estimate.bill_by_invoice,
+        // The Mark-won gate mirrors the list's canMarkEstimateWon, which also
+        // blocks one-time-option estimates (manual accept rejects them).
+        showOneTimeOption: estimate.show_one_time_option,
+        category: estimate.category,
+      },
+    });
   } catch (err) { next(err); }
 });
 
@@ -1397,7 +1563,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
       .whereNull('archived_at')
       .first(
         'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
-        'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
+        'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
         'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'expires_at',
         'customer_name', 'customer_phone', 'customer_email', 'address',
       );
@@ -1474,6 +1640,9 @@ router.get('/:id/schedule-source', async (req, res, next) => {
       estimate: {
         id: estimate.id,
         token: estimate.token,
+        // Human-facing estimate number (EST-YYYY-NNNN) — matches the
+        // schedule-estimates row shape so the provenance card can cite it.
+        estimateSlug: estimate.estimate_slug || null,
         status: estimate.status,
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,
@@ -1755,101 +1924,43 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
 //
 // Body: { days: 7 | 14 | 30 | 90 | <any 1-180 int> }
 // Send SMS by default; pass { silent: true } to skip the customer text.
+// Core (expiry anchoring, status revival, nudge re-arm, estimate_extended
+// SMS) lives in services/estimate-extension.js, shared with the public
+// expired-screen auto-grant — behavior here is 1:1 with the pre-extraction
+// inline version, including the 422-after-write template quirk.
 router.post('/:id/extend', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
 
     const days = Number.parseInt(req.body?.days, 10);
-    if (!Number.isFinite(days) || days < 1 || days > 180) {
-      return res.status(400).json({ error: 'days must be an integer between 1 and 180.' });
-    }
-    if (!['sent', 'viewed', 'expired'].includes(estimate.status)) {
-      return res.status(400).json({
-        error: `Only sent / viewed / expired estimates can be extended. Current status: ${estimate.status}.`,
-      });
-    }
-    if (estimate.archived_at) {
-      return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
-    }
-
-    // Anchor the extension on the LATER of "now" and the current expiry —
-    // extending an already-expired estimate by 7d means 7d from today, not
-    // 7d after the expiry that already passed. Active estimates get their
-    // current expiry pushed out by the requested days.
-    const now = new Date();
-    const currentExpiry = estimate.expires_at ? new Date(estimate.expires_at) : now;
-    const anchor = currentExpiry > now ? currentExpiry : now;
-    const newExpiry = new Date(anchor.getTime() + days * 86400000);
-
-    // Re-arm the expiring nudge for the new deadline. Other stage flags
-    // (unviewed / viewed / final) stay as-is — those are tied to send /
-    // view timestamps that haven't moved.
-    const updates = {
-      expires_at: newExpiry,
-      followup_expiring_sent: false,
-      updated_at: db.fn.now(),
-    };
-    // Expired estimates flipping back to active need their status reset
-    // to whatever they were before expiry — viewed if the customer had
-    // viewed, otherwise sent.
-    if (estimate.status === 'expired') {
-      updates.status = estimate.viewed_at ? 'viewed' : 'sent';
-    }
-    await db('estimates').where({ id: estimate.id }).update(updates);
-
-    // Customer notification — Waves voice. Skipped if no phone, opted out,
-    // or the caller passed silent=true (e.g. internal cleanup operations).
-    let smsResult = { sent: false, reason: 'silent' };
-    if (!req.body?.silent && estimate.customer_phone) {
-      const firstName = estimate.customer_name?.split(' ')[0] || 'there';
-      const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
-      const viewUrl = await shortenOrPassthrough(longUrl, {
-        kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
-        leadId: await leadIdForEstimate(estimate),
-        channel: 'sms', purpose: 'estimate_extended',
-      });
-      const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
-        month: 'long', day: 'numeric', timeZone: 'America/New_York',
-      });
-      const body = await renderTemplate(
-        'estimate_extended',
-        { first_name: firstName, estimate_url: viewUrl, new_expiry: newExpiryLabel, days_added: String(days) },
-        {
-          workflow: 'admin_estimate_extend',
-          entity_type: 'estimate',
-          entity_id: estimate.id,
-        },
-      );
-      if (!body) return res.status(422).json({ error: 'SMS template estimate_extended is missing or inactive' });
-      smsResult = await sendCustomerMessage({
-        to: estimate.customer_phone,
-        body,
-        channel: 'sms',
-        audience: estimate.customer_id ? 'customer' : 'lead',
-        purpose: 'estimate_followup',
-        customerId: estimate.customer_id || undefined,
-        estimateId: estimate.id,
-        identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-        consentBasis: estimate.customer_id ? undefined : {
-          status: 'transactional_allowed',
-          source: 'admin_estimate_extend',
-          capturedAt: estimate.created_at || new Date().toISOString(),
-        },
-        entryPoint: 'admin_estimate_extend',
-        metadata: { original_message_type: 'estimate_extended_manual', days_added: days },
-      });
+    const { extendEstimate } = require('../services/estimate-extension');
+    const { newExpiry, status, smsResult, emailResult } = await extendEstimate({
+      estimate,
+      days,
+      silent: !!req.body?.silent,
+      entryPoint: 'admin_estimate_extend',
+      workflow: 'admin_estimate_extend',
+      smsMetadata: { original_message_type: 'estimate_extended_manual' },
+    });
+    if (smsResult.reason === 'template_missing') {
+      return res.status(422).json({ error: 'SMS template estimate_extended is missing or inactive' });
     }
 
-    logger.info(`[estimates] Extended estimate ${estimate.id} by ${days}d to ${newExpiry.toISOString()} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'})`);
     res.json({
       success: true,
       expires_at: newExpiry.toISOString(),
       days_added: days,
-      status: updates.status || estimate.status,
+      status,
       sms: { sent: !!smsResult.sent, reason: smsResult.reason || null },
+      email: { sent: !!emailResult?.sent, reason: emailResult?.reason || null },
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode === 400 || err.statusCode === 409) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    next(err);
+  }
 });
 
 // POST /api/admin/estimates/:id/mark-accepted — admin records a verbal yes.

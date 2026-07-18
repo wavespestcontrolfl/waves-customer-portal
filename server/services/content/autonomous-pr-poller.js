@@ -351,6 +351,11 @@ async function supersedeRun(run, queueRow) {
           run.reviewer_notes,
           `PR lifecycle reconciliation stopped by autonomous-pr-poller: opportunity_queue row ${queueState} is no longer parked at pending_review/${pendingReason} (operator requeue/dismiss or superseding claim).`,
         ].filter(Boolean).join(' | '),
+        // pollPending `continue`s past trackPendingReason on the supersede
+        // path, so without this the last pending reason froze onto the row.
+        poll_pending_reason: null,
+        poll_pending_since: null,
+        poll_pending_annotated_at: null,
         updated_at: new Date(),
       });
     if (!claimed) return { skipped: true, reason: 'already_finalized' };
@@ -415,6 +420,18 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
       });
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] astro_pr_merged_at stamp failed for run ${run.id}: ${err.message}`);
+  }
+  // Retire the PR's remediation row at the FIRST merged observation — not
+  // after the completed-published claim. finalize legitimately stays pending
+  // on awaiting_live_deploy/awaiting_production_deploy for the 30–45 min hub
+  // deploy (or a whole outage), and remediation can never run again once the
+  // PR left the open state; stamping late preserved exactly the stale
+  // live-park telemetry this retires. Idempotent per tick (whereNotIn).
+  try {
+    const { markPrTerminal } = require('./codex-remediation');
+    await markPrTerminal(prNumber, 'merged');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] remediation terminal stamp failed for PR #${prNumber}: ${err.message}`);
   }
   // Fresh queue re-check at finalize time: the tick-start validation is
   // stale by now (GitHub lookup + live-URL gating take seconds), and an
@@ -515,6 +532,13 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
       outcome: 'completed_published',
       published_url: target.url,
       reviewer_notes: [run.reviewer_notes, note].filter(Boolean).join(' | '),
+      // Pending-reason columns clear inside the claim itself: the post-claim
+      // clear in trackPendingReason runs a separate write on the same tick,
+      // so a crash between the two froze reasons like 'awaiting_live_deploy'
+      // onto completed rows forever (run #374, 2026-07-15).
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
       completed_at: now,
       updated_at: now,
     });
@@ -608,6 +632,17 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
 
 /** PR closed without merge: terminal failure, never retried (both lanes). */
 async function finalizeClosed(run, prNumber) {
+  // Retire the remediation row at the FIRST closed observation — the PR can
+  // never re-enter remediation regardless of what happens to the run below
+  // (supersede, already-finalized, crash between writes), and stamping after
+  // the claim left closed PRs marked parked/remediating forever on any of
+  // those early exits. Idempotent per tick.
+  try {
+    const { markPrTerminal } = require('./codex-remediation');
+    await markPrTerminal(prNumber, 'closed');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] remediation terminal stamp failed for PR #${prNumber}: ${err.message}`);
+  }
   // Same finalize-time queue re-check as finalizeMerged: an operator who
   // requeued the opportunity mid-tick has already re-routed the work — the
   // old run gets annotated out of selection, not marked failed.
@@ -623,6 +658,9 @@ async function finalizeClosed(run, prNumber) {
       outcome: 'failed',
       skip_reason: closedSkipReasonForRun(run),
       failure_message: `Astro ${isMetadataLane(run) ? 'metadata ' : ''}PR #${prNumber} was closed without merging; the draft was rejected and will not be retried.`,
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
       completed_at: now,
       updated_at: now,
     });
@@ -852,6 +890,98 @@ async function pollRun(run, { allowMerge = true } = {}) {
   }
 }
 
+// ── Pending-reason observability ───────────────────────────────────
+//
+// A pending verdict is normal for minutes-to-hours (Codex review, preview
+// build, deploy lag) — but a reason that NEVER clears (e.g.
+// `preview_build_stale_commit` from the pre-single-commit publish race, PR
+// #374 2026-07-15) used to be invisible: nothing logged per run, nothing on
+// the row, and the run was indistinguishable from one healthily waiting.
+// Track the current reason + since on the run, and stamp reviewer_notes ONCE
+// when a reason outlives its expected window. Everything here is fail-soft:
+// observability must never block reconciliation.
+//
+// Reasons a human explicitly owns (or a budget resets on its own) never
+// annotate. Preview-build reasons should clear within one Pages build cycle
+// (fleet lag ~30–45 min), so 2h means something is wedged; everything else
+// (codex_review_pending, pr_not_found, …) gets a generous day.
+const PENDING_ANNOTATION_EXPECTED = new Set([
+  'awaiting_human_merge',
+  'awaiting_human_merge_metadata_lane',
+  'daily_publish_cap_reached',
+]);
+const PENDING_ANNOTATION_PREVIEW_MS = 2 * 60 * 60 * 1000;
+const PENDING_ANNOTATION_DEFAULT_MS = 24 * 60 * 60 * 1000;
+
+// Stable key for a pending reason — `codex_review_pending: <err.message>`
+// carries a message that can drift between ticks, so compare on the prefix.
+function pendingReasonKey(reason) {
+  const key = String(reason || '').split(':')[0].trim();
+  return key || null;
+}
+
+function pendingAnnotationThresholdMs(key) {
+  if (PENDING_ANNOTATION_EXPECTED.has(key)) return null;
+  if (key.startsWith('preview_build_')) return PENDING_ANNOTATION_PREVIEW_MS;
+  return PENDING_ANNOTATION_DEFAULT_MS;
+}
+
+async function trackPendingReason(run, result) {
+  try {
+    if (result && result.transient) return; // GitHub blip — keep the window
+    if (!result || result.pending !== true) {
+      // Run left the pending state (finalized / closed / superseded) —
+      // clear so a later re-park starts a fresh window.
+      if (run.poll_pending_reason) {
+        await db('autonomous_runs').where('id', run.id).update({
+          poll_pending_reason: null,
+          poll_pending_since: null,
+          poll_pending_annotated_at: null,
+          updated_at: new Date(),
+        });
+      }
+      return;
+    }
+    const key = pendingReasonKey(result.reason);
+    if (!key) return; // per-poll merge deferral etc. — no signal to track
+
+    if (key !== run.poll_pending_reason) {
+      await db('autonomous_runs').where('id', run.id).update({
+        poll_pending_reason: key,
+        poll_pending_since: new Date(),
+        poll_pending_annotated_at: null,
+        updated_at: new Date(),
+      });
+      return;
+    }
+
+    if (run.poll_pending_annotated_at) return;
+    const thresholdMs = pendingAnnotationThresholdMs(key);
+    const sinceMs = run.poll_pending_since ? new Date(run.poll_pending_since).getTime() : NaN;
+    if (thresholdMs == null || !Number.isFinite(sinceMs)) return;
+    const elapsedMs = Date.now() - sinceMs;
+    if (elapsedMs < thresholdMs) return;
+
+    // Append-only, like the remediation park note; fresh read so parallel
+    // annotations (park notes land on the same column) aren't clobbered.
+    const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+    if (!fresh) return;
+    const prNumber = prNumberFromUrl(run.astro_pr_url);
+    const hours = Math.round(elapsedMs / 3600000);
+    const note = `Auto-merge for PR #${prNumber ?? '?'} has been pending on "${key}" for ~${hours}h — `
+      + 'the poller is waiting on a signal that is not arriving (check the Cloudflare preview deployment '
+      + 'and Codex review for the CURRENT head; a new push to the PR branch re-arms everything).';
+    await db('autonomous_runs').where('id', run.id).update({
+      reviewer_notes: [fresh.reviewer_notes, note].filter(Boolean).join(' | '),
+      poll_pending_annotated_at: new Date(),
+      updated_at: new Date(),
+    });
+    logger.warn(`[autonomous-pr-poller] run ${run.id}: ${note}`);
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] pending-reason tracking failed for run ${run.id}: ${err.message}`);
+  }
+}
+
 async function pollPending() {
   let rows;
   try {
@@ -869,7 +999,11 @@ async function pollPending() {
       // coverage to before.
       .orderByRaw('random()')
       .limit(25)
-      .select('id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes', 'created_at');
+      .select(
+        'id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url',
+        'draft_payload', 'reviewer_notes', 'created_at',
+        'poll_pending_reason', 'poll_pending_since', 'poll_pending_annotated_at',
+      );
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
     return { count: 0, skipped: true, reason: err.message };
@@ -909,12 +1043,31 @@ async function pollPending() {
         && queueRow.skip_reason === pendingSkipReasonForRun(run);
       if (!stillParked) {
         const r = await supersedeRun(run, queueRow);
+        // This run leaves the poller's selection WITHOUT ever fetching its
+        // PR — if that PR already merged/closed, no finalize path will ever
+        // stamp its remediation row. Best-effort: observe the PR state once
+        // and retire the row; an OPEN PR is deliberately left alone (a
+        // stamp would be a lie — nothing has terminated it yet).
+        try {
+          const prNumber = prNumberFromUrl(run.astro_pr_url);
+          if (prNumber) {
+            const gh = require('../content-astro/github-client');
+            const pr = await gh.getPr(prNumber);
+            if (pr && (pr.merged || pr.merged_at || pr.state !== 'open')) {
+              const { markPrTerminal } = require('./codex-remediation');
+              await markPrTerminal(prNumber, (pr.merged || pr.merged_at) ? 'merged' : 'closed');
+            }
+          }
+        } catch (err) {
+          logger.warn(`[autonomous-pr-poller] terminal stamp on supersede failed for run ${run.id}: ${err.message}`);
+        }
         results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
         continue;
       }
     }
     const r = await pollRun(run, { allowMerge: autoMerges < maxAutoMerges });
     if (r.autoMerged) autoMerges += 1;
+    await trackPendingReason(run, r);
     results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
   }
   logger.info(`[autonomous-pr-poller] polled ${results.length} parked autonomous PR run(s) (${autoMerges} auto-merged)`);
@@ -941,5 +1094,8 @@ module.exports = {
     finalizeClosed,
     reconcileQueueRow,
     supersedeRun,
+    pendingReasonKey,
+    pendingAnnotationThresholdMs,
+    trackPendingReason,
   },
 };

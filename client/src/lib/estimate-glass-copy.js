@@ -32,7 +32,7 @@ export const GLASS_COPY = {
   ctaMain: 'Approve my plan and schedule',
   ctaBook: 'Book my first visit',
   ctaMicro: 'No long-term contract · Unlimited free callbacks · 90-day money-back guarantee',
-  askTitle: 'Still deciding? Ask anything — instant answers.',
+  askTitle: 'Still deciding? Ask anything — instant answers',
   askExcerpt: 'Ask about pricing, treatments, scheduling, pets, kids, or what happens after approval — straight answers in seconds.',
   schedExcerpt: 'Our soonest openings — and if we’re already on your street that day, snag it and skip the line.',
   appTitle: 'Stop waiting around for service windows — watch your tech drive to your door, live',
@@ -42,7 +42,9 @@ export const GLASS_COPY = {
   reviewsExcerpt: 'Real Google reviews — unedited, unfiltered, from people whose backyards look like yours.',
   textButton: 'Text us — fast answers',
   setupWaivedNote: 'Pay the year up front and we waive it — instantly.',
-  lawnOfferTitle: 'Add Lawn Care — save on both services',
+  // Title must hold for ANY plan size (owner 2026-07-10: "both services"
+  // made no sense on a 3-service plan) — the discount applies plan-wide.
+  lawnOfferTitle: 'Add Lawn Care — save on every service',
   // The Silver/10% mechanics are only true when lawn would be the SECOND
   // service; a pest + mosquito/tree/termite plan is already past Silver, so
   // multi-service estimates get the tier-agnostic body instead of a wrong
@@ -416,14 +418,15 @@ export function glassDayLinesFor(sectionServiceKey) {
 }
 
 // ── Tier display ────────────────────────────────────────────────────────────
-// On a single-plan estimate there is no tier ladder to compare against, so
-// "Bronze" (0% discount) reads as bottom-shelf for no reason — it displays as
-// "Home Protection". Silver/Gold/Platinum connote an earned discount and keep
-// their names. Comparison surfaces keep Bronze; the estimate page never
-// renders a ladder.
+// Every tier shows its real name. Recurring pest control (quarterly /
+// bi-monthly / monthly) IS the WaveGuard Bronze plan — that's the product's
+// name, so the badge says "WaveGuard Bronze" (owner directive 2026-07-11;
+// reverses the earlier "Home Protection" softening, which read as a different
+// product). Callers render "WaveGuard {result}", so a label that already
+// carries the prefix is normalized to the bare tier name.
 export function glassTierDisplay(tierLabel) {
   const raw = String(tierLabel || '').replace(/^WaveGuard\s+/i, '');
-  return raw.toLowerCase() === 'bronze' ? 'Home Protection' : tierLabel;
+  return raw.toLowerCase() === 'bronze' ? 'Bronze' : tierLabel;
 }
 
 // ── Scheduler header qualifier ──────────────────────────────────────────────

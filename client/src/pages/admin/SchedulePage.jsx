@@ -618,6 +618,16 @@ function lawnAreaForProtocol(service) {
   return null;
 }
 
+// Total product for an area-based application: rate (per 1,000 sq ft) × sq ft
+// treated, in the rate's own unit. Empty string when either side is unusable
+// so the field stays blank rather than showing NaN/0.
+export function derivedTotalAmount(rate, areaSqft) {
+  const r = Number(rate);
+  const a = Number(areaSqft);
+  if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(a) || a <= 0) return "";
+  return Math.round(r * (a / 1000) * 100) / 100;
+}
+
 function createCompletionIdempotencyKey(serviceId) {
   const randomPart =
     window.crypto?.randomUUID?.() ||
@@ -630,6 +640,22 @@ export function shouldResetCompletionIdempotencyKey(error) {
   if (!Number.isFinite(status) || status < 400 || status >= 500) return false;
   if (status !== 409) return true;
   return error?.code === "lawn_assessment_stale";
+}
+
+export function completionPreferencesNeedDraft({
+  sendSms = true,
+  includePayLink = true,
+  requestReview = true,
+  clientPestRating = null,
+} = {}) {
+  return sendSms !== true
+    || includePayLink !== true
+    || requestReview !== true
+    || clientPestRating != null;
+}
+
+export function normalizeCompletionDetourPhotos(photos) {
+  return Array.isArray(photos) ? photos : [];
 }
 
 function completionDraftKey(serviceId) {
@@ -673,7 +699,7 @@ const btnBase = {
   padding: "0 18px",
   borderRadius: 12,
   border: "none",
-  fontWeight: 700,
+  fontWeight: 500,
   fontSize: 13,
   cursor: "pointer",
   transition: "all 0.2s",
@@ -916,9 +942,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     routeOrder: service.routeOrder || "",
     notes: service.notes || "",
     // Per-job third-party Bill-To override + PO. Empty payerId = inherit the
-    // customer's default payer (or self-pay). Round-trips via ...form on save.
+    // customer's default payer (or self-pay). selfPayOverride pins the visit to
+    // "customer pays (self)" so an account default payer is NOT inherited.
+    // Both round-trip via ...form on save (the server admin-gates actual
+    // changes only, so echoing them on every save is required for tech saves).
     payerId: service.payerId != null ? String(service.payerId) : "",
     poNumber: service.poNumber || "",
+    selfPayOverride: service.selfPayOverride === true,
     // The editable primary "Price" must be the primary line price, NOT the
     // whole-visit total. When the appointment has add-on lines, estimatedPrice
     // is the combined total, so prefer the API's primary_line_price; fall back
@@ -1050,6 +1080,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [customerData, setCustomerData] = useState(null);
   const [customerLoading, setCustomerLoading] = useState(false);
   const [payers, setPayers] = useState([]);
+  // Inline "New payer" quick-add (admin-only — POST /admin/payers is
+  // requireAdmin, and payer routing changes are admin-gated server-side).
+  const isAdminUser = (() => {
+    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin"; }
+    catch { return false; }
+  })();
+  const [showNewPayer, setShowNewPayer] = useState(false);
+  const [newPayer, setNewPayer] = useState({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+  const [newPayerSaving, setNewPayerSaving] = useState(false);
+  const [newPayerError, setNewPayerError] = useState("");
+  const [newPayerNotice, setNewPayerNotice] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -1121,6 +1162,73 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  // Bill-to select: one control drives payerId + the self-pay pin (mutually
+  // exclusive). "__self__" pins this visit to customer-pays even when the
+  // account has a default payer; "__new__" opens the inline quick-add without
+  // changing the current selection.
+  const handleBillToChange = (value) => {
+    if (value === "__new__") {
+      setNewPayerError("");
+      setNewPayerNotice("");
+      setShowNewPayer(true);
+      return;
+    }
+    setForm((f) => ({
+      ...f,
+      payerId: value === "__self__" ? "" : value,
+      selfPayOverride: value === "__self__",
+    }));
+  };
+  const saveNewPayer = async () => {
+    const displayName = newPayer.displayName.trim();
+    if (!displayName) {
+      setNewPayerError("Payer name is required");
+      return;
+    }
+    const apEmail = newPayer.apEmail.trim().toLowerCase();
+    setNewPayerSaving(true);
+    setNewPayerError("");
+    try {
+      // dedupeByEmail: the SERVER checks the AP email against every payer
+      // (the loaded list is capped) and returns the existing active payer
+      // with deduped:true instead of minting a duplicate — AR must not split
+      // across payer rows.
+      const r = await adminFetch("/admin/payers", {
+        method: "POST",
+        body: JSON.stringify({
+          displayName,
+          companyName: newPayer.companyName.trim() || undefined,
+          apEmail: apEmail || undefined,
+          apPhone: newPayer.apPhone.trim() || undefined,
+          dedupeByEmail: true,
+        }),
+      });
+      const created = r?.payer;
+      if (created?.id) {
+        setPayers((list) =>
+          (list.some((p) => String(p.id) === String(created.id))
+            ? list
+            : [...list, created]
+          ).sort((a, b) =>
+            String(a.display_name || "").localeCompare(String(b.display_name || "")),
+          ),
+        );
+        setForm((f) => ({ ...f, payerId: String(created.id), selfPayOverride: false }));
+        setShowNewPayer(false);
+        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+        setNewPayerNotice(
+          r?.deduped
+            ? `Matched existing payer "${created.display_name}" by AP email — selected it instead.`
+            : "",
+        );
+      } else {
+        setNewPayerError("Unexpected response — payer not created");
+      }
+    } catch (e) {
+      setNewPayerError(e.message || "Failed to create payer");
+    }
+    setNewPayerSaving(false);
+  };
   // Moving the start time drags the end time with it, preserving the window
   // length (end stays independently editable to resize the window). Clamp at
   // 23:59 — windowEnd is a time-of-day on the same date, so wrapping past
@@ -1337,6 +1445,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
 
   const customer = customerData?.customer || {};
+  const customerDetailsId =
+    service.customerId || service.customer_id || customer.id || null;
   const customerName =
     service.customerName ||
     `${customer.firstName || ""} ${customer.lastName || ""}`.trim() ||
@@ -1395,7 +1505,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     color: "#374151",
     marginBottom: 6,
     display: "block",
-    fontWeight: 700,
+    fontWeight: 500,
   };
   const inputStyle = {
     width: "100%",
@@ -1404,7 +1514,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     background: D.input,
     color: "#111827",
     border: `1px solid ${D.inputBorder}`,
-    fontSize: 14,
+    fontSize: 16,
     outline: "none",
     boxSizing: "border-box",
   };
@@ -1417,7 +1527,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
   const sectionTitleStyle = {
     fontSize: 18,
-    fontWeight: 700,
+    fontWeight: 500,
     color: "#111827",
     margin: "0 0 14px",
   };
@@ -1466,14 +1576,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               borderBottom: `1px solid ${D.border}`,
             }}
           >
-            <span style={{ fontSize: 12, fontWeight: 800, color: D.muted }}>
+            <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
               {label || "Additional service"}
             </span>
             {onRemove && (
               <button
                 type="button"
                 onClick={onRemove}
-                className="font-bold"
+                className="font-medium"
                 style={{
                   padding: "4px 10px",
                   borderRadius: 4,
@@ -1514,7 +1624,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     setPickerKey(pickerId);
                     setExpandedCategory(null);
                   }}
-                  className="font-bold"
+                  className="font-medium"
                   style={{
                     padding: "8px 10px",
                     borderRadius: 4,
@@ -1548,7 +1658,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         onClick={() =>
                           setExpandedCategory(isOpen ? null : group.category)
                         }
-                        className="font-bold"
+                        className="font-medium"
                         style={{
                           width: "100%",
                           textAlign: "left",
@@ -1602,7 +1712,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                 setPickerKey(null);
                                 setExpandedCategory(null);
                               }}
-                              className="font-bold"
+                              className="font-medium"
                               style={{
                                 padding: "8px 10px",
                                 background: "#fff",
@@ -1631,7 +1741,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <select
                 value={technicianId}
                 onChange={(e) => onField("technicianId", e.target.value)}
-                className="font-bold"
+                className="font-medium"
                 style={inputStyle}
               >
                 <option value="">Unassigned</option>
@@ -1648,7 +1758,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <select
                       value={assignmentScope}
                       onChange={(e) => setAssignmentScope(e.target.value)}
-                      className="font-bold"
+                      className="font-medium"
                       style={inputStyle}
                     >
                       <option value="this_only">This appointment only</option>
@@ -1667,7 +1777,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               type="number"
               value={estimatedDuration}
               onChange={(e) => onField("estimatedDuration", e.target.value)}
-              className="font-bold"
+              className="font-medium"
               style={inputStyle}
             />
           </div>
@@ -1680,7 +1790,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               value={price}
               onChange={(e) => onField("price", e.target.value)}
               placeholder="0.00"
-              className="font-bold"
+              className="font-medium"
               style={inputStyle}
             />
           </div>
@@ -1705,7 +1815,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       {" "}
       <div
         onClick={(e) => e.stopPropagation()}
-        className="font-bold"
         style={{
           height: "100%",
           overflow: "auto",
@@ -1721,12 +1830,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             background: "#fff",
             borderBottom: `1px solid ${D.border}`,
             padding: "14px 20px",
+            // Standalone/home-screen mode: keep the title/buttons below the
+            // iOS status bar (viewport-fit=cover lets content run under it).
+            paddingTop: "calc(14px + env(safe-area-inset-top, 0px))",
           }}
         >
           {" "}
           <div className="min-w-0 flex-1">
             {" "}
-            <div style={{ fontSize: 22, fontWeight: 800, color: "#111827" }}>
+            <div style={{ fontSize: 22, fontWeight: 500, color: "#111827" }}>
               Edit appointment
             </div>{" "}
             <div
@@ -1749,7 +1861,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#ECFDF3",
                   color: "#027A48",
                   fontSize: 12,
-                  fontWeight: 800,
+                  fontWeight: 500,
                 }}
               >
                 {service.status || "Accepted"}
@@ -1782,7 +1894,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={() => handleSave({ takePayment: true })}
               disabled={saving}
-              className="font-bold flex-1 md:flex-initial"
+              className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
                 borderRadius: 4,
@@ -1800,7 +1912,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={() => handleSave()}
               disabled={saving}
-              className="font-bold flex-1 md:flex-initial"
+              className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
                 borderRadius: 4,
@@ -1818,7 +1930,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <button
               onClick={onClose}
               disabled={saving}
-              className="font-bold"
+              className="font-medium"
               style={{
                 width: 38,
                 height: 38,
@@ -1858,7 +1970,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <div
               style={{
                 fontSize: 13,
-                fontWeight: 800,
+                fontWeight: 500,
                 color: D.muted,
                 marginBottom: 12,
               }}
@@ -1868,7 +1980,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             <div
               style={{
                 fontSize: 22,
-                fontWeight: 800,
+                fontWeight: 500,
                 color: "#111827",
                 marginBottom: 10,
               }}
@@ -1908,23 +2020,29 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <span style={{ color: D.muted }}>No contact details</span>
               )}
             </div>{" "}
-            <button
-              type="button"
-              style={{
-                width: "100%",
-                padding: "10px 12px",
-                borderRadius: 4,
-                border: `1px solid ${D.inputBorder}`,
-                background: "#fff",
-                color: "#111827",
-                fontSize: 13,
-                fontWeight: 800,
-                cursor: "pointer",
-                marginBottom: 18,
-              }}
-            >
-              Customer details
-            </button>{" "}
+            {customerDetailsId && (
+              <a
+                href={`/admin/customers?customerId=${encodeURIComponent(customerDetailsId)}`}
+                style={{
+                  display: "block",
+                  boxSizing: "border-box",
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 4,
+                  border: `1px solid ${D.inputBorder}`,
+                  background: "#fff",
+                  color: "#111827",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  textAlign: "center",
+                  textDecoration: "none",
+                  cursor: "pointer",
+                  marginBottom: 18,
+                }}
+              >
+                Customer details
+              </a>
+            )}{" "}
             <div
               style={{
                 borderTop: `1px solid ${D.border}`,
@@ -1942,7 +2060,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 15, fontWeight: 800 }}>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>
                   Customer notes
                 </div>{" "}
                 <button
@@ -1952,7 +2070,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     background: "transparent",
                     color: D.teal,
                     fontSize: 12,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -1982,7 +2100,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 15, fontWeight: 800 }}>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>
                   Cards on file
                 </div>{" "}
                 <button
@@ -1992,7 +2110,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     background: "transparent",
                     color: D.teal,
                     fontSize: 12,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -2016,7 +2134,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </div>{" "}
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 16 }}>
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>
+              <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 10 }}>
                 Appointment history
               </div>
               {customerLoading && (
@@ -2042,7 +2160,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <div
                       style={{
                         fontSize: 13,
-                        fontWeight: 800,
+                        fontWeight: 500,
                         color: "#111827",
                       }}
                     >
@@ -2083,7 +2201,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#EEF6FF",
                   color: D.teal,
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   marginBottom: 14,
                 }}
               >
@@ -2097,7 +2215,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <input
                     value={service.address || customer.address?.line1 || ""}
                     readOnly
-                    className="font-bold"
+                    className="font-medium"
                     style={{ ...inputStyle, background: "#F9FAFB" }}
                   />{" "}
                 </div>{" "}
@@ -2115,7 +2233,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <input
                       value={service.city || customer.address?.city || ""}
                       readOnly
-                      className="font-bold"
+                      className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
                     />{" "}
                   </div>{" "}
@@ -2125,7 +2243,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <input
                       value={customer.address?.state || "Florida"}
                       readOnly
-                      className="font-bold"
+                      className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
                     />{" "}
                   </div>{" "}
@@ -2161,7 +2279,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <button
                 type="button"
                 onClick={addServiceLine}
-                className="font-bold"
+                className="font-medium"
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -2172,7 +2290,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   background: "#fff",
                   color: "#111827",
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   cursor: "pointer",
                   marginBottom: 12,
                 }}
@@ -2186,6 +2304,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
                   lines={estimateSource.lines}
+                  estimateRef={estimateSource.estimateSlug}
                   style={{ marginBottom: 14 }}
                 />
               )}
@@ -2204,7 +2323,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   }}
                 >
                   <div>
-                    <div style={{ fontSize: 13, fontWeight: 800, color: "#166534" }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: "#166534" }}>
                       Prepaid ${Number(service.prepaidAmount).toFixed(2)}
                       {service.prepaidMethod ? ` · ${String(service.prepaidMethod).replace(/_/g, " ")}` : ""}
                     </div>
@@ -2220,7 +2339,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <button
                     type="button"
                     onClick={() => onMarkPrepaid?.(service)}
-                    className="font-bold"
+                    className="font-medium"
                     style={{
                       padding: "8px 12px",
                       borderRadius: 4,
@@ -2249,14 +2368,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <button
                     type="button"
                     onClick={() => onMarkPrepaid(service)}
-                    className="font-bold"
+                    className="font-medium"
                     style={{
                       padding: "9px 12px",
                       borderRadius: 4,
                       border: `1px solid ${D.inputBorder}`,
                       background: "#fff",
                       fontSize: 13,
-                      fontWeight: 800,
+                      fontWeight: 500,
                       cursor: "pointer",
                     }}
                   >
@@ -2268,14 +2387,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   onClick={() =>
                     setDiscountPresetId(discountPresetId || "custom")
                   }
-                  className="font-bold"
+                  className="font-medium"
                   style={{
                     padding: "9px 12px",
                     borderRadius: 4,
                     border: `1px solid ${D.inputBorder}`,
                     background: "#fff",
                     fontSize: 13,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -2297,7 +2416,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <select
                     value={discountPresetId}
                     onChange={(e) => applyDiscountPreset(e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   >
                     {" "}
@@ -2322,7 +2441,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={discountType}
                         onChange={(e) => setDiscountType(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         {" "}
@@ -2345,7 +2464,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           step={discountType === "percentage" ? 1 : 0.01}
                           value={discountAmount}
                           onChange={(e) => setDiscountAmount(e.target.value)}
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2428,7 +2547,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="date"
                     value={form.scheduledDate}
                     onChange={(e) => update("scheduledDate", e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2439,7 +2558,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="time"
                     value={form.windowStart}
                     onChange={(e) => updateWindowStart(e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2450,7 +2569,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     type="time"
                     value={form.windowEnd}
                     onChange={(e) => update("windowEnd", e.target.value)}
-                    className="font-bold"
+                    className="font-medium"
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
@@ -2473,7 +2592,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 />{" "}
                 <div>
                   {" "}
-                  <div style={{ fontSize: 14, fontWeight: 800 }}>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>
                     Repeat
                   </div>{" "}
                   <div style={{ fontSize: 12, color: D.muted }}>
@@ -2507,7 +2626,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={recurringFreq}
                         onChange={(e) => setRecurringFreq(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         {EDIT_FREQUENCIES.map((f) => (
@@ -2526,7 +2645,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringOngoing(e.target.value === "never")
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {" "}
@@ -2547,7 +2666,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringCount(parseInt(e.target.value) || 4)
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2572,7 +2691,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringNth(parseInt(e.target.value))
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {EDIT_NTH_OPTIONS.map((o) => (
@@ -2590,7 +2709,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                           onChange={(e) =>
                             setRecurringWeekday(parseInt(e.target.value))
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           {EDIT_WEEKDAY_OPTIONS.map((o) => (
@@ -2625,7 +2744,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                               parseInt(e.target.value) || 30,
                             )
                           }
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         />{" "}
                       </div>
@@ -2634,7 +2753,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         <select
                           value={weekendRuleValue}
                           onChange={(e) => updateWeekendRule(e.target.value)}
-                          className="font-bold"
+                          className="font-medium"
                           style={inputStyle}
                         >
                           <option value="allow">Allow weekends</option>
@@ -2652,7 +2771,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                       <select
                         value={weekendRuleValue}
                         onChange={(e) => updateWeekendRule(e.target.value)}
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       >
                         <option value="allow">Allow weekends</option>
@@ -2679,7 +2798,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                             background: "#EEF6FF",
                             borderRadius: 999,
                             color: D.teal,
-                            fontWeight: 800,
+                            fontWeight: 500,
                           }}
                         >
                           {d}
@@ -2709,7 +2828,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 value={form.notes}
                 onChange={(e) => update("notes", e.target.value)}
                 rows={5}
-                className="font-bold"
+                className="font-medium"
                 style={{ ...inputStyle, resize: "vertical" }}
               />{" "}
               <label
@@ -2733,7 +2852,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   style={{ width: 16, height: 16, accentColor: D.green }}
                 />{" "}
                 <span
-                  style={{ fontSize: 13, color: "#111827", fontWeight: 800 }}
+                  style={{ fontSize: 13, color: "#111827", fontWeight: 500 }}
                 >
                   Create invoice on completion
                 </span>{" "}
@@ -2741,9 +2860,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <div style={{ marginTop: 14 }}>
                 <label style={labelStyle}>Bill to (third-party payer)</label>
                 <select
-                  value={form.payerId}
-                  onChange={(e) => update("payerId", e.target.value)}
-                  className="font-bold"
+                  value={form.selfPayOverride ? "__self__" : form.payerId}
+                  onChange={(e) => handleBillToChange(e.target.value)}
+                  className="font-medium"
                   style={inputStyle}
                 >
                   <option value="">
@@ -2758,6 +2877,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         : "Customer pays (self)";
                     })()}
                   </option>
+                  {customer.payerId && (
+                    <option value="__self__">
+                      Customer pays (self) — override default
+                    </option>
+                  )}
                   {payers.map((p) => (
                     <option key={p.id} value={String(p.id)}>
                       {p.display_name}
@@ -2766,17 +2890,130 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         : ""}
                     </option>
                   ))}
+                  {isAdminUser && <option value="__new__">＋ New payer…</option>}
                 </select>
+                {showNewPayer && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: 12,
+                      background: "#F9FAFB",
+                      border: `1px solid ${D.border}`,
+                      borderRadius: 4,
+                    }}
+                  >
+                    <div style={{ fontSize: 13, color: "#111827", fontWeight: 600, marginBottom: 8 }}>
+                      New payer
+                    </div>
+                    <label style={labelStyle}>Payer name *</label>
+                    <input
+                      type="text"
+                      value={newPayer.displayName}
+                      onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
+                      placeholder="e.g. tenant, builder, or property manager name"
+                      className="font-medium"
+                      style={inputStyle}
+                    />
+                    <div style={{ marginTop: 8 }}>
+                      <label style={labelStyle}>Company (optional)</label>
+                      <input
+                        type="text"
+                        value={newPayer.companyName}
+                        onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
+                        className="font-medium"
+                        style={inputStyle}
+                      />
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                      <label style={labelStyle}>Invoice email (AP)</label>
+                      <input
+                        type="email"
+                        value={newPayer.apEmail}
+                        onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
+                        placeholder="Where this payer's invoices are emailed"
+                        className="font-medium"
+                        style={inputStyle}
+                      />
+                      <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
+                        Without an email, invoices to this payer can’t be
+                        delivered until one is added in Finance &rarr; Payers.
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                      <label style={labelStyle}>Phone (optional)</label>
+                      <input
+                        type="tel"
+                        value={newPayer.apPhone}
+                        onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
+                        className="font-medium"
+                        style={inputStyle}
+                      />
+                    </div>
+                    {newPayerError && (
+                      <div style={{ fontSize: 12, color: D.red, marginTop: 8 }}>
+                        {newPayerError}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button
+                        type="button"
+                        onClick={saveNewPayer}
+                        disabled={newPayerSaving || !newPayer.displayName.trim()}
+                        style={{
+                          padding: "8px 14px",
+                          background: D.teal,
+                          color: "#fff",
+                          border: "none",
+                          borderRadius: 4,
+                          fontSize: 13,
+                          fontWeight: 600,
+                          cursor: newPayerSaving ? "default" : "pointer",
+                          opacity: newPayerSaving || !newPayer.displayName.trim() ? 0.6 : 1,
+                          minHeight: 44,
+                        }}
+                      >
+                        {newPayerSaving ? "Saving…" : "Create & select"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowNewPayer(false);
+                          setNewPayerError("");
+                        }}
+                        style={{
+                          padding: "8px 14px",
+                          background: "transparent",
+                          color: D.muted,
+                          border: `1px solid ${D.border}`,
+                          borderRadius: 4,
+                          fontSize: 13,
+                          cursor: "pointer",
+                          minHeight: 44,
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {newPayerNotice && (
+                  <div style={{ fontSize: 12, color: D.teal, marginTop: 6 }}>
+                    {newPayerNotice}
+                  </div>
+                )}
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-                  {customer.payerId
+                  {form.selfPayOverride
+                    ? "Pinned to customer pays (self) for this visit — the account default payer is ignored."
+                    : customer.payerId
                     ? "Blank inherits this customer’s default payer; pick a payer to override for just this visit."
                     : "Routes this visit’s invoice to a builder / property manager instead of the customer."}{" "}
                   Manage payers in Finance &rarr; Payers.
                 </div>
-                {(form.payerId || customer.payerId) && (() => {
+                {(form.payerId || (customer.payerId && !form.selfPayOverride)) && (() => {
                   // PO applies to the EFFECTIVE payer — the per-job override if
-                  // set, otherwise the customer's inherited default — so a
-                  // default-payer job can still capture a PO.
+                  // set, otherwise the customer's inherited default (unless the
+                  // visit is pinned to self-pay) — so a default-payer job can
+                  // still capture a PO.
                   const effectivePayerId = form.payerId || customer.payerId;
                   const selectedPayer = payers.find(
                     (p) => String(p.id) === String(effectivePayerId),
@@ -2792,7 +3029,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         value={form.poNumber}
                         onChange={(e) => update("poNumber", e.target.value)}
                         placeholder="Purchase order #"
-                        className="font-bold"
+                        className="font-medium"
                         style={inputStyle}
                       />
                       {needsPo && (
@@ -3021,6 +3258,9 @@ export function ProtocolPanel({ service, onClose }) {
       <div
         style={{
           padding: "16px 20px",
+          // Full-height drawer runs under the iOS status bar in standalone
+          // mode — pad the header below it.
+          paddingTop: "calc(16px + env(safe-area-inset-top, 0px))",
           borderBottom: `1px solid ${D.border}`,
           display: "flex",
           justifyContent: "space-between",
@@ -3030,7 +3270,7 @@ export function ProtocolPanel({ service, onClose }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 16, fontWeight: 700, color: D.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Service Protocol
           </div>{" "}
           <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
@@ -3106,7 +3346,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -3156,7 +3396,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 800,
+                          fontWeight: 500,
                           color: D.heading,
                           marginBottom: 6,
                         }}
@@ -3221,7 +3461,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 12,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.teal,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.6,
@@ -3302,7 +3542,7 @@ export function ProtocolPanel({ service, onClose }) {
                                 <div
                                   style={{
                                     fontSize: 12,
-                                    fontWeight: 700,
+                                    fontWeight: 500,
                                     color: D.heading,
                                   }}
                                 >
@@ -3351,7 +3591,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 11,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.muted,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.6,
@@ -3389,7 +3629,7 @@ export function ProtocolPanel({ service, onClose }) {
                     <div
                       style={{
                         fontSize: 12,
-                        fontWeight: 800,
+                        fontWeight: 500,
                         color: D.heading,
                         marginBottom: 8,
                       }}
@@ -3420,7 +3660,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 12,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.heading,
                             }}
                           >
@@ -3483,7 +3723,7 @@ export function ProtocolPanel({ service, onClose }) {
                   <div
                     style={{
                       fontSize: 14,
-                      fontWeight: 700,
+                      fontWeight: 500,
                       color: D.heading,
                       marginBottom: 4,
                     }}
@@ -3538,7 +3778,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 10,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.teal,
                               textTransform: "uppercase",
                               letterSpacing: 0.6,
@@ -3550,7 +3790,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 12,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.heading,
                             }}
                           >
@@ -3591,7 +3831,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 11,
-                          fontWeight: 800,
+                          fontWeight: 500,
                           color: D.teal,
                           textTransform: "uppercase",
                           letterSpacing: 0.5,
@@ -3616,7 +3856,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 11,
-                              fontWeight: 800,
+                              fontWeight: 500,
                               color: D.muted,
                               textTransform: "uppercase",
                               letterSpacing: 0.5,
@@ -3643,7 +3883,7 @@ export function ProtocolPanel({ service, onClose }) {
                   <div
                     style={{
                       fontSize: 11,
-                      fontWeight: 800,
+                      fontWeight: 500,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: 0.6,
@@ -3683,7 +3923,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 12,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.heading,
                               }}
                             >
@@ -3717,7 +3957,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <div
                           style={{
                             fontSize: 11,
-                            fontWeight: 800,
+                            fontWeight: 500,
                             color: D.teal,
                             textTransform: "uppercase",
                             letterSpacing: 0.5,
@@ -3742,7 +3982,7 @@ export function ProtocolPanel({ service, onClose }) {
                             <div
                               style={{
                                 fontSize: 11,
-                                fontWeight: 800,
+                                fontWeight: 500,
                                 color: D.muted,
                                 textTransform: "uppercase",
                                 letterSpacing: 0.5,
@@ -3776,7 +4016,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 12,
                   }}
@@ -3794,7 +4034,7 @@ export function ProtocolPanel({ service, onClose }) {
                 >
                   {" "}
                   <div
-                    style={{ fontSize: 13, color: D.heading, fontWeight: 600 }}
+                    style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}
                   >
                     {service.serviceType}
                   </div>{" "}
@@ -3826,7 +4066,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {seasonal.length}
                     </div>{" "}
@@ -3853,7 +4093,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {photos.length}
                     </div>{" "}
@@ -3880,7 +4120,7 @@ export function ProtocolPanel({ service, onClose }) {
                   >
                     {" "}
                     <div
-                      style={{ fontSize: 18, fontWeight: 700, color: D.heading }}
+                      style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
                     >
                       {scripts.length}
                     </div>{" "}
@@ -3903,7 +4143,7 @@ export function ProtocolPanel({ service, onClose }) {
                     <div
                       style={{
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         color: D.heading,
                         marginBottom: 6,
                       }}
@@ -3941,7 +4181,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 11,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.muted,
                           textTransform: "uppercase",
                           letterSpacing: 0.5,
@@ -3967,7 +4207,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4014,7 +4254,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <span
                           style={{
                             fontSize: 13,
-                            fontWeight: 600,
+                            fontWeight: 500,
                             color: D.heading,
                           }}
                         >
@@ -4023,7 +4263,7 @@ export function ProtocolPanel({ service, onClose }) {
                         <span
                           style={{
                             fontSize: 10,
-                            fontWeight: 700,
+                            fontWeight: 500,
                             textTransform: "uppercase",
                             padding: "2px 8px",
                             borderRadius: 8,
@@ -4071,7 +4311,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4108,7 +4348,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.teal,
                           marginBottom: 6,
                         }}
@@ -4149,7 +4389,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4186,7 +4426,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 13,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.heading,
                           marginBottom: 6,
                         }}
@@ -4228,7 +4468,7 @@ export function ProtocolPanel({ service, onClose }) {
                 <div
                   style={{
                     fontSize: 14,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.heading,
                     marginBottom: 4,
                   }}
@@ -4256,7 +4496,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{
                           fontSize: 12,
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: D.teal,
                           marginBottom: 8,
                         }}
@@ -4273,7 +4513,7 @@ export function ProtocolPanel({ service, onClose }) {
                           <div
                             style={{
                               fontSize: 11,
-                              fontWeight: 700,
+                              fontWeight: 500,
                               color: D.amber,
                               textTransform: "uppercase",
                               letterSpacing: 0.8,
@@ -4442,7 +4682,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     border: `1px solid ${D.border}`,
     background: D.input,
     color: D.heading,
-    fontSize: 14,
+    fontSize: 16,
     outline: "none",
     boxSizing: "border-box",
   };
@@ -4479,7 +4719,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         <div
           style={{
             fontSize: 18,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -4494,7 +4734,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               marginBottom: 6,
             }}
@@ -4518,7 +4758,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           <div
             style={{
               fontSize: 12,
-              fontWeight: 600,
+              fontWeight: 500,
               color: D.muted,
               marginBottom: 6,
             }}
@@ -4535,7 +4775,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         <div
           style={{
             fontSize: 13,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.teal,
             marginBottom: 10,
           }}
@@ -4580,7 +4820,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 <div>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 600, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
                   >
                     {opt.displayDate}
                   </div>{" "}
@@ -4600,7 +4840,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     background: D.teal,
                     color: "#fff",
                     fontSize: 12,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     opacity: sending ? 0.6 : 1,
                   }}
                 >
@@ -4626,7 +4866,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
               border: "none",
               color: D.teal,
               fontSize: 13,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: "pointer",
               padding: 0,
               display: "flex",
@@ -4676,7 +4916,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     background: manualDate ? D.teal : D.border,
                     color: D.heading,
                     fontSize: 13,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     opacity: sending ? 0.6 : 1,
                     whiteSpace: "nowrap",
                   }}
@@ -4726,7 +4966,7 @@ const CP_EYEBROW = {
   display: "block",
   fontFamily: CP_FONT,
   fontSize: 11,
-  fontWeight: 600,
+  fontWeight: 500,
   color: CP_M.ink4,
   textTransform: "uppercase",
   letterSpacing: "0.3px",
@@ -4783,16 +5023,19 @@ function CPChip({ selected, onClick, children, dot }) {
 
 // Whether a typed findings field is required for the CURRENT values —
 // static `required` plus the schema's conditional `requiredUnless`
-// metadata ({ field, value }: required exactly when the named sibling
-// field holds a non-empty value other than `value`). Mirrors the server's
-// conditional enforcement so the tech gets the normal pre-submit prompt
-// instead of a post-submit 422 (Codex P2).
+// metadata ({ field, value } or { field, values }: required exactly when
+// the named sibling field holds a non-empty value other than `value` /
+// outside `values`). Mirrors the server's conditional enforcement so the
+// tech gets the normal pre-submit prompt instead of a post-submit 422
+// (Codex P2).
 export function typedFieldRequiredNow(field, values) {
   if (field?.required) return true;
   const rule = field?.requiredUnless;
   if (!rule?.field) return false;
   const driver = String(values?.[rule.field] ?? "").trim();
-  return !!driver && driver !== rule.value;
+  if (!driver) return false;
+  const excluded = Array.isArray(rule.values) ? rule.values : [rule.value];
+  return !excluded.includes(driver);
 }
 
 // Mirrors the server's chips-vs-values rules (validateNextStepChips) so a
@@ -4861,6 +5104,36 @@ export function typedActivityScoreConflict(schemaType, values, score) {
     return `Activity score 0 conflicts with the recorded level (${selected}) — select "${rule.cleared}" or use a nonzero score`;
   }
   return null;
+}
+
+// Termite Phase-3 attestation contradictions, mirrored pre-submit so the
+// tech gets the inline prompt instead of the server 422 (Codex P3 r3 on
+// #2703). The method list mirrors TERMITE_PERIMETER_METHODS in
+// project-types.js; the messages mirror validateTypedFindings.
+export function typedFieldValueConflicts(schemaType, values) {
+  const conflicts = [];
+  if (schemaType === "termite_treatment") {
+    const method = String(values?.treatment_method ?? "").trim();
+    const notice = String(values?.posted_notice ?? "").trim();
+    if (
+      ["Liquid perimeter", "Trenching"].includes(method) &&
+      notice &&
+      notice !== "Yes"
+    ) {
+      conflicts.push(
+        `Posted notice "${notice}" conflicts with the ${method} application — exterior/perimeter treatments require the posted notice: place it and select "Yes"`,
+      );
+    }
+  }
+  if (
+    schemaType === "termite_inspection" &&
+    String(values?.inspection_notice_affixed ?? "").trim() === "No"
+  ) {
+    conflicts.push(
+      'The inspection notice must be affixed before completing — affix the notice and select "Yes"',
+    );
+  }
+  return conflicts;
 }
 
 // Prune draft-restored findings values to the CURRENT schema fields (shared
@@ -4951,13 +5224,13 @@ function TypedFindingsSection({
   const scoreLabels = schema.activity?.techScoreLabels || {};
   const fieldLabelStyle = {
     fontSize: 14,
-    fontWeight: 600,
+    fontWeight: 500,
     color: textColor,
     marginBottom: 6,
   };
   const sectionHeaderStyle = {
     fontSize: 12,
-    fontWeight: 700,
+    fontWeight: 500,
     letterSpacing: "0.06em",
     textTransform: "uppercase",
     color: mutedColor,
@@ -5024,7 +5297,7 @@ function TypedFindingsSection({
                     color: selected ? accentFg : textColor,
                     border: `1px solid ${selected ? accent : hairline}`,
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     cursor: "pointer",
                   }}
                 >
@@ -5132,7 +5405,7 @@ function TypedFindingsSection({
               color: accent,
               border: `1px solid ${accent}`,
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 500,
               cursor: aiDrafting ? "wait" : "pointer",
               opacity: aiDrafting ? 0.5 : 1,
             }}
@@ -5526,7 +5799,7 @@ function LawnAssessmentCompletionBlock({
                 background: D.white,
                 color: D.heading,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: disabled || photos.length >= 3 || analyzing ? "not-allowed" : "pointer",
                 opacity: disabled || photos.length >= 3 || analyzing ? 0.55 : 1,
               }}
@@ -5558,7 +5831,7 @@ function LawnAssessmentCompletionBlock({
                     background: D.white,
                     color: D.heading,
                     fontSize: 13,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     cursor: disabled || analyzing ? "not-allowed" : "pointer",
                     opacity: disabled || analyzing ? 0.55 : 1,
                   }}
@@ -5567,7 +5840,7 @@ function LawnAssessmentCompletionBlock({
                 </button>
                 <span style={{ fontSize: 12, color: D.muted }}>{gaugePhoto ? 1 : 0}/1</span>
                 {/* Gauge reading (height of cut) — sits with the lawn-length photo it documents. */}
-                <span style={{ fontSize: 12, color: D.muted, fontWeight: 700 }}>Gauge reading</span>
+                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Gauge reading</span>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -5645,7 +5918,7 @@ function LawnAssessmentCompletionBlock({
               background: D.green,
               color: "#fff",
               fontSize: 13,
-              fontWeight: 800,
+              fontWeight: 500,
               cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
               opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
             }}
@@ -5671,7 +5944,7 @@ function LawnAssessmentCompletionBlock({
                     minWidth: 0,
                   }}
                 >
-                  <div style={{ fontSize: 15, fontWeight: 800, color: lawnScoreColor(value), lineHeight: 1.1 }}>
+                  <div style={{ fontSize: 15, fontWeight: 500, color: lawnScoreColor(value), lineHeight: 1.1 }}>
                     {value}%
                   </div>
                   <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>{metric.label}</div>
@@ -5691,7 +5964,7 @@ function LawnAssessmentCompletionBlock({
           </div>
           {!confirmed && (
             <div>
-              <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, marginBottom: 6 }}>
                 Stress flags
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -5709,7 +5982,7 @@ function LawnAssessmentCompletionBlock({
                         background: selected ? `${D.amber}18` : D.white,
                         color: selected ? D.amber : D.text,
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         cursor: "pointer",
                       }}
                     >
@@ -5723,7 +5996,7 @@ function LawnAssessmentCompletionBlock({
           )}
           {!confirmed && (
             <div>
-              <div style={{ fontSize: 11, color: D.muted, fontWeight: 700, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, marginBottom: 6 }}>
                 Protocol field checks
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 8 }}>
@@ -5794,7 +6067,7 @@ function LawnAssessmentCompletionBlock({
                         background: selected ? `${D.green}14` : D.white,
                         color: selected ? D.green : D.text,
                         fontSize: 12,
-                        fontWeight: 700,
+                        fontWeight: 500,
                         cursor: "pointer",
                       }}
                     >
@@ -5828,7 +6101,7 @@ function LawnAssessmentCompletionBlock({
                   background: `${D.green}14`,
                   color: D.green,
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   textAlign: "center",
                 }}
               >
@@ -5847,7 +6120,7 @@ function LawnAssessmentCompletionBlock({
                   background: D.green,
                   color: "#fff",
                   fontSize: 13,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   cursor: disabled || confirming ? "not-allowed" : "pointer",
                   opacity: disabled || confirming ? 0.55 : 1,
                 }}
@@ -5875,7 +6148,7 @@ function LawnAssessmentCompletionBlock({
                 background: D.white,
                 color: D.text,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
                 opacity: disabled || analyzing || confirming ? 0.55 : 1,
               }}
@@ -5898,7 +6171,7 @@ const scoreButtonStyle = {
   background: D.white,
   color: D.heading,
   fontSize: 14,
-  fontWeight: 800,
+  fontWeight: 500,
   lineHeight: 1,
   cursor: "pointer",
 };
@@ -5929,6 +6202,7 @@ function normalizeApplicationMethod(value = "") {
       "broadcast_spray",
       "spot_treatment",
       "granular_broadcast",
+      "soil_drench",
       "bait_placement",
       "station_check",
       "fog_ulv",
@@ -5950,11 +6224,20 @@ function normalizeApplicationMethod(value = "") {
   return normalized;
 }
 
-function defaultApplicationMethod(product = {}, serviceType = "") {
+export function defaultApplicationMethod(product = {}, serviceType = "") {
   const category = String(product.category || product.product_category || "").toLowerCase();
   const explicit = product.application_method || product.method;
   if (explicit) return normalizeApplicationMethod(explicit);
   if (category.includes("bait") || category.includes("gel") || category.includes("glue")) return "bait_placement";
+  // Liquid fertilizers (K-Flow, Green Flo, chelated micros — catalog rate
+  // unit fl_oz/gal or "Liquid" in the name) go down as a spray, not granular.
+  const rateUnit = String(
+    product.rate_unit || product.rateUnit || product.default_unit || product.defaultUnit || "",
+  ).toLowerCase();
+  const liquidProduct =
+    rateUnit.includes("fl") || rateUnit.includes("gal") ||
+    /\b(liquid|flow?)\b/i.test(String(product.name || ""));
+  if (category.includes("fert") && liquidProduct) return "broadcast_spray";
   if (category.includes("fert") || category.includes("granular")) return "granular_broadcast";
   const serviceLine = serviceLineFromType(serviceType);
   if (serviceLine === "mosquito") return "fog_ulv";
@@ -5962,6 +6245,19 @@ function defaultApplicationMethod(product = {}, serviceType = "") {
   if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
   if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
   return "perimeter_spray";
+}
+
+// Whether a product controls something a tech would list as a target.
+// Fertilizers, adjuvants/surfactants, soil amendments, and growth regulators
+// don't — their cards skip the Targets picker. Unknown catalog rows keep it.
+export function productControlsTargets(product) {
+  const category = String(
+    product?.category || product?.product_category || "",
+  ).toLowerCase();
+  if (!category) return true;
+  return !/(fert|adjuvant|surfactant|soil|moisture|biostimulant|micronutrient|growth regulator|pgr)/.test(
+    category,
+  );
 }
 
 function requiresLinearFt(method) {
@@ -6366,7 +6662,7 @@ function TreeShrubCloseoutBlock({
           ))}
         </select>
       </div>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 700 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 500 }}>
         <input
           type="checkbox"
           checked={!!value.iracFracLogged}
@@ -6396,7 +6692,7 @@ function TreeShrubCloseoutBlock({
         placeholder="Customer note"
         style={textarea}
       />
-      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 700 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, color: colors.text, fontSize: 13, fontWeight: 500 }}>
         <input
           type="checkbox"
           checked={!!value.injectionPerformed || productFlags.hasInjectionProduct}
@@ -6678,8 +6974,8 @@ export function ZoneMarkingStep({
   return (
     <div style={{ marginTop: 12, border: `1px solid ${hairline}`, borderRadius: 12, background: cardBg, padding: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: ink }}>Mark treated areas on the map</div>
-        <div style={{ fontSize: 11, color: markedCount === areas.length ? "#10b981" : mutedInk, fontWeight: 600 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>Mark treated areas on the map</div>
+        <div style={{ fontSize: 11, color: markedCount === areas.length ? "#10b981" : mutedInk, fontWeight: 500 }}>
           {markedCount} of {areas.length} marked
         </div>
       </div>
@@ -6688,7 +6984,7 @@ export function ZoneMarkingStep({
         Mark every area to unlock the satellite map on the customer report.
       </div>
       {markedCount > 0 && markedCount < areas.length ? (
-        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 600, margin: "0 0 8px" }}>
+        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 500, margin: "0 0 8px" }}>
           Marks only save when every area is marked — finish the remaining {areas.length - markedCount} or they will be discarded.
         </div>
       ) : null}
@@ -6705,7 +7001,7 @@ export function ZoneMarkingStep({
                 padding: "5px 12px",
                 borderRadius: 999,
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
                 background: isActive ? accent : "transparent",
                 color: isActive ? "#fff" : ink,
@@ -6753,8 +7049,8 @@ export function ZoneMarkingStep({
         ) : null}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
-        <button type="button" onClick={() => setTool("circle")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: tool === "circle" ? accent : "transparent", color: tool === "circle" ? "#fff" : ink, border: `1px solid ${tool === "circle" ? accent : hairline}` }}>Circle</button>
-        <button type="button" onClick={() => setTool("rect")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: "pointer", background: tool === "rect" ? accent : "transparent", color: tool === "rect" ? "#fff" : ink, border: `1px solid ${tool === "rect" ? accent : hairline}` }}>Box</button>
+        <button type="button" onClick={() => setTool("circle")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer", background: tool === "circle" ? accent : "transparent", color: tool === "circle" ? "#fff" : ink, border: `1px solid ${tool === "circle" ? accent : hairline}` }}>Circle</button>
+        <button type="button" onClick={() => setTool("rect")} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: "pointer", background: tool === "rect" ? accent : "transparent", color: tool === "rect" ? "#fff" : ink, border: `1px solid ${tool === "rect" ? accent : hairline}` }}>Box</button>
         {activeMark && activeMark.type === "circle" ? (
           <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
             <button type="button" disabled={disabled} onClick={() => resizeActiveCircle(-0.015)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${hairline}`, background: "transparent", color: ink, fontSize: 15, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1 }}>-</button>
@@ -6763,9 +7059,306 @@ export function ZoneMarkingStep({
           </span>
         ) : null}
         {activeMark ? (
-          <button type="button" disabled={disabled} onClick={() => { if (!disabled) onClearMark(activeLabel); }} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: disabled ? "default" : "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}`, opacity: disabled ? 0.5 : 1 }}>Remove mark</button>
+          <button type="button" disabled={disabled} onClick={() => { if (!disabled) onClearMark(activeLabel); }} style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: disabled ? "default" : "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}`, opacity: disabled ? 0.5 : 1 }}>Remove mark</button>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+// ── Bait station marking (station-map-v1) ────────────────────────────────────
+// Bait stations (termite in-ground or rodent exterior, per `program`) as
+// individually-numbered pins on the same satellite image the zone step
+// draws on. Unlike zones (areas, all-or-nothing gate), stations are
+// independent point pins that each carry a per-visit status — the tech's
+// zero-tap path is "everything OK": every station defaults to 'ok' and only
+// exceptions get a tap. Pins persist as normalized circles so the shared
+// zone-drift re-anchoring applies to them unchanged. Status VALUES are
+// shared across programs (one DB CHECK); only the labels differ —
+// 'activity' reads "Activity" for termite, "Consumption" for rodent
+// (owner rodent-wording rules: exterior bait consumption, never
+// interior-infestation language).
+const STATION_PIN_R = 0.035; // normalized against the SHORT side (~12px @340)
+const STATION_TAP_RADIUS_PX = 22;
+const STATION_STATUS_UI = {
+  ok: { color: "#10b981", label: "OK" },
+  activity: { color: "#ef4444", label: "Activity" },
+  serviced: { color: "#f59e0b", label: "Serviced" },
+  inaccessible: { color: "#94a3b8", label: "No access" },
+};
+const STATION_PROGRAM_UI = {
+  termite: {
+    title: "Bait station map",
+    hint: "Every station starts as OK — tap a pin to flag activity, service, or no access.",
+    activityLabel: "Activity",
+    activityCounter: "with activity",
+  },
+  rodent: {
+    title: "Rodent bait station map",
+    hint: "Every station starts as OK — tap a pin to flag consumption, service, or no access.",
+    activityLabel: "Consumption",
+    activityCounter: "with consumption",
+  },
+  trapping: {
+    title: "Rodent trap map",
+    hint: "Every trap starts as OK — tap a pin to record a capture, service, or no access.",
+    activityLabel: "Capture",
+    activityCounter: "with captures",
+  },
+};
+function stationStatusLabel(status, program) {
+  if (status === "activity") return STATION_PROGRAM_UI[program]?.activityLabel || "Activity";
+  return STATION_STATUS_UI[status]?.label || status;
+}
+
+export function StationMarkingStep({
+  map,
+  stations, // [{ key, id?, number, label?, shape: {cx,cy,r}|null, stale }]
+  statuses, // { key → status } — absent key renders as 'ok'
+  onAddStation, // ({ cx, cy }) — parent appends a provisional-numbered pin
+  onMoveStation, // (key, { cx, cy })
+  onSetStatus, // (key, status)
+  onRemoveStation, // (key) — new pins delete; existing stations retire
+  // false = office desk mode (Customer 360): positions only, no visit to
+  // hang statuses on — pins render neutral and the status chips hide.
+  showStatuses = true,
+  // server cap (property-map stationCap) — add-mode stops here so the
+  // counts can never claim a pin the registry will refuse
+  maxStations = 80,
+  program = "termite", // 'termite' | 'rodent' — labels only, mechanics shared
+  disabled = false,
+  dark = false,
+}) {
+  const [selectedKey, setSelectedKey] = useState(null);
+  const [addMode, setAddMode] = useState(false);
+  const [armedMoveKey, setArmedMoveKey] = useState(null);
+  const svgRef = useRef(null);
+
+  if (!map?.available || !map.image?.url) return null;
+
+  const ink = dark ? "#e2e8f0" : "#1a1a1a";
+  const mutedInk = dark ? "#94a3b8" : "#6b6b6b";
+  const cardBg = dark ? "#1e293b" : "#ffffff";
+  const hairline = dark ? "#334155" : "#e4e4e4";
+  const accent = "#0ea5e9";
+
+  const pinned = stations.filter((station) => station.shape);
+  const stale = stations.filter((station) => !station.shape);
+  const selected = stations.find((station) => station.key === selectedKey) || null;
+  const statusOf = (key) => statuses[key] || "ok";
+  const activityCount = pinned.filter((station) => statusOf(station.key) === "activity").length;
+
+  const svgPointFromEvent = (evt) => {
+    const el = svgRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (evt.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const nearestPin = (pt) => {
+    let best = null;
+    let bestDist = Infinity;
+    pinned.forEach((station) => {
+      const dx = (station.shape.cx - pt.x) * 640;
+      const dy = (station.shape.cy - pt.y) * 340;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < bestDist) {
+        best = station;
+        bestDist = dist;
+      }
+    });
+    return bestDist <= STATION_TAP_RADIUS_PX ? best : null;
+  };
+
+  const handlePointerUp = (evt) => {
+    if (disabled) return;
+    const pt = svgPointFromEvent(evt);
+    if (!pt) return;
+    if (armedMoveKey) {
+      // Same occupied-pin rule as add mode: dropping the moved station on
+      // ANOTHER pin would be skipped server-side (position-occupied) while
+      // the tech believes it moved — ignore the tap and stay armed. A tap
+      // back on the station's own pin just re-places it.
+      const occupied = nearestPin(pt);
+      if (occupied && occupied.key !== armedMoveKey) return;
+      onMoveStation(armedMoveKey, { cx: pt.x, cy: pt.y });
+      setSelectedKey(armedMoveKey);
+      setArmedMoveKey(null);
+      return;
+    }
+    if (addMode) {
+      // A tap landing on an existing pin must NOT stack a duplicate on top
+      // of it (a double-tap would create two stations at one spot, and the
+      // auto counts would claim a pin the server dedupes away). Ignore it —
+      // the tech moves a thumb-width away or exits add mode to select.
+      if (nearestPin(pt)) return;
+      // Cap gating counts EVERY non-retired station, stale (drift-hidden)
+      // pins included — they hold registry slots even though they don't
+      // render, and an add past the real cap would 400 on save.
+      if (stations.length >= maxStations) return;
+      // stay in add mode — installs drop many pins in a row
+      onAddStation({ cx: pt.x, cy: pt.y });
+      return;
+    }
+    const hit = nearestPin(pt);
+    setSelectedKey(hit ? hit.key : null);
+  };
+
+  const removeSelected = () => {
+    if (disabled || !selected) return;
+    onRemoveStation(selected.key);
+    setSelectedKey(null);
+    setArmedMoveKey(null);
+  };
+
+  const chipStyle = (active, color) => ({
+    padding: "4px 12px",
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 500,
+    cursor: disabled ? "default" : "pointer",
+    background: active ? color : "transparent",
+    color: active ? "#fff" : ink,
+    border: `1px solid ${active ? color : hairline}`,
+    opacity: disabled ? 0.5 : 1,
+  });
+
+  const renderPin = (station) => {
+    const isSelected = station.key === selectedKey;
+    const meta = STATION_STATUS_UI[statusOf(station.key)] || STATION_STATUS_UI.ok;
+    const fill = showStatuses ? meta.color : "#64748b";
+    const cx = station.shape.cx * 640;
+    const cy = station.shape.cy * 340;
+    return (
+      <g key={station.key}>
+        {isSelected && <circle cx={cx} cy={cy} r={17} fill="none" stroke={accent} strokeWidth={3} />}
+        <circle cx={cx} cy={cy} r={12} fill={fill} stroke="rgba(255,255,255,0.95)" strokeWidth={2.5} />
+        <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">
+          {station.number}
+        </text>
+      </g>
+    );
+  };
+
+  const programUi = STATION_PROGRAM_UI[program] || STATION_PROGRAM_UI.termite;
+
+  return (
+    <div style={{ marginTop: 12, border: `1px solid ${hairline}`, borderRadius: 12, background: cardBg, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>{programUi.title}</div>
+        <div style={{ fontSize: 11, color: showStatuses && activityCount ? "#ef4444" : mutedInk, fontWeight: 500 }}>
+          {pinned.length} pinned{showStatuses && activityCount ? ` · ${activityCount} ${programUi.activityCounter}` : ""}
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: mutedInk, margin: "2px 0 8px" }}>
+        {addMode
+          ? "Tap the photo where each station sits — one pin per tap."
+          : armedMoveKey
+            ? `Tap the photo to place station ${stations.find((s) => s.key === armedMoveKey)?.number ?? ""}.`
+            : showStatuses
+              ? programUi.hint
+              : "Tap a pin to move or retire it, or add the property's stations from the satellite view."}
+      </div>
+      {stale.length > 0 && !addMode && !armedMoveKey && (
+        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 500, margin: "0 0 8px", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span>
+            The satellite image changed — re-pin station{stale.length === 1 ? "" : "s"}{" "}
+            {stale.map((station) => station.number).join(", ")}:
+          </span>
+          {stale.map((station) => (
+            <button
+              key={station.key}
+              type="button"
+              disabled={disabled}
+              onClick={() => { if (!disabled) { setArmedMoveKey(station.key); setSelectedKey(station.key); } }}
+              style={chipStyle(false, accent)}
+            >
+              Place #{station.number}
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${hairline}` }}>
+        <svg
+          ref={svgRef}
+          viewBox="0 0 640 340"
+          style={{ display: "block", width: "100%", touchAction: "none", cursor: disabled ? "default" : "crosshair" }}
+          onPointerUp={handlePointerUp}
+        >
+          <image href={map.image.url} x="0" y="0" width="640" height="340" preserveAspectRatio="xMidYMid slice" />
+          {pinned.filter((station) => station.key !== selectedKey).map(renderPin)}
+          {selected && selected.shape ? renderPin(selected) : null}
+        </svg>
+        {map.image.attributionText ? (
+          <div style={{ position: "absolute", right: 6, bottom: 4, fontSize: 10, color: "#fff", textShadow: "0 1px 2px rgba(0,0,0,0.9)", pointerEvents: "none" }}>
+            {map.image.attributionText}
+          </div>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          disabled={disabled || (!addMode && stations.length >= maxStations)}
+          onClick={() => {
+            if (disabled) return;
+            if (!addMode && stations.length >= maxStations) return;
+            setAddMode((v) => !v);
+            setArmedMoveKey(null);
+            setSelectedKey(null);
+          }}
+          style={chipStyle(addMode, accent)}
+        >
+          {addMode ? "Done adding" : stations.length >= maxStations ? `Station cap (${maxStations})` : "Add stations"}
+        </button>
+        {selected && !addMode && (
+          <>
+            <span style={{ fontSize: 11, color: mutedInk }}>Station {selected.number}:</span>
+            {showStatuses && Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
+              <button
+                key={status}
+                type="button"
+                disabled={disabled}
+                onClick={() => { if (!disabled) onSetStatus(selected.key, status); }}
+                style={chipStyle(statusOf(selected.key) === status, meta.color)}
+              >
+                {stationStatusLabel(status, program)}
+              </button>
+            ))}
+            {selected.shape && (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => { if (!disabled) setArmedMoveKey(selected.key); }}
+                style={chipStyle(armedMoveKey === selected.key, accent)}
+              >
+                Move pin
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={removeSelected}
+              style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: disabled ? "default" : "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}`, opacity: disabled ? 0.5 : 1 }}
+            >
+              {selected.id ? "Retire station" : "Remove pin"}
+            </button>
+          </>
+        )}
+      </div>
+      {showStatuses && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", marginTop: 8 }}>
+          {Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
+            <span key={status} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: mutedInk }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: meta.color }} />
+              {stationStatusLabel(status, program)}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -6780,7 +7373,7 @@ function RecapCapture({ serviceId }) {
 
   const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-media`)
     .then((d) => setItems(d?.items || [])).catch(() => {});
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [serviceId]);
+  useEffect(() => { refresh();   }, [serviceId]);
 
   const onPick = (e) => {
     const file = e.target.files && e.target.files[0];
@@ -6819,11 +7412,11 @@ function RecapCapture({ serviceId }) {
   };
 
   const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
-  const chip = { display: "flex", alignItems: "center", gap: 7, padding: "12px 10px", borderRadius: 11, background: D.bg, border: `1px solid ${D.border}`, color: D.text, fontSize: 12.5, fontWeight: 700, cursor: "pointer", textAlign: "left" };
+  const chip = { display: "flex", alignItems: "center", gap: 7, padding: "12px 10px", borderRadius: 11, background: D.bg, border: `1px solid ${D.border}`, color: D.text, fontSize: 12.5, fontWeight: 500, cursor: "pointer", textAlign: "left" };
 
   return (
     <div style={wrap}>
-      <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 14, color: D.text, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#111" }} /> Recap clips</span>
         <span style={{ fontSize: 12, color: D.muted }}>{items.length ? `${items.length} captured` : "optional"}</span>
       </div>
@@ -6837,10 +7430,10 @@ function RecapCapture({ serviceId }) {
             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 8 }}>
               <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#3f3f46,#18181b)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
                 <div style={{ fontSize: 11.5, color: "#111" }}>“{m.caption}”</div>
               </div>
-              <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 700 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
+              <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 500 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
               <button onClick={() => remove(m.id)} style={{ background: "none", border: "none", color: D.muted, fontSize: 18, cursor: "pointer" }}>×</button>
             </div>
           ))}
@@ -6848,7 +7441,7 @@ function RecapCapture({ serviceId }) {
       )}
 
       {err && <div style={{ fontSize: 12, color: D.red, margin: "0 0 8px", lineHeight: 1.4 }}>{err}</div>}
-      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 800, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
+      <button onClick={() => fileRef.current && fileRef.current.click()} style={{ width: "100%", padding: "12px", borderRadius: 10, border: "none", background: "#111", color: "#fff", fontWeight: 500, fontSize: 13.5, cursor: "pointer", fontFamily: "'Montserrat', sans-serif" }}>
         {uploading ? `Uploading… (${uploading})` : "+ Capture clip"}
       </button>
 
@@ -6856,7 +7449,7 @@ function RecapCapture({ serviceId }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,13,.7)", zIndex: 50, display: "flex", alignItems: "flex-end" }} onClick={() => setPendingFile(null)}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: D.card, borderRadius: "18px 18px 0 0", border: `1px solid ${D.border}`, padding: "16px 14px 22px", maxHeight: "82%", overflowY: "auto" }}>
             <div style={{ width: 40, height: 4, background: D.border, borderRadius: 3, margin: "0 auto 12px" }} />
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 800, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
+            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
             <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {(showMore ? [...RECAP_CHIPS_TOP, ...RECAP_CHIPS_MORE] : RECAP_CHIPS_TOP).map((c) => (
@@ -6927,8 +7520,8 @@ function PestRecapCard({ serviceId }) {
 
   const s = state.status;
   const wrap = { background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, margin: "0 0 12px" };
-  const head = { fontFamily: "'Montserrat', sans-serif", fontWeight: 700, fontSize: 14, color: D.text, display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
-  const btn = (bg, color) => ({ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: bg, color, fontWeight: 700, fontSize: 13, cursor: busy ? "wait" : "pointer", fontFamily: "'Montserrat', sans-serif" });
+  const head = { fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 14, color: D.text, display: "flex", alignItems: "center", gap: 8, marginBottom: 8 };
+  const btn = (bg, color) => ({ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: bg, color, fontWeight: 500, fontSize: 13, cursor: busy ? "wait" : "pointer", fontFamily: "'Montserrat', sans-serif" });
 
   return (
     <div style={wrap}>
@@ -6955,12 +7548,12 @@ function PestRecapCard({ serviceId }) {
           {s === "approved" ? (
             state.sent ? (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ flex: 1, fontSize: 12.5, color: "#111", fontWeight: 700 }}>Approved &amp; sent to the customer</span>
+                <span style={{ flex: 1, fontSize: 12.5, color: "#111", fontWeight: 500 }}>Approved &amp; sent to the customer</span>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
             ) : (
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 700, minWidth: 130 }}>Approved — the text didn’t send</span>
+                <span style={{ flex: 1, fontSize: 12, color: D.amber, fontWeight: 500, minWidth: 130 }}>Approved — the text didn’t send</span>
                 <button style={btn("#111", "#fff")} disabled={busy} onClick={() => act("approve")}>Retry send</button>
                 <button style={btn("transparent", D.muted)} disabled={busy} onClick={regenerate}>Regenerate</button>
               </div>
@@ -6995,6 +7588,9 @@ export function CompletionPanel({
   // follow-up CTA (wired by PR 4 — the button only renders when provided).
   onBillingRequired,
   onScheduleFollowup,
+  billingDetourPhotos = [],
+  onDiscardBillingDetour,
+  onBillingDetourPhotosChange,
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -7009,18 +7605,88 @@ export function CompletionPanel({
     setNotes((b) => (b ? `${b} ${text}` : text));
   });
   // Customer email isn't on the schedule payload (only name/phone are), so fetch
-  // it for the header contact card's tap-to-email link.
+  // it for the header contact card's tap-to-email link. The same fetch surfaces
+  // the account's default payer for the third-party-billing banner below.
   const [customerEmail, setCustomerEmail] = useState("");
+  const [customerDefaultPayerId, setCustomerDefaultPayerId] = useState(null);
   useEffect(() => {
     let live = true;
     setCustomerEmail(""); // clear stale email before (re)fetching for a new service
+    setCustomerDefaultPayerId(null);
     const cid = service.customerId || service.customer_id;
     if (!cid) return undefined;
     adminFetch(`/admin/customers/${cid}`)
-      .then((d) => { if (live) setCustomerEmail(d?.customer?.email || ""); })
+      .then((d) => {
+        if (!live) return;
+        setCustomerEmail(d?.customer?.email || "");
+        setCustomerDefaultPayerId(d?.customer?.payerId || null);
+      })
       .catch(() => { if (live) setCustomerEmail(""); });
     return () => { live = false; };
   }, [service.customerId, service.customer_id]);
+  // Third-party Bill-To: when this visit resolves to a payer (per-job override,
+  // else the account default unless the visit is pinned to self-pay), the
+  // invoice routes to the payer's AP inbox and the tech must NOT collect on
+  // site (the server blocks in-person collection for payer-billed visits).
+  // The banner and the self-pay UI suppression only engage for a CONFIRMED
+  // live ACTIVE payer — server resolution ignores missing/inactive payers
+  // (falls back to self-pay), so a stale link must not tell the tech "don't
+  // collect" on a visit that will actually mint a self-pay invoice.
+  // Preferred source: `service.billedToPayer`, resolved (active-checked)
+  // server-side on the tech-visible schedule day payload — /admin/payers/* is
+  // admin-only, so a tech can't look the payer up client-side. Payloads that
+  // don't carry the field (older list shapes) fall back to the admin lookup;
+  // when that fails (403/offline) nothing is suppressed — the server-side
+  // guards still prevent real mis-collection either way.
+  const serverBilledTo = service.billedToPayer;
+  const effectivePayerId =
+    service.payerId ||
+    (service.selfPayOverride === true ? null : customerDefaultPayerId) ||
+    null;
+  const [payerBillTo, setPayerBillTo] = useState(null);
+  useEffect(() => {
+    let live = true;
+    setPayerBillTo(null);
+    if (serverBilledTo !== undefined) {
+      if (serverBilledTo) {
+        setPayerBillTo({ name: serverBilledTo.name || "a third-party payer" });
+      }
+      return undefined;
+    }
+    if (!effectivePayerId) return undefined;
+    adminFetch(`/admin/payers/${effectivePayerId}`)
+      .then((d) => {
+        if (!live) return;
+        const p = d?.payer;
+        if (p && p.active !== false) {
+          setPayerBillTo({ name: p.display_name || p.company_name || "a third-party payer" });
+        }
+      })
+      .catch(() => { /* unconfirmed — keep self-pay UI */ });
+    return () => { live = false; };
+  }, [serverBilledTo, effectivePayerId]);
+  const payerBanner = payerBillTo
+    ? `Billed to ${payerBillTo.name} — don't collect payment on site. The invoice goes to the payer, and the customer's completion text gets no pay link.`
+    : null;
+  // Measured lawn sqft from the turf profile: seeds the Sq ft field (and the
+  // derived Total) when a broadcast/granular lawn product is added. No
+  // profile / not a lawn visit → the fields stay manual as before.
+  const [lawnSqftForPrefill, setLawnSqftForPrefill] = useState(null);
+  useEffect(() => {
+    let live = true;
+    setLawnSqftForPrefill(null);
+    const cid = service.customerId || service.customer_id;
+    const type = service?.serviceType || service?.service_type || "";
+    if (!cid || serviceLineFromType(type) !== "lawn") return undefined;
+    adminFetch(`/admin/customers/${cid}/turf-profile`)
+      .then((d) => {
+        if (!live) return;
+        const n = Number(d?.profile?.lawn_sqft);
+        setLawnSqftForPrefill(Number.isFinite(n) && n > 0 ? n : null);
+      })
+      .catch(() => { if (live) setLawnSqftForPrefill(null); });
+    return () => { live = false; };
+  }, [service.customerId, service.customer_id, service.serviceType, service.service_type]);
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
@@ -7038,6 +7704,8 @@ export function CompletionPanel({
   const [recapError, setRecapError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // F2 (ratified Q13): windowed comms context on the AI report draft — default CHECKED.
+  const [aiReportIncludeComms, setAiReportIncludeComms] = useState(true);
   const [success, setSuccess] = useState(false);
   const [completionResult, setCompletionResult] = useState(null);
   // Completion-screen annual-prepay offer (flag-gated, default off): a post-
@@ -7056,15 +7724,23 @@ export function CompletionPanel({
   const showPrepayCta = prepayAtCompletionFlag && prepayIsAdmin;
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
-  const [servicePhotos, setServicePhotos] = useState([]);
+  // Completion photos are intentionally kept out of localStorage (a handful
+  // of base64 images can exceed its quota). Dispatch keeps them in memory
+  // across the billing checkout detour and passes them back on remount.
+  const [servicePhotos, setServicePhotos] = useState(() =>
+    normalizeCompletionDetourPhotos(billingDetourPhotos),
+  );
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
   const { enabled: turfHeightFlag, ready: turfHeightFlagReady } = useFeatureFlagReady("turf-height-capture");
   // Phase 3 fast closeout — flag-gated (default off). Existing completion flow is unchanged when off.
-  // Tree & Shrub exception-based closeout — flag-gated (default off). When off the
-  // completion flow is unchanged and the server's post-commit auto-score still runs.
-  const { enabled: treeShrubCloseoutFlag, ready: treeShrubCloseoutReady } = useFeatureFlagReady("tree-shrub-closeout-v2");
+  // Tree & Shrub exception-based closeout — UNCONDITIONAL (the per-user
+  // tree-shrub-closeout-v2 flag is retired; owner ungated 2026-07-09). This
+  // also closes a trap: the server's validateTreeShrubCloseout enforcement is
+  // unconditional for tree_shrub/palm completions, so a tech WITHOUT the old
+  // flag had no closeout UI to collect the required fields and every
+  // completion hard-400'd (tree_shrub_closeout_lockout).
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
@@ -7089,17 +7765,73 @@ export function CompletionPanel({
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
 
+  // Bait station map (station-map-v1). Only station-typed completions
+  // (termite or rodent, primary or companion) surface the station step — the
+  // flag alone must not put pins on lawn/pest completions, and the visit's
+  // typed flow picks the PROGRAM whose registry slice loads. Eligibility
+  // reads the service prop directly so the property-map effect below can
+  // depend on it.
+  const { enabled: stationMapFlag } = useFeatureFlagReady("station-map-v1");
+  const stationTypeSet = [
+    service.completionProfile?.findingsType,
+    ...(Array.isArray(service.companionSchemas)
+      ? service.companionSchemas.map((s) => s?.type)
+      : []),
+  ];
+  // This selection must be IDENTICAL to the server's
+  // stationProgramForProfile, which /complete syncs against (codex r1+r2):
+  // a station PRIMARY (findingsType, first entry) wins outright; among
+  // COMPANIONS the tie breaks termite-first. Any divergence makes the panel
+  // load/submit one program's station ids while the sync targets the other,
+  // silently skipping the visit's checks.
+  const stationTypeProgram = {
+    termite_bait_station: "termite",
+    rodent_bait_station: "rodent",
+    rodent_trapping: "trapping",
+  };
+  const companionStationTypes = stationTypeSet.slice(1);
+  const stationProgram = stationTypeProgram[stationTypeSet[0]]
+    || (companionStationTypes.includes("termite_bait_station") ? "termite"
+      : companionStationTypes.includes("rodent_bait_station") ? "rodent"
+        : companionStationTypes.includes("rodent_trapping") ? "trapping" : null);
+  const stationFeatureOn = stationMapFlag && Boolean(stationProgram);
+  const [stationPreloads, setStationPreloads] = useState([]); // property's existing stations
+  const [stationNew, setStationNew] = useState([]); // pins dropped this session [{ key, number, shape }]
+  const [stationMoves, setStationMoves] = useState({}); // id → shape re-positioned this session
+  const [stationStatuses, setStationStatuses] = useState({}); // key → status ('ok' when absent)
+  const [stationRetired, setStationRetired] = useState([]); // existing ids retired this session
+  const [stationNumberBase, setStationNumberBase] = useState(1); // server's next number (never reuses retired)
+  const stationNewSeqRef = useRef(0);
+
   // Satellite basemap + the property's existing zone marks. Preloads land in
   // zonePreloads (normalized-label keyed) so visit N+1 is confirm/adjust,
   // never a redraw — and never dirty unless the tech actually touches one.
+  // Station pins ride the same payload; the fetch runs when either marking
+  // surface is on.
   useEffect(() => {
-    if (!zoneMarkingFlag || !service?.id) return undefined;
+    if ((!zoneMarkingFlag && !stationFeatureOn) || !service?.id) return undefined;
     let cancelled = false;
     adminFetch(`/admin/dispatch/${service.id}/property-map`)
       .then((res) => {
         if (cancelled) return;
         setPropertyMap(res || null);
         if (!res?.available) return;
+        setStationPreloads((Array.isArray(res.stations) ? res.stations : [])
+          .filter((station) => (station.program || "termite") === stationProgram)
+          .map((station) => ({
+            id: String(station.id),
+            number: station.number,
+            label: station.label || null,
+            shape: station.geometryImage && station.geometryImage.type === "circle"
+              ? station.geometryImage
+              : null,
+            stale: Boolean(station.staleMark),
+          })));
+        setStationNumberBase(
+          Number(res.nextStationNumberByProgram?.[stationProgram])
+          || Number(res.nextStationNumber)
+          || 1,
+        );
         const preload = {};
         const norm01 = (v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
         (res.zones || []).forEach((zone) => {
@@ -7120,7 +7852,7 @@ export function CompletionPanel({
       })
       .catch(() => { if (!cancelled) setPropertyMap(null); });
     return () => { cancelled = true; };
-  }, [zoneMarkingFlag, service?.id]);
+  }, [zoneMarkingFlag, stationFeatureOn, service?.id]);
 
   // What the marking step renders: this session's edit if present (null =
   // cleared), else the property's preloaded shape.
@@ -7149,6 +7881,145 @@ export function CompletionPanel({
     }
     setZoneMarks((prev) => ({ ...prev, [label]: null }));
   };
+
+  // Bait station display list + edit handlers (station-map-v1). Moves
+  // overlay preloaded shapes; retired stations drop from display but submit
+  // a retire intent; new pins get provisional numbers from the server's
+  // nextStationNumber base so what the tech sees matches what persists.
+  const stationDisplay = stationFeatureOn
+    ? [
+      ...stationPreloads
+        .filter((station) => !stationRetired.includes(station.id))
+        .map((station) => ({
+          key: station.id,
+          id: station.id,
+          number: station.number,
+          label: station.label,
+          shape: stationMoves[station.id] || station.shape,
+          stale: station.stale && !stationMoves[station.id],
+        })),
+      ...stationNew.map((station) => ({
+        key: station.key,
+        id: null,
+        number: station.number,
+        label: null,
+        shape: station.shape,
+        stale: false,
+      })),
+    ]
+    : [];
+  const addStationPin = (pt) => {
+    stationNewSeqRef.current += 1;
+    setStationNew((prev) => {
+      const base = Math.max(
+        Number(stationNumberBase) || 1,
+        ...prev.map((station) => (Number(station.number) || 0) + 1),
+      );
+      return [
+        ...prev,
+        {
+          key: `new-${stationNewSeqRef.current}`,
+          number: base,
+          shape: { type: "circle", cx: pt.cx, cy: pt.cy, r: STATION_PIN_R },
+        },
+      ];
+    });
+  };
+  const moveStationPin = (key, pt) => {
+    const shape = { type: "circle", cx: pt.cx, cy: pt.cy, r: STATION_PIN_R };
+    if (stationNew.some((station) => station.key === key)) {
+      setStationNew((prev) => prev.map((station) => (station.key === key ? { ...station, shape } : station)));
+    } else {
+      setStationMoves((prev) => ({ ...prev, [key]: shape }));
+    }
+  };
+  const setStationStatus = (key, status) => {
+    setStationStatuses((prev) => ({ ...prev, [key]: status }));
+  };
+  const removeStationPin = (key) => {
+    if (stationNew.some((station) => station.key === key)) {
+      setStationNew((prev) => prev.filter((station) => station.key !== key));
+    } else {
+      setStationRetired((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    }
+  };
+
+  // Auto-fill the termite station counts from the map so the typed report's
+  // numbers can never contradict the pins. A count field stays auto-owned
+  // while it is empty or still equals the last auto-written value — the
+  // moment the tech hand-edits one, autofill leaves it alone.
+  const stationAutoCountsRef = useRef({});
+  useEffect(() => {
+    if (!stationFeatureOn) return;
+    // Never auto-write counts for a property whose map was never populated —
+    // the tech may be entering counts by hand for unmapped stations. Once
+    // pins exist (preloaded or dropped), the counts follow the map, INCLUDING
+    // down to zero when every station is retired this session: leaving the
+    // pre-retire totals in place would publish counts for stations the
+    // submit payload just removed.
+    if (!stationPreloads.length && !stationNew.length) return;
+    // Drift-hidden ("stale") pins that haven't been re-placed are excluded:
+    // the report map cannot render them this visit, so counting them as
+    // checked would publish typed counts the customer-visible map can't
+    // show. Re-pinning (a move) brings a stale station back into the counts.
+    const activeKeys = [
+      ...stationPreloads
+        .filter((station) => !stationRetired.includes(station.id)
+          && (station.shape || stationMoves[station.id]))
+        .map((station) => station.id),
+      ...stationNew.map((station) => station.key),
+    ];
+    const statusOf = (key) => stationStatuses[key] || "ok";
+    const inaccessible = activeKeys.filter((key) => statusOf(key) === "inaccessible").length;
+    // Each program maps to ITS schema's count keys — never auto-write a key
+    // the schema doesn't own, or submit validation rejects the unknown
+    // field. Trapping owns traps_checked only: captures is a tech-judgment
+    // count (one trap can hold multiple captures), and the schema has no
+    // total/inaccessible keys.
+    const counts = stationProgram === "trapping"
+      ? { traps_checked: String(activeKeys.length - inaccessible) }
+      : {
+        total_stations: String(activeKeys.length),
+        stations_checked: String(activeKeys.length - inaccessible),
+        stations_inaccessible: String(inaccessible),
+        // Only the termite schema carries a per-station activity COUNT; the
+        // rodent flow records consumption as a select (tech judgment).
+        ...(stationProgram === "termite"
+          ? { stations_with_activity: String(activeKeys.filter((key) => statusOf(key) === "activity").length) }
+          : {}),
+      };
+    // Snapshot the last auto-written values BEFORE scheduling the state
+    // updates: the updater callbacks run after this effect finishes, so
+    // reading the ref inside them would see the values we're about to
+    // write below and misread every auto-owned field as hand-edited.
+    const lastAuto = { ...stationAutoCountsRef.current };
+    const applyCounts = (values) => {
+      let changed = false;
+      const next = { ...values };
+      for (const [key, value] of Object.entries(counts)) {
+        const current = next[key];
+        const autoOwned = current == null || current === "" || String(current) === String(lastAuto[key]);
+        if (autoOwned && String(current ?? "") !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      }
+      return changed ? next : values;
+    };
+    const stationTypedFlow = stationProgram === "trapping" ? "rodent_trapping"
+      : stationProgram === "rodent" ? "rodent_bait_station" : "termite_bait_station";
+    if (service.completionProfile?.findingsType === stationTypedFlow) {
+      setFindingsValues((prev) => applyCounts(prev));
+    } else {
+      setCompanionState((prev) => {
+        const entry = prev[stationTypedFlow] || EMPTY_COMPANION_ENTRY;
+        const nextValues = applyCounts(entry.values);
+        if (nextValues === entry.values) return prev;
+        return { ...prev, [stationTypedFlow]: { ...entry, values: nextValues } };
+      });
+    }
+    stationAutoCountsRef.current = counts;
+  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired]);
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -7191,7 +8062,8 @@ export function CompletionPanel({
   const [typedAiError, setTypedAiError] = useState("");
   // Customer calls/texts/emails reach the AI prompt only on explicit opt-in
   // — they can carry PII, so the box starts unchecked.
-  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(false);
+  // Default CHECKED (ratified Q13 — the owner is the only tech and uses it).
+  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(true);
   const [typedAiDraftUsed, setTypedAiDraftUsed] = useState(false);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
@@ -7206,6 +8078,9 @@ export function CompletionPanel({
   useEffect(() => {
     servicePhotosRef.current = servicePhotos;
   }, [servicePhotos]);
+  useEffect(() => {
+    onBillingDetourPhotosChange?.(service.id, servicePhotos);
+  }, [onBillingDetourPhotosChange, service.id, servicePhotos]);
   // Tech-speed telemetry (contract §10) — rides inside the completion POST
   // as `completionTelemetry`; never a separate request.
   const completionTelemetryRef = useRef({
@@ -7284,6 +8159,12 @@ export function CompletionPanel({
   );
   const [selectedRecommendationLabels, setSelectedRecommendationLabels] =
     useState([]);
+  // Flips true once Generate AI report replaces the notes with clean prose.
+  // Before that, the [Protocol]/[Found]/[Next] chip lines in the notes are the
+  // selection source of truth (delete a line = deselect); after, the label
+  // arrays are authoritative and selections render as removable pills instead
+  // of tagged lines inside the report text. Persisted with the draft.
+  const [chipLinesDetached, setChipLinesDetached] = useState(false);
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
   const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
@@ -7350,8 +8231,7 @@ export function CompletionPanel({
   const observationChips = observationChipsForLine(chipServiceLine);
   const recommendationChips = recommendationChipsForLine(chipServiceLine);
   const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
-  const treeShrubCloseoutOn =
-    treeShrubCloseoutReady && treeShrubCloseoutFlag && serviceLineForCloseout === "tree_shrub";
+  const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence) and returns the findings
@@ -7455,7 +8335,12 @@ export function CompletionPanel({
     invoiceAmount > 0;
   // A pay link is only inserted when an invoice will be created AND the
   // operator hasn't opted to send the report on its own (e.g. paid in person).
-  const willSendPayLink = willInvoice && includePayLink;
+  // Payer-billed visits never text the homeowner a pay link (the server
+  // suppresses it — the invoice routes to the payer's AP inbox), so the
+  // toggle is hidden and the preview drops the marker. Keyed on the
+  // CONFIRMED-active payer (payerBanner), matching server resolution — an
+  // inactive/stale link resolves self-pay and keeps the normal pay-link UI.
+  const willSendPayLink = willInvoice && includePayLink && !payerBanner;
   const completionSmsTemplateName = willSendPayLink
     ? "Service Complete + Invoice"
     : "Service Complete";
@@ -7991,8 +8876,25 @@ export function CompletionPanel({
           (entry?.chips || []).length ||
           entry?.score != null,
       ) ||
+      completionPreferencesNeedDraft({
+        sendSms,
+        includePayLink,
+        requestReview,
+        clientPestRating,
+      }) ||
       visitOutcome !== "completed";
-    if (!hasDraftContent) return;
+    if (!hasDraftContent) {
+      // A field can return to its default after an earlier debounced write.
+      // Remove both copies so a billing 409 cannot flush stale preferences.
+      // Only remove storage when this mounted panel created the snapshot:
+      // during draft discovery, state updates for the restore prompt have not
+      // rendered yet and the form still appears empty here.
+      if (draftSnapshotRef.current) {
+        localStorage.removeItem(completionDraftKey(service.id));
+      }
+      draftSnapshotRef.current = null;
+      return;
+    }
 
     const draft = {
         serviceId: service.id,
@@ -8002,6 +8904,7 @@ export function CompletionPanel({
         sendSms,
         includePayLink,
         requestReview,
+        clientPestRating,
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
@@ -8025,12 +8928,29 @@ export function CompletionPanel({
             height: propertyMap.image.height || 340,
           }
           : null,
+        // Bait station edits survive the billing-409 checkout detour like
+        // zone marks (statuses/pins are this visit's data — losing them
+        // behind a payment detour would silently publish a wrong map).
+        // Preloads ride along too: the submit payload iterates them, so a
+        // restore that submits BEFORE the /property-map refetch resolves
+        // would otherwise drop every existing-station status/move/retire
+        // while still sending the new pins.
+        stationNew,
+        stationMoves,
+        stationStatuses,
+        stationRetired,
+        stationPreloads,
+        stationNumberBase,
         customerInteraction,
         customerConcern,
         selectedProtocolActionLabels,
         actionScopeByLabel,
         selectedObservationLabels,
         selectedRecommendationLabels,
+        // Which deselect model the label arrays were saved under — a restored
+        // post-AI-draft (no chip lines in notes) must restore as detached or
+        // labelsStillInNotes would silently drop every structured selection.
+        chipLinesDetached,
         nextVisitNote,
         showNextVisitNote,
         equipmentSystemId,
@@ -8078,6 +8998,7 @@ export function CompletionPanel({
     sendSms,
     includePayLink,
     requestReview,
+    clientPestRating,
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
@@ -8086,12 +9007,19 @@ export function CompletionPanel({
     recapSource,
     areasServiced,
     zoneMarks,
+    stationNew,
+    stationMoves,
+    stationStatuses,
+    stationRetired,
+    stationPreloads,
+    stationNumberBase,
     customerInteraction,
     customerConcern,
     selectedProtocolActionLabels,
     actionScopeByLabel,
     selectedObservationLabels,
     selectedRecommendationLabels,
+    chipLinesDetached,
     nextVisitNote,
     showNextVisitNote,
     equipmentSystemId,
@@ -8133,6 +9061,11 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
+    setClientPestRating(
+      Number.isInteger(savedDraft.clientPestRating)
+        ? savedDraft.clientPestRating
+        : null,
+    );
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
@@ -8164,6 +9097,43 @@ export function CompletionPanel({
         ? savedDraft.zoneMapImage
         : null,
     );
+    const restoredStationNew = Array.isArray(savedDraft.stationNew)
+      ? savedDraft.stationNew.filter((station) => station
+        && typeof station.key === "string"
+        && station.shape && typeof station.shape === "object")
+      : [];
+    setStationNew(restoredStationNew);
+    // keep the key sequence ahead of restored pins so a new add can't
+    // collide with a restored key
+    stationNewSeqRef.current = restoredStationNew.reduce((max, station) => {
+      const n = Number(String(station.key).replace("new-", ""));
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, stationNewSeqRef.current);
+    setStationMoves(
+      savedDraft.stationMoves && typeof savedDraft.stationMoves === "object"
+        ? savedDraft.stationMoves
+        : {},
+    );
+    setStationStatuses(
+      savedDraft.stationStatuses && typeof savedDraft.stationStatuses === "object"
+        ? savedDraft.stationStatuses
+        : {},
+    );
+    setStationRetired(
+      Array.isArray(savedDraft.stationRetired) ? savedDraft.stationRetired : [],
+    );
+    // Bridge until the /property-map refetch resolves — submit iterates
+    // preloads, so restored existing-station edits need their rows present.
+    // The live fetch overwrites these with fresh (drift-resolved) data.
+    setStationPreloads(
+      Array.isArray(savedDraft.stationPreloads)
+        ? savedDraft.stationPreloads.filter((station) => station
+          && typeof station.id === "string" && station.id)
+        : [],
+    );
+    if (Number.isFinite(Number(savedDraft.stationNumberBase)) && Number(savedDraft.stationNumberBase) >= 1) {
+      setStationNumberBase(Number(savedDraft.stationNumberBase));
+    }
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
     );
@@ -8188,6 +9158,9 @@ export function CompletionPanel({
         ? savedDraft.selectedRecommendationLabels
         : [],
     );
+    // Drafts saved before the detached-selection model lack the field → false,
+    // which matches their notes still carrying the chip-marker lines.
+    setChipLinesDetached(savedDraft.chipLinesDetached === true);
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setEquipmentSystemId(savedDraft.equipmentSystemId || "");
@@ -8276,6 +9249,11 @@ export function CompletionPanel({
 
   function discardDraft() {
     localStorage.removeItem(completionDraftKey(service.id));
+    // Photos survive checkout in parent memory rather than localStorage. A
+    // deliberate Discard must clear both stores or old evidence remains
+    // attached to the otherwise-reset completion.
+    setServicePhotos([]);
+    onDiscardBillingDetour?.();
     setSavedDraft(null);
     setShowDraftPrompt(false);
   }
@@ -8390,6 +9368,10 @@ export function CompletionPanel({
   }
 
   function addChipNote(prefix, text) {
+    // Once an AI draft has replaced the notes, the label arrays are the
+    // selection source of truth and selections render as removable pills —
+    // don't write tagged template lines back into the clean report prose.
+    if (chipLinesDetached) return;
     const line = `[${prefix}] ${text}`;
     setNotes((prev) => (prev.trim() ? prev.trimEnd() + "\n" + line : line));
   }
@@ -8403,14 +9385,13 @@ export function CompletionPanel({
     );
   }
   function labelsStillInNotes(labels) {
-    // A selected label only counts as still-active if it appears inside one of
-    // the bracketed chip-marker lines ([Protocol]/[Protocol optional]/[Action]/
-    // [Found]/[Next] …) — NOT in arbitrary prose. The label arrays are only ever
-    // populated alongside a marker (the chip handlers, or a restored draft whose
-    // saved notes carry the markers), so this matches the same items as before
-    // for normal completions, but makes the deselect handle reliable after
-    // Generate: deleting the marker truly removes the item even when the AI prose
-    // happens to repeat the label text verbatim.
+    // Pre-draft deselect model only (see activeSelectedLabels for the
+    // post-draft one): a selected label counts as still-active if it appears
+    // inside one of the bracketed chip-marker lines ([Protocol]/[Protocol
+    // optional]/[Action]/[Found]/[Next] …) — NOT in arbitrary prose. The label
+    // arrays are only ever populated alongside a marker (the chip handlers, or
+    // a restored pre-draft whose saved notes carry the markers), so deleting a
+    // marker line truly deselects the item.
     const markerLines = notes
       .split("\n")
       .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
@@ -8420,40 +9401,67 @@ export function CompletionPanel({
       return text && markerLines.some((line) => line.includes(text));
     });
   }
-  // Generate AI report replaces the notes wholesale with AI prose, which would
-  // strip the [Protocol]/[Found]/[Next] tagged lines that handleSubmit reads
-  // back via labelsStillInNotes to rebuild protocolActionsCompleted + their
-  // re-entry/treatment scopes, observations, and recommendations. Re-append the
-  // still-selected labels so the structured visit record (and interior-treatment
-  // safety scopes) survive drafting.
-  function stitchSelectedLabelsIntoReport(reportText) {
-    const base = String(reportText || "");
-    const lines = [];
-    // Always emit an explicit removable marker (don't skip when the prose
-    // happens to mention the label verbatim): the marker is the tech's deselect
-    // handle, so leaving a still-selected item in prose-only form would make it
-    // impossible to deselect before completing.
-    const pushLabel = (prefix, label) => {
-      const text = String(label || "").trim();
-      if (text) lines.push(`[${prefix}] ${text}`);
-    };
-    // Only re-stitch labels still present in the pre-generation notes — the tech
-    // deselects a wrongly-picked item by deleting its tagged line, and
-    // handleSubmit honors that via labelsStillInNotes. Stitching the full
-    // selected-label state would resurrect a deliberately-removed action (and its
-    // re-entry scope) on the next Generate. (notes still holds the pre-draft text
-    // here; setNotes(report) hasn't applied yet.)
-    labelsStillInNotes(selectedProtocolActionLabels).forEach((l) =>
-      pushLabel("Protocol", l),
+  // The still-selected structured labels, honoring whichever deselect model is
+  // active: before an AI draft, the [Protocol]/[Found]/[Next] chip lines in the
+  // notes are the source of truth (delete a line = deselect); after Generate
+  // replaces the notes with clean prose (chipLinesDetached), the label arrays
+  // are authoritative and the removable pills below the notes are the deselect
+  // handle. Every reader (submit, AI payload, applied-count) goes through this
+  // so the structured visit record can't drift from what the tech sees.
+  function activeSelectedLabels(labels) {
+    if (!chipLinesDetached) return labelsStillInNotes(labels);
+    return (Array.isArray(labels) ? labels : []).filter((label) =>
+      String(label || "").trim(),
     );
-    labelsStillInNotes(selectedObservationLabels).forEach((l) =>
-      pushLabel("Found", l),
-    );
-    labelsStillInNotes(selectedRecommendationLabels).forEach((l) =>
-      pushLabel("Next", l),
-    );
-    if (!lines.length) return base;
-    return base.trimEnd() + "\n\n" + lines.join("\n");
+  }
+  // Generate AI report replaces the notes wholesale with AI prose. The tagged
+  // [Protocol]/[Found]/[Next] template lines are NOT re-appended to the report
+  // (owner request: the drafted copy must be clean prose only). Instead, prune
+  // the label arrays to the labels whose tagged lines survived in the pre-draft
+  // notes (honoring deselect-by-deletion up to this point) and flip
+  // chipLinesDetached so the arrays become authoritative — the structured visit
+  // record (and interior-treatment safety scopes) survive drafting, and the
+  // pills UI takes over as the deselect handle. (notes still holds the
+  // pre-draft text here; setNotes(report) hasn't applied yet.)
+  function applyGeneratedReport(reportText) {
+    if (!chipLinesDetached) {
+      setSelectedProtocolActionLabels(
+        labelsStillInNotes(selectedProtocolActionLabels),
+      );
+      setSelectedObservationLabels(
+        labelsStillInNotes(selectedObservationLabels),
+      );
+      setSelectedRecommendationLabels(
+        labelsStillInNotes(selectedRecommendationLabels),
+      );
+      setChipLinesDetached(true);
+    }
+    setNotes(String(reportText || "").trim());
+  }
+  // Deselect handle after an AI draft: remove a structured selection from its
+  // label array (and its recorded re-entry/treatment scope, for protocol
+  // actions). Products added by a protocol action stay — they have their own
+  // remove control, same as deleting a tagged line never removed them.
+  function removeSelectedLabel(kind, label) {
+    if (kind === "protocol") {
+      setSelectedProtocolActionLabels((prev) =>
+        prev.filter((item) => item !== label),
+      );
+      setActionScopeByLabel((prev) => {
+        if (!(label in prev)) return prev;
+        const next = { ...prev };
+        delete next[label];
+        return next;
+      });
+    } else if (kind === "observation") {
+      setSelectedObservationLabels((prev) =>
+        prev.filter((item) => item !== label),
+      );
+    } else if (kind === "recommendation") {
+      setSelectedRecommendationLabels((prev) =>
+        prev.filter((item) => item !== label),
+      );
+    }
   }
   // The [Protocol]/[Found]/[Next] chip lines are structured selections that ride
   // along in the notes only as the tech's deselect handle — they're already sent
@@ -8477,9 +9485,9 @@ export function CompletionPanel({
     const productsApplied = selectedProducts
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
       .join(", ");
-    const actionsCompleted = labelsStillInNotes(selectedProtocolActionLabels);
-    const observations = labelsStillInNotes(selectedObservationLabels);
-    const recommendations = labelsStillInNotes(selectedRecommendationLabels);
+    const actionsCompleted = activeSelectedLabels(selectedProtocolActionLabels);
+    const observations = activeSelectedLabels(selectedObservationLabels);
+    const recommendations = activeSelectedLabels(selectedRecommendationLabels);
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
     // when the interaction is still "customer had a concern"): if the tech typed
     // a concern then switched the interaction away, the concern input is hidden
@@ -8547,6 +9555,7 @@ export function CompletionPanel({
       customerConcern: concern,
       pestActivityRating: clientPestRating ?? null,
       photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
+      includeCustomerComms: aiReportIncludeComms,
     };
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
@@ -8607,23 +9616,85 @@ export function CompletionPanel({
       product.rateUnit ||
       product.rate_unit ||
       "oz";
+    const catalogRate =
+      product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "";
+    // Generic "insecticide" categories cover dry/bait/packet forms too (e.g.
+    // Advion WDG Granular, Delta Dust, Alpine WSG), whose inferred method
+    // still falls through to perimeter_spray — a 4 oz liquid default would be
+    // a wrong compliance record for those, so screen the name/category for
+    // dry-form and dry-formulation markers (WSG/WDG/WG/WP/DF).
+    const dryFormProduct =
+      /\b(granul\w*|dust|bait|gel|station|trap|briquet|tablet|blox|dunk|packet|wsg|wdg|wg|wp|df)\b/i.test(
+        `${product.name || ""} ${product.category || product.product_category || ""}`,
+      );
+    // General-pest perimeter sprays: when the catalog carries no rate, start
+    // at the house default of 4 oz (rate/total units move together with it so
+    // a catalog unit like "oz/1000sf" can't pair with the fallback value).
+    // Editable as before; catalog rates still win when present.
+    const usePestSprayDefault =
+      catalogRate === "" &&
+      !dryFormProduct &&
+      applicationMethod === "perimeter_spray" &&
+      serviceLineFromType(serviceTypeForArea) === "pest";
+    // Dilution products carry their verified label rate in the legacy display
+    // fields (default_rate "0.2-0.8" + default_unit "fl_oz/gal"). When there
+    // is no per-1k rate and the pest 4-oz house default doesn't apply, start
+    // the tech at the label band's LOW end in the label's own /gal unit —
+    // parseFloat reads the low bound out of an "X-Y" band.
+    const dilutionRate = defaultUnit.endsWith("/gal")
+      ? parseFloat(String(product.default_rate ?? product.defaultRate ?? ""))
+      : NaN;
+    // DB numerics arrive as strings with trailing zeros ("0.5000") — show the
+    // tech a clean number.
+    const prefillRate = usePestSprayDefault
+      ? 4
+      : catalogRate !== "" && Number.isFinite(Number(catalogRate))
+        ? Number(catalogRate)
+        : Number.isFinite(dilutionRate)
+          ? dilutionRate
+          : catalogRate;
+    // Lawn broadcast/granular products treat the whole measured lawn: start
+    // the Sq ft field at the turf profile's treatable area and derive Total =
+    // rate × area / 1,000 in the rate's own unit. Both stay editable; a
+    // hand-edited Total is never recomputed (see updateProduct).
+    const prefillArea =
+      areaRequirement?.unit === "sqft" && Number(lawnSqftForPrefill) > 0
+        ? Number(lawnSqftForPrefill)
+        : "";
+    // A "/gal" rate is a mix concentration — rate × sqft would fabricate an
+    // applied amount that really depends on carrier volume, so leave Total
+    // blank for the tech to enter.
+    const prefillTotal = defaultUnit.endsWith("/gal")
+      ? ""
+      : derivedTotalAmount(prefillRate, prefillArea);
     setSelectedProducts((prev) => [
       ...prev,
       {
         productId: product.id,
         name: product.name,
-        rate: product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "",
-        rateUnit: defaultUnit,
+        // Card display only — the submitted record keeps the canonical name.
+        displayName: product.display_name || product.displayName || null,
+        rate: prefillRate,
+        rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
+        // A "/gal" unit is a mix concentration — fine as the rate, but
+        // "Total used" records a real quantity (and inventory deduction
+        // can't convert a concentration), so default the amount unit to
+        // the base unit instead.
+        amountUnit: usePestSprayDefault
+          ? "oz"
+          : defaultUnit.endsWith("/gal")
+            ? defaultUnit.slice(0, -"/gal".length)
+            : defaultUnit,
         maxLabelRatePer1000:
           product.maxLabelRatePer1000 ??
           product.max_label_rate_per_1000 ??
           null,
-        totalAmount: "",
-        amountUnit: defaultUnit,
+        totalAmount: prefillTotal,
+        totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
-        areaValue: "",
+        areaValue: prefillArea,
         areaUnit: areaRequirement?.unit || "",
         // Prefill the targets from the manufacturer label (products_catalog
         // target_pests) so the tech starts from what the product is labeled to
@@ -8680,6 +9751,33 @@ export function CompletionPanel({
             serviceTypeForArea,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
+        }
+        // A hand-entered Total is the tech's actual and is never recomputed;
+        // otherwise rate/area edits keep the derived Total (rate × sq ft /
+        // 1,000) in sync on area-based applications — including back to blank
+        // when the rate/area is cleared or the method stops being area-based,
+        // so a stale full-lawn total can't be submitted. The derived total is
+        // in the rate's unit, so a rate-unit change moves the total unit too.
+        if (field === "totalAmount") {
+          next.totalAmountManual = true;
+        } else if (!next.totalAmountManual) {
+          if (next.areaUnit !== "sqft") {
+            if (field === "applicationMethod" && p.areaUnit === "sqft") {
+              next.totalAmount = "";
+            }
+          } else if (field === "rate" || field === "areaValue") {
+            next.totalAmount = String(next.rateUnit || "").endsWith("/gal")
+              ? ""
+              : derivedTotalAmount(next.rate, next.areaValue);
+          } else if (field === "rateUnit") {
+            // Concentration rate units keep Total in the base quantity unit,
+            // and can't derive a total at all (it depends on carrier volume).
+            const isConcentration = String(value).endsWith("/gal");
+            next.amountUnit = isConcentration
+              ? value.slice(0, -"/gal".length)
+              : value;
+            if (isConcentration) next.totalAmount = "";
+          }
         }
         return next;
       }),
@@ -8851,6 +9949,19 @@ export function CompletionPanel({
         alert(`Fix the activity score before submitting: ${scoreConflict}.`);
         return;
       }
+      // Mirror the server's field-value contradiction rejections (termite
+      // attestations) pre-submit — same rationale as the chip mirror.
+      const fieldConflicts = typedFieldValueConflicts(
+        typedFindingsSchema.type,
+        findingsValues,
+      );
+      if (fieldConflicts.length) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(
+          `Fix the findings before submitting: ${fieldConflicts.join("; ")}.`,
+        );
+        return;
+      }
     }
     // Companion sections mirror every primary typed pre-submit gate PER
     // COMPANION (server-side conditional checks without client mirrors are
@@ -8908,6 +10019,17 @@ export function CompletionPanel({
           completionTelemetryRef.current.requiredFieldErrorCount += 1;
           alert(
             `${label}: fix the activity score before submitting: ${companionScoreConflict}.`,
+          );
+          return;
+        }
+        const companionFieldConflicts = typedFieldValueConflicts(
+          schema.type,
+          entry.values,
+        );
+        if (companionFieldConflicts.length) {
+          completionTelemetryRef.current.requiredFieldErrorCount += 1;
+          alert(
+            `${label}: fix the findings before submitting: ${companionFieldConflicts.join("; ")}.`,
           );
           return;
         }
@@ -8985,7 +10107,7 @@ export function CompletionPanel({
           service.id,
         );
       }
-      const reportProtocolActions = labelsStillInNotes(
+      const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
       );
       const reportProtocolActionScopes = reportProtocolActions
@@ -8995,11 +10117,13 @@ export function CompletionPanel({
           return { label, scope: meta.scope, treatmentApplied: meta.treatmentApplied === true };
         })
         .filter(Boolean);
-      const reportObservations = labelsStillInNotes(selectedObservationLabels);
+      const reportObservations = activeSelectedLabels(
+        selectedObservationLabels,
+      );
       // Typed mode appends the optional recommendations textarea into the
       // existing recommendations array — no new server field.
       const reportRecommendations = [
-        ...labelsStillInNotes(selectedRecommendationLabels),
+        ...activeSelectedLabels(selectedRecommendationLabels),
         ...(isTypedFindings && typedRecommendations.trim()
           ? [typedRecommendations.trim()]
           : []),
@@ -9132,6 +10256,51 @@ export function CompletionPanel({
               .map((label) => ({ areaLabel: label, clear: true }));
             const shapes = [...writes, ...clears];
             return shapes.length ? { zoneShapes: shapes } : {};
+          })()
+          : {}),
+        // Bait station pins + this visit's statuses (station-map-v1).
+        // Statuses post for EVERY active station — 'ok' is the zero-tap
+        // default, so an untouched map still records a full check. Shapes
+        // post only for pins placed or moved THIS session (an untouched
+        // pin must not restamp its drift ref with today's image params);
+        // creates go last so server numbering (payload order) matches the
+        // provisional numbers the tech saw.
+        ...(stationFeatureOn
+          ? (() => {
+            const image = (propertyMap?.available && propertyMap.image) || zoneMapImageFallback;
+            const ref = image
+              ? {
+                lat: image.center?.lat,
+                lng: image.center?.lng,
+                zoom: image.zoom,
+                width: image.width || 640,
+                height: image.height || 340,
+                capturedAt: new Date().toISOString(),
+              }
+              : null;
+            const entries = [];
+            stationPreloads.forEach((station) => {
+              if (stationRetired.includes(station.id)) {
+                entries.push({ id: station.id, retire: true });
+                return;
+              }
+              const moved = stationMoves[station.id];
+              const status = stationStatuses[station.id] || "ok";
+              if (moved && ref) entries.push({ id: station.id, shape: { ...moved, ref }, status });
+              // A drift-hidden pin that was never re-placed submits NOTHING:
+              // a status would mint a check row for a station the visit's
+              // map cannot show (mirrors the auto-count exclusion above).
+              else if (station.shape) entries.push({ id: station.id, status });
+            });
+            if (ref) {
+              stationNew.forEach((station) => {
+                entries.push({
+                  shape: { ...station.shape, ref },
+                  status: stationStatuses[station.key] || "ok",
+                });
+              });
+            }
+            return entries.length ? { termiteStations: entries } : {};
           })()
           : {}),
         customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
@@ -9287,7 +10456,9 @@ export function CompletionPanel({
           "An invoice or payment is required before completing this one-time service." +
             (onBillingRequired ? " Opening checkout." : ""),
         );
-        if (onBillingRequired) onBillingRequired(service);
+        if (onBillingRequired) {
+          onBillingRequired(service, { servicePhotos });
+        }
       } else {
         alert("Failed to complete service: " + e.message);
       }
@@ -9296,7 +10467,9 @@ export function CompletionPanel({
   }
 
   const filteredProducts = (products || []).filter((p) =>
-    p.name.toLowerCase().includes(productSearch.toLowerCase()),
+    `${p.name} ${p.display_name || ""}`
+      .toLowerCase()
+      .includes(productSearch.toLowerCase()),
   );
   const selectedCalibration =
     equipmentCalibrations.find(
@@ -9331,8 +10504,17 @@ export function CompletionPanel({
           : "");
   function isProtocolActionSelected(action) {
     const noteText = action?.note || action?.label || action?.raw || "";
+    // After an AI draft the notes are clean prose (no tagged lines), so check
+    // the authoritative label array instead of the notes text.
+    const inSelection = chipLinesDetached
+      ? selectedProtocolActionLabels.some(
+          (label) =>
+            String(label).trim().toLowerCase() ===
+            noteText.trim().toLowerCase(),
+        )
+      : notes.includes(noteText);
     return (
-      (!!noteText && notes.includes(noteText)) ||
+      (!!noteText && inSelection) ||
       (action?.product?.id &&
         selectedProducts.some((p) => p.productId === action.product.id))
     );
@@ -9346,6 +10528,28 @@ export function CompletionPanel({
   const selectedProtocolActionCount = protocolActionSelectOptions.filter(
     (opt) => opt.selected,
   ).length;
+  // After an AI draft, the tagged chip lines no longer ride in the notes, so
+  // the still-selected structured items render as removable pills below the
+  // notes box — the ×-pill replaces delete-the-line as the deselect handle.
+  const detachedSelectionEntries = chipLinesDetached
+    ? [
+        ...activeSelectedLabels(selectedProtocolActionLabels).map((label) => ({
+          kind: "protocol",
+          prefix: "Protocol",
+          label,
+        })),
+        ...activeSelectedLabels(selectedObservationLabels).map((label) => ({
+          kind: "observation",
+          prefix: "Found",
+          label,
+        })),
+        ...activeSelectedLabels(selectedRecommendationLabels).map((label) => ({
+          kind: "recommendation",
+          prefix: "Next",
+          label,
+        })),
+      ]
+    : [];
   function handleProtocolActionSelect(value) {
     if (!value) return;
     // No note-mutating selections while an AI draft is in flight — the chip line
@@ -9578,7 +10782,7 @@ export function CompletionPanel({
       display: "block",
       fontFamily: font,
       fontSize: 11,
-      fontWeight: 600,
+      fontWeight: 500,
       color: M.ink4,
       textTransform: "uppercase",
       letterSpacing: "0.3px",
@@ -9621,7 +10825,7 @@ export function CompletionPanel({
       color: M.actionFg,
       fontFamily: font,
       fontSize: 14,
-      fontWeight: 600,
+      fontWeight: 500,
       textTransform: "uppercase",
       letterSpacing: "0.3px",
       cursor: "pointer",
@@ -9662,6 +10866,9 @@ export function CompletionPanel({
           }}
         />{" "}
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={`completion-panel-title-${service.id}`}
           style={{
             position: "fixed",
             inset: 0,
@@ -9738,7 +10945,7 @@ export function CompletionPanel({
                 style={{
                   fontFamily: font,
                   fontSize: 20,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: M.ink,
                 }}
               >
@@ -9895,10 +11102,11 @@ export function CompletionPanel({
             >
               {" "}
               <div
+                id={`completion-panel-title-${service.id}`}
                 style={{
                   fontFamily: font,
                   fontSize: 17,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: M.ink,
                   whiteSpace: "nowrap",
                   overflow: "hidden",
@@ -9921,7 +11129,7 @@ export function CompletionPanel({
                   color: M.ink,
                   fontFamily: font,
                   fontSize: 13,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   cursor: "pointer",
                 }}
               >
@@ -9957,7 +11165,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 14,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                   }}
                 >
@@ -9997,7 +11205,7 @@ export function CompletionPanel({
                     display: "block",
                     fontFamily: font,
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                     marginBottom: 4,
                     textDecoration: "underline",
@@ -10011,7 +11219,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 16,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                     marginBottom: 4,
                   }}
@@ -10063,7 +11271,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: mono,
                     fontSize: 28,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: M.ink,
                     fontVariantNumeric: "tabular-nums",
                     lineHeight: 1.15,
@@ -10488,6 +11696,57 @@ export function CompletionPanel({
                 )}
               </div>
             </Field>
+            {/* Post-AI-draft structured selections — the tagged lines no
+                longer ride in the report text, so the pills are the deselect
+                handle (tap × to remove an item before completing). */}
+            {detachedSelectionEntries.length > 0 && (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 6,
+                  marginTop: -8,
+                  marginBottom: 16,
+                }}
+              >
+                {detachedSelectionEntries.map(({ kind, prefix, label }) => (
+                  <span
+                    key={`${kind}:${label}`}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontFamily: font,
+                      fontSize: 12,
+                      color: M.ink2,
+                      background: M.muted,
+                      border: `1px solid ${M.hairline}`,
+                      borderRadius: 999,
+                      padding: "4px 6px 4px 10px",
+                    }}
+                  >
+                    <span style={{ color: M.ink3 }}>{prefix}:</span>
+                    {label}
+                    <button
+                      type="button"
+                      aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
+                      onClick={() => removeSelectedLabel(kind, label)}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: M.ink3,
+                        fontSize: 14,
+                        lineHeight: 1,
+                        padding: "2px 4px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             {!isTypedFindings && (
               <Field label="Protocol actions">
                 {protocolActionsLoading ? (
@@ -10581,6 +11840,27 @@ export function CompletionPanel({
                 from the structured visit data (actions, observations, products,
                 concern), for the tech to review/edit before completing. */}
             {!quickComplete && (
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 13,
+                  color: "#71717A",
+                  cursor: "pointer",
+                  marginBottom: 6,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={aiReportIncludeComms}
+                  onChange={(e) => setAiReportIncludeComms(e.target.checked)}
+                  style={{ width: 16, height: 16 }}
+                />
+                Include recent customer calls/texts/emails
+              </label>
+            )}
+            {!quickComplete && (
               <button
                 type="button"
                 onClick={async () => {
@@ -10597,8 +11877,7 @@ export function CompletionPanel({
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
-                    if (r.report)
-                      setNotes(stitchSelectedLabelsIntoReport(r.report));
+                    if (r.report) applyGeneratedReport(r.report);
                   } catch (e) {
                     alert("AI report failed: " + e.message);
                   }
@@ -10734,7 +12013,7 @@ export function CompletionPanel({
                     )}
                     {typedPhotoSummary !== "" && (
                       <div style={{ marginTop: 10 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: M.ink, marginBottom: 4 }}>
+                        <div style={{ fontSize: 14, fontWeight: 500, color: M.ink, marginBottom: 4 }}>
                           Photo summary (appears on the customer report)
                         </div>
                         <textarea
@@ -10759,6 +12038,21 @@ export function CompletionPanel({
                   </div>
                 )}
               </Field>
+            )}
+            {/* Bait station map — pins + per-visit statuses (station-map-v1) */}
+            {stationFeatureOn && (
+              <StationMarkingStep
+                map={propertyMap}
+                stations={stationDisplay}
+                statuses={stationStatuses}
+                onAddStation={addStationPin}
+                onMoveStation={moveStationPin}
+                onSetStatus={setStationStatus}
+                onRemoveStation={removeStationPin}
+                program={stationProgram || "termite"}
+                maxStations={Number(propertyMap?.stationCap) || 80}
+                disabled={generating || success}
+              />
             )}
             {/* Service findings — typed specialty completion */}
             {isTypedFindings && (
@@ -10831,7 +12125,7 @@ export function CompletionPanel({
                         }
                       >
                         {selected ? "" : ""}
-                        {p.name}
+                        {p.display_name || p.name}
                       </Chip>
                     );
                   })}
@@ -10873,7 +12167,7 @@ export function CompletionPanel({
                                 : `0.5px solid ${M.hairline}`,
                           }}
                         >
-                          {p.name}
+                          {p.display_name || p.name}
                         </div>
                       ))}
                     </div>
@@ -10908,13 +12202,16 @@ export function CompletionPanel({
                         style={{
                           fontFamily: font,
                           fontSize: 15,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           color: M.ink,
                           flex: 1,
                           minWidth: 120,
                         }}
                       >
-                        {sp.name}
+                        {sp.displayName || sp.name}
+                      </span>{" "}
+                      <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
+                        {sp.areaUnit === "sqft" ? "Rate /1k sq ft" : "Rate"}
                       </span>{" "}
                       <input
                         type="number"
@@ -10953,7 +12250,13 @@ export function CompletionPanel({
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
+                        <option value="oz/gal">oz/gal</option>{" "}
+                        <option value="fl_oz/gal">fl oz/gal</option>{" "}
+                        <option value="g/gal">g/gal</option>{" "}
                       </select>{" "}
+                      <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
+                        Total used
+                      </span>{" "}
                       <input
                         type="number"
                         placeholder="Total"
@@ -11047,6 +12350,7 @@ export function CompletionPanel({
                         <option value="broadcast_spray">Broadcast spray</option>
                         <option value="spot_treatment">Spot treatment</option>
                         <option value="granular_broadcast">Granular</option>
+                        <option value="soil_drench">Soil drench</option>
                         <option value="bait_placement">Bait</option>
                         <option value="station_check">Station check</option>
                         <option value="fog_ulv">Fog/ULV</option>
@@ -11101,28 +12405,34 @@ export function CompletionPanel({
                       >
                         ×
                       </button>{" "}
-                      <ProductTargetsPicker
-                        idSuffix={sp.productId}
-                        targets={sp.targets}
-                        suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
-                        noun={isLawn ? "" : "pest"}
-                        onChange={(next) =>
-                          updateProduct(sp.productId, "targets", next)
-                        }
-                        theme={{
-                          labelColor: M.ink3,
-                          chipBg: M.muted,
-                          chipText: M.ink,
-                          chipBorder: M.hairline,
-                          inputStyle: {
-                            ...mInput,
-                            height: 40,
-                            padding: "0 12px",
-                            fontSize: 14,
-                            width: "auto",
-                          },
-                        }}
-                      />
+                      {productControlsTargets(
+                        (products || []).find(
+                          (p) => String(p.id) === String(sp.productId),
+                        ),
+                      ) && (
+                        <ProductTargetsPicker
+                          idSuffix={sp.productId}
+                          targets={sp.targets}
+                          suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                          noun={isLawn ? "" : "pest"}
+                          onChange={(next) =>
+                            updateProduct(sp.productId, "targets", next)
+                          }
+                          theme={{
+                            labelColor: M.ink3,
+                            chipBg: M.muted,
+                            chipText: M.ink,
+                            chipBorder: M.hairline,
+                            inputStyle: {
+                              ...mInput,
+                              height: 40,
+                              padding: "0 12px",
+                              fontSize: 14,
+                              width: "auto",
+                            },
+                          }}
+                        />
+                      )}
                     </div>
                   ))}
                 </div>
@@ -11242,7 +12552,7 @@ export function CompletionPanel({
                           }`,
                           fontFamily: font,
                           fontSize: 16,
-                          fontWeight: 600,
+                          fontWeight: 500,
                           cursor: "pointer",
                         }}
                         aria-pressed={selected}
@@ -11268,6 +12578,22 @@ export function CompletionPanel({
             {/* Options */}
             <Field label="Options">
               {" "}
+              {payerBanner && (
+                <div
+                  style={{
+                    padding: "12px 16px",
+                    marginBottom: 8,
+                    background: "#FFF7ED",
+                    border: "1px solid #FDBA74",
+                    borderRadius: 12,
+                    fontFamily: font,
+                    fontSize: 14,
+                    color: "#9A3412",
+                  }}
+                >
+                  {payerBanner}
+                </div>
+              )}{" "}
               <label
                 style={{
                   display: "flex",
@@ -11325,7 +12651,7 @@ export function CompletionPanel({
                       : "Send completion SMS to customer"}
                 </span>{" "}
               </label>{" "}
-              {willInvoice && effectiveSendSms && !oneTimeRecapOnly && (
+              {willInvoice && effectiveSendSms && !oneTimeRecapOnly && !payerBanner && (
                 <label
                   style={{
                     display: "flex",
@@ -11445,7 +12771,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: font,
                     fontSize: 15,
-                    fontWeight: 600,
+                    fontWeight: 500,
                     color: M.ink,
                   }}
                 >
@@ -11563,6 +12889,9 @@ export function CompletionPanel({
         }}
       />{" "}
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`completion-panel-title-${service.id}`}
         style={{
           position: "fixed",
           top: 0,
@@ -11597,7 +12926,7 @@ export function CompletionPanel({
             <div style={{ fontSize: 64, marginBottom: 16, color: D.green }}>
               &#10003;
             </div>{" "}
-            <div style={{ fontSize: 20, fontWeight: 700, color: D.green }}>
+            <div style={{ fontSize: 20, fontWeight: 500, color: D.green }}>
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
@@ -11727,10 +13056,15 @@ export function CompletionPanel({
             }}
           >
             {" "}
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+            <div
+              id={`completion-panel-title-${service.id}`}
+              style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
+            >
               Complete Service
             </div>{" "}
             <button
+              type="button"
+              aria-label="Close complete service"
               onClick={() => onClose(false)}
               style={{
                 background: "none",
@@ -11747,12 +13081,12 @@ export function CompletionPanel({
           {(service.customerId || service.customer_id) ? (
             <a
               href={`/admin/customers?customerId=${encodeURIComponent(service.customerId || service.customer_id)}`}
-              style={{ display: "block", fontSize: 14, color: D.text, fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}
+              style={{ display: "block", fontSize: 14, color: D.text, fontWeight: 500, textDecoration: "underline", cursor: "pointer" }}
             >
               {service.customerName}
             </a>
           ) : (
-            <div style={{ fontSize: 14, color: D.text, fontWeight: 600 }}>
+            <div style={{ fontSize: 14, color: D.text, fontWeight: 500 }}>
               {service.customerName}
             </div>
           )}{" "}
@@ -11783,7 +13117,7 @@ export function CompletionPanel({
                 <div
                   style={{
                     fontSize: 10,
-                    fontWeight: 700,
+                    fontWeight: 500,
                     color: D.teal,
                     textTransform: "uppercase",
                     letterSpacing: 0.5,
@@ -11795,7 +13129,7 @@ export function CompletionPanel({
                   style={{
                     fontFamily: "'JetBrains Mono', monospace",
                     fontSize: 22,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     color: D.teal,
                     letterSpacing: 1,
                   }}
@@ -11815,7 +13149,7 @@ export function CompletionPanel({
               borderBottom: `1px solid ${D.green}44`,
               fontSize: 13,
               color: D.green,
-              fontWeight: 600,
+              fontWeight: 500,
               lineHeight: 1.5,
             }}
           >
@@ -11836,7 +13170,7 @@ export function CompletionPanel({
               }}
             >
               {" "}
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                 Restore saved draft?
               </div>{" "}
               <div style={{ fontSize: 12, color: D.muted, marginTop: 3 }}>
@@ -11958,7 +13292,7 @@ export function CompletionPanel({
                           lineHeight: 1.4,
                         }}
                       >
-                        <div style={{ fontWeight: 800, color: D.heading }}>
+                        <div style={{ fontWeight: 500, color: D.heading }}>
                           Approved substitute: {sub.substituteProductName}
                         </div>
                         <div style={{ color: D.muted, marginTop: 2 }}>
@@ -11979,7 +13313,7 @@ export function CompletionPanel({
                             background: selected ? D.green + "18" : D.card,
                             color: selected ? D.green : D.text,
                             fontSize: 12,
-                            fontWeight: 800,
+                            fontWeight: 500,
                             cursor: selected ? "default" : "pointer",
                             opacity: isIncompleteVisit || submitting ? 0.6 : 1,
                           }}
@@ -12357,6 +13691,55 @@ export function CompletionPanel({
               </button>
             )}
           </div>
+          {/* Post-AI-draft structured selections — the tagged lines no longer
+              ride in the report text, so the pills are the deselect handle
+              (click × to remove an item before completing). */}
+          {detachedSelectionEntries.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 6,
+                marginTop: 8,
+              }}
+            >
+              {detachedSelectionEntries.map(({ kind, prefix, label }) => (
+                <span
+                  key={`${kind}:${label}`}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    fontSize: 12,
+                    color: D.text,
+                    background: D.card,
+                    border: `1px solid ${D.border}`,
+                    borderRadius: 999,
+                    padding: "4px 6px 4px 10px",
+                  }}
+                >
+                  <span style={{ color: D.muted }}>{prefix}:</span>
+                  {label}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
+                    onClick={() => removeSelectedLabel(kind, label)}
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      color: D.muted,
+                      fontSize: 14,
+                      lineHeight: 1,
+                      padding: "2px 4px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
             {!isTypedFindings && (
@@ -12456,6 +13839,27 @@ export function CompletionPanel({
               notes box from the structured visit data, for the tech to
               review/edit before completing. */}
           {!quickComplete && (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 13,
+                color: "#71717A",
+                cursor: "pointer",
+                marginTop: 8,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={aiReportIncludeComms}
+                onChange={(e) => setAiReportIncludeComms(e.target.checked)}
+                style={{ width: 16, height: 16 }}
+              />
+              Include recent customer calls/texts/emails
+            </label>
+          )}
+          {!quickComplete && (
             <button
               type="button"
               onClick={async () => {
@@ -12472,8 +13876,7 @@ export function CompletionPanel({
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
-                  if (r.report)
-                    setNotes(stitchSelectedLabelsIntoReport(r.report));
+                  if (r.report) applyGeneratedReport(r.report);
                 } catch (e) {
                   alert("AI report failed: " + e.message);
                 }
@@ -12490,7 +13893,7 @@ export function CompletionPanel({
                   : "linear-gradient(135deg, #8b5cf6, #6366f1)",
                 color: D.heading,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: generating ? "wait" : "pointer",
                 marginTop: 8,
                 marginBottom: 20,
@@ -12580,7 +13983,7 @@ export function CompletionPanel({
                           alignItems: "center",
                           justifyContent: "center",
                           lineHeight: 1,
-                          fontWeight: 700,
+                          fontWeight: 500,
                         }}
                       >
                         &times;
@@ -12633,7 +14036,7 @@ export function CompletionPanel({
                   )}
                   {typedPhotoSummary !== "" && (
                     <div style={{ marginTop: 10 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: D.text, marginBottom: 4 }}>
+                      <div style={{ fontSize: 14, fontWeight: 500, color: D.text, marginBottom: 4 }}>
                         Photo summary (appears on the customer report)
                       </div>
                       <textarea
@@ -12658,6 +14061,22 @@ export function CompletionPanel({
                 </div>
               )}
             </div>
+          )}
+          {/* Bait station map — pins + per-visit statuses (station-map-v1) */}
+          {stationFeatureOn && (
+            <StationMarkingStep
+              map={propertyMap}
+              stations={stationDisplay}
+              statuses={stationStatuses}
+              onAddStation={addStationPin}
+              onMoveStation={moveStationPin}
+              onSetStatus={setStationStatus}
+              onRemoveStation={removeStationPin}
+              program={stationProgram || "termite"}
+              maxStations={Number(propertyMap?.stationCap) || 80}
+              dark
+              disabled={generating || success}
+            />
           )}
           {/* Service findings — typed specialty completion */}
           {isTypedFindings && (
@@ -12736,7 +14155,7 @@ export function CompletionPanel({
                       padding: "6px 12px",
                       borderRadius: 8,
                       fontSize: 12,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       cursor: "pointer",
                       background: isSelected ? D.teal + "22" : D.card,
                       color: isSelected ? D.teal : D.text,
@@ -12744,7 +14163,7 @@ export function CompletionPanel({
                     }}
                   >
                     {isSelected ? "\u2713 " : ""}
-                    {p.name}
+                    {p.display_name || p.name}
                   </button>
                 );
               })}
@@ -12783,7 +14202,7 @@ export function CompletionPanel({
                         borderBottom: `1px solid ${D.border}`,
                       }}
                     >
-                      {p.name}
+                      {p.display_name || p.name}
                     </div>
                   ))}
                 </div>
@@ -12818,13 +14237,16 @@ export function CompletionPanel({
                   <span
                     style={{
                       fontSize: 13,
-                      fontWeight: 600,
+                      fontWeight: 500,
                       color: D.text,
                       flex: 1,
                       minWidth: 120,
                     }}
                   >
-                    {sp.name}
+                    {sp.displayName || sp.name}
+                  </span>{" "}
+                  <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
+                    {sp.areaUnit === "sqft" ? "Rate /1k sq ft" : "Rate"}
                   </span>{" "}
                   <input
                     type="number"
@@ -12848,7 +14270,13 @@ export function CompletionPanel({
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
+                    <option value="oz/gal">oz/gal</option>{" "}
+                    <option value="fl_oz/gal">fl oz/gal</option>{" "}
+                    <option value="g/gal">g/gal</option>{" "}
                   </select>{" "}
+                  <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
+                    Total used
+                  </span>{" "}
                   <input
                     type="number"
                     placeholder="Total"
@@ -12921,6 +14349,7 @@ export function CompletionPanel({
                     <option value="broadcast_spray">Broadcast spray</option>
                     <option value="spot_treatment">Spot treatment</option>
                     <option value="granular_broadcast">Granular</option>
+                    <option value="soil_drench">Soil drench</option>
                     <option value="bait_placement">Bait</option>
                     <option value="station_check">Station check</option>
                     <option value="fog_ulv">Fog/ULV</option>
@@ -12964,26 +14393,32 @@ export function CompletionPanel({
                   >
                     &times;
                   </button>{" "}
-                  <ProductTargetsPicker
-                    idSuffix={sp.productId}
-                    targets={sp.targets}
-                    suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
-                    noun={isLawn ? "" : "pest"}
-                    onChange={(next) =>
-                      updateProduct(sp.productId, "targets", next)
-                    }
-                    theme={{
-                      labelColor: D.muted,
-                      chipBg: D.bg,
-                      chipText: D.text,
-                      chipBorder: D.border,
-                      inputStyle: {
-                        ...inputStyle,
-                        marginBottom: 0,
-                        width: "auto",
-                      },
-                    }}
-                  />
+                  {productControlsTargets(
+                    (products || []).find(
+                      (p) => String(p.id) === String(sp.productId),
+                    ),
+                  ) && (
+                    <ProductTargetsPicker
+                      idSuffix={sp.productId}
+                      targets={sp.targets}
+                      suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                      noun={isLawn ? "" : "pest"}
+                      onChange={(next) =>
+                        updateProduct(sp.productId, "targets", next)
+                      }
+                      theme={{
+                        labelColor: D.muted,
+                        chipBg: D.bg,
+                        chipText: D.text,
+                        chipBorder: D.border,
+                        inputStyle: {
+                          ...inputStyle,
+                          marginBottom: 0,
+                          width: "auto",
+                        },
+                      }}
+                    />
+                  )}
                 </div>
               ))}
             </div>
@@ -13004,7 +14439,7 @@ export function CompletionPanel({
                         padding: "6px 14px",
                         borderRadius: 20,
                         fontSize: 12,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         cursor: "pointer",
                         background: selected ? D.teal + "22" : D.card,
                         color: selected ? D.teal : D.muted,
@@ -13106,7 +14541,7 @@ export function CompletionPanel({
                         color: selected ? D.teal : D.text,
                         border: `1px solid ${selected ? D.teal : D.border}`,
                         fontSize: 14,
-                        fontWeight: 600,
+                        fontWeight: 500,
                         cursor: "pointer",
                         transition: "all 0.15s",
                       }}
@@ -13131,6 +14566,21 @@ export function CompletionPanel({
           )}
           {/* Options */}
           <label style={labelStyle}>Options</label>{" "}
+          {payerBanner && (
+            <div
+              style={{
+                padding: "10px 12px",
+                marginBottom: 8,
+                background: "#FFF7ED",
+                border: "1px solid #FDBA74",
+                borderRadius: 8,
+                fontSize: 13,
+                color: "#9A3412",
+              }}
+            >
+              {payerBanner}
+            </div>
+          )}{" "}
           <label
             style={{
               ...checkboxRow,
@@ -13163,7 +14613,7 @@ export function CompletionPanel({
                   : "Send completion SMS to customer"}
             </span>{" "}
           </label>{" "}
-          {willInvoice && effectiveSendSms && !oneTimeRecapOnly && (
+          {willInvoice && effectiveSendSms && !oneTimeRecapOnly && !payerBanner && (
             <label style={{ ...checkboxRow, marginLeft: 24 }}>
               {" "}
               <input
@@ -13240,7 +14690,7 @@ export function CompletionPanel({
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 700,
+                  fontWeight: 500,
                   color: D.muted,
                   textTransform: "uppercase",
                   letterSpacing: 0.5,
@@ -13249,7 +14699,7 @@ export function CompletionPanel({
               >
                 Next Scheduled Visit
               </div>{" "}
-              <div style={{ fontSize: 14, color: D.heading, fontWeight: 600 }}>
+              <div style={{ fontSize: 14, color: D.heading, fontWeight: 500 }}>
                 {nextVisit.date
                   ? new Date(nextVisit.date + "T00:00:00").toLocaleDateString(
                       "en-US",
@@ -13345,7 +14795,7 @@ export function CompletionPanel({
             ) : (
               <>
                 {" "}
-                <span style={{ fontSize: 15, fontWeight: 700 }}>
+                <span style={{ fontSize: 15, fontWeight: 500 }}>
                   {completionCtaLabel}
                 </span>{" "}
                 <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
@@ -13368,7 +14818,7 @@ export function CompletionPanel({
 const labelStyle = {
   display: "block",
   fontSize: 12,
-  fontWeight: 700,
+  fontWeight: 500,
   color: D.muted,
   textTransform: "uppercase",
   letterSpacing: 0.8,
@@ -13509,7 +14959,7 @@ function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, invent
   const rows = planRows.length ? planRows : staticRows;
   return (
     <div style={{ background: t.card, border: `1px solid ${t.border}`, borderRadius: 12, padding: 12 }}>
-      <div style={{ fontFamily: t.font, fontSize: 13, fontWeight: 700, color: t.ink }}>
+      <div style={{ fontFamily: t.font, fontSize: 13, fontWeight: 500, color: t.ink }}>
         {protocol.window.title}
       </div>
       {protocol.window.goal ? (
@@ -13519,7 +14969,7 @@ function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, invent
       ) : null}
       {rows.length ? (
         <div style={{ marginTop: 10 }}>
-          <div style={{ fontFamily: t.font, fontSize: 11, fontWeight: 700, color: t.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>
+          <div style={{ fontFamily: t.font, fontSize: 11, fontWeight: 500, color: t.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>
             Mix for a {PROTOCOL_TANK_GAL}-gal tank
           </div>
           <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 5 }}>
@@ -13595,7 +15045,7 @@ function ProductTargetsPicker({ targets, onChange, idSuffix, theme, suggestions 
         minWidth: 0,
       }}
     >
-      <span style={{ fontSize: 12, fontWeight: 600, color: theme.labelColor }}>
+      <span style={{ fontSize: 12, fontWeight: 500, color: theme.labelColor }}>
         Targets
       </span>
       {list.map((t) => (
@@ -13764,6 +15214,7 @@ const PRODUCT_DESCRIPTIONS = {
   "13-0-13": "ornamental fertilizer used only where N/P rules allow",
   "suffoil-x": "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   suffoil: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
+  tritek: "horticultural oil for scale, mites, and whitefly crawlers when plant/weather safe",
   merit: "imidacloprid systemic; counts as IRAC 4A/neonic pressure",
   zylam: "fast systemic rescue; counts as IRAC 4A/neonic pressure",
   kontos: "non-neonic systemic rotation for sucking pests and mites (IRAC 23)",

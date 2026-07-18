@@ -32,6 +32,7 @@ import {
   Select,
   cn,
 } from "../../components/ui";
+import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -316,7 +317,7 @@ export default function CallLogTabV2() {
   // processor never finished extracting (no terminal status) and nothing
   // was transcribed. Voicemail/spam/processed rows are intentionally skipped.
   const needsAutoProcess = (c) => {
-    if (!c?.twilio_call_sid || !c.recording_url) return false;
+    if (!c?.twilio_call_sid || !c.recording_available) return false;
     if (c.transcription && c.transcription.length > 0) return false;
     const status = c.processing_status;
     if (status === "processed" || status === "voicemail" || status === "spam")
@@ -547,7 +548,7 @@ export default function CallLogTabV2() {
   // captured — no duration, no recording, no transcript. Otherwise a real
   // conversation happened and it should show as "Discussion".
   const hadConversation = (c) =>
-    Number(c.duration_seconds) > 5 || !!c.recording_url || !!c.transcription;
+    Number(c.duration_seconds) > 5 || !!c.recording_available || !!c.transcription;
   const isVoicemailCall = (c) =>
     c.answered_by === "voicemail" || c.call_outcome === "voicemail";
   const isReallyMissed = (c) =>
@@ -559,7 +560,7 @@ export default function CallLogTabV2() {
   const missed = calls.filter(isReallyMissed).length;
   const voicemailCalls = calls.filter(isVoicemailCall);
   const voicemailWithoutTranscript = voicemailCalls.filter(
-    (c) => c.recording_url && !(c.transcription && c.transcription.length > 0),
+    (c) => c.recording_available && !(c.transcription && c.transcription.length > 0),
   ).length;
   const recentVoicemails = voicemailCalls.slice(0, 5);
 
@@ -717,7 +718,7 @@ export default function CallLogTabV2() {
                         </div>
                       )}
                     </div>
-                    {c.recording_url && (
+                    {c.recording_available && (
                       <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
                         <div className="text-11 text-ink-tertiary font-medium mb-1">
                           Recording
@@ -725,19 +726,17 @@ export default function CallLogTabV2() {
                             ? ` (${Math.floor(c.recording_duration_seconds / 60)}:${String(c.recording_duration_seconds % 60).padStart(2, "0")})`
                             : ""}
                         </div>
-                        <audio controls preload="none" className="w-full h-8">
-                          <source
-                            src={`${API_BASE}/admin/call-recordings/audio/${c.recording_sid || c.id}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
-                            type="audio/mpeg"
-                          />
-                        </audio>
+                        <AuthenticatedCallAudio
+                          recordingId={c.recording_sid || c.id}
+                          className="w-full h-8"
+                        />
                       </div>
                     )}
                     {transcriptPreview ? (
                       <div className="mt-2 text-13 text-ink-secondary italic leading-relaxed">
                         "{transcriptPreview}"
                       </div>
-                    ) : c.recording_url ? (
+                    ) : c.recording_available ? (
                       <div className="mt-2 flex items-center gap-2">
                         <span className="text-12 text-ink-tertiary">
                           {isProcessing ? "Transcribing…" : "No transcript yet"}
@@ -1167,7 +1166,7 @@ export default function CallLogTabV2() {
                             // restart, Gemini errored, row wedged in processing_status='processing').
                             // Process defers to the backend claim guard — actively-processing
                             // rows safely no-op, stale 'processing' rows (>10min) get reclaimed.
-                            if (c.recording_url && !hasTranscript) {
+                            if (c.recording_available && !hasTranscript) {
                               return (
                                 <button
                                   type="button"
@@ -1283,7 +1282,7 @@ export default function CallLogTabV2() {
                     )}
                     {/* Recording — proxy through the admin audio endpoint so
                         the browser gets past Twilio's Basic-auth gate. */}
-                    {c.recording_url && (
+                    {c.recording_available && (
                       <div className="mt-2 ml-8 p-2 bg-zinc-50 border-hairline rounded-md">
                         {" "}
                         <div className="text-13 md:text-11 text-ink-tertiary font-medium mb-1">
@@ -1292,13 +1291,10 @@ export default function CallLogTabV2() {
                             ? ` (${Math.floor(c.recording_duration_seconds / 60)}:${String(c.recording_duration_seconds % 60).padStart(2, "0")})`
                             : ""}
                         </div>{" "}
-                        <audio controls preload="none" className="w-full h-8">
-                          {" "}
-                          <source
-                            src={`${API_BASE}/admin/call-recordings/audio/${c.recording_sid || c.id}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
-                            type="audio/mpeg"
-                          />{" "}
-                        </audio>{" "}
+                        <AuthenticatedCallAudio
+                          recordingId={c.recording_sid || c.id}
+                          className="w-full h-8"
+                        />{" "}
                       </div>
                     )}
                     {/* Transcription — collapsible. Transcripts are noisy,

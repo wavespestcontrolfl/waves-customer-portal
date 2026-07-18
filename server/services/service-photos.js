@@ -8,8 +8,10 @@ const {
   hashPhotoChainPayload,
   latestPhotoHash,
 } = require('./service-report/photo-chain');
+const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
 
 const SERVICE_PHOTO_PREFIX = 'service-photos/';
+const STAGED_SERVICE_PHOTO_PREFIX = 'service-photo-staging/';
 const MAX_SERVICE_PHOTO_BYTES = 15 * 1024 * 1024;
 const MAX_COMPLETION_PHOTO_DATA_URL_BYTES = 2 * 1024 * 1024;
 const VALID_PHOTO_TYPES = new Set(['before', 'after', 'issue', 'progress']);
@@ -25,6 +27,22 @@ function nullIfEmpty(value) {
   if (value == null) return null;
   const text = String(value).trim();
   return text ? text : null;
+}
+
+function sanitizeCustomerFacingPhotoCaption(value) {
+  const caption = nullIfEmpty(value)?.slice(0, 200) || null;
+  const violations = [...new Set(findBannedCustomerCopy(caption))];
+  if (violations.length) {
+    const err = new Error(
+      `Photo caption contains wording we can't put on a customer report (${violations.join(', ')}).`
+    );
+    err.statusCode = 422;
+    err.code = 'photo_caption_banned_copy';
+    err.isOperational = true;
+    err.violations = violations;
+    throw err;
+  }
+  return caption;
 }
 
 function numberOrNull(value) {
@@ -251,6 +269,166 @@ async function uploadServicePhotoBuffer({
   return row;
 }
 
+async function uploadStagedServicePhotoBuffer({
+  scheduledServiceId,
+  technicianId,
+  buffer,
+  originalName,
+  mimeType,
+  photoType = 'progress',
+  sortOrder = 0,
+  caption,
+  gpsLat,
+  gpsLng,
+  capturedAt,
+  knex = db,
+}) {
+  if (!scheduledServiceId || !technicianId) {
+    const err = new Error('scheduledServiceId and technicianId are required');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!Buffer.isBuffer(buffer) || !buffer.length) {
+    const err = new Error('Photo buffer is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (buffer.length > MAX_SERVICE_PHOTO_BYTES) {
+    const err = new Error('Photo exceeds 15MB limit');
+    err.statusCode = 413;
+    throw err;
+  }
+  if (!VALID_PHOTO_TYPES.has(photoType)) {
+    const err = new Error(`Invalid photoType - must be one of: ${[...VALID_PHOTO_TYPES].join(', ')}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!config.s3?.bucket) {
+    const err = new Error('S3 not configured');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const imageHash = hashBuffer(buffer);
+  const existing = await knex('scheduled_service_photo_staging')
+    .where({ scheduled_service_id: scheduledServiceId, image_sha256: imageHash })
+    .first();
+  if (existing) return existing;
+
+  const filename = safePhotoName(originalName);
+  const key = `${STAGED_SERVICE_PHOTO_PREFIX}${scheduledServiceId}/${Date.now()}-${crypto.randomBytes(4).toString('hex')}-${filename}`;
+  await s3.send(new PutObjectCommand({
+    Bucket: config.s3.bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: mimeType || 'image/jpeg',
+  }));
+
+  try {
+    const [row] = await knex('scheduled_service_photo_staging').insert({
+      scheduled_service_id: scheduledServiceId,
+      technician_id: technicianId,
+      photo_type: photoType,
+      s3_key: key,
+      caption: nullIfEmpty(caption),
+      sort_order: parseInt(sortOrder, 10) || 0,
+      gps_lat: numberOrNull(gpsLat),
+      gps_lng: numberOrNull(gpsLng),
+      captured_at: dateOrNow(capturedAt),
+      image_sha256: imageHash,
+    }).returning('*');
+    return row;
+  } catch (err) {
+    await deleteUploadedObject(key);
+    if (err?.code === '23505') {
+      return knex('scheduled_service_photo_staging')
+        .where({ scheduled_service_id: scheduledServiceId, image_sha256: imageHash })
+        .first();
+    }
+    throw err;
+  }
+}
+
+async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId, knex = db }) {
+  if (!scheduledServiceId || !serviceRecordId) return [];
+  return withPhotoDbTransaction(knex, async (trx) => {
+    const staged = await trx('scheduled_service_photo_staging')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .orderBy('captured_at', 'asc')
+      .orderBy('sort_order', 'asc')
+      .orderBy('id', 'asc')
+      .forUpdate();
+    if (!staged.length) return [];
+
+    const cols = await trx('service_photos').columnInfo();
+    const returning = [
+      'id', 'service_record_id', 'photo_type', 's3_key', 'storage_key',
+      'caption', 'sort_order', 'gps_lat', 'gps_lng', 'captured_at',
+      'image_sha256', 'hash_sha256', 'prev_hash_sha256', 'created_at',
+    ].filter((column) => column === 'id' || cols[column]);
+    let prevHash = cols.hash_sha256 && cols.prev_hash_sha256
+      ? await latestPhotoHash(trx, serviceRecordId)
+      : null;
+    const appendingToExistingChain = !!prevHash;
+    const promotedAt = Date.now();
+    const promoted = [];
+
+    for (let index = 0; index < staged.length; index += 1) {
+      const photo = staged[index];
+      const insert = {
+        service_record_id: serviceRecordId,
+        photo_type: photo.photo_type,
+        s3_key: photo.s3_key,
+        caption: sanitizeCustomerFacingPhotoCaption(photo.caption),
+        sort_order: photo.sort_order || 0,
+      };
+      if (cols.storage_key) insert.storage_key = photo.s3_key;
+      if (cols.gps_lat) insert.gps_lat = photo.gps_lat;
+      if (cols.gps_lng) insert.gps_lng = photo.gps_lng;
+      if (cols.captured_at) {
+        // A completion/upload race can promote a true before photo after the
+        // completion photos have already formed a chain. Keep late recovery
+        // append-only so chronological validation uses the same order as the
+        // hashes.
+        insert.captured_at = appendingToExistingChain
+          ? new Date(promotedAt + index)
+          : photo.captured_at;
+      }
+      if (cols.image_sha256) insert.image_sha256 = photo.image_sha256;
+      if (cols.prev_hash_sha256) insert.prev_hash_sha256 = prevHash;
+
+      const [row] = await trx('service_photos').insert(insert).returning(returning);
+      if (cols.hash_sha256 && cols.prev_hash_sha256) {
+        const hash = hashPhotoChainPayload(row, prevHash);
+        await trx('service_photos').where({ id: row.id }).update({ hash_sha256: hash });
+        row.hash_sha256 = hash;
+        prevHash = hash;
+      }
+      promoted.push(row);
+    }
+
+    await trx('scheduled_service_photo_staging')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .del();
+    return promoted;
+  });
+}
+
+async function promoteStagedPhotosForCompletedVisit({ scheduledServiceId, knex = db }) {
+  if (!scheduledServiceId) return null;
+  const serviceRecord = await knex('service_records')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'desc')
+    .first('id');
+  if (!serviceRecord) return null;
+  const photos = await promoteStagedServicePhotos({
+    scheduledServiceId,
+    serviceRecordId: serviceRecord.id,
+    knex,
+  });
+  return { serviceRecordId: serviceRecord.id, photos };
+}
+
 async function uploadServicePhotoDataUrls({
   serviceRecordId,
   photos = [],
@@ -306,11 +484,16 @@ module.exports = {
   MAX_SERVICE_PHOTO_BYTES,
   MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
   SERVICE_PHOTO_PREFIX,
+  STAGED_SERVICE_PHOTO_PREFIX,
   VALID_PHOTO_TYPES,
   cleanupUploadedServicePhotoObjects,
   decodeDataUrlPhoto,
+  sanitizeCustomerFacingPhotoCaption,
   safePhotoName,
   uniqueServicePhotoCount,
   uploadServicePhotoBuffer,
   uploadServicePhotoDataUrls,
+  uploadStagedServicePhotoBuffer,
+  promoteStagedServicePhotos,
+  promoteStagedPhotosForCompletedVisit,
 };

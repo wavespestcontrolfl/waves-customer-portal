@@ -93,7 +93,12 @@ class PushNotificationService {
   }
 
   async sendToAdmins(notification) {
-    const subs = await db('push_subscriptions').whereIn('role', ['admin', 'technician']).where({ active: true });
+    const subs = await db('push_subscriptions as ps')
+      .join('technicians as t', 'ps.admin_user_id', 't.id')
+      .where({ 'ps.active': true, 't.active': true })
+      .whereRaw('ps.staff_token_version = t.auth_token_version')
+      .whereIn('t.role', ['admin', 'technician'])
+      .select('ps.*');
     const results = [];
     for (const sub of subs) {
       results.push(await sendSubscription(sub, notification));
@@ -104,9 +109,13 @@ class PushNotificationService {
   async sendToAdminUsers(adminUserIds, notificationForUser) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
-    const subs = await db('push_subscriptions')
-      .whereIn('admin_user_id', ids)
-      .where({ active: true });
+    const subs = await db('push_subscriptions as ps')
+      .join('technicians as t', 'ps.admin_user_id', 't.id')
+      .whereIn('ps.admin_user_id', ids)
+      .where({ 'ps.active': true, 't.active': true })
+      .whereRaw('ps.staff_token_version = t.auth_token_version')
+      .whereIn('t.role', ['admin', 'technician'])
+      .select('ps.*');
     const results = [];
     for (const sub of subs) {
       const notification = typeof notificationForUser === 'function'
@@ -119,6 +128,13 @@ class PushNotificationService {
 
   async sendToAdminUser(adminUserId, notification) {
     return this.sendToAdminUsers([adminUserId], notification);
+  }
+
+  async deactivateStaffUser(adminUserId, connection = db) {
+    if (!adminUserId) return 0;
+    return connection('push_subscriptions')
+      .where({ admin_user_id: adminUserId, active: true })
+      .update({ active: false });
   }
 }
 

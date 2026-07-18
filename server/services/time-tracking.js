@@ -1,135 +1,276 @@
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const {
+  STAFF_WORK_DATE_SQL,
+  staffWeekRange,
+  staffWeekStartForWorkDate,
+  staffWorkDate,
+  staffWorkDateSql,
+  validateWorkDate,
+} = require('../utils/staff-time-work-date');
+const {
+  ACTIVE_WRITE_GENERATION,
+  WEEKLY_OT_THRESHOLD_MINUTES,
+} = require('../constants/staff-time');
 
-const WEEKLY_OT_THRESHOLD = 2400; // 40 hours in minutes
+const UNDO_STOP_WINDOW_MINUTES = 30;
+const PAYROLL_SCALE = 100n;
+
+// PostgreSQL NUMERIC(..., 2) and ROUND(numeric, 2) round exact decimal values
+// half away from zero. JavaScript's binary floating-point Math.round can land
+// one cent lower at boundaries such as 64.725. Keep payroll arithmetic in
+// integer hundredths so writers and the rollout audit share one definition.
+function payrollUnits(value) {
+  if (value == null || value === '') return 0n;
+  const match = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(String(value).trim());
+  if (!match) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? BigInt(Math.round(numeric * 100)) : 0n;
+  }
+
+  const negative = match[1] === '-';
+  const fraction = match[3] || '';
+  let units = BigInt(match[2]) * PAYROLL_SCALE
+    + BigInt((fraction.slice(0, 2) || '').padEnd(2, '0'));
+  if (fraction.length > 2 && fraction[2] >= '5') units += 1n;
+  return negative ? -units : units;
+}
+
+function payrollNumber(units) {
+  return Number(units) / Number(PAYROLL_SCALE);
+}
+
+function roundPayroll(value) {
+  return payrollNumber(payrollUnits(value));
+}
+
+function roundedPayrollRatio(numeratorUnits, denominatorUnits, hundredthsFactor) {
+  if (denominatorUnits === 0n) return 0;
+  const scaled = numeratorUnits * hundredthsFactor;
+  const negative = (scaled < 0n) !== (denominatorUnits < 0n);
+  const absoluteScaled = scaled < 0n ? -scaled : scaled;
+  const absoluteDenominator = denominatorUnits < 0n ? -denominatorUnits : denominatorUnits;
+  let quotient = absoluteScaled / absoluteDenominator;
+  const remainder = absoluteScaled % absoluteDenominator;
+  if (remainder * 2n >= absoluteDenominator) quotient += 1n;
+  return payrollNumber(negative ? -quotient : quotient);
+}
+
+// Payroll durations are stored at hundredths of a minute. A real positive
+// interval shorter than half that resolution would normally round to 0.00,
+// which the approval and rollout audit correctly reject. Preserve the fact
+// that time elapsed by quantizing every positive interval to at least 0.01.
+function roundCompletedDuration(clockIn, clockOut) {
+  const elapsedMinutes = (new Date(clockOut) - new Date(clockIn)) / 60000;
+  if (!Number.isFinite(elapsedMinutes) || elapsedMinutes <= 0) {
+    throw staffTimeHttpError(409, 'Timer timestamps are invalid; reload and retry the stop.');
+  }
+  return Math.max(0.01, roundPayroll(elapsedMinutes));
+}
+
+function completedDurationSql(trx, clockOut) {
+  return trx.raw(
+    'GREATEST(0.01::numeric, ROUND((EXTRACT(EPOCH FROM (? - clock_in)) / 60)::numeric, 2))',
+    [clockOut],
+  );
+}
 
 /**
  * Clock in a technician for a new shift.
  */
 async function clockIn(technicianId, { lat, lng, notes, source } = {}) {
-  // Check for existing active shift
-  const existing = await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
-    .first();
+  // There is no active-shift row to lock on the first clock-in. Serialize the
+  // check-and-insert on the stable technician row until the deferred partial
+  // unique active-timer index can be installed after rollout.
+  const entry = await db.transaction(async (trx) => {
+    const technician = await trx('technicians')
+      .where({ id: technicianId, active: true })
+      .forUpdate()
+      .first('id');
+    if (!technician) {
+      const error = staffTimeHttpError(
+        409,
+        'Staff account is inactive; clock-in was cancelled.',
+      );
+      error.code = 'ACCOUNT_INACTIVE';
+      throw error;
+    }
 
-  if (existing) {
-    throw new Error('Already clocked in. Clock out before starting a new shift.');
-  }
+    const existing = await trx('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
+      .first();
+    if (existing) {
+      throw new Error('Already clocked in. Clock out before starting a new shift.');
+    }
 
-  const [entry] = await db('time_entries')
-    .insert({
-      technician_id: technicianId,
-      entry_type: 'shift',
-      status: 'active',
-      clock_in: new Date(),
-      clock_in_lat: lat || null,
-      clock_in_lng: lng || null,
-      notes: notes || null,
-      source: source || 'app',
-    })
-    .returning('*');
+    const now = new Date();
+    const [created] = await trx('time_entries')
+      .insert({
+        technician_id: technicianId,
+        entry_type: 'shift',
+        status: 'active',
+        clock_in: now,
+        clock_in_lat: lat || null,
+        clock_in_lng: lng || null,
+        notes: notes || null,
+        source: source || 'app',
+        staff_write_generation: ACTIVE_WRITE_GENERATION,
+      })
+      .returning('*');
+    return created;
+  });
 
   logger.info(`[time-tracking] Tech ${technicianId} clocked in`, { entryId: entry.id });
   return entry;
+}
+
+async function lockActiveShift(trx, technicianId, shiftId) {
+  let query = trx('time_entries')
+    .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' });
+  if (shiftId) query = query.where({ id: shiftId });
+  return query.forUpdate().first();
+}
+
+function appendEntryNote(existing, note) {
+  if (!note) return existing;
+  return `${existing ? `${existing}; ` : ''}${note}`;
+}
+
+/**
+ * Close a shift and every active child while holding the shift row lock.
+ * startJob/startBreak/reopenStoppedEntry take the same lock before creating an
+ * active child, so no child can commit after this transaction closes them.
+ */
+async function closeActiveShiftAtomically(technicianId, options = {}) {
+  return db.transaction(async (trx) => {
+    const activeShift = await lockActiveShift(trx, technicianId, options.shiftId);
+    if (!activeShift) {
+      if (options.missingError) throw new Error(options.missingError);
+      return null;
+    }
+
+    // Capture the close time only after acquiring the lock. A child-start
+    // transaction may have held it; using a pre-lock timestamp could produce
+    // a negative duration for the child that just committed.
+    const now = options.now || new Date();
+    const childUpdates = {
+      status: 'completed',
+      clock_out: now,
+      duration_minutes: completedDurationSql(trx, now),
+      updated_at: now,
+    };
+    if (options.childNoteSuffix) {
+      childUpdates.notes = trx.raw("COALESCE(notes, '') || ?", [options.childNoteSuffix]);
+    }
+
+    await trx('time_entries')
+      .where({ technician_id: technicianId, status: 'active' })
+      .whereIn('entry_type', ['job', 'break', 'drive', 'admin_time'])
+      .update(childUpdates);
+
+    const duration = roundCompletedDuration(activeShift.clock_in, now);
+    const shiftUpdates = {
+      status: 'completed',
+      clock_out: now,
+      duration_minutes: duration,
+      notes: appendEntryNote(activeShift.notes, options.shiftNote),
+      updated_at: now,
+    };
+    if (options.includeLocation) {
+      shiftUpdates.clock_out_lat = options.lat || null;
+      shiftUpdates.clock_out_lng = options.lng || null;
+    }
+
+    const [entry] = await trx('time_entries')
+      .where({ id: activeShift.id, status: 'active' })
+      .update(shiftUpdates)
+      .returning('*');
+
+    return {
+      entry,
+      activeShift,
+      duration,
+      workDate: staffWorkDate(activeShift.clock_in),
+    };
+  });
 }
 
 /**
  * Clock out a technician, closing any open sub-entries first.
  */
 async function clockOut(technicianId, { lat, lng, notes } = {}) {
-  const activeShift = await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
-    .first();
-
-  if (!activeShift) {
-    throw new Error('Not currently clocked in.');
-  }
-
-  const now = new Date();
-
-  // Close any open job entries
-  await db('time_entries')
-    .where({ technician_id: technicianId, status: 'active' })
-    .whereIn('entry_type', ['job', 'break', 'drive', 'admin_time'])
-    .update({
-      status: 'completed',
-      clock_out: now,
-      duration_minutes: db.raw("EXTRACT(EPOCH FROM (? - clock_in)) / 60", [now]),
-      updated_at: now,
-    });
-
-  // Close the shift
-  const duration = (now - new Date(activeShift.clock_in)) / 60000;
-  const [entry] = await db('time_entries')
-    .where({ id: activeShift.id })
-    .update({
-      status: 'completed',
-      clock_out: now,
-      clock_out_lat: lat || null,
-      clock_out_lng: lng || null,
-      duration_minutes: Math.round(duration * 100) / 100,
-      notes: notes ? `${activeShift.notes ? activeShift.notes + '; ' : ''}${notes}` : activeShift.notes,
-      updated_at: now,
-    })
-    .returning('*');
+  const closed = await closeActiveShiftAtomically(technicianId, {
+    includeLocation: true,
+    lat,
+    lng,
+    shiftNote: notes,
+    missingError: 'Not currently clocked in.',
+  });
 
   // Compute daily summary
-  const workDate = new Date(activeShift.clock_in).toISOString().split('T')[0];
-  await computeDailySummary(technicianId, workDate);
+  await computeDailySummary(technicianId, closed.workDate);
 
-  logger.info(`[time-tracking] Tech ${technicianId} clocked out`, { entryId: entry.id, duration: entry.duration_minutes });
-  return entry;
+  logger.info(`[time-tracking] Tech ${technicianId} clocked out`, {
+    entryId: closed.entry.id,
+    duration: closed.entry.duration_minutes,
+  });
+  return closed.entry;
 }
 
 /**
  * Start a job entry (tech must be clocked in).
  */
 async function startJob(technicianId, jobId, { lat, lng } = {}) {
-  const activeShift = await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
-    .first();
+  // Keep replacement atomic across writer-generation cutovers. If this app
+  // generation is stale, its insert is rejected by the active-write CHECK;
+  // the transaction then rolls back the preceding close instead of leaving
+  // the technician without an active job timer.
+  const entry = await db.transaction(async (trx) => {
+    const activeShift = await lockActiveShift(trx, technicianId);
 
-  if (!activeShift) {
-    throw new Error('Must be clocked in to start a job.');
-  }
-
-  // Close any other active job entry
-  const now = new Date();
-  await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'job', status: 'active' })
-    .update({
-      status: 'completed',
-      clock_out: now,
-      duration_minutes: db.raw("EXTRACT(EPOCH FROM (? - clock_in)) / 60", [now]),
-      updated_at: now,
-    });
-
-  // Lookup job details
-  let customerId = null;
-  let serviceType = null;
-  if (jobId) {
-    const job = await db('scheduled_services').where({ id: jobId }).first();
-    if (job) {
-      customerId = job.customer_id;
-      serviceType = job.service_type;
+    if (!activeShift) {
+      throw new Error('Must be clocked in to start a job.');
     }
-  }
 
-  const [entry] = await db('time_entries')
-    .insert({
-      technician_id: technicianId,
-      entry_type: 'job',
-      status: 'active',
-      clock_in: now,
-      clock_in_lat: lat || null,
-      clock_in_lng: lng || null,
-      job_id: jobId || null,
-      customer_id: customerId,
-      service_type: serviceType,
-      source: 'app',
-    })
-    .returning('*');
+    // Close any other active job entry.
+    const now = new Date();
+    await trx('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'job', status: 'active' })
+      .update({
+        status: 'completed',
+        clock_out: now,
+        duration_minutes: completedDurationSql(trx, now),
+        updated_at: now,
+      });
+
+    // Lookup job details.
+    let customerId = null;
+    let serviceType = null;
+    if (jobId) {
+      const job = await trx('scheduled_services').where({ id: jobId }).first();
+      if (job) {
+        customerId = job.customer_id;
+        serviceType = job.service_type;
+      }
+    }
+
+    const [created] = await trx('time_entries')
+      .insert({
+        technician_id: technicianId,
+        entry_type: 'job',
+        status: 'active',
+        clock_in: now,
+        clock_in_lat: lat || null,
+        clock_in_lng: lng || null,
+        job_id: jobId || null,
+        customer_id: customerId,
+        service_type: serviceType,
+        source: 'app',
+        staff_write_generation: ACTIVE_WRITE_GENERATION,
+      })
+      .returning('*');
+    return created;
+  });
 
   logger.info(`[time-tracking] Tech ${technicianId} started job`, { entryId: entry.id, jobId });
   if (jobId) {
@@ -150,28 +291,7 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
  * End the active job entry.
  */
 async function endJob(technicianId, { lat, lng } = {}) {
-  const activeJob = await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'job', status: 'active' })
-    .first();
-
-  if (!activeJob) {
-    throw new Error('No active job to end.');
-  }
-
-  const now = new Date();
-  const duration = (now - new Date(activeJob.clock_in)) / 60000;
-
-  const [entry] = await db('time_entries')
-    .where({ id: activeJob.id })
-    .update({
-      status: 'completed',
-      clock_out: now,
-      clock_out_lat: lat || null,
-      clock_out_lng: lng || null,
-      duration_minutes: Math.round(duration * 100) / 100,
-      updated_at: now,
-    })
-    .returning('*');
+  const entry = await endActiveChild(technicianId, 'job', { lat, lng });
 
   logger.info(`[time-tracking] Tech ${technicianId} ended job`, { entryId: entry.id, duration: entry.duration_minutes });
   return entry;
@@ -181,23 +301,29 @@ async function endJob(technicianId, { lat, lng } = {}) {
  * Start a break.
  */
 async function startBreak(technicianId) {
-  const activeShift = await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
-    .first();
+  const entry = await db.transaction(async (trx) => {
+    const activeShift = await lockActiveShift(trx, technicianId);
+    if (!activeShift) {
+      throw new Error('Must be clocked in to start a break.');
+    }
 
-  if (!activeShift) {
-    throw new Error('Must be clocked in to start a break.');
-  }
+    const existingBreak = await trx('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'break', status: 'active' })
+      .first('id');
+    if (existingBreak) throw new Error('Already on break. End the current break first.');
 
-  const [entry] = await db('time_entries')
-    .insert({
-      technician_id: technicianId,
-      entry_type: 'break',
-      status: 'active',
-      clock_in: new Date(),
-      source: 'app',
-    })
-    .returning('*');
+    const [created] = await trx('time_entries')
+      .insert({
+        technician_id: technicianId,
+        entry_type: 'break',
+        status: 'active',
+        clock_in: new Date(),
+        source: 'app',
+        staff_write_generation: ACTIVE_WRITE_GENERATION,
+      })
+      .returning('*');
+    return created;
+  });
 
   logger.info(`[time-tracking] Tech ${technicianId} started break`, { entryId: entry.id });
   return entry;
@@ -207,29 +333,153 @@ async function startBreak(technicianId) {
  * End the active break.
  */
 async function endBreak(technicianId) {
-  const activeBreak = await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'break', status: 'active' })
-    .first();
-
-  if (!activeBreak) {
-    throw new Error('No active break to end.');
-  }
-
-  const now = new Date();
-  const duration = (now - new Date(activeBreak.clock_in)) / 60000;
-
-  const [entry] = await db('time_entries')
-    .where({ id: activeBreak.id })
-    .update({
-      status: 'completed',
-      clock_out: now,
-      duration_minutes: Math.round(duration * 100) / 100,
-      updated_at: now,
-    })
-    .returning('*');
+  const entry = await endActiveChild(technicianId, 'break');
 
   logger.info(`[time-tracking] Tech ${technicianId} ended break`, { entryId: entry.id, duration: entry.duration_minutes });
   return entry;
+}
+
+async function endActiveChild(technicianId, entryType, { lat, lng } = {}) {
+  const label = entryType === 'job' ? 'job' : 'break';
+  return db.transaction(async (trx) => {
+    const activeShift = await lockActiveShift(trx, technicianId);
+    if (!activeShift) throw staffTimeHttpError(409, `No active ${label} to end.`);
+
+    const child = await trx('time_entries')
+      .where({ technician_id: technicianId, entry_type: entryType, status: 'active' })
+      .forUpdate()
+      .first();
+    if (!child) throw staffTimeHttpError(409, `No active ${label} to end.`);
+
+    const now = new Date();
+    const duration = roundCompletedDuration(child.clock_in, now);
+    const updates = {
+      status: 'completed',
+      clock_out: now,
+      duration_minutes: duration,
+      updated_at: now,
+    };
+    if (entryType === 'job') {
+      updates.clock_out_lat = lat || null;
+      updates.clock_out_lng = lng || null;
+    }
+
+    const [ended] = await trx('time_entries')
+      .where({ id: child.id, status: 'active' })
+      .update(updates)
+      .returning('*');
+    if (!ended) throw staffTimeHttpError(409, `${label} timer was already closed.`);
+    return ended;
+  });
+}
+
+function staffTimeHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.isOperational = true;
+  return error;
+}
+
+function isCompletedEntryIntervalValid(entry) {
+  const clockInMs = new Date(entry?.clock_in).getTime();
+  const clockOutMs = new Date(entry?.clock_out).getTime();
+  const durationMinutes = Number(entry?.duration_minutes);
+  if (
+    !Number.isFinite(clockInMs)
+    || !Number.isFinite(clockOutMs)
+    || !Number.isFinite(durationMinutes)
+    || clockOutMs <= clockInMs
+    || durationMinutes <= 0
+  ) return false;
+  const expectedMinutes = (clockOutMs - clockInMs) / 60000;
+  return Math.abs(durationMinutes - expectedMinutes) <= 0.02;
+}
+
+/**
+ * Reopen a child timer stopped by the geofence workflow. The active-shift
+ * lock serializes this with every child start and every shift close.
+ */
+async function reopenStoppedEntryInTransaction(trx, technicianId, entryId) {
+  const activeShift = await lockActiveShift(trx, technicianId);
+  if (!activeShift) {
+    throw staffTimeHttpError(409, 'Must be clocked in to restore a stopped timer.');
+  }
+
+  const stopped = await trx('time_entries')
+    .where({ id: entryId, technician_id: technicianId })
+    .forUpdate()
+    .first();
+  if (!stopped) throw staffTimeHttpError(404, 'Stopped time entry not found.');
+  if (!['job', 'break', 'drive', 'admin_time'].includes(stopped.entry_type)) {
+    throw staffTimeHttpError(409, 'Only a stopped child timer can be restored.');
+  }
+  if (!['active', 'completed'].includes(stopped.status)) {
+    throw staffTimeHttpError(409, 'Only a completed child timer can be restored.');
+  }
+
+  const shiftStartedAt = new Date(activeShift.clock_in).getTime();
+  const childStartedAt = new Date(stopped.clock_in).getTime();
+  if (
+    !Number.isFinite(shiftStartedAt)
+    || !Number.isFinite(childStartedAt)
+    || childStartedAt < shiftStartedAt
+  ) {
+    throw staffTimeHttpError(409, 'Stopped timer belongs to an earlier shift.');
+  }
+  if (stopped.status === 'active') return stopped;
+
+  const stoppedAt = new Date(stopped.clock_out).getTime();
+  if (
+    !Number.isFinite(stoppedAt)
+    || Date.now() - stoppedAt > UNDO_STOP_WINDOW_MINUTES * 60 * 1000
+    || stoppedAt > Date.now() + 60 * 1000
+  ) {
+    throw staffTimeHttpError(409, 'Stopped timer is too old to restore safely.');
+  }
+
+  const laterChild = await trx('time_entries')
+    .where({ technician_id: technicianId, entry_type: stopped.entry_type })
+    .whereNot({ id: entryId })
+    .where('status', '!=', 'voided')
+    .where('clock_in', '>=', stopped.clock_out)
+    .first('id');
+  if (laterChild) {
+    throw staffTimeHttpError(409, 'A later timer exists; this stopped timer cannot be restored.');
+  }
+
+  const conflicting = await trx('time_entries')
+    .where({
+      technician_id: technicianId,
+      entry_type: stopped.entry_type,
+      status: 'active',
+    })
+    .whereNot({ id: entryId })
+    .first('id');
+  if (conflicting) {
+    throw staffTimeHttpError(409, `Another ${stopped.entry_type} timer is already active.`);
+  }
+
+  const [reopened] = await trx('time_entries')
+    .where({ id: entryId, technician_id: technicianId, status: 'completed' })
+    .update({
+      status: 'active',
+      staff_write_generation: ACTIVE_WRITE_GENERATION,
+      clock_out: null,
+      clock_out_lat: null,
+      clock_out_lng: null,
+      duration_minutes: null,
+      notes: trx.raw("COALESCE(notes, '') || ' [undo-stop]'"),
+      updated_at: new Date(),
+    })
+    .returning('*');
+  if (!reopened) throw staffTimeHttpError(409, 'Stopped timer is no longer restorable.');
+  return reopened;
+}
+
+async function reopenStoppedEntry(technicianId, entryId) {
+  return db.transaction((trx) => (
+    reopenStoppedEntryInTransaction(trx, technicianId, entryId)
+  ));
 }
 
 /**
@@ -249,11 +499,11 @@ async function getStatus(technicianId) {
     .first();
 
   // Today's summary
-  const today = etDateString();
+  const today = staffWorkDate(new Date());
   const todayEntries = await db('time_entries')
     .where({ technician_id: technicianId })
     .where('status', '!=', 'voided')
-    .whereRaw("DATE(clock_in) = ?", [today]);
+    .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [today]);
 
   const todayShiftMin = todayEntries
     .filter(e => e.entry_type === 'shift')
@@ -288,44 +538,88 @@ async function getStatus(technicianId) {
  * Admin edit an entry — preserves originals.
  */
 async function adminEditEntry(entryId, { clock_in, clock_out, entry_type, notes, edit_reason, edited_by }) {
-  const entry = await db('time_entries').where({ id: entryId }).first();
-  if (!entry) throw new Error('Entry not found.');
-  if (entry.status === 'voided') throw new Error('Cannot edit a voided entry.');
+  const updated = await db.transaction(async (trx) => {
+    // Read without a row lock first so we can acquire the advisory week locks
+    // in the same order as approval. The locked re-read below detects a move
+    // to another week between these statements instead of deadlocking.
+    const preview = await trx('time_entries').where({ id: entryId }).first();
+    if (!preview) throw staffTimeHttpError(404, 'Entry not found.');
+    const previewWorkDate = staffWorkDate(preview.clock_in);
+    const requestedWorkDate = clock_in
+      ? staffWorkDate(new Date(clock_in))
+      : previewWorkDate;
+    const lockedWeeks = [previewWorkDate, requestedWorkDate]
+      .map(staffWeekStartForWorkDate);
+    await lockStaffWeeks(trx, preview.technician_id, lockedWeeks);
 
-  const updates = {
-    status: 'edited',
-    edit_reason,
-    edited_by,
-    edited_at: new Date(),
-    updated_at: new Date(),
-  };
+    const entry = await trx('time_entries').where({ id: entryId }).forUpdate().first();
+    assertEntryStillInLockedWeek(entry, preview.technician_id, lockedWeeks[0]);
+    await assertEntryMutable(trx, entry, 'edit', [
+      staffWorkDate(entry.clock_in),
+      requestedWorkDate,
+    ]);
 
-  // Preserve originals (only on first edit)
-  if (!entry.original_clock_in) {
-    updates.original_clock_in = entry.clock_in;
-    updates.original_clock_out = entry.clock_out;
-  }
+    const updates = {
+      status: 'edited',
+      // An admin edit is the resolution transition for a disputed entry.
+      // Keep the entry and its day reviewable so the corrected week can be
+      // signed and approved again.
+      approval_status: 'pending',
+      approved_by: null,
+      approved_at: null,
+      approval_notes: null,
+      edit_reason,
+      edited_by,
+      edited_at: new Date(),
+      updated_at: new Date(),
+    };
 
-  if (clock_in) updates.clock_in = new Date(clock_in);
-  if (clock_out) updates.clock_out = new Date(clock_out);
-  if (entry_type) updates.entry_type = entry_type;
-  if (notes !== undefined) updates.notes = notes;
+    // Preserve originals (only on first edit)
+    if (!entry.original_clock_in) {
+      updates.original_clock_in = entry.clock_in;
+      updates.original_clock_out = entry.clock_out;
+    }
 
-  // Recompute duration if both times are set
-  const finalIn = updates.clock_in || entry.clock_in;
-  const finalOut = updates.clock_out || entry.clock_out;
-  if (finalIn && finalOut) {
-    updates.duration_minutes = Math.round(((new Date(finalOut) - new Date(finalIn)) / 60000) * 100) / 100;
-  }
+    if (clock_in) updates.clock_in = new Date(clock_in);
+    if (clock_out) updates.clock_out = new Date(clock_out);
+    if (entry_type) updates.entry_type = entry_type;
+    if (notes !== undefined) updates.notes = notes;
 
-  const [updated] = await db('time_entries')
-    .where({ id: entryId })
-    .update(updates)
-    .returning('*');
+    // A completed/edited payroll interval must be positive and internally
+    // consistent. Recompute the duration from the final timestamps so edits
+    // cannot introduce a negative or stale paid interval.
+    const finalIn = updates.clock_in || entry.clock_in;
+    const finalOut = updates.clock_out || entry.clock_out;
+    const durationMinutes = (new Date(finalOut) - new Date(finalIn)) / 60000;
+    updates.duration_minutes = Math.round(durationMinutes * 100) / 100;
+    if (!isCompletedEntryIntervalValid({
+      ...entry,
+      ...updates,
+      clock_in: finalIn,
+      clock_out: finalOut,
+    })) {
+      throw staffTimeHttpError(
+        400,
+        'clock_out must be after clock_in and match a finite positive duration.',
+      );
+    }
 
-  // Recompute daily summary
-  const workDate = new Date(updated.clock_in).toISOString().split('T')[0];
-  await computeDailySummary(updated.technician_id, workDate);
+    const [saved] = await trx('time_entries')
+      .where({ id: entryId, status: entry.status })
+      .whereRaw("approval_status IS DISTINCT FROM 'approved'")
+      .update(updates)
+      .returning('*');
+    if (!saved) throw staffTimeHttpError(409, 'Entry changed; reload before editing.');
+    const affectedWorkDates = [
+      staffWorkDate(entry.clock_in),
+      staffWorkDate(saved.clock_in),
+    ];
+    if (entry.approval_status === 'disputed') {
+      await resolveDisputedDailyStatuses(trx, saved.technician_id, affectedWorkDates);
+    }
+    await recomputeEntryMutationSummaries(trx, saved.technician_id, affectedWorkDates);
+    return saved;
+  });
 
   logger.info(`[time-tracking] Entry ${entryId} edited by ${edited_by}`, { edit_reason });
   return updated;
@@ -335,36 +629,175 @@ async function adminEditEntry(entryId, { clock_in, clock_out, entry_type, notes,
  * Void an entry.
  */
 async function voidEntry(entryId, { reason, voided_by }) {
-  const entry = await db('time_entries').where({ id: entryId }).first();
-  if (!entry) throw new Error('Entry not found.');
+  const updated = await db.transaction(async (trx) => {
+    const preview = await trx('time_entries').where({ id: entryId }).first();
+    if (!preview) throw staffTimeHttpError(404, 'Entry not found.');
+    const previewWeek = staffWeekStartForWorkDate(staffWorkDate(preview.clock_in));
+    await lockStaffWeek(trx, preview.technician_id, previewWeek);
 
-  const [updated] = await db('time_entries')
-    .where({ id: entryId })
-    .update({
-      status: 'voided',
-      edit_reason: reason,
-      edited_by: voided_by,
-      edited_at: new Date(),
-      updated_at: new Date(),
-    })
-    .returning('*');
+    const entry = await trx('time_entries').where({ id: entryId }).forUpdate().first();
+    assertEntryStillInLockedWeek(entry, preview.technician_id, previewWeek);
+    await assertEntryMutable(trx, entry, 'void', [staffWorkDate(entry.clock_in)]);
 
-  // Recompute daily summary
-  const workDate = new Date(updated.clock_in).toISOString().split('T')[0];
-  await computeDailySummary(updated.technician_id, workDate);
+    const [saved] = await trx('time_entries')
+      .where({ id: entryId, status: entry.status })
+      .whereRaw("approval_status IS DISTINCT FROM 'approved'")
+      .update({
+        status: 'voided',
+        approval_status: 'pending',
+        approved_by: null,
+        approved_at: null,
+        approval_notes: null,
+        edit_reason: reason,
+        edited_by: voided_by,
+        edited_at: new Date(),
+        updated_at: new Date(),
+      })
+      .returning('*');
+    if (!saved) throw staffTimeHttpError(409, 'Entry changed; reload before voiding.');
+    const affectedWorkDates = [staffWorkDate(entry.clock_in)];
+    if (entry.approval_status === 'disputed') {
+      await resolveDisputedDailyStatuses(trx, saved.technician_id, affectedWorkDates);
+    }
+    await recomputeEntryMutationSummaries(trx, saved.technician_id, affectedWorkDates);
+    return saved;
+  });
 
   logger.info(`[time-tracking] Entry ${entryId} voided by ${voided_by}`, { reason });
   return updated;
 }
 
+function assertEntryStillInLockedWeek(entry, technicianId, weekStart) {
+  if (!entry) throw staffTimeHttpError(404, 'Entry not found.');
+  const currentWeek = staffWeekStartForWorkDate(staffWorkDate(entry.clock_in));
+  if (entry.technician_id !== technicianId || currentWeek !== weekStart) {
+    throw staffTimeHttpError(409, 'Entry changed; reload before editing it.');
+  }
+}
+
+async function assertEntryMutable(trx, entry, action, affectedWorkDates) {
+  if (!entry) throw staffTimeHttpError(404, 'Entry not found.');
+  if (entry.status === 'active') {
+    throw staffTimeHttpError(409, `End or clock out the active timer before ${action}ing it.`);
+  }
+  if (entry.status === 'voided') {
+    throw staffTimeHttpError(409, 'Cannot change a voided entry.');
+  }
+  if (entry.approval_status === 'approved') {
+    throw staffTimeHttpError(409, 'Unlock the approved week before changing its entries.');
+  }
+
+  const workDates = [...new Set(
+    (affectedWorkDates || [staffWorkDate(entry.clock_in)]).map(validateWorkDate),
+  )].sort();
+  for (const workDate of workDates) {
+    const daily = await trx('time_entry_daily_summary')
+      .where({ technician_id: entry.technician_id, work_date: workDate })
+      .forUpdate()
+      .first('id', 'status');
+    if (daily?.status === 'approved') {
+      throw staffTimeHttpError(409, 'Reopen the approved day before changing its entries.');
+    }
+  }
+
+  const weekStarts = [...new Set(workDates.map(staffWeekStartForWorkDate))].sort();
+  for (const weekStart of weekStarts) {
+    const weekly = await trx('time_weekly_summary')
+      .where({ technician_id: entry.technician_id, week_start: weekStart })
+      .forUpdate()
+      .first('id', 'status');
+    if (weekly?.status === 'approved') {
+      throw staffTimeHttpError(409, 'Unlock the approved week before changing its entries.');
+    }
+  }
+}
+
+async function lockStaffWeek(trx, technicianId, weekStart) {
+  const { start } = staffWeekRange(weekStart);
+  const lockKey = `staff-time-week:${technicianId}:${start}`;
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))',
+    [lockKey],
+  );
+  return start;
+}
+
+async function lockStaffWeeks(trx, technicianId, weekStarts) {
+  const starts = [...new Set(weekStarts.map(week => staffWeekRange(week).start))].sort();
+  for (const start of starts) {
+    await lockStaffWeek(trx, technicianId, start);
+  }
+  return starts;
+}
+
+async function resolveDisputedDailyStatuses(trx, technicianId, workDates) {
+  const dates = [...new Set(workDates.map(validateWorkDate))].sort();
+  for (const workDate of dates) {
+    const remainingDispute = await trx('time_entries')
+      .where({ technician_id: technicianId, approval_status: 'disputed' })
+      .where('status', '!=', 'voided')
+      .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [workDate])
+      .first('id');
+    if (remainingDispute) continue;
+
+    await trx('time_entry_daily_summary')
+      .where({ technician_id: technicianId, work_date: workDate, status: 'disputed' })
+      .update({
+        status: 'pending',
+        approved_by: null,
+        approved_at: null,
+        updated_at: new Date(),
+      });
+  }
+}
+
+async function recomputeEntryMutationSummaries(trx, technicianId, workDates) {
+  const dates = [...new Set(workDates.map(validateWorkDate))].sort();
+  for (const workDate of dates) {
+    await computeDailySummaryInTransaction(trx, technicianId, workDate);
+  }
+  const weeks = [...new Set(dates.map(staffWeekStartForWorkDate))].sort();
+  for (const weekStart of weeks) {
+    await computeWeeklySummaryInTransaction(trx, technicianId, weekStart, { lock: false });
+    // An edit or void invalidates the employee's attestation even when rounded
+    // totals happen to remain unchanged (for example, a notes-only correction).
+    await trx('time_weekly_summary')
+      .where({ technician_id: technicianId, week_start: weekStart })
+      .whereNot({ status: 'approved' })
+      .whereNotNull('tech_signed_at')
+      .update({ tech_signed_at: null, tech_signature: null, updated_at: new Date() });
+  }
+}
+
+function withoutKeys(source, keys) {
+  return Object.fromEntries(
+    Object.entries(source).filter(([key]) => !keys.includes(key)),
+  );
+}
+
 /**
- * Compute daily summary for a technician on a specific date.
+ * Compute a daily summary and its weekly roll-up atomically. Every writer for
+ * a technician/week takes the same transaction-scoped advisory lock, while
+ * conditional ON CONFLICT merges leave approved snapshots immutable.
  */
 async function computeDailySummary(technicianId, date) {
-  const entries = await db('time_entries')
+  const workDate = validateWorkDate(date);
+  const weekStart = staffWeekStartForWorkDate(workDate);
+  const summary = await db.transaction(async (trx) => {
+    await lockStaffWeek(trx, technicianId, weekStart);
+    const daily = await computeDailySummaryInTransaction(trx, technicianId, workDate);
+    await computeWeeklySummaryInTransaction(trx, technicianId, weekStart, { lock: false });
+    return daily;
+  });
+  logger.info(`[time-tracking] Daily summary computed for tech ${technicianId} on ${workDate}`);
+  return summary;
+}
+
+async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
+  const entries = await trx('time_entries')
     .where({ technician_id: technicianId })
     .where('status', '!=', 'voided')
-    .whereRaw("DATE(clock_in) = ?", [date]);
+    .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [workDate]);
 
   const shiftEntries = entries.filter(e => e.entry_type === 'shift');
   const jobEntries = entries.filter(e => e.entry_type === 'job' && e.status !== 'active');
@@ -372,13 +805,21 @@ async function computeDailySummary(technicianId, date) {
   const breakEntries = entries.filter(e => e.entry_type === 'break');
   const adminEntries = entries.filter(e => e.entry_type === 'admin_time');
 
-  const sum = (arr) => arr.reduce((s, e) => s + (parseFloat(e.duration_minutes) || 0), 0);
+  const sumUnits = (arr) => arr.reduce(
+    (sum, entry) => sum + payrollUnits(entry.duration_minutes),
+    0n,
+  );
 
-  const totalShift = sum(shiftEntries);
-  const totalJob = sum(jobEntries);
-  const totalDrive = sum(driveEntries);
-  const totalBreak = sum(breakEntries);
-  const totalAdmin = sum(adminEntries);
+  const totalShiftUnits = sumUnits(shiftEntries);
+  const totalJobUnits = sumUnits(jobEntries);
+  const totalDriveUnits = sumUnits(driveEntries);
+  const totalBreakUnits = sumUnits(breakEntries);
+  const totalAdminUnits = sumUnits(adminEntries);
+  const totalShift = payrollNumber(totalShiftUnits);
+  const totalJob = payrollNumber(totalJobUnits);
+  const totalDrive = payrollNumber(totalDriveUnits);
+  const totalBreak = payrollNumber(totalBreakUnits);
+  const totalAdmin = payrollNumber(totalAdminUnits);
   const jobCount = jobEntries.length;
 
   const firstIn = shiftEntries.length > 0
@@ -389,28 +830,38 @@ async function computeDailySummary(technicianId, date) {
     : null;
 
   // Utilization = job time / shift time
-  const utilization = totalShift > 0 ? Math.round((totalJob / totalShift) * 10000) / 100 : 0;
+  const utilization = totalShiftUnits > 0n
+    ? roundedPayrollRatio(totalJobUnits, totalShiftUnits, 10000n)
+    : 0;
 
   // Revenue from completed jobs that day
   const jobIds = jobEntries.filter(e => e.job_id).map(e => e.job_id);
-  let revenue = 0;
+  let revenueUnits = 0n;
   if (jobIds.length > 0) {
-    const jobs = await db('scheduled_services').whereIn('id', jobIds).select('price');
-    revenue = jobs.reduce((s, j) => s + (parseFloat(j.price) || 0), 0);
+    const jobs = await trx('scheduled_services')
+      .whereIn('id', jobIds)
+      .select('estimated_price');
+    revenueUnits = jobs.reduce(
+      (sum, job) => sum + payrollUnits(job.estimated_price),
+      0n,
+    );
   }
+  const revenue = payrollNumber(revenueUnits);
 
   // RPMH = revenue per man-hour
-  const shiftHours = totalShift / 60;
-  const rpmh = shiftHours > 0 ? Math.round((revenue / shiftHours) * 100) / 100 : 0;
+  const rpmh = totalShiftUnits > 0n
+    ? roundedPayrollRatio(revenueUnits, totalShiftUnits, 6000n)
+    : 0;
 
+  const now = new Date();
   const summaryData = {
     technician_id: technicianId,
-    work_date: date,
-    total_shift_minutes: Math.round(totalShift * 100) / 100,
-    total_job_minutes: Math.round(totalJob * 100) / 100,
-    total_drive_minutes: Math.round(totalDrive * 100) / 100,
-    total_break_minutes: Math.round(totalBreak * 100) / 100,
-    total_admin_minutes: Math.round(totalAdmin * 100) / 100,
+    work_date: workDate,
+    total_shift_minutes: totalShift,
+    total_job_minutes: totalJob,
+    total_drive_minutes: totalDrive,
+    total_break_minutes: totalBreak,
+    total_admin_minutes: totalAdmin,
     job_count: jobCount,
     first_clock_in: firstIn,
     last_clock_out: lastOut,
@@ -418,97 +869,155 @@ async function computeDailySummary(technicianId, date) {
     utilization_pct: utilization,
     revenue_generated: revenue,
     rpmh_actual: rpmh,
-    updated_at: new Date(),
+    updated_at: now,
   };
+  const mergeData = withoutKeys(summaryData, ['technician_id', 'work_date']);
+  const [written] = await trx('time_entry_daily_summary')
+    .insert({ ...summaryData, created_at: now })
+    .onConflict(['technician_id', 'work_date'])
+    .merge(mergeData)
+    .whereRaw("time_entry_daily_summary.status IS DISTINCT FROM 'approved'")
+    .returning('*');
 
-  // Upsert
-  const existing = await db('time_entry_daily_summary')
-    .where({ technician_id: technicianId, work_date: date })
+  if (written) return written;
+  return trx('time_entry_daily_summary')
+    .where({ technician_id: technicianId, work_date: workDate })
     .first();
-
-  if (existing) {
-    await db('time_entry_daily_summary').where({ id: existing.id }).update(summaryData);
-  } else {
-    summaryData.created_at = new Date();
-    await db('time_entry_daily_summary').insert(summaryData);
-  }
-
-  logger.info(`[time-tracking] Daily summary computed for tech ${technicianId} on ${date}`);
-  return summaryData;
 }
 
 /**
  * Compute weekly summary. FL has no daily OT — only federal 40hr/week.
  */
 async function computeWeeklySummary(technicianId, weekStart) {
-  const weekEnd = new Date(weekStart);
-  weekEnd.setDate(weekEnd.getDate() + 6);
-  const weekEndStr = weekEnd.toISOString().split('T')[0];
+  const { start } = staffWeekRange(weekStart);
+  const summary = await db.transaction(async (trx) => (
+    computeWeeklySummaryInTransaction(trx, technicianId, start)
+  ));
+  logger.info(`[time-tracking] Weekly summary computed for tech ${technicianId}, week of ${start}`);
+  return summary;
+}
 
-  const dailies = await db('time_entry_daily_summary')
+async function computeWeeklySummaryInTransaction(
+  trx,
+  technicianId,
+  weekStart,
+  { lock = true } = {},
+) {
+  const { start, end: weekEndStr } = staffWeekRange(weekStart);
+  if (lock) await lockStaffWeek(trx, technicianId, start);
+
+  const dailies = await trx('time_entry_daily_summary')
     .where({ technician_id: technicianId })
-    .where('work_date', '>=', weekStart)
-    .where('work_date', '<=', weekEndStr);
+    .where('work_date', '>=', start)
+    .where('work_date', '<=', weekEndStr)
+    .orderBy('work_date', 'asc')
+    .forUpdate();
 
-  const totalShift = dailies.reduce((s, d) => s + parseFloat(d.total_shift_minutes || 0), 0);
-  const totalJob = dailies.reduce((s, d) => s + parseFloat(d.total_job_minutes || 0), 0);
-  const totalDrive = dailies.reduce((s, d) => s + parseFloat(d.total_drive_minutes || 0), 0);
-  const totalRevenue = dailies.reduce((s, d) => s + parseFloat(d.revenue_generated || 0), 0);
-  const jobCount = dailies.reduce((s, d) => s + (d.job_count || 0), 0);
-  const daysWorked = dailies.filter(d => parseFloat(d.total_shift_minutes || 0) > 0).length;
+  const sumDailyUnits = (field) => dailies.reduce(
+    (sum, daily) => sum + payrollUnits(daily[field]),
+    0n,
+  );
+  const totalShiftUnits = sumDailyUnits('total_shift_minutes');
+  const totalJobUnits = sumDailyUnits('total_job_minutes');
+  const totalDriveUnits = sumDailyUnits('total_drive_minutes');
+  const totalRevenueUnits = sumDailyUnits('revenue_generated');
+  const totalShift = payrollNumber(totalShiftUnits);
+  const totalJob = payrollNumber(totalJobUnits);
+  const totalDrive = payrollNumber(totalDriveUnits);
+  const totalRevenue = payrollNumber(totalRevenueUnits);
+  const jobCount = dailies.reduce((s, d) => s + Number(d.job_count || 0), 0);
+  const daysWorked = dailies.filter(d => payrollUnits(d.total_shift_minutes) > 0n).length;
 
-  const regularMinutes = Math.min(totalShift, WEEKLY_OT_THRESHOLD);
-  const overtimeMinutes = Math.max(0, totalShift - WEEKLY_OT_THRESHOLD);
+  const overtimeThresholdUnits = BigInt(WEEKLY_OT_THRESHOLD_MINUTES) * PAYROLL_SCALE;
+  const regularUnits = totalShiftUnits < overtimeThresholdUnits
+    ? totalShiftUnits
+    : overtimeThresholdUnits;
+  const overtimeUnits = totalShiftUnits > overtimeThresholdUnits
+    ? totalShiftUnits - overtimeThresholdUnits
+    : 0n;
 
-  const shiftHours = totalShift / 60;
-  const avgRpmh = shiftHours > 0 ? Math.round((totalRevenue / shiftHours) * 100) / 100 : 0;
-  const utilization = totalShift > 0 ? Math.round((totalJob / totalShift) * 10000) / 100 : 0;
+  const avgRpmh = totalShiftUnits > 0n
+    ? roundedPayrollRatio(totalRevenueUnits, totalShiftUnits, 6000n)
+    : 0;
+  const utilization = totalShiftUnits > 0n
+    ? roundedPayrollRatio(totalJobUnits, totalShiftUnits, 10000n)
+    : 0;
 
   // Also update daily OT allocation (assign OT to later days)
-  let runningMinutes = 0;
+  let runningUnits = 0n;
   const sortedDailies = [...dailies].sort((a, b) => a.work_date < b.work_date ? -1 : 1);
   for (const d of sortedDailies) {
-    const dayShift = parseFloat(d.total_shift_minutes || 0);
-    const prevRunning = runningMinutes;
-    runningMinutes += dayShift;
-    const dayOT = runningMinutes > WEEKLY_OT_THRESHOLD
-      ? Math.min(dayShift, runningMinutes - WEEKLY_OT_THRESHOLD)
-      : 0;
-    if (dayOT !== parseFloat(d.overtime_minutes || 0)) {
-      await db('time_entry_daily_summary').where({ id: d.id }).update({ overtime_minutes: dayOT });
+    const dayShiftUnits = payrollUnits(d.total_shift_minutes);
+    runningUnits += dayShiftUnits;
+    const dayOvertimeUnits = runningUnits > overtimeThresholdUnits
+      ? (dayShiftUnits < runningUnits - overtimeThresholdUnits
+        ? dayShiftUnits
+        : runningUnits - overtimeThresholdUnits)
+      : 0n;
+    const dayOT = payrollNumber(dayOvertimeUnits);
+    if (dayOvertimeUnits !== payrollUnits(d.overtime_minutes)) {
+      await trx('time_entry_daily_summary')
+        .where({ id: d.id })
+        .whereRaw("status IS DISTINCT FROM 'approved'")
+        .update({ overtime_minutes: dayOT });
     }
   }
 
+  const now = new Date();
   const summaryData = {
     technician_id: technicianId,
-    week_start: weekStart,
+    week_start: start,
     week_end: weekEndStr,
-    total_shift_minutes: Math.round(totalShift * 100) / 100,
-    total_job_minutes: Math.round(totalJob * 100) / 100,
-    total_drive_minutes: Math.round(totalDrive * 100) / 100,
-    regular_minutes: regularMinutes,
-    overtime_minutes: overtimeMinutes,
+    total_shift_minutes: totalShift,
+    total_job_minutes: totalJob,
+    total_drive_minutes: totalDrive,
+    regular_minutes: payrollNumber(regularUnits),
+    overtime_minutes: payrollNumber(overtimeUnits),
     days_worked: daysWorked,
     job_count: jobCount,
     total_revenue: totalRevenue,
     avg_rpmh: avgRpmh,
     utilization_pct: utilization,
-    updated_at: new Date(),
+    updated_at: now,
   };
-
-  const existing = await db('time_weekly_summary')
-    .where({ technician_id: technicianId, week_start: weekStart })
+  const existingWeekly = await trx('time_weekly_summary')
+    .where({ technician_id: technicianId, week_start: start })
+    .forUpdate()
     .first();
-
-  if (existing) {
-    await db('time_weekly_summary').where({ id: existing.id }).update(summaryData);
-  } else {
-    summaryData.created_at = new Date();
-    await db('time_weekly_summary').insert(summaryData);
+  const attestedFields = [
+    'total_shift_minutes',
+    'total_job_minutes',
+    'total_drive_minutes',
+    'regular_minutes',
+    'overtime_minutes',
+    'days_worked',
+    'job_count',
+    'total_revenue',
+    'avg_rpmh',
+    'utilization_pct',
+  ];
+  const countFields = new Set(['days_worked', 'job_count']);
+  const attestedTotalsChanged = existingWeekly && attestedFields.some((field) => (
+    countFields.has(field)
+      ? Number(existingWeekly[field] || 0) !== Number(summaryData[field] || 0)
+      : roundPayroll(existingWeekly[field]) !== roundPayroll(summaryData[field])
+  ));
+  const mergeData = withoutKeys(summaryData, ['technician_id', 'week_start']);
+  if (existingWeekly?.status !== 'approved' && attestedTotalsChanged) {
+    mergeData.tech_signed_at = null;
+    mergeData.tech_signature = null;
   }
+  const [written] = await trx('time_weekly_summary')
+    .insert({ ...summaryData, created_at: now })
+    .onConflict(['technician_id', 'week_start'])
+    .merge(mergeData)
+    .whereRaw("time_weekly_summary.status IS DISTINCT FROM 'approved'")
+    .returning('*');
 
-  logger.info(`[time-tracking] Weekly summary computed for tech ${technicianId}, week of ${weekStart}`);
-  return summaryData;
+  if (written) return written;
+  return trx('time_weekly_summary')
+    .where({ technician_id: technicianId, week_start: start })
+    .first();
 }
 
 /**
@@ -528,8 +1037,9 @@ async function getEntries({ technicianId, startDate, endDate, entryType, status,
     );
 
   if (technicianId) query = query.where('time_entries.technician_id', technicianId);
-  if (startDate) query = query.where('time_entries.clock_in', '>=', startDate);
-  if (endDate) query = query.where('time_entries.clock_in', '<=', endDate + ' 23:59:59');
+  const qualifiedWorkDate = staffWorkDateSql('time_entries.clock_in');
+  if (startDate) query = query.whereRaw(`${qualifiedWorkDate} >= ?::date`, [startDate]);
+  if (endDate) query = query.whereRaw(`${qualifiedWorkDate} <= ?::date`, [endDate]);
   if (entryType) query = query.where('time_entries.entry_type', entryType);
   if (status) query = query.where('time_entries.status', status);
 
@@ -586,35 +1096,20 @@ async function autoClockOutCheck() {
 
   const results = [];
   for (const shift of staleShifts) {
-    const now = new Date();
+    const closed = await closeActiveShiftAtomically(shift.technician_id, {
+      shiftId: shift.id,
+      childNoteSuffix: ' [auto-closed]',
+      shiftNote: 'AUTO CLOCK-OUT: exceeded 14-hour limit',
+    });
+    if (!closed) continue;
 
-    // Close any sub-entries
-    await db('time_entries')
-      .where({ technician_id: shift.technician_id, status: 'active' })
-      .whereIn('entry_type', ['job', 'break', 'drive', 'admin_time'])
-      .update({
-        status: 'completed',
-        clock_out: now,
-        duration_minutes: db.raw("EXTRACT(EPOCH FROM (? - clock_in)) / 60", [now]),
-        notes: db.raw("COALESCE(notes, '') || ' [auto-closed]'"),
-        updated_at: now,
-      });
+    await computeDailySummary(shift.technician_id, closed.workDate);
 
-    const duration = (now - new Date(shift.clock_in)) / 60000;
-    await db('time_entries')
-      .where({ id: shift.id })
-      .update({
-        status: 'completed',
-        clock_out: now,
-        duration_minutes: Math.round(duration * 100) / 100,
-        notes: (shift.notes ? shift.notes + '; ' : '') + 'AUTO CLOCK-OUT: exceeded 14-hour limit',
-        updated_at: now,
-      });
-
-    const workDate = new Date(shift.clock_in).toISOString().split('T')[0];
-    await computeDailySummary(shift.technician_id, workDate);
-
-    results.push({ technicianId: shift.technician_id, entryId: shift.id, duration });
+    results.push({
+      technicianId: shift.technician_id,
+      entryId: shift.id,
+      duration: closed.duration,
+    });
     logger.warn(`[time-tracking] Auto clock-out for tech ${shift.technician_id}`, { entryId: shift.id });
   }
 
@@ -628,11 +1123,18 @@ module.exports = {
   endJob,
   startBreak,
   endBreak,
+  reopenStoppedEntry,
+  reopenStoppedEntryInTransaction,
+  closeActiveShiftAtomically,
   getStatus,
   adminEditEntry,
   voidEntry,
   computeDailySummary,
+  computeDailySummaryInTransaction,
   computeWeeklySummary,
+  computeWeeklySummaryInTransaction,
+  lockStaffWeek,
+  isCompletedEntryIntervalValid,
   getEntries,
   getDailySummaries,
   getWeeklySummaries,

@@ -1,0 +1,571 @@
+// Deposit-stage cancel-signup orchestration: eligibility fails closed, the
+// void-before-refund order holds, the refund is face-only, and the email
+// states the ledger-verified refunded total.
+
+let mockDbHandler = () => { throw new Error('db handler not configured'); };
+const callOrder = [];
+
+jest.mock('../models/db', () => {
+  const mock = jest.fn((...args) => mockDbHandler(...args));
+  mock.fn = { now: jest.fn(() => 'NOW') };
+  mock.transaction = jest.fn(async (cb) => cb({}));
+  return mock;
+});
+jest.mock('../services/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
+
+const mockVoidInvoice = jest.fn(async (id) => {
+  callOrder.push(`void:${id}`);
+  return { invoice_number: `WPC-${id}` };
+});
+const mockVoidOpenInvoices = jest.fn(async () => {});
+jest.mock('../services/invoice', () => ({
+  voidInvoice: (...args) => mockVoidInvoice(...args),
+  voidOpenInvoicesForCancelledService: (...args) => mockVoidOpenInvoices(...args),
+}));
+
+const mockTransition = jest.fn(async ({ jobId }) => { callOrder.push(`cancel:${jobId}`); });
+jest.mock('../services/job-status', () => ({
+  transitionJobStatus: (...args) => mockTransition(...args),
+}));
+const mockHandleCancellation = jest.fn(async () => {});
+jest.mock('../services/appointment-reminders', () => ({
+  handleCancellation: (...args) => mockHandleCancellation(...args),
+}));
+jest.mock('../services/call-booking-catalog', () => ({
+  cancelCallFollowUpsForParentCancel: jest.fn(async () => 0),
+}));
+const mockCardHold = jest.fn(async () => ({ handled: false, reason: 'no_hold' }));
+jest.mock('../services/estimate-card-holds', () => ({
+  handleCardHoldCancellation: (...args) => mockCardHold(...args),
+}));
+
+const mockTrackCancel = jest.fn(async () => ({ ok: true }));
+jest.mock('../services/track-transitions', () => ({
+  cancel: (...args) => mockTrackCancel(...args),
+}));
+
+const mockRefundUnconsumed = jest.fn(async () => {
+  callOrder.push('refund');
+  return { refunded: 49 };
+});
+jest.mock('../services/estimate-deposits', () => ({
+  refundUnconsumedDeposits: (...args) => mockRefundUnconsumed(...args),
+}));
+
+const mockSendEmail = jest.fn(async () => ({ ok: true }));
+jest.mock('../services/payment-lifecycle-email', () => ({
+  sendCancellationRefundIssued: (...args) => mockSendEmail(...args),
+}));
+
+const mockTriggerNotification = jest.fn(async () => {});
+jest.mock('../services/notification-triggers', () => ({
+  triggerNotification: (...args) => mockTriggerNotification(...args),
+}));
+
+const CustomerOffboarding = require('../services/customer-offboarding');
+
+function chain({ rows = [], first = undefined, update = 1 } = {}) {
+  const c = {};
+  ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'whereRaw', 'select', 'orderBy', 'leftJoin', 'join'].forEach((m) => {
+    c[m] = jest.fn(() => c);
+  });
+  c.first = jest.fn(async () => first);
+  c.update = jest.fn(async () => update);
+  c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+  return c;
+}
+
+function setDbQueues(queues) {
+  const tableQueues = new Map(Object.entries(queues));
+  mockDbHandler = (table) => {
+    const queue = tableQueues.get(table);
+    if (!queue || !queue.length) throw new Error(`Unexpected db table ${table} (queue exhausted)`);
+    return queue.shift();
+  };
+}
+
+const CUSTOMER = { id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan', waveguard_tier: 'Bronze', billing_mode: 'annual_prepay', active: true };
+const DEPOSIT_CREDITED = {
+  id: 'dep-1', estimate_id: 'est-1', status: 'credited', amount: '49.00',
+  credited_amount: '49.00', refunded_amount: '0.00', card_surcharge: '0.00',
+  credited_invoice_id: 'inv-1', customer_id: 'cust-1',
+};
+const UNPAID_INVOICE = {
+  id: 'inv-1', invoice_number: 'WPC-2026-0001', status: 'sent', total: '371.00',
+  payment_recorded_at: null, annual_prepay_term_id: 'term-1',
+  line_items: JSON.stringify([
+    { amount: 420, description: 'plan' },
+    { amount: -49, category: 'deposit_credit', estimate_id: 'est-1' },
+  ]),
+};
+const PENDING_TERM = {
+  id: 'term-1', status: 'payment_pending', plan_label: 'WaveGuard Bronze — Annual Prepay',
+  prepay_invoice_id: 'inv-1', prepay_amount: '420.00', term_start: null, term_end: null,
+};
+const VISITS = [
+  { id: 'v-1', status: 'pending', scheduled_date: '2026-07-09', service_type: 'quarterly', track_state: null },
+  { id: 'v-2', status: 'confirmed', scheduled_date: '2026-10-09', service_type: 'quarterly', track_state: 'scheduled' },
+];
+
+// Preview's db-call order: customers → estimate_deposits → invoices (credit
+// scan per credited deposit, + stamped fallback when the line-scan misses)
+// → annual_prepay_terms → invoices (per term not already mapped) →
+// scheduled_services (cancellable, in-progress) → invoices (paid visit
+// invoices, only when cancellable visits exist).
+function previewQueues({ customer = CUSTOMER, deposits = [DEPOSIT_CREDITED], invoicesQueue, terms = [PENDING_TERM], visits = VISITS, inProgress = [] } = {}) {
+  return {
+    customers: [chain({ first: customer })],
+    // The deposit lookup joins estimates (prospect deposits carry NULL
+    // customer_id), so it addresses the aliased table.
+    'estimate_deposits as ed': [chain({ rows: deposits })],
+    estimate_deposits: [],
+    invoices: invoicesQueue || [chain({ rows: [UNPAID_INVOICE] }), chain({ rows: [] })],
+    annual_prepay_terms: [chain({ rows: terms })],
+    scheduled_services: [chain({ rows: visits }), chain({ rows: inProgress })],
+    'estimate_card_holds as h': [chain({ rows: [] })],
+  };
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  callOrder.length = 0;
+});
+
+describe('previewCancelSignup — eligibility fails closed', () => {
+  it('eligible: credited deposit on an unpaid invoice, pending term, open visits', async () => {
+    setDbQueues(previewQueues());
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(true);
+    expect(p.refundTotal).toBe(49);
+    expect(p.invoices).toHaveLength(1);
+    expect(p.visits).toHaveLength(2);
+  });
+
+  it('blocks when the deposit credit sits on a PAID invoice — refund that payment instead', async () => {
+    const paidInvoice = { ...UNPAID_INVOICE, status: 'paid' };
+    setDbQueues(previewQueues({
+      invoicesQueue: [
+        chain({ rows: [paidInvoice] }), // credit scan
+        chain({ first: paidInvoice }), // term prepay lookup (not in void map since blocked)
+        chain({ rows: [] }), // paid-visit-invoice check
+      ],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/refund that payment instead/);
+  });
+
+  it('voids EVERY invoice carrying the credit when it split across invoices', async () => {
+    const second = {
+      ...UNPAID_INVOICE,
+      id: 'inv-2',
+      invoice_number: 'WPC-2026-0002',
+      annual_prepay_term_id: null,
+    };
+    setDbQueues(previewQueues({
+      invoicesQueue: [
+        chain({ rows: [UNPAID_INVOICE, second] }), // credit scan finds both lines
+        chain({ rows: [] }), // paid-visit-invoice check
+      ],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(true);
+    expect(p.invoices.map((i) => i.id).sort()).toEqual(['inv-1', 'inv-2']);
+  });
+
+  it('blocks when the annual prepay term has collected money', async () => {
+    setDbQueues(previewQueues({ terms: [{ ...PENDING_TERM, status: 'active' }] }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/out of scope/);
+  });
+
+  it('blocks when there is nothing refundable', async () => {
+    setDbQueues(previewQueues({
+      deposits: [{ ...DEPOSIT_CREDITED, refunded_amount: '49.00' }],
+      invoicesQueue: [
+        chain({ first: UNPAID_INVOICE }), // term prepay lookup (no credit scan — deposit skipped)
+        chain({ rows: [] }), // paid-visit-invoice check
+      ],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/no refundable deposit/);
+  });
+
+  it('blocks while a deposit refund is already in flight', async () => {
+    setDbQueues(previewQueues({
+      deposits: [DEPOSIT_CREDITED, { ...DEPOSIT_CREDITED, id: 'dep-2', status: 'refunding' }],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/in flight/);
+  });
+
+  it('blocks when a visit is in progress (tech en route / on property)', async () => {
+    setDbQueues(previewQueues({ inProgress: [{ id: 'v-9', status: 'en_route' }] }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/en_route.*dispatch board/);
+  });
+
+  it('blocks when a LIVE track_state leads a still-cancellable status', async () => {
+    setDbQueues(previewQueues({
+      visits: [
+        { ...VISITS[0], track_state: 'on_property' }, // tracker leads status=pending
+        VISITS[1],
+      ],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/on_property.*dispatch board/);
+    // The live-tracked visit must not appear in the cancellable list either.
+    expect(p.visits.map((v) => v.id)).toEqual(['v-2']);
+  });
+
+  it('blocks when the tracker already reached COMPLETE while the status lags — delivered service, money owed', async () => {
+    setDbQueues(previewQueues({
+      visits: [{ ...VISITS[0], track_state: 'complete' }, VISITS[1]],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/complete.*dispatch board/);
+  });
+
+  it('blocks when a cancellable visit already has a PAID invoice — money beyond the deposit', async () => {
+    setDbQueues(previewQueues({
+      invoicesQueue: [
+        chain({ rows: [UNPAID_INVOICE] }), // credit scan
+        chain({ rows: [{ id: 'vinv-1', invoice_number: 'WPC-2026-0009', status: 'paid' }] }), // paid visit invoice
+      ],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/money collected beyond the deposit/);
+  });
+
+  it('blocks a DECIDED paid term (renewed) — still a paid coverage window', async () => {
+    setDbQueues(previewQueues({ terms: [{ ...PENDING_TERM, status: 'renewed' }] }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/out of scope/);
+  });
+
+  it('allows a credit-covered PREPAID invoice through (no payment recorded — voidInvoice restores its credit)', async () => {
+    setDbQueues(previewQueues({
+      invoicesQueue: [
+        chain({ rows: [{ ...UNPAID_INVOICE, status: 'prepaid', payment_recorded_at: null }] }),
+        chain({ rows: [] }),
+      ],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(true);
+    expect(p.invoices).toHaveLength(1);
+  });
+});
+
+describe('cancelSignupAndRefundDeposit — order and side effects', () => {
+  // Execute's db-call order after the preview: recurrence flip → per visit
+  // (fresh status/track read, post-flip track re-check, track normalize,
+  // unresolved-invoice re-query, card-hold release) → straggler re-query
+  // (+ the same set per straggler) → lingering visit-invoice re-scan →
+  // open-holds re-scan → fresh billing_mode read → tier/rate clear →
+  // ledger re-read → bell name read.
+  const visitChains = (status = 'pending', track = null) => [
+    chain({ first: { status, track_state: track } }), // fresh read
+    chain({ first: { track_state: track } }), // post-flip re-check
+    chain({ update: 1 }), // track normalize
+  ];
+  function executeQueues({ ledgerRefunded = '49.00', stragglers = [], unresolved = [], lingering = [] } = {}) {
+    const q = previewQueues();
+    q.scheduled_services.push(
+      chain({ update: 1 }), // recurring_ongoing flip
+      ...visitChains('pending', null), // v-1
+      ...visitChains('confirmed', 'scheduled'), // v-2
+      chain({ rows: stragglers }),
+      ...stragglers.flatMap(() => visitChains('pending', null)),
+      chain({ rows: [] }), // stale-tracker durable re-scan
+    );
+    q.appointment_reminders = [
+      chain({ first: undefined }), // v-1 stale-reminder re-check: clean
+      chain({ first: undefined }), // v-2
+      ...stragglers.map(() => chain({ first: undefined })),
+    ];
+    q.invoices.push(
+      chain({ rows: unresolved }), // v-1 unresolved-invoice re-query
+      chain({ rows: [] }), // v-2
+      ...stragglers.map(() => chain({ rows: [] })),
+      chain({ rows: lingering }), // pre-refund lingering re-scan
+    );
+    q.customers.push(
+      chain({ first: { billing_mode: null } }), // fresh read after voids
+      chain({ update: 1 }), // tier/rate clear
+      chain({ first: { first_name: 'Taylor', last_name: 'Morgan' } }),
+    );
+    q.estimate_deposits.push(chain({ rows: [{ refunded_amount: ledgerRefunded }] }));
+    return q;
+  }
+
+  it('voids first, cancels visits, clears tier, refunds face-only, then emails the ledger total', async () => {
+    setDbQueues(executeQueues());
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1', { actorId: 'tech-1' });
+
+    // Void strictly precedes every visit cancel and the refund; the refund is last.
+    expect(callOrder[0]).toBe('void:inv-1');
+    expect(callOrder[callOrder.length - 1]).toBe('refund');
+    expect(callOrder).toEqual(['void:inv-1', 'cancel:v-1', 'cancel:v-2', 'refund']);
+
+    expect(mockRefundUnconsumed).toHaveBeenCalledWith({
+      estimateId: 'est-1',
+      reason: 'cancel_signup',
+      includeSurchargeShare: false,
+    });
+    // Business-initiated cancel: hold fees waived on every visit.
+    expect(mockCardHold).toHaveBeenCalledTimes(2);
+    for (const call of mockCardHold.mock.calls) {
+      expect(call[0].waiveFee).toBe(true);
+    }
+    // Customer-visible tracker cancelled for every visit too.
+    expect(mockTrackCancel).toHaveBeenCalledTimes(2);
+    // No per-visit customer notice — ONE combined email only.
+    for (const call of mockHandleCancellation.mock.calls) {
+      expect(call[1]).toMatchObject({ sendNotification: false });
+    }
+    expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      refundAmount: 49,
+      // Amount-keyed: a retry that refunds more sends a corrected email
+      // instead of deduping against the partial one.
+      idempotencyKey: 'account.cancellation_refund:cust-1:dep-1:4900',
+    }));
+    expect(mockTriggerNotification).toHaveBeenCalledWith('payment_refunded', expect.objectContaining({ amount: 49 }));
+    expect(result).toMatchObject({
+      invoicesVoided: ['WPC-inv-1'],
+      visitsCancelled: 2,
+      visitFailures: [],
+      tierCleared: true,
+      refunded: 49,
+    });
+  });
+
+  it('refuses to run when ineligible', async () => {
+    setDbQueues(previewQueues({ terms: [{ ...PENDING_TERM, status: 'active' }] }));
+    await expect(CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1'))
+      .rejects.toMatchObject({ status: 409 });
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a void failure aborts BEFORE any visit or money is touched', async () => {
+    mockVoidInvoice.mockRejectedValueOnce(new Error('payment applied while voiding'));
+    setDbQueues(executeQueues());
+    await expect(CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1'))
+      .rejects.toThrow('payment applied while voiding');
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('a failed refund skips the email AND the admin bell (no $0.00 "refund issued")', async () => {
+    mockRefundUnconsumed.mockImplementationOnce(async () => { callOrder.push('refund'); return { refunded: 0 }; });
+    setDbQueues(executeQueues({ ledgerRefunded: '0.00' }));
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    // A zero-refund run is the degenerate partial: reported, email held.
+    expect(result.email).toMatchObject({ skipped: true, reason: 'partial_refund' });
+    expect(result.refundIncomplete).toMatch(/0\.00 of 49\.00/);
+  });
+
+  it('a per-application mode found AFTER the voids (term-cancel restore) clears billing_mode and fee with the tier', async () => {
+    const q = executeQueues();
+    // The FRESH post-void read is authoritative — a term cancel can restore
+    // billing_mode='per_application' that the preview snapshot never saw.
+    q.customers[1] = chain({ first: { billing_mode: 'per_application' } });
+    // Capture before the run — setDbQueues consumes the arrays.
+    const tierChain = q.customers[2];
+    setDbQueues(q);
+    await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    const tierUpdate = tierChain.update.mock.calls[0][0];
+    expect(tierUpdate).toMatchObject({
+      waveguard_tier: null,
+      monthly_rate: null,
+      billing_mode: null,
+      per_application_fee: null,
+    });
+  });
+
+  // Shared shape for gated runs where v-1 fails BEFORE its post-fresh-read
+  // chains are consumed: v-2 still runs its full trio + unresolved query,
+  // then the lingering/holds re-scans and tier clear run before the gate.
+  function gatedQueues({ v1Fresh }) {
+    const q = previewQueues();
+    q.scheduled_services.push(
+      chain({ update: 1 }), // flip
+      chain({ first: v1Fresh }), // v-1 fresh (fails before further chains)
+      ...visitChains('confirmed', 'scheduled'), // v-2
+      chain({ rows: [] }), // stragglers
+      chain({ rows: [] }), // stale-tracker re-scan
+    );
+    q.appointment_reminders = [chain({ first: undefined })]; // v-2 only
+    q.invoices.push(chain({ rows: [] }), chain({ rows: [] })); // v-2 unresolved + lingering re-scan
+    q.customers.push(chain({ first: { billing_mode: null } }), chain({ update: 1 }));
+    return q;
+  }
+
+  it('one stuck visit GATES the refund — reported, deposits left received for a re-run', async () => {
+    mockTransition.mockImplementationOnce(async () => { throw new Error('invalid transition'); });
+    setDbQueues(gatedQueues({ v1Fresh: { status: 'pending', track_state: null } }));
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitsCancelled).toBe(1);
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: 'invalid transition' }]);
+    expect(result.refundSkipped).toMatch(/run this again/);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  it('a LIVE tracker discovered at cancel time fails that visit and gates the refund', async () => {
+    setDbQueues(gatedQueues({ v1Fresh: { status: 'pending', track_state: 'en_route' } }));
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/live \(en_route\)/) }]);
+    // The live visit was never transitioned.
+    expect(mockTransition).toHaveBeenCalledTimes(1);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a tracker that goes live BETWEEN the fresh read and the flip reverts the cancel', async () => {
+    const q = previewQueues();
+    q.scheduled_services.push(
+      chain({ update: 1 }), // flip
+      chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh: clean
+      chain({ first: { track_state: 'en_route' } }), // v-1 post-flip: went live
+      ...visitChains('confirmed', 'scheduled'), // v-2
+      chain({ rows: [] }), // stragglers
+      chain({ rows: [] }), // stale-tracker re-scan
+    );
+    q.appointment_reminders = [chain({ first: undefined })]; // v-2 only
+    q.invoices.push(chain({ rows: [] }), chain({ rows: [] })); // v-2 unresolved + lingering
+    q.customers.push(chain({ first: { billing_mode: null } }), chain({ update: 1 }));
+    setDbQueues(q);
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/went en_route mid-cancel/) }]);
+    // v-1: cancel + compensating revert; v-2: cancel.
+    expect(mockTransition).toHaveBeenCalledTimes(3);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'v-1',
+      fromStatus: 'cancelled',
+      toStatus: 'pending',
+    }));
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('an unreleased card hold fails the visit and gates the refund', async () => {
+    mockCardHold.mockResolvedValueOnce({ released: false }); // held → charging race
+    setDbQueues(executeQueues());
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/card hold/) }]);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a leftover open invoice from a PRIOR partial run gates the refund on retry', async () => {
+    setDbQueues(executeQueues({
+      lingering: [{ id: 'old-1', invoice_number: 'WPC-2026-0007', status: 'sent' }],
+    }));
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitsCancelled).toBe(2);
+    expect(result.unresolvedInvoices).toEqual(['WPC-2026-0007']);
+    expect(result.refundSkipped).toMatch(/run this again/);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a mid-send invoice (transient sending claim) gates the refund — denylist, not allowlist', async () => {
+    setDbQueues(executeQueues({
+      lingering: [{ id: 'snd-1', invoice_number: 'WPC-2026-0012', status: 'sending' }],
+    }));
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.unresolvedInvoices).toEqual(['WPC-2026-0012']);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a reminder row still active after handleCancellation fails the visit and gates the refund', async () => {
+    // v-1 aborts at the reminder re-check (before its normalize/unresolved
+    // chains), so this run's queue is hand-built.
+    const q = previewQueues();
+    q.scheduled_services.push(
+      chain({ update: 1 }), // flip
+      chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh
+      chain({ first: { track_state: null } }), // v-1 post-flip
+      ...visitChains('confirmed', 'scheduled'), // v-2
+      chain({ rows: [] }), // stragglers
+      chain({ rows: [] }), // stale-tracker re-scan
+    );
+    q.appointment_reminders = [
+      chain({ first: { id: 'rem-1' } }), // v-1 reminder survived handleCancellation
+      chain({ first: undefined }), // v-2 clean
+    ];
+    q.invoices.push(chain({ rows: [] }), chain({ rows: [] })); // v-2 unresolved + lingering
+    q.customers.push(chain({ first: { billing_mode: null } }), chain({ update: 1 }));
+    setDbQueues(q);
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/reminder still active/) }]);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a tracker cancel that returns non-ok fails the visit and gates the refund', async () => {
+    mockTrackCancel.mockResolvedValueOnce({ ok: false, reason: 'guarded update missed' });
+    setDbQueues(executeQueues());
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/tracker cancel failed/) }]);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a PARTIAL multi-deposit refund reports loudly and holds the email for the completing re-run', async () => {
+    const secondDeposit = {
+      ...DEPOSIT_CREDITED, id: 'dep-2', estimate_id: 'est-2', status: 'received', credited_amount: '0.00',
+    };
+    const q = executeQueues();
+    q['estimate_deposits as ed'] = [chain({ rows: [DEPOSIT_CREDITED, secondDeposit] })];
+    // est-2's refund fails inside the sweep (returns 0 without throwing).
+    mockRefundUnconsumed
+      .mockImplementationOnce(async () => { callOrder.push('refund'); return { refunded: 49 }; })
+      .mockImplementationOnce(async () => { callOrder.push('refund'); return { refunded: 0 }; });
+    q.estimate_deposits = [chain({ rows: [{ refunded_amount: '49.00' }, { refunded_amount: '0.00' }] })];
+    setDbQueues(q);
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.refundIncomplete).toMatch(/49\.00 of 98\.00/);
+    expect(result.email).toMatchObject({ skipped: true, reason: 'partial_refund' });
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  it('an invoice the void sweep could not resolve gates the refund', async () => {
+    setDbQueues(executeQueues({
+      unresolved: [{ id: 'vinv-1', invoice_number: 'WPC-2026-0011', status: 'sent' }],
+    }));
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitsCancelled).toBe(2);
+    expect(result.unresolvedInvoices).toEqual(['WPC-2026-0011']);
+    expect(result.refundSkipped).toMatch(/run this again/);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('sweeps stragglers minted by a racing auto-extension after the recurrence flip', async () => {
+    setDbQueues(executeQueues({ stragglers: [{ id: 'v-99', status: 'pending' }] }));
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitsCancelled).toBe(3);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'v-99' }));
+  });
+});

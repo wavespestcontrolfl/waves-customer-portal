@@ -22,18 +22,18 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
       />,
     );
 
-    // $400/mo, fraction 1 → $320–$480/mo band (interval = monthly, so 1×).
-    expect(screen.getByText('$320–$480')).toBeInTheDocument();
+    // $400.00/mo, fraction 1 → $320.00–$480.00/mo band (interval = monthly, so 1×).
+    expect(screen.getByText('$320.00–$480.00')).toBeInTheDocument();
     // Annual is banded too.
-    expect(screen.getByText('$3,840 – $5,760 / year')).toBeInTheDocument();
+    expect(screen.getByText('$3,840.00 – $5,760.00 / year')).toBeInTheDocument();
     // Site-confirmation caption present; single exact price is NOT shown.
     expect(screen.getByText(/confirm your exact price/i)).toBeInTheDocument();
-    expect(screen.queryByText('$400')).toBeNull();
+    expect(screen.queryByText('$400.00')).toBeNull();
   });
 
   it('bands only the LOW share on a mixed-confidence card (no overstated range)', () => {
-    // $900/mo total where only a $400 LOW line is uncertain (fraction 0.4444…):
-    // band = 900 × 0.4444 × 0.2 = $80 → $820–$980, NOT a blanket ±20% ($720–$1,080).
+    // $900.00/mo total where only a $400.00 LOW line is uncertain (fraction 0.4444…):
+    // band = 900 × 0.4444 × 0.2 = $80.00 → $820.00–$980,.00 NOT a blanket ±20% ($720.00–$1,080.00).
     render(
       <PriceCard
         frequency={{
@@ -47,8 +47,8 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
       />,
     );
 
-    expect(screen.getByText('$820–$980')).toBeInTheDocument();
-    expect(screen.queryByText('$720–$1,080')).toBeNull();
+    expect(screen.getByText('$820.00–$980.00')).toBeInTheDocument();
+    expect(screen.queryByText('$720.00–$1,080.00')).toBeNull();
   });
 
   it('suppresses exact per-application treatment rows while ranging', () => {
@@ -68,8 +68,8 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
     );
 
     // Range shows; the exact per-application price must NOT leak.
-    expect(screen.getByText('$320–$480')).toBeInTheDocument();
-    expect(screen.queryByText('$1,200')).toBeNull();
+    expect(screen.getByText('$320.00–$480.00')).toBeInTheDocument();
+    expect(screen.queryByText('$1,200.00')).toBeNull();
     expect(screen.queryByText(/per application/i)).toBeNull();
   });
 
@@ -86,7 +86,7 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
       />,
     );
 
-    expect(screen.getByText('$1,200')).toBeInTheDocument();
+    expect(screen.getByText('$1,200.00')).toBeInTheDocument();
   });
 
   it('never derives a cadence-key visit count over multiple treatment rows', () => {
@@ -116,8 +116,8 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
   it('renders the exact price (no range) when the marker is absent', () => {
     render(<PriceCard frequency={{ key: 'monthly', monthly: 400, annual: 4800 }} />);
 
-    expect(screen.getByText('$400')).toBeInTheDocument();
-    expect(screen.queryByText('$320–$480')).toBeNull();
+    expect(screen.getByText('$400.00')).toBeInTheDocument();
+    expect(screen.queryByText('$320.00–$480.00')).toBeNull();
     expect(screen.queryByText(/confirm your exact price/i)).toBeNull();
   });
 
@@ -135,7 +135,7 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
 
 describe('PriceCard — WaveGuard savings display', () => {
   it('suppresses a rounding-noise "savings" on a 0%-discount tier (Bronze quarterly)', () => {
-    // $94/visit quarterly stored as $31.33/mo → cadence 93.99 vs anchor 94:
+    // $94.00/visit quarterly stored as $31.33/mo → cadence 93.99 vs anchor 94:
     // the $0.01 delta is monthly-rounding noise, not a member discount.
     render(
       <PriceCard
@@ -146,7 +146,7 @@ describe('PriceCard — WaveGuard savings display', () => {
 
     expect(screen.queryByText(/You save/)).toBeNull();
     // No strike-through anchor either — just the billed price.
-    expect(screen.queryByText('$94/quarter')).toBeNull();
+    expect(screen.queryByText('$94.00/quarter')).toBeNull();
     expect(screen.getByText('$93.99')).toBeInTheDocument();
     expect(screen.getByText('WaveGuard Bronze')).toBeInTheDocument();
     // No annual figure on a standard exact price (owner directive).
@@ -154,7 +154,7 @@ describe('PriceCard — WaveGuard savings display', () => {
   });
 
   it('shows a real tier discount as the struck-through anchor, with no savings line', () => {
-    // Anchor $100/visit, member pays $90/quarter (10% Silver).
+    // Anchor $100.00/visit, member pays $90.00/quarter (10% Silver).
     render(
       <PriceCard
         frequency={{ key: 'quarterly', monthly: 30, annual: 360, perVisit: 100 }}
@@ -165,11 +165,11 @@ describe('PriceCard — WaveGuard savings display', () => {
     // The "You save" line was removed globally (anchor-vs-cadence delta
     // misattributed to the tier) — the struck anchor is the discount signal.
     expect(screen.queryByText(/You save/)).toBeNull();
-    expect(screen.getByText('$100/quarter')).toBeInTheDocument();
+    expect(screen.getByText('$100.00/quarter')).toBeInTheDocument();
   });
 
   it('derives the anchor from monthlyBase when perVisit is absent (non-pest bundle rows)', () => {
-    // Lawn in a Silver bundle: $83/mo base → $74.70/mo member price. Own-cadence
+    // Lawn in a Silver bundle: $83.00/mo base → $74.70/mo member price. Own-cadence
     // ladder rows never carry perVisit, only monthlyBase.
     render(
       <PriceCard
@@ -178,7 +178,7 @@ describe('PriceCard — WaveGuard savings display', () => {
       />,
     );
 
-    expect(screen.getByText('$83/mo')).toBeInTheDocument();
+    expect(screen.getByText('$83.00/mo')).toBeInTheDocument();
     expect(screen.queryByText(/You save/)).toBeNull();
   });
 
@@ -191,8 +191,8 @@ describe('PriceCard — WaveGuard savings display', () => {
     );
 
     expect(screen.queryByText(/You save/)).toBeNull();
-    expect(screen.queryByText('$83/mo')).toBeNull();
-    expect(screen.getByText('$83')).toBeInTheDocument();
+    expect(screen.queryByText('$83.00/mo')).toBeNull();
+    expect(screen.getByText('$83.00')).toBeInTheDocument();
   });
 });
 
@@ -215,6 +215,57 @@ describe('PriceCard — manual discount is not double-reported in-card', () => {
 
     expect(screen.getByText('Spring promo')).toBeInTheDocument();
     expect(screen.queryByText(/You save/)).toBeNull();
-    expect(screen.queryByText('$83/mo')).toBeNull();
+    expect(screen.queryByText('$83.00/mo')).toBeNull();
+  });
+
+  it('per-application headline: no struck-through anchor when the gap is the promo alone', () => {
+    // Mosquito-only with a manual promo: perTreatment is already net of the
+    // promo ($66.00 → $56.00 via $120.00/yr over 12 apps) and the promo renders as its
+    // own labeled row — the anchor strike-through must not restate it as
+    // member savings.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly12',
+          label: 'Monthly',
+          monthly: 56,
+          visitsPerYear: 12,
+          perTreatment: 56,
+          perVisit: 66,
+          manualDiscount: { amount: 120, recurringAmount: 120, label: 'Spring promo' },
+        }}
+        waveGuardTier="Bronze"
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getByText('Spring promo')).toBeInTheDocument();
+    // Net per-application headline renders…
+    expect(screen.getByText('$56.00')).toBeInTheDocument();
+    // …but no $66.00 anchor strike-through (the whole gap is the promo).
+    expect(screen.queryByText(/\$66.00 \/ application/)).toBeNull();
+  });
+
+  it('per-application headline: a real tier discount still anchors after the promo is netted out', () => {
+    // Anchor $66,.00 net $46.00: $10.00/app is the promo, the remaining $10.00/app is a
+    // genuine member discount — the strike-through stays.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly12',
+          label: 'Monthly',
+          monthly: 46,
+          visitsPerYear: 12,
+          perTreatment: 46,
+          perVisit: 66,
+          manualDiscount: { amount: 120, recurringAmount: 120, label: 'Spring promo' },
+        }}
+        waveGuardTier="Gold"
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getByText('Spring promo')).toBeInTheDocument();
+    expect(screen.getByText(/\$66.00 \/ application/)).toBeInTheDocument();
   });
 });

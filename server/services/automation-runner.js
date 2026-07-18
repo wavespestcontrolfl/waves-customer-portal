@@ -16,7 +16,7 @@
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { wrapNewsletter, wrapServiceEmail, ensureLegalTextFooter } = require('./email-template');
+const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -100,10 +100,17 @@ function renderAutomationStepContent({ template, htmlBody, textBody, customer, a
   const rawHtml = substitute(htmlBody || '', customer);
   const rawText = substitute(textBody || '', customer);
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
+  // Every automation renders the service chrome — "The Waves Newsletter"
+  // header is reserved for actual newsletter sends (owner call 2026-07-10;
+  // the new_lead intro was going out dressed as the newsletter). Marketing-
+  // stream automations (asm_group='newsletter') stay on the marketing ASM/
+  // suppression group, so the visible unsubscribe link must survive the
+  // wrapper swap — same pattern as referral.invite in email-template-library.
+  const unsubFooter = isNewsletterAutomation(template) && unsubscribeUrl
+    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from these emails.`
+    : null;
   const html = rawHtml
-    ? isNewsletterAutomation(template)
-      ? wrapNewsletter({ body: rawHtml, unsubscribeUrl })
-      : wrapServiceEmail({ body: rawHtml })
+    ? wrapServiceEmail({ body: rawHtml, footerNote: unsubFooter })
     : '';
   const text = isNewsletterAutomation(template)
     ? ensureLegalTextFooter(rawText, { unsubscribeUrl })
@@ -129,21 +136,24 @@ async function hasLocalContent(templateKey) {
  * Enroll a customer into a template's sequence. Idempotent on customer id
  * when present, otherwise on normalized lead email for lead-only estimates.
  * If there are no enabled steps, returns { enrolled: false }.
+ * `dbh` lets a caller run the whole enrollment on its own transaction (the
+ * appointment tagger holds a per-customer advisory lock and must not need a
+ * second pooled connection while doing so).
  */
-async function enrollCustomer({ templateKey, customer }) {
-  const template = await db('automation_templates').where({ key: templateKey }).first();
+async function enrollCustomer({ templateKey, customer, dbh = db }) {
+  const template = await dbh('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error(`Unknown automation template: ${templateKey}`);
   if (!template.enabled) return { enrolled: false, reason: 'template disabled' };
   if (!customer?.email) return { enrolled: false, reason: 'no email' };
   const normalizedEmail = String(customer.email || '').trim().toLowerCase();
   if (!normalizedEmail) return { enrolled: false, reason: 'no email' };
 
-  const steps = await db('automation_steps')
+  const steps = await dbh('automation_steps')
     .where({ template_key: templateKey, enabled: true })
     .orderBy('step_order', 'asc');
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
-  const existingQuery = db('automation_enrollments').where({ template_key: templateKey });
+  const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });
   } else {
@@ -165,9 +175,21 @@ async function enrollCustomer({ templateKey, customer }) {
     next_send_at: nextSendAt,
     enrolled_at: new Date(),
     updated_at: new Date(),
+    // A reactivation starts a NEW episode: nothing has sent in it yet, so the
+    // delivery stamp resets with the cursor. Leaving the old last_sent_at in
+    // place made a later fail-before-send read as delivered coverage in the
+    // event-enrollment dedupe (automation-enroll.js) and suppressed the
+    // transactional dunning fallback.
+    last_sent_at: null,
+    // Refresh the denormalized contact fields on reactivation — the scheduler
+    // sends to the ROW's email, so re-enrolling a customer who changed their
+    // address must not keep queueing steps to the stale one.
+    email: normalizedEmail,
+    first_name: customer.first_name || null,
+    last_name: customer.last_name || null,
   };
   if (existing) {
-    const [reactivated] = await db('automation_enrollments')
+    const [reactivated] = await dbh('automation_enrollments')
       .where({ id: existing.id })
       .update(reactivatePayload)
       .returning('*');
@@ -187,17 +209,17 @@ async function enrollCustomer({ templateKey, customer }) {
 
   let row;
   if (customer.id) {
-    [row] = await db('automation_enrollments')
+    [row] = await dbh('automation_enrollments')
       .insert(payload)
       .returning('*')
       .onConflict(['template_key', 'customer_id'])
       .merge(reactivatePayload);
   } else {
     try {
-      [row] = await db('automation_enrollments').insert(payload).returning('*');
+      [row] = await dbh('automation_enrollments').insert(payload).returning('*');
     } catch (err) {
       if (err.code !== '23505') throw err;
-      [row] = await db('automation_enrollments')
+      [row] = await dbh('automation_enrollments')
         .where({ template_key: templateKey })
         .whereNull('customer_id')
         .whereRaw('lower(email) = ?', [normalizedEmail])
@@ -214,6 +236,32 @@ async function enrollCustomer({ templateKey, customer }) {
  * marks the enrollment complete if it was the last step, or failed
  * if SendGrid rejects.
  */
+// Treatment-sequence templates whose FIRST enabled step carries the prep
+// guide. When that step actually sends, the enrolled customer's token-bearing
+// visit rows (minted by the appointment tagger at enroll time) get their
+// prep_sent_at confirmed-delivery stamp — the tracker's prep link gates on
+// it. Fail-soft: a stamp hiccup never fails a step that already sent.
+const PREP_TEMPLATE_BY_SEQUENCE_KEY = Object.freeze({
+  bed_bug: 'prep.bed_bug',
+  cockroach: 'prep.cockroach',
+  flea: 'prep.flea',
+});
+
+async function stampPrepSentForSequence(enrollment, step, steps) {
+  const prepKey = PREP_TEMPLATE_BY_SEQUENCE_KEY[enrollment.template_key];
+  if (!prepKey || !enrollment.customer_id) return;
+  if (!steps.length || step.id !== steps[0].id) return;
+  try {
+    await db('scheduled_services')
+      .where({ customer_id: enrollment.customer_id, prep_template_key: prepKey })
+      .whereNotNull('prep_token')
+      .whereNull('prep_sent_at')
+      .update({ prep_sent_at: db.fn.now() });
+  } catch (err) {
+    logger.warn(`[automation-runner] prep_sent_at stamp failed for enrollment ${enrollment.id}: ${err.message}`);
+  }
+}
+
 async function sendStep(enrollmentId, { testRecipient } = {}) {
   const enrollment = await db('automation_enrollments').where({ id: enrollmentId }).first();
   if (!enrollment) throw new Error('enrollment not found');
@@ -303,6 +351,8 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
     // For test sends we don't advance the enrollment — only real sends do.
     if (testRecipient) return { sent: true, messageId: res.messageId, test: true };
 
+    await stampPrepSentForSequence(enrollment, step, steps);
+
     return advanceEnrollment(enrollment, steps);
   } catch (err) {
     logger.error(`[automation-runner] send failed enrollment=${enrollment.id} step=${step.step_order}: ${err.message}`);
@@ -351,11 +401,19 @@ async function advanceEnrollment(enrollment, steps) {
 async function processDueSteps() {
   if (!sendgrid.isConfigured()) return { processed: 0, reason: 'sendgrid not configured' };
 
-  const due = await db('automation_enrollments')
-    .where({ status: 'active' })
-    .where('next_send_at', '<=', new Date())
-    .orderBy('next_send_at', 'asc')
-    .limit(50);
+  // Enabled templates only: toggling an automation off in the Automations tab
+  // must HOLD its in-flight enrollments immediately, not just block new ones.
+  // next_send_at stays in the past, so re-enabling resumes on the next tick.
+  // (Operator test-sends bypass this on purpose — testSequence renders and
+  // sends directly, so a disabled sequence can be proofed before enabling.)
+  const due = await db('automation_enrollments as e')
+    .join('automation_templates as t', 't.key', 'e.template_key')
+    .where('e.status', 'active')
+    .where('t.enabled', true)
+    .where('e.next_send_at', '<=', new Date())
+    .orderBy('e.next_send_at', 'asc')
+    .limit(50)
+    .select('e.id');
 
   if (!due.length) return { processed: 0 };
 

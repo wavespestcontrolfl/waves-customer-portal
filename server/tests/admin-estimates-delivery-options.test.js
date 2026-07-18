@@ -231,6 +231,22 @@ describe('admin estimate delivery option validation', () => {
     })).toBeNull();
   });
 
+  test('allows invoice mode for a quote-required manual-quote draft (commercial handoff)', () => {
+    // The estimator's commercial handoff saves a quote-required draft whose
+    // totals are zero by design — pricing arrives when the proposal lines are
+    // authored on the builder page it navigates to.
+    expect(validateEstimateDeliveryOptions({
+      showOneTimeOption: false,
+      billByInvoice: true,
+      onetimeTotal: 0,
+      monthlyTotal: 0,
+      annualTotal: 0,
+      estimateData: {
+        result: { quoteRequired: true },
+      },
+    })).toBeNull();
+  });
+
   test('still rejects invoice mode for a proposal with no priced lines', () => {
     expect(validateEstimateDeliveryOptions({
       showOneTimeOption: false,

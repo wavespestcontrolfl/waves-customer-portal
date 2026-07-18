@@ -1,8 +1,8 @@
 // Lawn Report V2 — customer-facing visual insight layer.
 //
-// Presentational components ONLY: every component is driven by props so they can
-// render from the eventual `/api/reports/:token/data` payload (and from mock data
-// in the dev preview at /report-v2-preview). Lightweight inline SVG/CSS — no
+// Presentational components ONLY: every component is driven by props and renders
+// from the live `/api/reports/:token/data` payload's `reportV2` key (the dev
+// preview page was removed once V2 went live). Lightweight inline SVG/CSS — no
 // charting dependency. Customer-surface warm tokens (NOT the admin monochrome).
 //
 // Honest-copy rules baked in here are presentation-side guards only — the real
@@ -20,10 +20,10 @@ export const PrintContext = createContext(false);
 function usePrint() { return useContext(PrintContext); }
 
 // ── Surface tokens (mirror LawnReportViewPage / public estimate surface) ──────
-const TEXT = CUSTOMER_SURFACE.text;
-const BODY = CUSTOMER_SURFACE.body;
+const TEXT = 'var(--text)'; // report ink var — resolves per theme (glass navy / doc ink); was CUSTOMER_SURFACE.text (old marketing navy)
+const BODY = 'var(--text)'; // prose uses the same ink as the rest of the report body
 // muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
-const MUTED = CUSTOMER_SURFACE.muted;
+const MUTED = 'var(--muted)'; // single supporting gray, matches the page
 const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
@@ -91,26 +91,71 @@ function useMounted(delay = 40) {
   return m;
 }
 
+
+// Scroll-triggered variant: flips true when the element scans into view, so
+// gauges fill as the customer reaches them (owner ask 2026-07-09). Print and
+// reduced-motion render the final frame immediately.
+function useInViewOnce(threshold = 0.35) {
+  const print = usePrint();
+  const reduce = print || (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const ref = useRef(null);
+  const [inView, setInView] = useState(reduce);
+  useEffect(() => {
+    if (reduce || inView) return undefined;
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') { setInView(true); return undefined; }
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) { setInView(true); obs.disconnect(); }
+    }, { threshold });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [reduce, inView, threshold]);
+  return [ref, inView];
+}
+
+// Counts the displayed number up in step with the ring draw-in; snaps straight
+// to the final value for print / reduced motion.
+function useCountUp(target, run, duration = 900) {
+  const print = usePrint();
+  const reduce = print || (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const [shown, setShown] = useState(reduce ? target : 0);
+  useEffect(() => {
+    if (!Number.isFinite(target)) return undefined;
+    if (reduce || !run) { setShown(reduce ? target : 0); return undefined; }
+    let raf;
+    const t0 = performance.now();
+    const tick = (t) => {
+      const p = Math.min(1, (t - t0) / duration);
+      setShown(target * (1 - Math.pow(1 - p, 3)));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, run, reduce, duration]);
+  return shown;
+}
+
 // Circular score ring. value null → renders a muted "—" with the tracking color.
 // The arc fills on mount (animated strokeDashoffset).
 export function ScoreRing({ value, size = 120, stroke = 10, status }) {
-  const mounted = useMounted();
+  const [ringRef, ringInView] = useInViewOnce(0.4);
   const n = toScore(value);
   const known = Number.isFinite(n);
+  const shown = useCountUp(known ? Math.round(n) : 0, known && ringInView);
   const meta = statusMeta(status || (known ? scoreStatus(n) : 'tracking'));
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const pct = known ? clamp(n) / 100 : 0;
   const offset = c * (1 - pct);
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img"
+    <svg ref={ringRef} width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img"
          aria-label={known ? `Score ${Math.round(n)} of 100` : 'Not yet scored'}>
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={BORDER} strokeWidth={stroke} />
       {known && (
         <circle
           cx={size / 2} cy={size / 2} r={r} fill="none"
           stroke={meta.color} strokeWidth={stroke} strokeLinecap="round"
-          strokeDasharray={c} strokeDashoffset={mounted ? offset : c}
+          strokeDasharray={c} strokeDashoffset={ringInView ? offset : c}
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
           style={{ transition: 'stroke-dashoffset 0.9s cubic-bezier(0.4,0,0.2,1)' }}
         />
@@ -118,7 +163,7 @@ export function ScoreRing({ value, size = 120, stroke = 10, status }) {
       <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle"
             style={{ fontFamily: FONTS.heading, fontWeight: 800, fill: known ? TEXT : MUTED }}
             fontSize={size * 0.3}>
-        {known ? Math.round(n) : '—'}
+        {known ? Math.round(shown) : '—'}
       </text>
     </svg>
   );
@@ -143,7 +188,7 @@ function Card({ children, style }) {
   // data-glass is inert without html[data-glass-theme] (set unconditionally on
   // the live report view) — glass-theme.css supplies all material.
   return (
-    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 16, padding: 24, marginBottom: 20, ...style }}>
       {children}
     </section>
   );
@@ -153,7 +198,7 @@ function CardTitle({ children, sub }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <h2 style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: 0 }}>{children}</h2>
-      {sub ? <div style={{ fontSize: 13, color: MUTED, marginTop: 3 }}>{sub}</div> : null}
+      {sub ? <div style={{ fontSize: 14, color: MUTED, marginTop: 3 }}>{sub}</div> : null}
     </div>
   );
 }
@@ -161,7 +206,9 @@ function CardTitle({ children, sub }) {
 function inchLabel(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0) return null;
-  return `${String(Number(n.toFixed(2))).replace(/\.?0+$/, '')}"`;
+  // Number() already drops trailing decimal zeros; the old /\.?0+$/ regex
+  // also ate integer zeros — 0 rendered as a bare '"' and 10 as '1"'.
+  return `${Number(n.toFixed(2))}"`;
 }
 
 // ── 1. Lawn Health Snapshot (hero) ──────────────────────────────────────────────
@@ -184,9 +231,9 @@ export function LawnSnapshotHero({ snapshot = {} }) {
           <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Lawn Status
           </div>
-          <h1 style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
+          <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
             {statusHeadline || statusMeta(status).label}
-          </h1>
+          </h2>
           {scoreExplanation ? (
             <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{scoreExplanation}</p>
           ) : null}
@@ -219,14 +266,14 @@ export function LawnSnapshotHero({ snapshot = {} }) {
       ) : null}
 
       <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BORDER}`, display: 'grid', gap: 10 }}>
-        {wavesNext ? <KeyLine label="What Waves will do next" value={wavesNext} dot={COLORS.teal} /> : null}
+        {wavesNext ? <KeyLine label="What Waves will do next" value={wavesNext} dot={'#0A7EC2'} /> : null}
         {customerAction
           ? <KeyLine label="Your next step" value={customerAction} dot={COLORS.green} />
           : (noActionNeeded ? <KeyLine label="Your next step" value="No action is needed from you right now — we’ve got it covered." dot={COLORS.green} /> : null)}
-        {nextVisitText ? <KeyLine label="Next lawn visit" value={nextVisitText} dot={COLORS.blueDeeper} /> : null}
+        {nextVisitText ? <KeyLine label="Next lawn visit" value={nextVisitText} dot={COLORS.glassNavy} /> : null}
       </div>
       {seasonalNote ? (
-        <div style={{ marginTop: 14, fontSize: 13, color: MUTED, fontStyle: 'italic', lineHeight: 1.5 }}>{seasonalNote}</div>
+        <div style={{ marginTop: 14, fontSize: 14, color: MUTED, fontStyle: 'italic', lineHeight: 1.5 }}>{seasonalNote}</div>
       ) : null}
     </Card>
   );
@@ -275,7 +322,7 @@ function SliderArrow({ dir, onClick, disabled }) {
       className="lawn-photo-arrow"
       style={{
         position: 'absolute', top: '42%', [dir === 'prev' ? 'left' : 'right']: 8, transform: 'translateY(-50%)',
-        width: 36, height: 36, borderRadius: 999, border: 'none', background: 'rgba(27,44,91,0.82)', color: '#fff',
+        width: 36, height: 36, borderRadius: 999, border: 'none', background: 'rgba(4,57,94,0.82)', color: '#fff',
         fontSize: 20, fontWeight: 800, lineHeight: 1, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.3 : 1,
         display: 'grid', placeItems: 'center',
       }}
@@ -322,10 +369,12 @@ export function LawnPhotoStrip({ photos = [], summary = null }) {
           >
             {pics.map((p, i) => (
               <figure key={i} style={{ margin: 0, flex: '0 0 100%', scrollSnapAlign: 'center' }}>
+                {/* Eager on purpose: these are presigned URLs, and lazy
+                    deferred the fetch until after they expired — swiped-to
+                    slides rendered blank (owner-reported). ≤5 photos. */}
                 <img
                   src={p.url}
                   alt={p.label || 'Lawn photo'}
-                  loading="lazy"
                   style={{ width: '100%', height: 240, objectFit: 'cover', borderRadius: 12, border: `1px solid ${BORDER}`, display: 'block' }}
                 />
                 {p.label ? <figcaption style={{ fontSize: 12, color: MUTED, marginTop: 6 }}>{p.label}</figcaption> : null}
@@ -379,6 +428,7 @@ const CATEGORY_DETAIL = {
 
 export function VisualDiagnosisCards({ categories = [] }) {
   const print = usePrint();
+  const [barsRef, mounted] = useInViewOnce(0.25);
   const cats = categories.filter(Boolean);
   if (!cats.length) return null;
   return (
@@ -386,8 +436,8 @@ export function VisualDiagnosisCards({ categories = [] }) {
       <CardTitle sub="What our cameras and AI scored from today’s photos. Tap a row for the details.">Photo Diagnosis</CardTitle>
       {/* Visual-primary rows: the score ring + bar + status carry the read at a glance;
           the plain-language detail lives in the dropdown. */}
-      <div style={{ display: 'grid', gap: 8 }}>
-        {cats.map((c) => {
+      <div ref={barsRef} style={{ display: 'grid', gap: 8 }}>
+        {cats.map((c, i) => {
           const status = c.status || scoreStatus(c.score);
           const meta = statusMeta(status);
           const known = Number.isFinite(toScore(c.score));
@@ -407,7 +457,7 @@ export function VisualDiagnosisCards({ categories = [] }) {
                   </div>
                   {/* score bar — the primary visual read of where this sits 0–100 */}
                   <div style={{ marginTop: 10, height: 7, borderRadius: 999, background: '#F1EEE6', overflow: 'hidden' }}>
-                    {known ? <div style={{ width: `${pct}%`, height: '100%', background: meta.color, borderRadius: 999 }} /> : null}
+                    {known ? <div style={{ width: mounted ? `${pct}%` : '0%', height: '100%', background: meta.color, borderRadius: 999, transition: `width 0.8s cubic-bezier(0.34,1.56,0.64,1) ${0.15 + i * 0.09}s` }} /> : null}
                   </div>
                 </div>
               </div>
@@ -415,6 +465,9 @@ export function VisualDiagnosisCards({ categories = [] }) {
                 <details open={print} style={{ borderTop: `1px solid ${BORDER}`, padding: '9px 14px' }}>
                   <summary style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: MUTED, listStyle: 'none' }}>
                     What this means
+                    {/* listStyle:none removes the native disclosure triangle —
+                        keep a visible expand affordance in its place. */}
+                    <span aria-hidden="true" style={{ marginLeft: 6, fontSize: 10 }}>▾</span>
                   </summary>
                   <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
                     {sawValue ? <InsightLine label="What we saw" value={sawValue} strong /> : null}
@@ -514,15 +567,15 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       </div>
       {/* Stacked bar with a target marker — segments grow on mount */}
       <div style={{ position: 'relative', height: 26, borderRadius: 8, background: '#F1EEE6', overflow: 'hidden' }}>
-        {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: COLORS.teal, transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
-        {hasIrr ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: '#7CB9E8', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+        {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: '#0A7EC2', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+        {hasIrr ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: '#7CC7F0', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
         {Number.isFinite(target) ? (
           <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
         ) : null}
       </div>
       <div style={{ display: 'flex', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
-        {hasRain ? <Legend color={COLORS.teal} label="Rain" /> : null}
-        {hasIrr ? <Legend color="#7CB9E8" label="Irrigation" /> : null}
+        {hasRain ? <Legend color={'#0A7EC2'} label="Rain" /> : null}
+        {hasIrr ? <Legend color="#7CC7F0" label="Irrigation" /> : null}
         {Number.isFinite(target) ? <Legend color={TEXT} label="Target" /> : null}
       </div>
       <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -534,7 +587,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
       {water.coverageWatch ? (
-        <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 13, color: BODY, lineHeight: 1.5 }}>
+        <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>Coverage watch:</strong> total weekly water looks adequate, but a few areas may not be getting even coverage — worth checking that your sprinklers reach those spots rather than watering the whole lawn more.
         </div>
       ) : null}
@@ -562,7 +615,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
             href={irrigationHref}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 7,
-              background: COLORS.blueDeeper, color: '#fff', textDecoration: 'none',
+              background: COLORS.glassNavy, color: '#fff', textDecoration: 'none',
               fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14,
               padding: '11px 18px', borderRadius: 999,
             }}
@@ -606,13 +659,23 @@ export function RainLast7DaysChart({ days = [], confidence = null }) {
           return (
             <div
               key={i}
+              role="button"
+              tabIndex={0}
+              aria-pressed={on}
+              aria-label={`${d.d}: ${inchLabel(v) || '0"'} of rain`}
               onMouseEnter={() => setActive(i)} onMouseLeave={() => setActive(null)} onClick={() => setActive((a) => (a === i ? null : i))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setActive((a) => (a === i ? null : i));
+                }
+              }}
               style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, cursor: 'pointer' }}
             >
               <div style={{ fontSize: 10.5, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{(on || v) ? inchLabel(v) || '0"' : ''}</div>
               <div style={{
                 width: '100%', maxWidth: 26, height: Math.max(2, mounted ? h : 0),
-                background: v ? (on ? COLORS.blueDeeper : COLORS.teal) : BORDER, borderRadius: 4,
+                background: v ? (on ? COLORS.glassNavy : '#0A7EC2') : BORDER, borderRadius: 4,
                 transition: `height 0.7s cubic-bezier(0.4,0,0.2,1) ${i * 45}ms, background 0.15s ease`,
               }} />
               <div style={{ fontSize: 11, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{d.d}</div>
@@ -671,7 +734,8 @@ export function MowingHeightGauge({ mowing = {} }) {
       ) : null}
       {photoUrl ? (
         <figure style={{ margin: hasGauge ? '16px 0 0' : 0 }}>
-          <img src={photoUrl} alt="On-site lawn length" loading="lazy"
+          {/* Eager: presigned URL — see LawnPhotoStrip. */}
+          <img src={photoUrl} alt="On-site lawn length"
             style={{ width: '100%', borderRadius: 10, display: 'block', border: `1px solid ${COLORS.greenLight}` }} />
           <figcaption style={{ marginTop: 6, fontSize: 12, color: MUTED }}>On-site lawn length</figcaption>
         </figure>
@@ -685,7 +749,7 @@ export function MowingHeightGauge({ mowing = {} }) {
 
 // ── 5b. What Waves did today (solutions / products applied) ──────────────────────
 const KIND_DOT = {
-  fungicide: COLORS.teal, herbicide: COLORS.orange, pre_emergent: COLORS.orange,
+  fungicide: '#0A7EC2', herbicide: COLORS.orange, pre_emergent: COLORS.orange,
   insecticide: COLORS.red, fertilizer: COLORS.green, supplement: COLORS.green, other: COLORS.grayMid,
 };
 
@@ -731,11 +795,29 @@ export function LawnTreatmentCard({ treatment = {} }) {
 }
 
 // ── 5c. Visit timeline (visual, animated) ────────────────────────────────────────
-const TIMELINE_ICON = {
-  technician_en_route: '🚚', en_route: '🚚', arrived_on_site: '📍', technician_on_site: '📍',
-  inspection_started: '🔍', service_started: '🌱', service_completed: '✓', report_published: '📋',
-  quality_reviewed: '✓',
-};
+// Crafted inline-SVG glyphs for the event rows (replaces emoji — glass language,
+// thin white strokes on the status disc).
+function TimelineGlyph({ type }) {
+  const stroke = { fill: 'none', stroke: '#fff', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  const kind = /en_route/.test(type) ? 'route'
+    : /on_site|arrived/.test(type) ? 'pin'
+    : /completed|reviewed/.test(type) ? 'check'
+    : /inspection/.test(type) ? 'scan'
+    : /service_started/.test(type) ? 'leaf'
+    : /report/.test(type) ? 'doc' : 'dot';
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style={{ display: 'block' }}>
+      {kind === 'route' && <path d="M2 7 h8 M7 3.5 L10.5 7 L7 10.5" {...stroke} />}
+      {kind === 'pin' && <><path d="M7 12.5 C7 12.5 2.8 8.6 2.8 5.8 A4.2 4.2 0 1 1 11.2 5.8 C11.2 8.6 7 12.5 7 12.5 Z" {...stroke} /><circle cx="7" cy="5.8" r="1.4" {...stroke} /></>}
+      {kind === 'check' && <path d="M2.8 7.4 L5.8 10.2 L11.2 3.8" {...stroke} />}
+      {kind === 'scan' && <><circle cx="6" cy="6" r="3.4" {...stroke} /><path d="M8.6 8.6 L11.6 11.6" {...stroke} /></>}
+      {kind === 'leaf' && <path d="M7 12 C3 9 3.4 4 11 2.4 C11.4 9 9 11 7 12 Z M7 12 C7 9 8 6.4 9.8 4.6" {...stroke} />}
+      {kind === 'doc' && <><rect x="3.4" y="2" width="7.2" height="10" rx="1.2" {...stroke} /><path d="M5.4 5 h3.2 M5.4 7.4 h3.2" {...stroke} /></>}
+      {kind === 'dot' && <circle cx="7" cy="7" r="2" fill="#fff" />}
+    </svg>
+  );
+}
+
 export function LawnVisitTimeline({ timeline = {} }) {
   const mounted = useMounted();
   const events = timeline && Array.isArray(timeline.events) ? timeline.events.filter(Boolean) : [];
@@ -762,14 +844,14 @@ export function LawnVisitTimeline({ timeline = {} }) {
             >
               {!isLast ? <span style={{ position: 'absolute', left: 13, top: 28, bottom: 0, width: 2, background: BORDER }} /> : null}
               <span style={{ flex: 'none', width: 28, height: 28, borderRadius: 999, background: COLORS.green, color: '#fff', display: 'grid', placeItems: 'center', fontSize: 14, fontWeight: 800, zIndex: 1 }}>
-                {TIMELINE_ICON[e.type] || '•'}
+                <TimelineGlyph type={e.type || ''} />
               </span>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' }}>
                   <span style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{e.label}</span>
                   {e.displayTime ? <span style={{ fontFamily: FONTS.mono, fontSize: 12.5, color: MUTED, flex: 'none' }}>{e.displayTime}</span> : null}
                 </div>
-                {desc ? <div style={{ fontSize: 13, color: BODY, lineHeight: 1.45, marginTop: 2 }}>{desc}</div> : null}
+                {desc ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.45, marginTop: 2 }}>{desc}</div> : null}
               </div>
             </div>
           );
@@ -788,8 +870,8 @@ function ScoreBadge({ score, side }) {
   return (
     <div className="lawn-photo-score" style={{
       position: 'absolute', bottom: 10, [side]: 10, zIndex: 3,
-      background: 'rgba(27,44,91,0.86)', color: '#fff', borderRadius: 999, padding: '3px 10px',
-      fontFamily: FONTS.heading, fontWeight: 800, fontSize: 13, lineHeight: 1,
+      background: 'rgba(4,57,94,0.86)', color: '#fff', borderRadius: 999, padding: '3px 10px',
+      fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14, lineHeight: 1,
     }}>{Math.round(toScore(score))}</div>
   );
 }
@@ -816,7 +898,10 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
 
   const before = pics[0];
   const after = pics[pics.length - 1];
-  const delta = toScore(after.score) - toScore(before.score);
+  // difference of the ROUNDED scores, so the delta always agrees with the
+  // ScoreBadge numbers shown beside it (codex P2: rounding the raw delta can
+  // disagree with round(after) - round(before) near .5 boundaries)
+  const delta = Math.round(toScore(after.score)) - Math.round(toScore(before.score));
   const H = 260;
 
   const setFromX = (clientX) => {
@@ -848,10 +933,26 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
       ) : (
         <div
           ref={ref}
+          role="slider"
+          tabIndex={0}
+          aria-label="First-visit vs now photo comparison divider"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(pos)}
           onPointerDown={onDown}
           onPointerMove={onMove}
           onPointerUp={onUp}
           onPointerLeave={onUp}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+              e.preventDefault();
+              setPos((p) => Math.max(0, Math.min(100, p + (e.key === 'ArrowLeft' ? -5 : 5))));
+            } else if (e.key === 'Home') {
+              e.preventDefault(); setPos(0);
+            } else if (e.key === 'End') {
+              e.preventDefault(); setPos(100);
+            }
+          }}
           style={{ position: 'relative', height: H, borderRadius: 12, overflow: 'hidden', border: `1px solid ${BORDER}`, cursor: 'ew-resize', touchAction: 'none', userSelect: 'none' }}
         >
           {/* AFTER (latest) is the base layer */}
@@ -880,7 +981,7 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
         </div>
       ) : null}
       {note ? (
-        <div style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 13, color: BODY, lineHeight: 1.5 }}>{note}</div>
+        <div style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>{note}</div>
       ) : null}
     </Card>
   );
@@ -889,7 +990,7 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
 // ── 6. Trends across visits ──────────────────────────────────────────────────────
 // Reusable line chart. points = [{ label, value }]. Needs 2+ scored points to draw
 // (a single visit has no trend — matches V1, which hides the trend until 2+ visits).
-export function LawnTrendChart({ title, sub, points = [], domain, unit = '', accent = COLORS.teal, zeroLine = false, band = null, compact = false, footnote = null }) {
+export function LawnTrendChart({ title, sub, points = [], domain, unit = '', accent = '#0A7EC2', zeroLine = false, band = null, compact = false, footnote = null }) {
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const gidRef = useRef(`lg-${Math.random().toString(36).slice(2)}`);
@@ -924,7 +1025,10 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
     <Card style={compact ? { marginBottom: 0, padding: 16 } : undefined}>
       <CardTitle sub={compact ? undefined : sub}>{title}</CardTitle>
       {compact ? <div style={{ fontSize: 12, color: MUTED, marginTop: -8, marginBottom: 8 }}>{sub}</div> : null}
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label={`${title} trend`} onMouseLeave={() => setActive(null)} style={{ touchAction: 'pan-y' }}>
+      {/* role="group", NOT "img": an img role makes every descendant
+          presentational, which would strip the keyboard-focusable point
+          buttons back out of the accessibility tree (codex P2 #2824 r2). */}
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="group" aria-label={`${title} trend`} onMouseLeave={() => setActive(null)} style={{ touchAction: 'pan-y' }}>
         <defs>
           <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={accent} stopOpacity="0.28" />
@@ -952,9 +1056,16 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
               fill={active === i || i === pts.length - 1 ? accent : CARD} stroke={accent} strokeWidth="2"
               style={{ transition: 'r 0.15s ease' }}
             />
-            {/* generous transparent hit target for hover/tap */}
+            {/* generous transparent hit target for hover/tap/keyboard */}
             <circle cx={x(i)} cy={y(p.value)} r="13" fill="transparent" style={{ cursor: 'pointer' }}
-              onMouseEnter={() => setActive(i)} onClick={() => setActive((a) => (a === i ? null : i))} />
+              role="button" tabIndex={0} aria-label={`${p.label}: ${fmt(p.value)}`}
+              onMouseEnter={() => setActive(i)} onClick={() => setActive((a) => (a === i ? null : i))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setActive((a) => (a === i ? null : i));
+                }
+              }} />
           </g>
         ))}
         {activePt ? (
@@ -980,11 +1091,31 @@ function gapAccent(v) { return Math.abs(Number(v)) <= 0.25 ? COLORS.green : COLO
 const lastVal = (pts = []) => { const f = [...pts].reverse().find((p) => Number.isFinite(toScore(p.value))); return f ? toScore(f.value) : NaN; };
 
 export function LawnTrends({ trends = {} }) {
-  const { overall, waterGap, mowing, weed, stress, coverage, color, mowingBand = [3.5, 4.0], seasonalNote } = trends;
+  const { overall, waterGap, mowing, weed, stress, coverage, color, seasonalNote } = trends;
+  // The server emits [null, null] when no ideal band is known for the grass —
+  // a destructure default only covers undefined, so [null, null] used to ride
+  // through bandAccent (v >= null && v <= null → false) and paint a false
+  // orange "off-target" accent with no band drawn. Unknown band → neutral
+  // accent, no band overlay, honest subtitle.
+  const rawBand = Array.isArray(trends.mowingBand) ? trends.mowingBand : [3.5, 4.0];
+  // null-check BEFORE Number(): Number(null) === 0 is finite — the exact trap
+  // that produced the false accent in the first place
+  const mowingBand = (rawBand[0] != null && rawBand[1] != null
+    && Number.isFinite(Number(rawBand[0])) && Number.isFinite(Number(rawBand[1]))) ? rawBand : null;
   const hasOverall = (overall || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2;
   const minis = [
     waterGap && { key: 'water', title: 'Water Gap', sub: 'vs. weekly target', points: waterGap, unit: '"', zeroLine: true, accent: gapAccent(lastVal(waterGap)) },
-    mowing && { key: 'mow', title: 'Mowing Height', sub: 'vs. ideal band', points: mowing, unit: '"', band: mowingBand, accent: bandAccent(lastVal(mowing), mowingBand[0], mowingBand[1]) },
+    mowing && {
+      key: 'mow',
+      title: 'Mowing Height',
+      sub: mowingBand ? 'vs. ideal band' : 'recent readings',
+      points: mowing,
+      unit: '"',
+      band: mowingBand || undefined,
+      // COLORS.blue does not exist in theme-brand (codex P2) — unknown band
+      // takes the neutral slate used for 'tracking' states
+      accent: mowingBand ? bandAccent(lastVal(mowing), mowingBand[0], mowingBand[1]) : COLORS.grayMid,
+    },
     weed && { key: 'weed', title: 'Weed Cleanliness', sub: 'higher is better', points: weed, domain: [0, 100], accent: scoreAccent(lastVal(weed)) },
     coverage && { key: 'cov', title: 'Turf Coverage', sub: 'higher is better', points: coverage, domain: [0, 100], accent: scoreAccent(lastVal(coverage)) },
     color && { key: 'color', title: 'Color & Vigor', sub: 'higher is better', points: color, domain: [0, 100], accent: scoreAccent(lastVal(color)) },

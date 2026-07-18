@@ -1,5 +1,6 @@
 let mockDbHandler = () => { throw new Error('db handler not configured'); };
 const mockRetrievePaymentIntent = jest.fn();
+const mockRetrievePaymentMethod = jest.fn();
 const mockCreateEstimateDepositIntent = jest.fn();
 
 jest.mock('../models/db', () => {
@@ -40,6 +41,7 @@ const mockFindLinkedAppt = jest.fn(async () => null);
 
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: (...args) => mockRetrievePaymentIntent(...args),
+  retrievePaymentMethod: (...args) => mockRetrievePaymentMethod(...args),
   createEstimateDepositIntent: (...args) => mockCreateEstimateDepositIntent(...args),
   refundPaymentIntent: (...args) => mockRefundPaymentIntent(...args),
 }));
@@ -79,6 +81,7 @@ const {
   ensureDepositSatisfied,
   handleDepositIntentSucceeded,
   pendingDepositCredit,
+  pendingDepositCreditForCustomer,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
   _private: { depositIntentMatchesEstimate },
@@ -422,6 +425,29 @@ describe('ensureDepositSatisfied', () => {
     expect(result.receivedTotal).toBe(70);
     expect(upserts).toHaveLength(1);
     expect(upserts[0].stripe_payment_intent_id).toBe('pi_1');
+  });
+
+  it('live verification WINNING the webhook race still fires the surcharge-bypass audit (r6)', async () => {
+    // A modified client confirmed a CREDIT card directly at face value
+    // (quote_at_confirm, no card_surcharge stamp, PM not a wallet), and the
+    // accept flow's live verification records it before the webhook — the
+    // webhook then replays out, so THIS path must raise the alert.
+    const upserts = [];
+    const table = depositsTable({
+      receivedTotals: [0, 49],
+      upserts,
+      ledgerRow: { status: 'received', amount: '49.00' },
+    });
+    mockDbHandler = () => table;
+    mockRetrievePaymentIntent.mockResolvedValue({
+      id: 'pi_bypass', status: 'succeeded', amount_received: 4900, payment_method: 'pm_credit',
+      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', surcharge_policy: 'quote_at_confirm' },
+    });
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_credit', type: 'card', card: { funding: 'credit', wallet: null } });
+
+    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_bypass' });
+    expect(result.satisfied).toBe(true);
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
   });
 
   it('a REFUNDED ledger row never satisfies, even though Stripe still says succeeded', async () => {
@@ -1165,6 +1191,110 @@ describe('webhook + invoice credit', () => {
     });
     expect(await pendingDepositCredit('est-1')).toBeNull();
   });
+
+  // Mock helper: the customer-wide scan query ('estimate_deposits as d')
+  // returns `scanRows`; the per-estimate pendingDepositCredit query returns
+  // `ledger[estimateId]`. `where({ estimate_id })` records which estimate the
+  // ledger read is scoped to.
+  const mockCustomerDepositLedger = (scanRows, ledger) => {
+    mockDbHandler = (table) => {
+      const b = {
+        join() { return this; },
+        where(arg) {
+          if (arg && typeof arg === 'object' && arg.estimate_id) b._estimateId = arg.estimate_id;
+          return this;
+        },
+        orderBy() { return this; },
+        select: async () => (table === 'estimate_deposits as d'
+          ? scanRows
+          : (ledger[b._estimateId] || [])),
+      };
+      return b;
+    };
+  };
+
+  it('pendingDepositCreditForCustomer skips exhausted estimates and tags the owning estimateId', async () => {
+    // est-old's deposit is fully consumed; est-new still has an open $49 —
+    // the helper must skip past est-old (oldest first) and return est-new's
+    // credit with the estimateId the caller needs for consumption.
+    mockCustomerDepositLedger(
+      [
+        { estimate_id: 'est-old', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0001' },
+        { estimate_id: 'est-new', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0002' },
+      ],
+      {
+        'est-old': [{ id: 'd1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' }],
+        'est-new': [{ id: 'd2', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' }],
+      },
+    );
+    const credit = await pendingDepositCreditForCustomer('cust-1');
+    expect(credit.estimateId).toBe('est-new');
+    expect(credit.estimateSlug).toBe('EST-2026-0002');
+    expect(credit.amount).toBe(49);
+    expect(credit.lineItem.unit_price).toBe(-49);
+    expect(credit.lineItem.category).toBe('deposit_credit');
+  });
+
+  it('an exhausted older row must not hide a later open row on the SAME estimate (Codex round-1 P2)', async () => {
+    // d1 was split between credit and refund (nothing left); d2 is fully
+    // open. The estimate-level aggregate is $99 — a per-row gate on d1 would
+    // have skipped the whole estimate and stranded d2.
+    mockCustomerDepositLedger(
+      [
+        { estimate_id: 'est-1', amount: '49.00', credited_amount: '24.00', refunded_amount: '25.00', estimate_slug: 'EST-2026-0009' },
+        { estimate_id: 'est-1', amount: '99.00', credited_amount: '0.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0009' },
+      ],
+      {
+        'est-1': [
+          { id: 'd1', amount: '49.00', credited_amount: '24.00', refunded_amount: '25.00' },
+          { id: 'd2', amount: '99.00', credited_amount: '0.00', refunded_amount: '0.00' },
+        ],
+      },
+    );
+    const credit = await pendingDepositCreditForCustomer('cust-1');
+    expect(credit.estimateId).toBe('est-1');
+    expect(credit.amount).toBe(99);
+    expect(credit.lineItem.unit_price).toBe(-99);
+  });
+
+  it('picks the estimate with the oldest OPEN row, not one fronted by an exhausted early row (Codex round-3 FIFO)', async () => {
+    // Scan order (created_at asc): est-a's earliest row is exhausted, est-b's
+    // row is the oldest still-OPEN deposit, est-a has a later open row. The
+    // true FIFO winner is est-b — est-a must not jump the queue on the
+    // strength of its early fully-consumed row.
+    mockCustomerDepositLedger(
+      [
+        { estimate_id: 'est-a', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0100' },
+        { estimate_id: 'est-b', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0101' },
+        { estimate_id: 'est-a', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0100' },
+      ],
+      {
+        'est-a': [
+          { id: 'a1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' },
+          { id: 'a2', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' },
+        ],
+        'est-b': [{ id: 'b1', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' }],
+      },
+    );
+    const credit = await pendingDepositCreditForCustomer('cust-1');
+    expect(credit.estimateId).toBe('est-b');
+    expect(credit.estimateSlug).toBe('EST-2026-0101');
+    expect(credit.amount).toBe(49);
+  });
+
+  it('pendingDepositCreditForCustomer returns null when every row is consumed or refunded (or none exist)', async () => {
+    mockCustomerDepositLedger(
+      [
+        { estimate_id: 'est-1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0001' },
+        { estimate_id: 'est-2', amount: '99.00', credited_amount: '0.00', refunded_amount: '99.00', estimate_slug: 'EST-2026-0002' },
+      ],
+      {},
+    );
+    expect(await pendingDepositCreditForCustomer('cust-1')).toBeNull();
+    mockDbHandler = () => ({ join() { return this; }, where() { return this; }, orderBy() { return this; }, select: async () => [] });
+    expect(await pendingDepositCreditForCustomer('cust-1')).toBeNull();
+    expect(await pendingDepositCreditForCustomer(null)).toBeNull();
+  });
 });
 
 describe('deposit reversal webhooks (refunds + disputes)', () => {
@@ -1173,10 +1303,11 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
 
   // updateResult mimics knex's affected-row count for the CONDITIONAL flip;
   // 0 = the row transitioned under us and the handler must re-read.
-  function reversalDb({ row, updates = [], updateResult = 1 }) {
+  function reversalDb({ row, updates = [], updateResult = 1, cols = { failed_refund_ids: {} } }) {
     return (table) => {
       if (table !== 'estimate_deposits') throw new Error(`unexpected table: ${table}`);
       return {
+        columnInfo: async () => cols,
         where(criteria) {
           if (criteria && criteria.id) {
             return {
@@ -1234,6 +1365,33 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     expect(updates2[0].payload).toMatchObject({ status: 'refunded', refunded_amount: 99 });
   });
 
+  it('a dashboard refund of the FACE amount on a surcharged deposit records the full face (never deflated) — r4', async () => {
+    // $49 deposit captured at $50.42 (card_surcharge 1.42). An operator
+    // refunds "$49.00" from the dashboard, meaning the whole deposit.
+    // Proportional deflation would record ~$47.62 and leave $1.38 able to
+    // satisfy acceptance — the conservative reading records the full face.
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00', refunded_amount: null, card_surcharge: '1.42' },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 4900 });
+    expect(result.handled).toBe(true);
+    expect(updates[0].payload).toMatchObject({ status: 'refunded', refunded_amount: 49 });
+  });
+
+  it('the echo of OUR prorated sweep refund on a surcharged deposit replays instead of re-recording — r4', async () => {
+    // Sweep refunded a $20 remainder + $0.58 prorated fee = 2058c gross;
+    // the ledger already stamps refunded_amount 20.00. The gross deflates
+    // back to ~2000c and must read as a replay, not a new dashboard refund.
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'credited', estimate_id: 'est-1', amount: '49.00', credited_amount: '29.00', refunded_amount: '20.00', card_surcharge: '1.42' },
+      updates: [],
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 2058 });
+    expect(result).toEqual({ handled: true, replay: true });
+  });
+
   it('an already-credited deposit flips AND flags for manual reconciliation', async () => {
     const updates = [];
     mockDbHandler = reversalDb({
@@ -1255,6 +1413,40 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     const result = await handleDepositChargeReversed('pi_1', 'charge.refunded');
     expect(result.replay).toBe(true);
     expect(updates).toHaveLength(0);
+  });
+
+  it('a refund whose failure was already recorded is REFUSED — the ledger never flips for money Stripe kept', async () => {
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00', failed_refund_ids: ['re_bounced'] },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { refundId: 're_bounced' });
+    expect(result).toEqual({ handled: true, bounced: true });
+    expect(updates).toHaveLength(0);
+  });
+
+  it('a refund NOT in the failed fence still reverses normally', async () => {
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00', failed_refund_ids: ['re_bounced'] },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { refundId: 're_ok' });
+    expect(result.handled).toBe(true);
+    expect(updates[0].payload.status).toBe('refunded');
+  });
+
+  it('pre-migration (no failed_refund_ids column) skips the fence and reverses', async () => {
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00' },
+      updates,
+      cols: {},
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { refundId: 're_any' });
+    expect(result.handled).toBe(true);
+    expect(updates[0].payload.status).toBe('refunded');
   });
 
   it('the flip is CONDITIONAL on the state the alert decision used', async () => {
@@ -1408,6 +1600,76 @@ describe('refundUnconsumedDeposits — exempt-path sweep', () => {
     expect(result.refunded).toBe(0);
     expect(state.rows[0].status).toBe('received');
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
+  });
+
+  it('includeSurchargeShare:false refunds FACE VALUE only — the captured fee stays earned (cancel-signup ruling 2026-07-15)', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    expect(result.refunded).toBe(49);
+    // Face cents only — no prorated fee share rides the refund.
+    expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 4900 });
+    // refunded_surcharge 0 = the explicit "fee stayed earned" marker the
+    // deposit revenue rollup reads (vs NULL = legacy proration fallback).
+    expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49, refunded_surcharge: 0 });
+    // The CLAIM update pre-stamped the face total so a webhook echo landing
+    // mid-'refunding' hits the replay guard instead of deflating the stamp.
+    const claimUpdate = state.updates.find((u) => u.payload.status === 'refunding');
+    expect(claimUpdate.payload.refunded_amount).toBe(49);
+  });
+
+  it('the prorated sweep stamps the fee share it returned in refunded_surcharge', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'exempt_accept:prepay_annual' });
+    expect(result.refunded).toBe(49);
+    // Full remainder + full fee share rides the refund; the stamp records it.
+    expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 5042 });
+    expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49, refunded_surcharge: 1.42 });
+  });
+
+  it('never rolls back after Stripe succeeds — a failed terminal stamp keeps the refunding claim + pre-stamp', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = (table) => {
+      const c = handler(table);
+      const origUpdate = c.update;
+      c.update = async (payload) => {
+        if (payload.status === 'refunded' || payload.status === 'credited') throw new Error('db blip');
+        return origUpdate(payload);
+      };
+      return c;
+    };
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    // Money moved and is counted; the row stays CLAIMED (sweeps exclude
+    // 'refunding', so nothing can double-refund it) with the face
+    // pre-stamp intact, and a human is paged.
+    expect(result.refunded).toBe(49);
+    expect(state.rows[0]).toMatchObject({ status: 'refunding', refunded_amount: 49 });
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
+  });
+
+  it('face-only Stripe failure reverts the pre-stamp with the claim — the ledger never says money moved', async () => {
+    mockRefundPaymentIntent.mockRejectedValue(new Error('stripe down'));
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    expect(result.refunded).toBe(0);
+    expect(state.rows[0]).toMatchObject({ status: 'received', refunded_amount: 0 });
   });
 
   it('rows consumed mid-sweep are skipped — their claim simply loses', async () => {

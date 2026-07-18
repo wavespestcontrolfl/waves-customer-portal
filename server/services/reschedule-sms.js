@@ -75,6 +75,19 @@ class RescheduleSMS {
       responseType = 'option_expired';
     }
 
+    // Same degrade for owner blackout days: the option was texted BEFORE the
+    // admin blacked the date out (offers live up to 7 days) — booking it now
+    // would land a visit on a day off. Route to office follow-up instead of
+    // committing (helper fails open).
+    if (selectedOption?.date) {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(selectedOption.date)) {
+        logger.warn(`[reschedule-sms] Customer ${customerId} picked a blacked-out option (${selectedOption.date}) on log ${pending.id} — routing to office follow-up`);
+        selectedOption = null;
+        responseType = 'option_expired';
+      }
+    }
+
     await db('reschedule_log').where({ id: pending.id }).update({
       customer_response: responseType,
       customer_response_text: messageBody,

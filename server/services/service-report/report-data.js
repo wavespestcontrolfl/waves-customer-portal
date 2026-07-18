@@ -12,13 +12,15 @@ const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
+const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
+const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
-const { loadActivityCustomerView } = require('./activity-scores-store');
+const { loadActivityCustomerView, buildTypedVisitTimeline } = require('./activity-scores-store');
 const {
   loadServiceCoverageConfig,
   normalizeServiceCoverage,
@@ -1216,13 +1218,17 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
 }
 
 async function photoUrl(photo) {
-  if (photo.s3_url) return photo.s3_url;
-  if (!photo.s3_key || !PhotoService) return null;
-  try {
-    return await PhotoService.getViewUrl(photo.s3_key, 15 * 60);
-  } catch {
-    return null;
+  // Presign from s3_key FIRST: service_photos.s3_url is a legacy stored-URL
+  // column whose values expire/go stale (see the track-public.js note) — it
+  // only remains as the fallback for ancient rows that never got a key.
+  if (photo.s3_key && PhotoService) {
+    try {
+      return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
+    } catch {
+      /* fall through to the legacy stored URL */
+    }
   }
+  return photo.s3_url || null;
 }
 
 function buildProtocolPayload(record) {
@@ -1317,7 +1323,9 @@ function calculateLawnOverallScore(row = {}) {
   // model (rows that have stress_damage). Legacy rows keep an overall from the
   // old five-signal weighting, so recompute them to match the four displayed
   // bars (Density/Weed/Color/Stress) instead of hidden fungus/thatch weights.
-  if (explicit != null && row.stress_damage != null) return explicit;
+  // lawnScoreValue (not a raw null-check): a legacy '' stress_damage is
+  // "not scored" and must recompute too.
+  if (explicit != null && lawnScoreValue(row.stress_damage) != null) return explicit;
   // Weighted average of the four displayed categories, null-aware: a category
   // that wasn't scored is excluded and the weights are renormalized over the
   // ones present, so a missing category doesn't count as 0 and drag the overall
@@ -1658,7 +1666,7 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
-    return await PhotoService.getViewUrl(photo.s3_key, 15 * 60);
+    return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
   } catch {
     return null;
   }
@@ -1921,6 +1929,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
+  // Owner ruling 2026-07-16: the report kicker mirrors the customer's LINKED
+  // service on the schedule ("Monthly Lawn Care Service"), so the scheduled
+  // row's service_type (the catalog name) wins over the record's snapshot
+  // when the visit is linked; unlinked/legacy records keep the snapshot.
+  const scheduledServiceRow = service.scheduled_service_id
+    ? await knex('scheduled_services')
+      .where({ id: service.scheduled_service_id })
+      .first('service_type')
+      .catch(() => null)
+    : null;
+  const linkedServiceName = String(scheduledServiceRow?.service_type || '').trim()
+    || serviceDisplayName(service);
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -1937,7 +1957,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
     : Promise.resolve(null);
-  const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments] = await Promise.all([
+  const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
@@ -1945,6 +1965,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
     loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
+    // Bait station map (station-map-v1) — fail-soft to [] so a missing table
+    // (pre-migration) or a load error never takes down the report. Retired
+    // rows load on purpose: report tokens are long-lived and the builder
+    // scopes rows to THE VISIT (a station retired after this visit must keep
+    // rendering on this report).
+    knex('termite_stations').where({ customer_id: service.customer_id }).orderBy('station_number').catch(() => []),
+    knex('termite_station_checks').where({ service_record_id: service.id }).catch(() => []),
   ]);
   const products = await attachApprovedReportProductFacts(knex, rawProducts);
 
@@ -2062,6 +2089,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           serviceLine: serviceLine || null,
           limit: 8,
           beforeOrOnServiceDate: service.service_date || null,
+          // Trim same-day sibling rows at this report's own score row so a
+          // later visit completed the same day can't chart on this token.
+          currentServiceRecordId: service.id || null,
         }).catch(() => [])
       : Promise.resolve([]),
     serviceCoverageConfigPromise,
@@ -2082,6 +2112,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const activity = typedSnapshot
     ? await loadActivityCustomerView(knex, { snapshot: typedSnapshot, service }).catch(() => null)
     : null;
+  // D2: visit timeline for typed trend programs — derived from the same
+  // bounded history as the gauge, so it inherits the trend-type gate
+  // (activity exists only for ACTIVITY_INDICATORS types) and the
+  // same-day-sibling trim. Null for one-shot types and first visits.
+  const typedVisitTimeline = activity
+    ? await buildTypedVisitTimeline(knex, { activityView: activity, snapshot: typedSnapshot, service }).catch(() => null)
+    : null;
 
   // Companion typed sections (combined-service-completions.md): each stored
   // snapshot froze its own delivery posture at completion. Server-side
@@ -2098,20 +2135,26 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const companionReports = await Promise.all(
     companionSnapshots
       .filter((snapshot) => staffViewer || snapshot.delivery === 'auto_send')
-      .map(async (snapshot) => ({
-        type: snapshot.type,
-        typeLabel: snapshot.typeLabel || null,
-        reportTypeLabel: snapshot.reportTypeLabel || null,
-        visitSequence: snapshot.visitSequence || 1,
-        isProgressVisit: (snapshot.visitSequence || 1) > 1,
-        todaysResult: snapshot.todaysResult || null,
-        findings: Array.isArray(snapshot.findings) ? snapshot.findings : [],
-        nextStepChips: Array.isArray(snapshot.nextStepChips) ? snapshot.nextStepChips : [],
-        photoSummary: snapshot.photoSummary || null,
-        schemaVersion: snapshot.schemaVersion || null,
-        internalOnly: snapshot.delivery !== 'auto_send',
-        activity: await loadActivityCustomerView(knex, { snapshot, service }).catch(() => null),
-      })),
+      .map(async (snapshot) => {
+        const companionActivity = await loadActivityCustomerView(knex, { snapshot, service }).catch(() => null);
+        return {
+          type: snapshot.type,
+          typeLabel: snapshot.typeLabel || null,
+          reportTypeLabel: snapshot.reportTypeLabel || null,
+          visitSequence: snapshot.visitSequence || 1,
+          isProgressVisit: (snapshot.visitSequence || 1) > 1,
+          todaysResult: snapshot.todaysResult || null,
+          findings: Array.isArray(snapshot.findings) ? snapshot.findings : [],
+          nextStepChips: Array.isArray(snapshot.nextStepChips) ? snapshot.nextStepChips : [],
+          photoSummary: snapshot.photoSummary || null,
+          schemaVersion: snapshot.schemaVersion || null,
+          internalOnly: snapshot.delivery !== 'auto_send',
+          activity: companionActivity,
+          visitTimeline: companionActivity
+            ? await buildTypedVisitTimeline(knex, { activityView: companionActivity, snapshot, service }).catch(() => null)
+            : null,
+        };
+      }),
   );
 
   // buildPestPressureCustomerView returns null ONLY when Pest Pressure is
@@ -2239,6 +2282,25 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     geometryRow,
     mode: 'live',
   }).catch(() => ({ available: false, fallbackReason: 'build_failed' }));
+
+  // Bait station map (station-map-v1): numbered pins + this visit's statuses
+  // over the same live satellite image. Gated to termite-bait-typed reports —
+  // the VIEWER-VISIBLE snapshot types, so an internal_only companion's
+  // station data never reaches the customer copy and pins never leak onto
+  // unrelated (lawn / pest-only) reports for the same property.
+  const stationMap = buildStationMapReportContext({
+    stationRows,
+    checkRows: stationCheckRows,
+    satelliteMap,
+    imageContext: {
+      center: mapCenter,
+      zoom: Number(geometryRow?.zoom) || 20,
+      width: 640,
+      height: 340,
+    },
+    typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
+    serviceDate: service.service_date || null,
+  });
 
   const onSiteMin = computeOnSiteMin({
     ...service,
@@ -2381,6 +2443,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const technicianPhotoUrl = await resolveTechPhotoUrl(
     service.technician_photo_s3_key,
     service.technician_avatar_url || service.technician_photo_url,
+    // PhotoService is guard-loaded above — fall back to the helper's default
+    // TTL rather than throwing when it's unavailable.
+    PhotoService?.CUSTOMER_DWELL_TTL_SECONDS ?? undefined,
   ).catch(() => service.technician_avatar_url || service.technician_photo_url || null);
   const publicZones = zones.map((zone) => ({
     id: zone.id,
@@ -2395,7 +2460,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceReportId: service.id,
     serviceLine,
     serviceType: service.service_type,
-    serviceDisplayName: serviceDisplayName(service),
+    serviceDisplayName: linkedServiceName,
     serviceDate: service.service_date,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
@@ -2418,12 +2483,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ? reportWaveGuardTier
     : null;
 
-  // Lawn Report V2 — visual-insight payload (flag-gated, additive). Deterministic
-  // structure (diagnosis / water / mowing / treatment / trends) from the data already
-  // computed for V1; optional LLM narrative overlay (VOICE) varies the prose per visit
-  // and falls back to the deterministic copy field-by-field. Never blocks the report.
+  // Lawn Report V2 — THE lawn report (owner ruling 2026-07-09; the
+  // LAWN_REPORT_V2 env flag is retired). Deterministic structure
+  // (diagnosis / water / mowing / treatment / trends) from the data already
+  // computed for V1; optional LLM narrative overlay (VOICE) varies the prose
+  // per visit and falls back to the deterministic copy field-by-field. Built
+  // whenever the visit has a tech-confirmed linked assessment — visits
+  // without one (historical tokens predating the assessment flow) keep the
+  // legacy fallback layout client-side. Never blocks the report.
   let reportV2 = null;
-  if (serviceLine === 'lawn' && process.env.LAWN_REPORT_V2 === 'true' && lawnAssessment) {
+  if (serviceLine === 'lawn' && lawnAssessment) {
     try {
       // Phase 2: prefer the stored area water-intake snapshot (computed at
       // completion); compute + persist on the fly if absent so a permanent report
@@ -2515,7 +2584,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           const nextRow = await knex('scheduled_services')
             .where('customer_id', service.customer_id)
             .andWhere('scheduled_date', '>', afterIso)
-            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site', 'rescheduled'])
+            // NO 'rescheduled': phantom placeholders hold the OLD date until the
+            // office rebooks — publishing one shows a stale time as still real
+            // (same rule as the tree-shrub and nextAppointment queries below).
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
             // "turf": commercial lawn persists as "Commercial Turf Treatment Program".
             // Grouped OR so it stays ANDed with the customer/date/status predicates.
             .andWhere((qb) => qb
@@ -2566,11 +2638,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
-  // Tree & Shrub Report V2 — visual plant-health payload (flag-gated, additive).
-  // Mirrors the lawn path: a tech-confirmed tree_shrub_assessments row, scored from
-  // the visit's photos, drives the five diagnosis categories + insights. Best-effort:
-  // a build hiccup or unmigrated tables must never break the report.
-  if (!reportV2 && serviceLine === 'tree_shrub' && process.env.TREE_SHRUB_REPORT_V2 === 'true') {
+  // Tree & Shrub Report V2 — visual plant-health payload (unconditional, like
+  // lawn: the TREE_SHRUB_REPORT_V2 env flag is retired — owner ungated
+  // 2026-07-09 after prod ran flag-on since 06-26). Mirrors the lawn path: a
+  // tech-confirmed tree_shrub_assessments row, scored from the visit's
+  // photos, drives the five diagnosis categories + insights. Best-effort: a
+  // build hiccup or unmigrated tables must never break the report.
+  if (!reportV2 && serviceLine === 'tree_shrub') {
     try {
       const { buildTreeShrubAssessmentReportData } = require('../tree-shrub-assessment');
       const treeShrubAssessment = await buildTreeShrubAssessmentReportData(service, serviceLine, knex);
@@ -2679,17 +2753,39 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   //    recap, same as the pressure card.
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
+  let visitSummarySource = visitSummary ? 'recap' : null;
+  // Tech-reviewed AI report copy ("Generate AI report" → notes, parsed by
+  // its WHAT WE DID / WHAT WE FOUND shape and banned-copy-screened) is the
+  // fullest customer-facing account of the visit — it beats the SMS-style
+  // recap as the report summary. Typed reports switch only when the frozen
+  // snapshot's Today's Result body came from the technician report, so the
+  // legacy Visit Summary section (rendered whenever Pest V2 is absent)
+  // matches the card above it instead of reverting to the generic recap
+  // (Codex P2 #2709) — and a body the snapshot rejected (zero state, old
+  // snapshot) never resurfaces via the summary.
+  {
+    const technicianReport = technicianReportCustomerCopy(service.technician_notes);
+    const drivesSummary = technicianReport?.body
+      && (!typedSnapshot || typedSnapshot.todaysResult?.bodySource === 'technician_report');
+    if (drivesSummary) {
+      visitSummary = technicianReport.body;
+      visitSummarySource = 'technician_report';
+    }
+  }
   if (
     serviceLine === 'pest'
     && !typedSnapshot
     && pestPressure
     && visitSummary
+    // The AI report is already the rich, reviewed version of this visit —
+    // reweaving it through the narrative would only risk distorting it.
+    && visitSummarySource !== 'technician_report'
     && opts.mode === 'live'
     && process.env.PEST_VISIT_SUMMARY_NARRATIVE === 'true'
   ) {
     visitSummary = await applyVisitSummaryNarrative({
       recap: visitSummary,
-      serviceTypeDisplay: serviceDisplayName(service),
+      serviceTypeDisplay: linkedServiceName,
       areasServiced: areaLabels,
       pestPressure,
       findings,
@@ -2703,7 +2799,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     token,
     serviceRecordId: service.id,
     serviceType: service.service_type,
-    serviceDisplayName: serviceDisplayName(service),
+    serviceDisplayName: linkedServiceName,
     serviceLine,
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
@@ -2714,6 +2810,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       photoUrl: technicianPhotoUrl,
       initials: initialsForCustomerTechnicianName(technicianName),
     },
+    // Dark-ship gate for the photo tech card on the report page. The
+    // technician identity above is already per-visit
+    // (service_records.technician_id, frozen at completion), so past
+    // reports keep the tech who actually performed that visit. Records
+    // with no technician attached keep the legacy plain-text cell —
+    // the card would otherwise show a placeholder identity.
+    techVisitCard: process.env.GATE_REPORT_TECH_PHOTO === 'true'
+      && !!(service.technician_name || service.technician_first_name),
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
@@ -2751,6 +2855,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       onSiteMinutes: onSiteMin,
     },
     summary: visitSummary,
+    // 'technician_report' when summary is the tech-reviewed AI report copy,
+    // 'recap' for the completion recap — lets response wrappers (Pest V2
+    // hero) surface the reviewed copy without re-parsing the notes.
+    summarySource: visitSummarySource,
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {
@@ -2776,6 +2884,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         schemaVersion: typedSnapshot.schemaVersion || null,
       }
       : null,
+    typedVisitTimeline,
     // Companion sections, ordered as stored (declared profile order),
     // already viewer-filtered above — customers never receive
     // internal_only entries.
@@ -2791,6 +2900,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       satellite: satelliteMap,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
+    stationMap,
     serviceCoverage,
     nextAppointment,
     visitTimeline,
@@ -2820,7 +2930,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     photoChain,
     pdfUrl: `/api/reports/${token}`,
     legacy: {
-      notes: service.technician_notes || '',
+      // No raw technician_notes here (owner ruling 2026-07-16): the field is
+      // internal — access codes, billing notes — and the only sanctioned path
+      // to customer copy is technicianReportCustomerCopy's reviewed parse,
+      // which already feeds the summary slot. The client never read this key.
       measurements: {
         soilTemp: service.soil_temp,
         thatch: service.thatch_measurement,

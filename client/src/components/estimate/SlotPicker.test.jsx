@@ -144,7 +144,7 @@ describe('SlotPicker', () => {
     );
 
     const firstSlot = await screen.findByText('Monday, June 1');
-    const heading = screen.getByText('Find a date & time that works for you');
+    const heading = screen.getByText('Search by date or time \u2014 no calling, no hold music, no back-and-forth');
     const finderLabel = screen.getByText(/pick one that works for you/i);
 
     // Order: heading → finder → slot windows (matches the SSR booking card).

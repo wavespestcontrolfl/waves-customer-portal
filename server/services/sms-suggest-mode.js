@@ -22,10 +22,11 @@
  *   - scheduling_intent=true drafts never become suggestions in Phase D.
  *   - Fail closed: any lookup error resolves to 'shadow'.
  *
- * Suggested drafts get message_drafts status='suggested', which keeps them
- * out of the nightly judge (it queries status='shadow' only) — a suggestion
- * the human sends becomes the outbound itself, and judging a draft against
- * its own text would inflate scores.
+ * Suggested drafts get message_drafts status='suggested'. The nightly judge
+ * skips ACCEPTED ones — a suggestion sent verbatim becomes the outbound
+ * itself, and judging a draft against its own text would inflate scores.
+ * CORRECTED ones ARE judged (owner 2026-07-11, training throughput): the
+ * human's edited send is independent ground truth.
  *
  * PII: never log message bodies or full phone numbers from this module.
  */
@@ -47,6 +48,65 @@ const ESCALATION_INTENTS = new Set(['customer_issue_needs_review']);
 const REDACTION_PLACEHOLDER_RE = /\[(name|phone|email|ssn|card|address|url|zip)\]/i;
 function hasRedactionPlaceholder(text) {
   return REDACTION_PLACEHOLDER_RE.test(String(text || ''));
+}
+
+// House rule: no prices in customer SMS — billing amounts belong on invoices
+// and in a human's hands, and the July 2026 live judge readout showed the
+// drafter INVENTING dollar figures (a quoted "$415.75" that appeared nowhere
+// in the facts). Deterministic and verifier-independent like the placeholder
+// guard: a draft carrying price talk stays shadow / never auto-sends.
+//
+// Pattern is a SUPERSET of the Ask Waves price scrub (ask-waves-intake
+// PRICE_TALK_RE — that one is the floor; changes there should be folded in
+// here): dollar figures ($45), digits OR spelled-out amounts + dollar/buck
+// in singular/plural/hyphenated forms ("a 50-dollar credit", "four hundred
+// dollars", "a hundred bucks"), USD on either side ("USD 50", "45 USD"),
+// Spanish currency incl. hundreds ("doscientos dólares"), per-cadence rates
+// without a currency word ("45/mo", "forty five per visit"), and explicit
+// price grammar around price nouns in both directions and languages ("the
+// price is 415", "the price is fifty", "el precio es 45", "415.75 is the
+// total"). False positives are acceptable — they fail toward human review,
+// never toward a customer send.
+const PRICE_NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|few|couple)';
+const PRICE_NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti[\\wáéíóú]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|\\w*cient[oa]s|quinient[oa]s|mil|pocos)';
+const PRICE_EN_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|a|${PRICE_NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${PRICE_NUM_WORD})*)`;
+const PRICE_ES_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|${PRICE_NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${PRICE_NUM_WORD_ES})*)`;
+// The context branches use a STRICT amount (no bare "a") — "the price is a
+// bit high" is not a quote; "a hundred bucks" still matches via the currency
+// branch, where "a" is load-bearing.
+const PRICE_EN_AMOUNT_STRICT = `(?:\\d[\\d,]*(?:\\.\\d+)?|${PRICE_NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${PRICE_NUM_WORD})*)`;
+const PRICE_WORD_EN = '(?:total|price|cost|costs|fee|charge|charges|quote|estimate|balance)';
+const PRICE_WORD_ES = '(?:precio|costo|total|tarifa|saldo)';
+const PRICE_QUOTE_RE = new RegExp(
+  '\\$\\s*\\.?\\d' // $45, $ 1,200.50, $.99
+  + '|\\bUSD\\s*\\d' // USD 50
+  + `|\\b${PRICE_EN_AMOUNT_STRICT}\\s*USD\\b` // 45 USD, forty-five USD (reversed)
+  + `|\\b${PRICE_EN_AMOUNT}[-\\s]+(?:dollars?|bucks?|cents?)\\b` // 45 dollars, a 50-dollar credit, 99 cents
+  + `|${PRICE_EN_AMOUNT}\\s*¢` // 99¢
+  + `|\\b${PRICE_ES_AMOUNT}[-\\s]+(?:d[oó]lar(?:es)?|pesos?|centavos?)\\b` // 45 dólares, doscientos dólares, noventa centavos
+  + `|\\b${PRICE_EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per visit
+  + `|\\b${PRICE_ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b` // 45 al mes
+  // Explicit price GRAMMAR around strong price nouns, both directions and
+  // both languages — a connector is required on purpose: "the price is 415" /
+  // "the price is fifty" / "el precio es 45" quote a price, while "your
+  // estimate expires in 30 days" (no connector) is a date and must pass.
+  + `|\\b${PRICE_WORD_EN}\\b(?:\\s+due|\\s+owed)?\\s*(?:is|was|will\\s+be|would\\s+be|(?:will\\s+|would\\s+)?comes?\\s+(?:out\\s+)?to|came\\s+to|runs?|of|at|:)\\s*\\$?${PRICE_EN_AMOUNT_STRICT}\\b` // the price is 415 / fifty, balance due is 415.75
+  + `|\\b${PRICE_WORD_ES}\\b\\s*(?:es|ser[íi]a|ser[áa]|de|:)\\s*\\$?${PRICE_ES_AMOUNT}\\b` // el precio es 45
+  + `|\\b${PRICE_EN_AMOUNT_STRICT}\\s+(?:is|was|will be|es|ser[áa])\\s+(?:the\\s+|el\\s+|la\\s+)?(?:${PRICE_WORD_EN}|${PRICE_WORD_ES})\\b` // 415.75 is the total
+  // Direct price VERBS — "the service costs 415.75", "we charge 415.75",
+  // "cuesta 45.50", "cobramos 60" — no connector, the verb IS the claim.
+  + `|\\b(?:costs?|charge[sd]?|charging)\\s+(?:you\\s+|about\\s+|around\\s+|just\\s+)?\\$?${PRICE_EN_AMOUNT_STRICT}\\b`
+  + `|\\b(?:cuestan?|cobramos|cobran?)\\s+\\$?${PRICE_ES_AMOUNT}\\b`
+  // Cents-bearing amount after a bare copula — "that will be 415.75". Cents
+  // are required: "that will be 3" is a time or a count, not a quote.
+  + '|\\b(?:that|it|this)\\s+(?:will\\s+be|would\\s+be|is|comes?\\s+to)\\s+\\$?\\d[\\d,]*\\.\\d{2}\\b'
+  // Weak words that double as identifiers (invoice, payment, pay) require
+  // CENTS so "invoice #04395" stays clean.
+  + '|\\b(?:invoice|payment|pay)\\b[^\\n]{0,30}?\\b\\d[\\d,]*\\.\\d{2}\\b',
+  'i',
+);
+function hasPriceQuote(text) {
+  return PRICE_QUOTE_RE.test(String(text || ''));
 }
 
 const SUGGESTED_STATUS = 'suggested';
@@ -274,6 +334,146 @@ function splitPendingSuggestions(pending, inboundAt) {
 }
 
 /**
+ * Withhold-path companion to publishSuggestion: when a NEWER inbound's draft
+ * is withheld (price guard, leaked placeholder, unconverged verify), the
+ * thread's older pending cards were drafted against a conversation that has
+ * since moved on — leaving them actionable invites a stale staff send. Runs
+ * the same lock, thread scope, and ordering rule as publishSuggestion, and
+ * ONLY the supersede step (no insert). Idempotent — safe to call even when
+ * publishSuggestion already ran or nothing is pending. Fail-soft: an error
+ * leaves cards in place (the expiry sweep and staff-send ignore sweep still
+ * cover them) and never breaks the webhook.
+ */
+async function supersedeStaleSuggestions({ customerId, smsLogId } = {}) {
+  if (!smsLogId) return 0;
+  try {
+    return await db.transaction(async (trx) => {
+      const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone');
+      if (!inbound?.created_at) return 0;
+      const threadLast10 = String(inbound.from_phone || '').replace(/\D/g, '').slice(-10) || null;
+      await lockSuggestThread(trx, threadLast10 || customerId);
+
+      const pending = await trx('agent_decisions as ad')
+        .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+        .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+        .where(function pendingThreadScope() {
+          if (threadLast10) {
+            this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);
+          } else {
+            this.where('ad.customer_id', customerId);
+          }
+        })
+        .select('ad.id', 'ad.entity_id', 'ad.sms_log_id', 's.created_at as inbound_at');
+
+      // STRICTLY older only — deliberately NOT splitPendingSuggestions. The
+      // publish path replaces an equal-timestamp card with a fresh insert; a
+      // withhold has no replacement, so sweeping the SAME inbound's card
+      // (e.g. this inbound drafted twice and the retry was withheld) would
+      // delete a perfectly valid suggestion. Same-sms_log rows are excluded
+      // outright, equal-or-newer timestamps survive.
+      const anchor = new Date(inbound.created_at).getTime();
+      if (!Number.isFinite(anchor)) return 0;
+      const supersede = pending.filter((r) => {
+        if (r.sms_log_id === smsLogId) return false;
+        const t = new Date(r.inbound_at || 0).getTime();
+        return Number.isFinite(t) && t < anchor;
+      });
+      if (!supersede.length) return 0;
+
+      const changed = await trx('agent_decisions')
+        .whereIn('id', supersede.map((r) => r.id))
+        .where({ status: 'pending_review' })
+        .update({
+          status: 'superseded',
+          correction_note: 'A newer inbound arrived; its draft was withheld — review the thread before replying.',
+          updated_at: new Date(),
+        })
+        .returning(['id', 'entity_id']);
+      await revertDraftsToShadow(trx, changed.map((r) => r.entity_id));
+      return changed.length;
+    });
+  } catch (err) {
+    logger.warn(`[sms-suggest] stale-suggestion sweep failed: ${err.message}`);
+    return 0;
+  }
+}
+
+/**
+ * True when a decision's anchoring inbound is no longer the newest customer
+ * message on its thread — the context it was drafted against has moved on.
+ * Anchor-less decisions (no sms_log link) return false: they can't be judged
+ * here, and the send path's ownership/claim guards still apply.
+ */
+async function suggestionAnchorIsStale({ decisionId, dbi = db, excludeSmsLogId } = {}) {
+  const row = await dbi('agent_decisions as ad')
+    .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+    .where('ad.id', decisionId)
+    .first('ad.sms_log_id', 's.created_at as inbound_at', 's.from_phone');
+  if (!row?.inbound_at) return false;
+  const last10 = String(row.from_phone || '').replace(/\D/g, '').slice(-10);
+  if (!last10) return false;
+  const newer = await dbi('sms_log')
+    .where({ direction: 'inbound' })
+    .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .where('created_at', '>', row.inbound_at)
+    .whereNot('id', row.sms_log_id)
+    .first('id');
+  if (newer) return true;
+  // A HUMAN answer landing after the anchor makes a queued agent reply just
+  // as obsolete as a newer inbound — staff manually replied while this one
+  // sat scheduled. excludeSmsLogId is the caller's OWN claimed row (the
+  // scheduled send being fired was created after the anchor by definition
+  // and must not self-flag).
+  const humanReply = await dbi('sms_log')
+    .where({ direction: 'outbound' })
+    .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .whereIn('message_type', HUMAN_REPLY_TYPES)
+    .whereIn('status', [...SENT_STATUSES, 'scheduled', 'sending'])
+    .where('created_at', '>', row.inbound_at)
+    .modify((q) => { if (excludeSmsLogId) q.whereNot('id', excludeSmsLogId); })
+    .first('id');
+  return Boolean(humanReply);
+}
+
+/**
+ * Guardedly retire ONE stale decision at the moment staleness is discovered
+ * (send-time 409, or a scheduled send's fire-time re-check): fromStatus →
+ * superseded, and a house-voice suggestion's draft returns to the judge
+ * pool. Without this, a stale card whose newer inbound produced no
+ * replacement (withheld draft, reaction, failure) would resurface after
+ * every "refresh the thread" 409, forever. Guarded + idempotent. Fail-soft
+ * by default (the 409 path must never break a send response); `strict: true`
+ * rethrows instead — callers running inside their OWN transaction (the
+ * scheduler's fire-time cleanup) must roll back rather than commit a blocked
+ * SMS with its decision still claimed. In both modes, `false` means the row
+ * was not in fromStatus (someone else already handled it) — never an error.
+ */
+async function supersedeStaleDecision({ decisionId, fromStatus = 'pending_review', note, dbi = db, strict = false } = {}) {
+  const run = () => dbi.transaction(async (trx) => {
+    const [row] = await trx('agent_decisions')
+      .where({ id: decisionId, status: fromStatus })
+      .update({
+        status: 'superseded',
+        correction_note: note || 'A newer customer message arrived — review the thread before replying.',
+        updated_at: new Date(),
+      })
+      .returning(['id', 'entity_id', 'entity_type', 'workflow']);
+    if (!row) return false;
+    if (row.workflow === SUGGEST_WORKFLOW && row.entity_type === 'message_draft') {
+      await revertDraftsToShadow(trx, [row.entity_id]);
+    }
+    return true;
+  });
+  if (strict) return run();
+  try {
+    return await run();
+  } catch (err) {
+    logger.warn(`[sms-suggest] stale-decision supersede failed (${decisionId}): ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Publish one suggested draft into the comms composer: supersede any older
  * pending suggestion for the customer (one card per thread, newest inbound
  * wins — their drafts go back to the judge), then insert the pending_review
@@ -453,11 +653,11 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
 }
 
 /** Cancel/failure path: the customer was never answered — the cards return. */
-async function reopenScheduledSuggestions({ decisionIds, reason }) {
+async function reopenScheduledSuggestions({ decisionIds, reason, dbi = db }) {
   const ids = (Array.isArray(decisionIds) ? decisionIds : [decisionIds]).filter(Boolean);
   if (!ids.length) return 0;
   try {
-    return await db('agent_decisions')
+    return await dbi('agent_decisions')
       .whereIn('id', ids)
       .where({ status: 'scheduled' })
       .update({
@@ -662,6 +862,10 @@ module.exports = {
   SENT_STATUSES,
   isEscalationIntent,
   hasRedactionPlaceholder,
+  hasPriceQuote,
+  supersedeStaleSuggestions,
+  suggestionAnchorIsStale,
+  supersedeStaleDecision,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,

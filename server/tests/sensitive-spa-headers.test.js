@@ -5,6 +5,8 @@ const {
   isPestReportPath,
   isServiceReportPath,
   isEstimatePath,
+  isSecureCardPath,
+  isPriceChangeNoticePath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -107,7 +109,7 @@ describe('sensitive SPA document headers', () => {
     expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/`)).toBe(true);
     expect(isEstimatePath('/estimate/jane-doe-9f8e7d6c')).toBe(true);
     expect(isEstimatePath('/estimate/lead-00112233')).toBe(true);
-    // Known public marketing service-slug quote pages (routed to QuotePage) stay indexable.
+    // Known public marketing service-slug paths redirect before the SPA privacy middleware.
     expect(isEstimatePath('/estimate/mosquito')).toBe(false);
     expect(isEstimatePath('/estimate/termite')).toBe(false);
     expect(isEstimatePath('/estimate/bed-bug')).toBe(false);
@@ -115,5 +117,44 @@ describe('sensitive SPA document headers', () => {
     // Not single-segment estimate paths at all.
     expect(isEstimatePath('/estimate')).toBe(false);
     expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
+  });
+
+  test('marks secure-appointment card token pages noindex, no-referrer, and no-store', () => {
+    const SECURE_TOKEN = 'a'.repeat(64);
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/secure/${SECURE_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
+
+  test('recognizes only full secure-card 64-hex token document paths', () => {
+    const SECURE_TOKEN = 'b'.repeat(64);
+    expect(isSecureCardPath(`/secure/${SECURE_TOKEN}`)).toBe(true);
+    expect(isSecureCardPath(`/secure/${SECURE_TOKEN}/`)).toBe(true);
+    expect(isSecureCardPath('/secure/not-a-token')).toBe(false);
+    expect(isSecureCardPath(`/secure/${'c'.repeat(32)}`)).toBe(false);
+    expect(isSecureCardPath(`/api/public/secure-card/${SECURE_TOKEN}`)).toBe(false);
+  });
+
+  test('marks price-change notice token pages noindex, no-referrer, and no-store', () => {
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/price-change/${LAWN_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
+
+  test('recognizes only full price-change 32-hex token document paths', () => {
+    expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN}`)).toBe(true);
+    expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN}/`)).toBe(true);
+    // The public API's TOKEN_RE accepts uppercased tokens — the shell matcher must too.
+    expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN.toUpperCase()}`)).toBe(true);
+    expect(isPriceChangeNoticePath('/price-change/not-a-real-token')).toBe(false);
+    expect(isPriceChangeNoticePath('/api/public/price-change/0123456789abcdef0123456789abcdef')).toBe(false);
   });
 });

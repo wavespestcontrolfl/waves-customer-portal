@@ -69,7 +69,9 @@ import CreateAppointmentModal from "../../components/schedule/CreateAppointmentM
 import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
-import CreateProjectModal from "../../components/tech/CreateProjectModal";
+import CreateProjectModal, { wdoFeeSeedFromVisit } from "../../components/tech/CreateProjectModal";
+import { ProjectDetail } from "./ProjectsPage";
+import { getAdminUser } from "../../lib/adminAuth";
 import HorizontalScroll from "../../components/HorizontalScroll";
 import useIsMobile from "../../hooks/useIsMobile";
 import { Button, Badge, Card, CardBody, cn } from "../../components/ui";
@@ -81,6 +83,12 @@ import {
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
+import {
+  mergePostPaymentService,
+  shouldReopenCompletionAfterPayment,
+  TERMINAL_VISIT_STATUSES,
+} from "../../lib/dispatchCompletionRouting";
+import { requestDispatchSync } from "../../lib/dispatchSync";
 
 const TechMatchPanel = lazy(
   () => import("../../components/dispatch/TechMatchPanelV2"),
@@ -111,6 +119,16 @@ function isProjectBackedCompletion(service) {
   // service_report profiles serialize projectBacked:false, so cut-over
   // jobs fall through to CompletionPanel.
   const profile = service?.completionProfile;
+  // An explicit profile is authoritative (house review on #2717): cut-over
+  // visits keep their legacy project linked via scheduled_service_id, but
+  // the server's /complete gate reads the PROFILE, not the link — treating
+  // the leftover link as project-backed dead-ended the post-payment punches
+  // (and the row button) on visits the server would happily complete. The
+  // link heuristic only backstops rows whose payload carries no profile
+  // (e.g. week-list rows).
+  if (profile && typeof profile.projectBacked === "boolean") {
+    return !!(profile.projectBacked || profile.requiresProject);
+  }
   return !!(profile?.projectBacked || profile?.requiresProject || service?.linkedProject?.id);
 }
 
@@ -127,6 +145,9 @@ function projectCompletionIsClosed(service) {
     && (service?.linkedProject?.status === "closed" || service?.status === "completed");
 }
 
+// Visit statuses the dispatch status route treats as terminal — the
+// appointment detail sheet hides Cancel/No-show for these, and the
+// continue-snapshot sync below refuses to downgrade past them.
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const SKIP_REASONS = [
@@ -1160,12 +1181,107 @@ export default function DispatchPageV2({
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
   const [projectService, setProjectService] = useState(null);
+  // In-place project editor (owner ask 2026-07-13): a project-backed visit's
+  // report opens right here in the schedule — the same interaction as the
+  // pest CompletionPanel — instead of bouncing to the Jobs page.
+  const [continueProjectId, setContinueProjectId] = useState(null);
+  // The visit behind the open report — powers the appointment-details
+  // handoff (cancel/no-show/reschedule/rain-out/price) from the report
+  // surfaces, mirroring the pest CompletionPanel's Details pill. Set and
+  // cleared together with continueProjectId.
+  const [continueProjectService, setContinueProjectService] = useState(null);
+  // Keep that snapshot pinned to the LIVE schedule row (Codex P1): closing
+  // the report inside ProjectDetail also completes the visit and refreshes
+  // the schedule via onChanged — a stale pre-close snapshot handed to the
+  // detail sheet would offer Cancel/No-show against a completed compliance
+  // visit. Re-pointing on every refresh keeps the sheet's status gating
+  // truthful; a row that left the day view clears the handoff. Reads
+  // data?.services (the state), not the post-early-return derived const —
+  // this hook must run unconditionally. Settles in one pass: once the
+  // snapshot IS the live row the effect stops writing.
+  useEffect(() => {
+    if (!continueProjectService) return;
+    const fresh = (data?.services || []).find(
+      (s) => String(s.id) === String(continueProjectService.id),
+    );
+    // A miss is NOT a clear (Codex r2): mobile Week mode rows come from the
+    // /week payload and legitimately aren't in the selected day's response —
+    // clearing on miss killed the Details pill for every week row. Week-row
+    // staleness after an in-editor close is covered by the close signal
+    // (onChanged {visitCompleted}) and the sheet's own terminal gating.
+    if (fresh && fresh !== continueProjectService) {
+      // Never downgrade a terminal snapshot with an older row (Codex r3 P1):
+      // the close signal marks the snapshot completed while fetchSchedule is
+      // still in flight, so this effect re-runs against the PRE-close day
+      // payload first — accepting that stale active-looking row would
+      // resurrect the Details pill and hand a live-looking visit to the
+      // action sheet.
+      if (
+        TERMINAL_VISIT_STATUSES.has(String(continueProjectService.status))
+        && !TERMINAL_VISIT_STATUSES.has(String(fresh.status))
+      ) {
+        return;
+      }
+      // Keep the created-project seed through the same window (Codex r6
+      // P2): onCreated stamps linkedProject onto the snapshot before
+      // fetchSchedule resolves — a stale day row without it would strip
+      // the link and reopen the duplicate-create path from Details →
+      // Complete project.
+      if (
+        continueProjectService.linkedProject?.id
+        && !fresh.linkedProject?.id
+      ) {
+        return;
+      }
+      setContinueProjectService(fresh);
+    }
+  }, [data, continueProjectService]);
+  // Bumped after payment detours (Details → checkout) so the mounted
+  // ProjectDetail reloads its closeoutPreview (preserveEdits) — otherwise
+  // the footer keeps the stale billing block and Close project stays
+  // disabled (Codex r10 P2).
+  const [projectReloadKey, setProjectReloadKey] = useState(0);
+  // Mirrors ProjectDetail's dirty state (via onDirtyChange) so the overlay
+  // backdrop can confirm before discarding unsaved report edits
+  // (Codex r14 P2). Re-synced on every editor mount; stale values after
+  // unmount are unreachable (the backdrop only exists while mounted).
+  const [projectEditorDirty, setProjectEditorDirty] = useState(false);
+  // ProjectDetail needs the types registry for form labels/fields; fetched
+  // once on first open, then cached for the session.
+  const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
+  useEffect(() => {
+    if (!continueProjectId || projectTypesRegistry) return;
+    // This page's adminFetch (utils/admin-fetch) returns the PARSED body,
+    // not a Response — calling .json() on it threw and permanently cached
+    // an empty registry, which blanked every findings field in the
+    // in-place editor (Codex round-2 P2).
+    adminFetch("/admin/projects/types")
+      .then((d) => {
+        // Only cache a real registry (Codex r15 P2): caching {} on a
+        // transient failure or empty payload satisfied the loaded-guard
+        // above and permanently blanked every findings field in the
+        // in-place editor. Left null, the next editor open retries.
+        const types = d?.types;
+        if (types && Object.keys(types).length) {
+          setProjectTypesRegistry(types);
+        }
+      })
+      .catch(() => {});
+  }, [continueProjectId, projectTypesRegistry]);
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
   const [detailService, setDetailService] = useState(null);
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
   const pendingPaymentAfterCompletionRef = useRef(null);
+  const [completionDetourPhotos, setCompletionDetourPhotos] = useState(null);
+  const handleCompletionDetourPhotosChange = useCallback((serviceId, photos) => {
+    setCompletionDetourPhotos((current) =>
+      String(current?.serviceId) === String(serviceId)
+        ? { ...current, photos: Array.isArray(photos) ? photos : [] }
+        : current,
+    );
+  }, []);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -1231,21 +1347,35 @@ export default function DispatchPageV2({
     return () => setOpenCreateHandler(null);
   }, [setOpenCreateHandler]);
 
-  const fetchSchedule = useCallback(async (d) => {
-    setLoading(true);
-    setError(null);
+  const fetchSchedule = useCallback(async (
+    d,
+    { silent = false, updateState = true } = {},
+  ) => {
+    // silent: refresh data without tripping the page-level loading/error
+    // gates — both render ABOVE the overlays, so a loud refresh (or a
+    // transient refresh failure) unmounts the in-place project editor and
+    // its unsaved edits in board/week modes (Codex r8 P2). Loud stays the
+    // default for initial loads, date changes, and explicit retries.
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const [scheduleData, catalogData] = await Promise.all([
         adminFetch(`/admin/schedule?date=${d}`),
         adminFetch("/admin/dispatch/products/catalog"),
       ]);
-      setData(scheduleData);
-      setProducts(catalogData.products || []);
-      setLoading(false);
+      if (updateState) {
+        setData(scheduleData);
+        setProducts(catalogData.products || []);
+      }
+      if (!silent) setLoading(false);
       return scheduleData;
     } catch (e) {
-      setError(e);
-      setLoading(false);
+      if (!silent) {
+        setError(e);
+        setLoading(false);
+      }
       return null;
     }
   }, []);
@@ -1253,6 +1383,21 @@ export default function DispatchPageV2({
   useEffect(() => {
     fetchSchedule(date);
   }, [date, fetchSchedule]);
+
+  // C4 (universal one-time services, ratified Q9): /tech deep-links typed
+  // jobs here as ?completeService=<scheduledServiceId> instead of alert-
+  // bouncing. The param is consumed once (deleted immediately, same shape
+  // as ?customer below); the open itself happens after handleComplete is
+  // defined, keyed off this ref.
+  const pendingCompleteIdRef = useRef(null);
+  useEffect(() => {
+    const id = searchParams.get("completeService");
+    if (!id) return;
+    pendingCompleteIdRef.current = id;
+    const next = new URLSearchParams(searchParams);
+    next.delete("completeService");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     const customerId = searchParams.get("customer");
@@ -1303,21 +1448,17 @@ export default function DispatchPageV2({
     setSyncing(true);
     setSyncMsg("");
     try {
-      const res = await fetch(`${API_BASE}/dispatch/sync`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ date }),
+      const d = await requestDispatchSync({
+        apiBase: API_BASE,
+        date,
+        token: localStorage.getItem("waves_admin_token"),
       });
-      const d = await res.json();
       setSyncMsg(
         d.message || `Synced ${d.bridge?.synced || 0} jobs from schedule`,
       );
       setTimeout(() => setSyncMsg(""), 5000);
-    } catch {
-      setSyncMsg("Sync failed");
+    } catch (error) {
+      setSyncMsg(error?.message || "Sync failed");
     }
     setSyncing(false);
   };
@@ -1370,7 +1511,9 @@ export default function DispatchPageV2({
     if (isProjectBackedCompletion(service)) {
       if (projectCompletionIsClosed(service)) return;
       if (service?.linkedProject?.id) {
-        window.location.assign(`/admin/projects?projectId=${service.linkedProject.id}`);
+        // Open the existing report in place — no Jobs-page bounce.
+        setContinueProjectId(service.linkedProject.id);
+        setContinueProjectService(service);
         return;
       }
       setProjectService(service);
@@ -1378,6 +1521,27 @@ export default function DispatchPageV2({
     }
     setCompletingService(service);
   }, []);
+
+  // Second half of the ?completeService deep-link: once the day's schedule
+  // is loaded, open the completion for the pending id through
+  // handleComplete (so project-backed routing still applies). An id not on
+  // the loaded date alerts once instead of silently hanging.
+  useEffect(() => {
+    const id = pendingCompleteIdRef.current;
+    if (!id || !data) return;
+    pendingCompleteIdRef.current = null;
+    const svc = (data.services || []).find((s) => String(s.id) === String(id));
+    if (!svc) {
+      alert("That appointment isn't on this dispatch date — find it on the schedule to complete it.");
+    } else if (["completed", "cancelled", "skipped", "no_show"].includes(String(svc.status || ""))) {
+      // Defense in depth for the /tech deep-link (Codex P1): a stale or
+      // re-tapped URL must never reopen completion on a terminal visit —
+      // the endpoint would accept a duplicate submission.
+      alert(`That visit is already ${svc.status} — nothing to complete.`);
+    } else {
+      handleComplete(svc);
+    }
+  }, [data, handleComplete]);
 
   const handleEnRoute = useCallback(
     async (service) => {
@@ -1387,8 +1551,10 @@ export default function DispatchPageV2({
           body: JSON.stringify({ status: "en_route" }),
         });
         handleStatusChange(service.id, "en_route");
+        return true;
       } catch (e) {
         alert("En route failed: " + e.message);
+        return false;
       }
     },
     [handleStatusChange],
@@ -1401,6 +1567,11 @@ export default function DispatchPageV2({
         body: JSON.stringify(body),
       });
       handleStatusChange(serviceId, "completed");
+      // The mobile week list serves rows from its own cached /week payload —
+      // completion was the one terminal transition that never invalidated
+      // it, leaving the completed stop tappable for a duplicate /complete
+      // submission (house review; same pattern as cancel/no-show/rain-out).
+      setScheduleRefreshKey((k) => k + 1);
       const invoiceWasAlreadyBundled =
         ["service_complete_with_invoice", "service_report_v1_with_invoice"].includes(r?.completionSmsType) &&
         r?.completionSmsStatus === "sent";
@@ -1911,6 +2082,8 @@ export default function DispatchPageV2({
           mode="week"
           date={date}
           refreshKey={scheduleRefreshKey}
+          technicians={technicians}
+          onRefresh={() => setScheduleRefreshKey((key) => key + 1)}
           onEdit={(svc) => {
             if (shouldOpenMobileCompletion(svc)) {
               handleComplete(svc);
@@ -2249,6 +2422,8 @@ export default function DispatchPageV2({
               mode="day"
               date={date}
               services={services}
+              technicians={technicians}
+              onRefresh={() => fetchSchedule(date)}
               onEdit={(svc) => {
                 if (shouldOpenMobileCompletion(svc)) {
                   handleComplete(svc);
@@ -2275,19 +2450,33 @@ export default function DispatchPageV2({
         <CompletionPanel
           service={completingService}
           products={products}
-          onClose={() => {
+          billingDetourPhotos={
+            String(completionDetourPhotos?.serviceId) === String(completingService.id)
+              ? completionDetourPhotos.photos
+              : []
+          }
+          onDiscardBillingDetour={() => setCompletionDetourPhotos(null)}
+          onBillingDetourPhotosChange={handleCompletionDetourPhotosChange}
+          onClose={(completed) => {
             setCompletingService(null);
+            if (completed) setCompletionDetourPhotos(null);
             if (pendingPaymentAfterCompletionRef.current) {
               setPaymentData(pendingPaymentAfterCompletionRef.current);
               pendingPaymentAfterCompletionRef.current = null;
             }
           }}
           onSubmit={handleCompleteSubmit}
-          onBillingRequired={(svc) => {
+          onBillingRequired={(svc, detourState) => {
             // Typed one-time completion hit the billing 409 — close the
             // panel (its draft autosave preserves the findings) and open
             // the existing checkout flow; the post-payment paths re-open
             // completion automatically.
+            setCompletionDetourPhotos({
+              serviceId: svc.id,
+              photos: Array.isArray(detourState?.servicePhotos)
+                ? detourState.servicePhotos
+                : [],
+            });
             setCompletingService(null);
             setCheckoutService(svc);
           }}
@@ -2325,11 +2514,17 @@ export default function DispatchPageV2({
       {projectService && (
         <CreateProjectModal
           theme="light"
+          presentation="sheet"
           defaultCustomerId={projectService.customerId}
           defaultCustomerLabel={projectService.customerName}
           defaultScheduledServiceId={projectService.id}
           defaultProjectDate={
             String(projectService.scheduledDate || date || "").split("T")[0]
+          }
+          defaultInspectionFee={
+            /* The WDO line's own net price (never the pre-discount base,
+               never a multi-service group total) — see wdoFeeSeedFromVisit. */
+            wdoFeeSeedFromVisit(projectService)
           }
           defaultProjectType={projectService.completionProfile?.projectType || ""}
           allowedProjectTypes={
@@ -2337,12 +2532,150 @@ export default function DispatchPageV2({
               ? [projectService.completionProfile.projectType]
               : null
           }
+          allowInvoiceCompletion={getAdminUser()?.role === "admin"}
+          onViewDetails={
+            isMobile
+              ? () => {
+                  // Pest-completion parity: swap the report sheet for the
+                  // appointment detail sheet (cancel / no-show / reschedule /
+                  // rain-out / price edit).
+                  const svc = projectService;
+                  setProjectService(null);
+                  setDetailService(svc);
+                }
+              : undefined
+          }
           onClose={() => setProjectService(null)}
-          onCreated={() => {
+          onCreated={(p, outcome = {}) => {
+            const svc = projectService;
             setProjectService(null);
-            fetchSchedule(date);
+            // Silent: this chains straight into the continue editor below,
+            // and the loud loading/error gates render ABOVE the overlays —
+            // a loud refresh withheld the just-created report's editor in
+            // board/week modes, and a failed one stranded the tech on the
+            // no-retry error screen with the local draft already deleted
+            // (house review). The conditional-silence idiom can't cover
+            // this call: continueProjectId isn't seated yet.
+            fetchSchedule(date, { silent: true });
+            // The mobile week list serves rows from its own cached /week
+            // payload — without a refetch that row still shows no
+            // linkedProject, and tapping it again would open a second
+            // create sheet (and a second POST) for the same visit
+            // (Codex r3 P2).
+            setScheduleRefreshKey((k) => k + 1);
+            // A completed WDO already sent its invoice, armed the customer-side
+            // report hold, and closed the linked visit inside the same sheet.
+            // Do not detour into the legacy Project editor afterward.
+            if (p?.id && !outcome.completed) {
+              setContinueProjectId(p.id);
+              // Seed the snapshot with the created project (Codex r5 P2):
+              // week rows (and day rows before the refetch lands) carry no
+              // linkedProject yet, so Details → Complete project would
+              // treat the visit as unlinked and mint a duplicate report.
+              setContinueProjectService(
+                svc ? { ...svc, linkedProject: p } : svc,
+              );
+            }
           }}
         />
+      )}
+      {continueProjectId && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 overflow-y-auto"
+          onClick={() => {
+            // A stray scrim tap must not silently discard unsaved report
+            // edits — the editor keeps them only in component state
+            // (Codex r14 P2).
+            if (
+              projectEditorDirty
+              && !confirm("Discard unsaved report edits?")
+            ) {
+              return;
+            }
+            setContinueProjectId(null);
+            setContinueProjectService(null);
+            fetchSchedule(date);
+          }}
+        >
+          <div
+            className="max-w-4xl mx-auto my-6 px-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* cancelled/no_show retirements aren't "closed" to
+                projectCompletionIsClosed (it only knows completed/closed) —
+                gate the handoff on the terminal visit set too, or the pill
+                reopens appointment actions for a dead visit (Codex r7 P2). */}
+            {isMobile && continueProjectService
+              && !projectCompletionIsClosed(continueProjectService)
+              && !TERMINAL_VISIT_STATUSES.has(
+                String(continueProjectService.status),
+              ) && (
+              <div className="flex justify-end mb-2">
+                <button
+                  type="button"
+                  className="h-9 rounded-full bg-white border border-hairline border-zinc-200 text-13 font-medium text-ink-primary px-4"
+                  onClick={() => {
+                    // Pest-completion parity: appointment actions (cancel /
+                    // no-show / reschedule / rain-out / price edit) for the
+                    // visit behind this report. Hidden once the visit/report
+                    // is terminal (Codex P1) — the sheet also gates its own
+                    // terminal actions as the last line of defense.
+                    // The editor stays MOUNTED underneath (Codex r3 P2):
+                    // clearing continueProjectId here unmounted ProjectDetail
+                    // and silently discarded unsaved findings edits. The
+                    // detail sheet portals to document.body at z-100, fully
+                    // covering this z-50 overlay; closing it drops the
+                    // operator back into the editor, edits intact.
+                    setDetailService(continueProjectService);
+                  }}
+                >
+                  Details
+                </button>
+              </div>
+            )}
+            <ProjectDetail
+              projectId={continueProjectId}
+              reloadKey={projectReloadKey}
+              onDirtyChange={setProjectEditorDirty}
+              typesRegistry={projectTypesRegistry}
+              onClose={() => {
+                // Same dirty guard as the backdrop (Codex r15 P2): the
+                // header × inside ProjectDetail routes through this prop
+                // and must not silently discard unsaved edits either.
+                if (
+                  projectEditorDirty
+                  && !confirm("Discard unsaved report edits?")
+                ) {
+                  return;
+                }
+                setContinueProjectId(null);
+                setContinueProjectService(null);
+                fetchSchedule(date);
+              }}
+              onChanged={(info) => {
+                // Silent: this fires while the editor is mounted — a loud
+                // refresh would unmount it through the loading gate.
+                fetchSchedule(date, { silent: true });
+                // Close-from-editor also completes the visit. The day
+                // refresh re-points day rows, but a Week-mode row never
+                // appears in the day payload — mark the snapshot terminal
+                // directly off the close signal so the Details pill hides
+                // for those too (Codex P1/r2).
+                if (info?.visitCompleted) {
+                  setContinueProjectService(
+                    (s) => (s ? { ...s, status: "completed" } : s),
+                  );
+                  // The week list's cached /week payload still holds the
+                  // pre-close active row — tappable again once this overlay
+                  // closes, reseeding a stale active snapshot (Codex r3 P1).
+                  // Bump the shared key so it refetches, as rain-out does.
+                  setScheduleRefreshKey((k) => k + 1);
+                }
+              }}
+              canAdminActions={getAdminUser()?.role === "admin"}
+            />
+          </div>
+        </div>
       )}
       {rescheduleService && (
         <RescheduleModal
@@ -2359,9 +2692,52 @@ export default function DispatchPageV2({
           service={editingService}
           technicians={technicians}
           onClose={() => setEditingService(null)}
-          onSaved={() => {
+          onSaved={async () => {
+            const editedId = editingService?.id;
+            // Captured pre-refetch: was the edited visit a DAY row? A
+            // successful refresh miss then means it MOVED (retire the
+            // snapshot); week-origin rows are never in the day payload,
+            // so their miss means nothing (keep) — Codex r14 P2.
+            const wasDayRow = (data?.services || []).some(
+              (r) => String(r.id) === String(editedId),
+            );
             setEditingService(null);
-            fetchSchedule(date);
+            // Week rows cache their own /week payload — invalidate it so a
+            // saved date/price/tech change can't be re-served pre-edit from
+            // a week row into checkout/details (Codex r11 P1).
+            setScheduleRefreshKey((k) => k + 1);
+            // Silent only while the project editor is mounted underneath
+            // (the Details → Edit path) — desktop grid edits keep the loud
+            // gate so a failed refresh stays visible instead of silently
+            // leaving the board stale (Codex r9 P2).
+            const fresh = await fetchSchedule(date, {
+              silent: !!continueProjectId,
+            });
+            // An edit can change the visit's price/service — refresh the
+            // mounted editor's closeoutPreview too, or a billing-required
+            // Close stays disabled after the tech lowers the visit to
+            // $0/covered and the decision-time re-fetch never runs off the
+            // disabled button (Codex r12 P2). Harmless when no editor is
+            // mounted: the consumed-key ref ignores pre-mount bumps.
+            setProjectReloadKey((k) => k + 1);
+            // Mirror the rain-out re-seat/retire (Codex r9 P2): an edit can
+            // change the visit's date/price/tech, and a day-miss would
+            // otherwise leave the Details pill serving the pre-edit
+            // appointment.
+            setContinueProjectService((s) => {
+              if (!s || String(s.id) !== String(editedId)) return s;
+              // A failed refresh keeps the snapshot (house review). On a
+              // successful refresh: a found row re-points; a miss retires
+              // only DAY-origin visits (the edit moved them off this day)
+              // and keeps week-origin ones, which are never in the day
+              // payload to begin with (house review + Codex r14 P2).
+              if (!fresh) return s;
+              const row = (fresh.services || []).find(
+                (r) => String(r.id) === String(s.id),
+              );
+              if (row) return row;
+              return wasDayRow ? null : s;
+            });
           }}
           onMarkPrepaid={(svc) => {
             setPrepaidEntryContext('edit');
@@ -2405,7 +2781,9 @@ export default function DispatchPageV2({
           }}
           onCompleteService={(svc) => {
             setDetailService(null);
-            handleComplete(svc);
+            if (shouldReopenCompletionAfterPayment(svc)) {
+              handleComplete(svc);
+            }
           }}
           onBookNext={(svc) => {
             setDetailService(null);
@@ -2425,13 +2803,68 @@ export default function DispatchPageV2({
             });
             setShowNewAppt(true);
           }}
-          onCancelled={() => fetchSchedule(date)}
-          onNoShow={() => fetchSchedule(date)}
-          onRescheduled={() => {
-            fetchSchedule(date);
+          onCancelled={() => {
+            // Silent only while the project editor is mounted underneath —
+            // ordinary day-row sheets keep the loud gate so a failed
+            // refresh can't quietly leave the pre-mutation row active
+            // (Codex r11 P2).
+            fetchSchedule(date, { silent: !!continueProjectId });
+            // Week rows come from MobileDispatchList's cached /week payload —
+            // without a bump the terminalized visit stays tappable as an
+            // active project-backed row and can mint a project against a
+            // cancelled visit (Codex r4 P2). Same pattern as onRescheduled.
+            setScheduleRefreshKey((k) => k + 1);
+            // A week-origin continue snapshot never re-points off the day
+            // payload, so retire it directly — otherwise the editor's
+            // Details pill reopens the sheet with stale active status
+            // (Codex r5 P2). Same move as the project-close path.
+            setContinueProjectService((s) =>
+              s && detailService && String(s.id) === String(detailService.id)
+                ? { ...s, status: "cancelled" }
+                : s,
+            );
+          }}
+          onNoShow={() => {
+            // Same conditional silence as onCancelled (Codex r11 P2).
+            fetchSchedule(date, { silent: !!continueProjectId });
+            // Same week-cache staleness as onCancelled (Codex r4 P2).
+            setScheduleRefreshKey((k) => k + 1);
+            // Same week-origin snapshot retirement as onCancelled (Codex r5).
+            setContinueProjectService((s) =>
+              s && detailService && String(s.id) === String(detailService.id)
+                ? { ...s, status: "no_show" }
+                : s,
+            );
+          }}
+          onRescheduled={async () => {
             // The mobile week list owns its own cached weekData; bump the
             // shared refresh key so it refetches and drops the moved stop.
             setScheduleRefreshKey((k) => k + 1);
+            // Same conditional silence as onCancelled (Codex r11 P2).
+            const fresh = await fetchSchedule(date, {
+              silent: !!continueProjectId,
+            });
+            // Re-seat (or retire) the continue snapshot off the refreshed
+            // day payload (Codex r7 P2): a rain-out/reschedule moves the
+            // visit, and a day-miss would otherwise keep serving the old
+            // date/status through the Details pill.
+            setContinueProjectService((s) => {
+              if (
+                !s
+                || !detailService
+                || String(s.id) !== String(detailService.id)
+              ) {
+                return s;
+              }
+              // A failed refresh is not a move — keep the snapshot (house
+              // review). The retire below is only for a visit that a
+              // successful refetch shows really left the selected day.
+              if (!fresh) return s;
+              const row = (fresh.services || []).find(
+                (r) => String(r.id) === String(s.id),
+              );
+              return row || null;
+            });
           }}
         />
       )}
@@ -2449,12 +2882,18 @@ export default function DispatchPageV2({
             if (Number(amount || 0) <= 0) {
               setCheckoutService(null);
               setDetailService(null);
-              setCompletingService({
+              // Route through handleComplete, not straight to the generic
+              // CompletionPanel: project-backed visits (WDO/cert) must land
+              // in their project lanes — /complete rejects them (Codex r7
+              // P1). Pest visits take the same setCompletingService path
+              // as before.
+              handleComplete({
                 ...svc,
                 checkoutInvoiceId: invoiceId,
                 checkoutInvoiceToken: invoiceToken,
               });
-              fetchSchedule(date);
+              setProjectReloadKey((k) => k + 1);
+              fetchSchedule(date, { silent: true });
               return;
             }
             setPaymentData({ service: svc, invoiceId, invoiceToken, amount });
@@ -2471,12 +2910,28 @@ export default function DispatchPageV2({
           onSaved={async () => {
             const svcId = editingLineService.id;
             setEditingLineService(null);
-            const fresh = await fetchSchedule(date);
+            const fresh = await fetchSchedule(date, { silent: true });
+            // Invalidate the cached week rows too (Codex r10 P1): a
+            // week-origin visit never lands in the day payload, and
+            // reopening checkout from a stale week row would hand the
+            // pre-edit totals right back.
+            setScheduleRefreshKey((k) => k + 1);
             // Re-seat the checkout sheet on the updated service record so
             // the new totals render immediately without the tech having
             // to close + reopen the sheet.
             const updated = fresh?.services?.find((s) => s.id === svcId);
-            if (updated) setCheckoutService(updated);
+            if (updated) {
+              setCheckoutService(updated);
+              return;
+            }
+            // The line edit saved, but the refresh failed or the visit
+            // isn't in the selected day's payload — never re-present
+            // checkout on pre-edit totals (Codex r9 P1). Close it;
+            // reopening re-derives fresh state.
+            setCheckoutService(null);
+            alert(
+              "Line saved, but the schedule refresh didn't return this visit — reopen checkout to continue with updated totals.",
+            );
           }}
         />
       )}
@@ -2488,7 +2943,7 @@ export default function DispatchPageV2({
           amount={paymentData.amount}
           desktopVisible
           onClose={() => setPaymentData(null)}
-          onInvoiceSent={() => {
+          onInvoiceSent={async () => {
             // Invoice SMS+email was just sent — the bill is now in the
             // customer's hands. Mirror the cash/check tender flow and
             // punch straight to the completion sheet so the tech can
@@ -2500,8 +2955,20 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            setCompletingService(svc);
-            fetchSchedule(date);
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
+            const updated = fresh?.services?.find((s) => s.id === svc.id);
+            // Same project-backed routing as the primary Complete action
+            // (Codex r7 P1).
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
+            setScheduleRefreshKey((k) => k + 1);
+            setProjectReloadKey((k) => k + 1);
           }}
           onChargeSuccess={async () => {
             // Card paths reopen completion like the invoice/cash/check
@@ -2516,9 +2983,20 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date);
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
-            setCompletingService(updated ? { ...updated, ...svc } : svc);
+            // Same project-backed routing as the primary Complete action
+            // (Codex r7 P1).
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
+            setScheduleRefreshKey((k) => k + 1);
+            setProjectReloadKey((k) => k + 1);
           }}
           onPrepaidRecorded={async ({ invoice } = {}) => {
             // Cash / Check tender marked the pre-minted invoice paid server-side;
@@ -2532,9 +3010,20 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date);
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
-            setCompletingService(updated ? { ...updated, ...svc } : svc);
+            // Same project-backed routing as the primary Complete action
+            // (Codex r7 P1).
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
+            setScheduleRefreshKey((k) => k + 1);
+            setProjectReloadKey((k) => k + 1);
           }}
         />
       )}
@@ -2550,15 +3039,37 @@ export default function DispatchPageV2({
             const entry = prepaidEntryContext;
             setPrepaidService(null);
             setPrepaidEntryContext(null);
-            const fresh = await fetchSchedule(date);
+            // Week rows cache their own /week payload — without a bump a
+            // week-origin visit keeps showing unpaid and can reopen
+            // checkout/prepay off stale totals (Codex r12 P2).
+            setScheduleRefreshKey((k) => k + 1);
+            const fresh = await fetchSchedule(date, { silent: true });
             if (entry === 'edit') {
               // Re-seat the editing service with the post-save row so the
               // EditServiceModal banner reflects the new prepaid state
               // without forcing the operator to close + reopen.
               const updated = fresh?.services?.find((s) => s.id === svc.id);
-              if (updated) setEditingService(updated);
+              if (updated) {
+                setEditingService(updated);
+              } else {
+                // Refresh failed or the visit isn't in the day payload —
+                // never leave the edit modal claiming the visit is still
+                // unpaid; the stale banner invited a second collection
+                // (house review; mirrors the r9 line-edit alert).
+                setEditingService(null);
+                alert(
+                  "Prepayment recorded, but the schedule refresh didn't return this visit — reopen it to see the updated state.",
+                );
+              }
+              // Prepaid resolves project closeout billing — refresh the
+              // mounted editor's closeoutPreview too, or Close project
+              // stays disabled until reopen (Codex r11 P2).
+              setProjectReloadKey((k) => k + 1);
             } else {
-              setCompletingService(svc);
+              // Same project-backed routing as the primary Complete action
+              // (Codex r7 P1).
+              handleComplete(svc);
+              setProjectReloadKey((k) => k + 1);
             }
           }}
         />

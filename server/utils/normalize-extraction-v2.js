@@ -10,6 +10,12 @@ function cleanText(value) {
   return s || null;
 }
 
+// Strict by design — NO domain repair here. Repair of a mis-heard/dropped TLD
+// ("brandon@gmail" → "brandon@gmail.com") happens exclusively in
+// deriveEmailReview, whose proposal must clear the call processor's ownership
+// gate (correctedAddressOwnedByOther, fails closed) before adoption. An inline
+// repair would flow straight into customer/lead/service-contact writes with no
+// check that the corrected address belongs to this caller.
 function cleanValidEmail(value) {
   if (!value) return null;
   const normalized = normalizeEmail(value);
@@ -37,6 +43,14 @@ function normalizeState(value) {
 
 function normalizeCaller(caller) {
   if (!caller) return caller;
+  // Same transcript-garble rejection as the V1 normalizer and the secondary-
+  // contact path below: a URL-shaped "email" ("www.cw63@gmail.com") is a
+  // mishearing of spelled-out letters, never a mailbox — the literal string
+  // may be a real stranger's address, so it must not survive into the
+  // caller's customer/lead writes or first-touch sends.
+  const { looksGarbledTranscriptEmail } = require('./intake-normalize');
+  const validEmail = cleanValidEmail(caller.email);
+  const usableEmail = validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null;
   return {
     ...caller,
     name_full: cleanText(caller.name_full),
@@ -45,7 +59,15 @@ function normalizeCaller(caller) {
     organization_name: cleanText(caller.organization_name),
     phone_e164: normalizePhone(caller.phone_e164),
     phone_raw_spoken: cleanText(caller.phone_raw_spoken),
-    email: cleanValidEmail(caller.email),
+    email: usableEmail,
+    // Server-derived, mirrors the V1 normalizer's email/email_raw split: an
+    // as-heard capture the validation rejected ("brandon@gmail", a garbled
+    // URL-shape) survives here — never in `email`, which write paths store —
+    // so the processor can carry it into the legacy email_raw channel where
+    // deriveEmailReview repairs (ownership-gated) or flags it for read-back.
+    // Without this, a V2-driven call whose V1 extraction returned null would
+    // silently lose the only captured address.
+    email_raw: usableEmail ? null : (cleanText(caller.email) || null),
   };
 }
 
@@ -73,6 +95,45 @@ function normalizeProperty(property) {
   };
 }
 
+// Secondary contact (realtor's buyer, landlord's tenant): same component
+// normalization as the caller. Collapses to null when nothing identifying
+// survives, so downstream consumers never see an empty shell.
+function normalizeSecondaryContact(contact) {
+  if (!contact || typeof contact !== 'object') return null;
+  // Same transcript-garble rejection as the V1 normalizer: a URL-shaped
+  // "email" ("www.cw63@gmail.com") is a mishearing, never a mailbox — it
+  // must not survive into a service-contact write when V2 is the source.
+  const { looksGarbledTranscriptEmail } = require('./intake-normalize');
+  const validEmail = cleanValidEmail(contact.email);
+  const normalized = {
+    ...contact,
+    name_full: cleanText(contact.name_full),
+    first_name: contact.first_name ? properCaseName(contact.first_name) : null,
+    last_name: contact.last_name ? properCaseName(contact.last_name) : null,
+    phone_e164: normalizePhone(contact.phone_e164),
+    phone_raw_spoken: cleanText(contact.phone_raw_spoken),
+    email: validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null,
+    notes: cleanText(contact.notes),
+  };
+  if (!normalized.name_full && !normalized.first_name && !normalized.last_name
+      && !normalized.phone_e164 && !normalized.email) return null;
+  return normalized;
+}
+
+// 1.4.0 array: each entry through the single-contact normalizer (E.164
+// re-validation, garbled-email rejection); empty shells drop; cap 3.
+// Non-array garbage fails safe to null (persisted schema allows null).
+function normalizeSecondaryContacts(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const entry of list) {
+    const normalized = normalizeSecondaryContact(entry);
+    if (normalized) out.push(normalized);
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 function normalizeExtractionV2(extraction) {
   if (!extraction || typeof extraction !== 'object') return extraction;
 
@@ -80,12 +141,20 @@ function normalizeExtractionV2(extraction) {
     ...extraction,
     caller: normalizeCaller(extraction.caller),
     property: normalizeProperty(extraction.property),
+    ...(extraction.secondary_contact !== undefined
+      ? { secondary_contact: normalizeSecondaryContact(extraction.secondary_contact) }
+      : {}),
+    ...(extraction.secondary_contacts !== undefined
+      ? { secondary_contacts: normalizeSecondaryContacts(extraction.secondary_contacts) }
+      : {}),
   };
 }
 
 module.exports = {
   normalizeExtractionV2,
   normalizeCaller,
+  normalizeSecondaryContact,
+  normalizeSecondaryContacts,
   normalizeAddress,
   normalizePhone,
   normalizeZip,

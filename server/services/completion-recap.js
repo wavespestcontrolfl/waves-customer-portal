@@ -152,7 +152,7 @@ Inputs:
 Service type: ${serviceType}
 Visit outcome: ${outcome}
 Areas treated: ${areas.length ? areas.join(', ') : 'not specified'}
-Technician notes: ${notes || 'not specified'}
+Technician notes: ${notes || 'not specified'}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
 
 Return only the recap text.`;
 }

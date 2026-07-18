@@ -378,9 +378,44 @@ class GoogleBusinessService {
     // who never reviewed. Treat 2+ matches as "no match" so the review falls
     // through to the manual-match alert instead of an arbitrary auto-link.
     // limit(2) is all we need to detect ambiguity.
-    const matches = await db('customers')
+    //
+    // Match on first + last name TOKEN, tolerating middle names/initials and
+    // punctuation in the Google display name — "Michael P. Fossier" must
+    // match customer "Michael Fossier" (prod miss 2026-07-10). Single-token
+    // display names can't produce a confident match and fall through to the
+    // manual queue.
+    const tokens = String(reviewerName)
+      .replace(/[.,]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+    if (tokens.length < 2) return null;
+
+    // TIER 1 — exact full-name equality (the original rule). Checked FIRST
+    // and on its own: an exact "Mary Ann Smith" row must win even when the
+    // looser token arm would ALSO match a "Mary Smith" row and read as
+    // ambiguous (Codex round-2). Two exact rows are still ambiguous.
+    const exact = await db('customers')
       .whereNull('deleted_at')
       .whereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) = LOWER(?)", [reviewerName])
+      .select('id')
+      .limit(2);
+    if (exact.length === 1) return exact[0].id;
+    if (exact.length > 1) {
+      logger.info('[gbp] Reviewer name matched multiple active customers — routing to manual match, no auto-mark');
+      return null;
+    }
+
+    // TIER 2 — token match, tolerating middle names/initials and punctuation
+    // ("Michael P. Fossier" → customer "Michael Fossier", prod miss
+    // 2026-07-10). The joined-leading-tokens arm keeps two-word first names
+    // matching. Same unambiguous-match guard.
+    const firstToken = tokens[0];
+    const leadingTokens = tokens.slice(0, -1).join(' ');
+    const lastToken = tokens[tokens.length - 1];
+    const matches = await db('customers')
+      .whereNull('deleted_at')
+      .whereRaw('(LOWER(TRIM(first_name)) = LOWER(?) OR LOWER(TRIM(first_name)) = LOWER(?))', [firstToken, leadingTokens])
+      .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(?)", [lastToken])
       .select('id')
       .limit(2);
     if (matches.length !== 1) {
@@ -518,6 +553,21 @@ class GoogleBusinessService {
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
       await this._markCustomerLeftReview(row.customer_id);
+      // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
+      // an existing one that just matched a customer) — not on every hourly
+      // re-sync; the helper's once-ever dedupe backstops replays anyway.
+      // Gate / 4-5-star bar / location mapping live in the shared helper so
+      // the manual-match flow (review-incentives) behaves identically.
+      const justAttributed = result.inserted || !existing?.customer_id;
+      if (justAttributed) {
+        const { enrollReviewThankYou } = require('./automation-enroll');
+        await enrollReviewThankYou({
+          customerId: row.customer_id,
+          locationId: row.location_id,
+          starRating: row.star_rating,
+          source: 'google_review',
+        });
+      }
     } else if (result.inserted) {
       // New review we couldn't tie to a customer — alert the office to match it.
       await this._notifyUnlinkedReview(row);
@@ -633,6 +683,17 @@ class GoogleBusinessService {
       if (effectiveCustomerId) {
         // Matched to a customer → they left a review; auto-exclude from outreach.
         await this._markCustomerLeftReview(effectiveCustomerId);
+        // Same attribution-moment thank-you hook as the GBP feed path.
+        const justAttributed = !existing || !existing.customer_id;
+        if (justAttributed) {
+          const { enrollReviewThankYou } = require('./automation-enroll');
+          await enrollReviewThankYou({
+            customerId: effectiveCustomerId,
+            locationId: loc.id,
+            starRating: review.rating || 0,
+            source: 'google_review_places',
+          });
+        }
       } else if (!existing) {
         // Newly inserted, unmatched → alert the office to match it.
         await this._notifyUnlinkedReview({

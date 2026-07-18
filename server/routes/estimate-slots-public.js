@@ -34,7 +34,9 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-slot-availability');
+const StripeService = require('../services/stripe');
+const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
+const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
 const {
   annualPrepayEligibleForEstimateData,
@@ -47,6 +49,8 @@ const {
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
   isEstimateAcceptActive,
+  matchAcceptCustomerByPhone,
+  isEstimateCustomerViewable,
   isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
   reconcileFrozenMembershipSnapshot,
@@ -74,6 +78,11 @@ const {
   createCardHoldSetupIntentForEstimate,
   resolveCardHoldPolicy,
 } = require('../services/estimate-card-holds');
+const {
+  createRecurringCardSetupIntentForEstimate,
+  resolveRecurringCardPolicyForEstimate,
+} = require('../services/recurring-card-on-file');
+const { recordCheckoutStepReached, CHECKOUT_KIND } = require('../services/estimate-checkout-events');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
@@ -98,6 +107,18 @@ function resolveSlotServiceMode(estimate = {}, requestedMode = '') {
   return requestedMode === 'one_time' ? 'one_time' : 'recurring';
 }
 
+// Cache/privacy parity with GET /:token/data (estimate-public.js): these
+// responses are tokenized and can carry availability tied to a customer's
+// address — no shared-browser or intermediary retention, no referrer leak of
+// the tokenized URL. Stamped before any branch so every response path
+// (including 4xx/429) carries them.
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Referrer-Policy', 'no-referrer');
+  next();
+});
+
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 30,
@@ -116,13 +137,23 @@ router.use(rateLimit({
 // BLOCKED_STATES_FOR_SLOTS + expires_at) so the commercial manual-scheduling
 // short-circuit can't return a 200 for an accepted/declined/expired estimate.
 // Returns a sent response (caller must `return` it) or null when eligible.
-const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired']);
+// 'void' matches the services' terminal set (reserveSlot's ESTIMATE_TERMINAL
+// list) so the router and service layers reject the same states.
+const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void']);
 function rejectIneligibleEstimate(res, estimate = {}) {
+  // Parity with GET /:token/data's exposure gate (isEstimateCustomerViewable,
+  // estimate-public.js): archived, unpublished (draft/scheduled), send_failed,
+  // and past-expiry estimates must not expose availability or take holds —
+  // same 404 shape /data uses. Callers must SELECT archived_at/status/
+  // expires_at for this check to see them. This check runs FIRST: an archived
+  // estimate whose status is also terminal (accepted/declined/…) must return
+  // the same generic 404 as a missing token — a 409 here would make archived
+  // tokens distinguishable from nonexistent ones.
+  if (!isEstimateCustomerViewable(estimate)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
   if (SLOT_BLOCKED_STATES.has(estimate.status)) {
     return res.status(409).json({ error: 'Estimate is no longer active' });
-  }
-  if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
-    return res.status(404).json({ error: 'Not found' });
   }
   return null;
 }
@@ -159,7 +190,7 @@ router.get('/:token/available-slots', async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -193,12 +224,23 @@ router.get('/:token/available-slots', async (req, res) => {
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const opts = {};
-    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 90) {
+    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= MAX_SLOT_HORIZON_DAYS) {
       opts.windowDays = windowDays;
     }
     // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
+    // Horizon parity with reserveSlot (slot-reservation.js): the reserve path
+    // rejects any slot past MAX_SLOT_HORIZON_DAYS in ET, so browsing must not
+    // display far-future days whose every slot would 409 on the first tap.
+    // Same ET day-string compare, same strict `>` so the boundary day both
+    // displays and reserves. Silently substituting the default window (the
+    // windowDays treatment) would mislead here — the customer asked for a
+    // specific day — so an out-of-horizon date is a 400 like find-slots'
+    // out-of-bound query.
     const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
+        return res.status(400).json({ error: 'date is beyond the booking horizon' });
+      }
       opts.dateFrom = date;
       opts.dateTo = date;
     }
@@ -281,7 +323,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -369,7 +411,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -585,6 +627,38 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     if (!policy.required) {
       return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
     }
+    // One-time card hold supersedes the deposit (mirrors the accept gate's
+    // card_hold_supersedes): whether the hold is satisfied by a captured
+    // SetupIntent or a saved consented card, the accept refuses the deposit
+    // — never pre-collect one here (Codex #2680 r2).
+    if (oneTime) {
+      const holdPolicy = resolveCardHoldPolicy({
+        treatAsOneTime: true,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+        paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+      });
+      if (holdPolicy.required) {
+        return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'card_hold_supersedes' });
+      }
+    }
+    // Recurring card-on-file lane supersedes the deposit (mirrors the accept
+    // gate + /data): during the rollout window with both flags on, minting a
+    // deposit here would collect the retired $49 from a customer whose card
+    // lane promises "$0 today" (Codex #2680).
+    if (!oneTime) {
+      const cardPolicy = await resolveRecurringCardPolicyForEstimate({
+        estimate,
+        membership,
+        treatAsOneTime: false,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+        paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+      });
+      const laneActive = cardPolicy.required
+        || ['saved_method_consented', 'autopay_already_active'].includes(cardPolicy.exemptReason || '');
+      if (laneActive) {
+        return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'recurring_card_supersedes' });
+      }
+    }
     // Mirror accept's appointment gate BEFORE collecting money: a one-time
     // uninvoiced accept with no booking is rejected (APPOINTMENT_REQUIRED at
     // accept), so minting the PI first would charge $99 for an acceptance
@@ -632,6 +706,127 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
   } catch (err) {
     logger.error(`[estimate-slots-public:deposit-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+// POST /:token/deposit-quote — surcharge quote for the deposit PI the client
+// is about to confirm with a MANUAL card entry (owner ruling 2026-07-13:
+// deposits are surcharged like invoices — credit funding only; wallets pay
+// through Express Checkout at face value and never hit this). Deliberately
+// LIGHT compared to /deposit-intent: the PI was minted through every
+// accept-mirror gate already, its face value is pinned in metadata, and a
+// quote only prices that existing intent — the service re-derives trust
+// from the PI's own purpose/estimate_id pin, so a crafted paymentIntentId
+// can't price (or later confirm) someone else's intent through this token.
+router.post('/:token/deposit-quote', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const { paymentIntentId, paymentMethodId } = req.body || {};
+    if (!paymentIntentId || !paymentMethodId) {
+      return res.status(400).json({ error: 'paymentIntentId and paymentMethodId required' });
+    }
+    // Kill switch honored mid-modal (Codex #2705 r3 P2): if the deposit
+    // gate flips off while a customer has the payment form open, the
+    // already-minted PI must not be charged through this server-side
+    // path — the accept no longer requires it. (Per-estimate exemptions
+    // arising mid-modal are handled the same way they always were: the
+    // unconsumed-deposit sweep refunds money nothing consumes.)
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+
+    const quote = await StripeService.quoteEstimateDepositSurcharge({
+      estimateId: estimate.id,
+      paymentIntentId,
+      paymentMethodId,
+    });
+    return res.json({ success: true, ...quote });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    logger.error(`[estimate-slots-public:deposit-quote] ${err.message}`, { stack: err.stack });
+    return res.status(400).json({ error: 'Could not price the deposit payment. Please try again.' });
+  }
+});
+
+// POST /:token/deposit-finalize — confirm the quoted deposit server-side
+// with the surcharge applied (mirrors the invoice /finalize contract:
+// re-derives the amount from the live PM + the PI's pinned face value,
+// never the client's numbers). requires_action (3DS) returns clientSecret
+// for the client's handleNextAction; the accept gate still live-verifies
+// the PI afterward, so this endpoint grants nothing by itself.
+router.post('/:token/deposit-finalize', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const { quoteToken } = req.body || {};
+    if (!quoteToken) return res.status(400).json({ error: 'quoteToken required' });
+    // Kill switch honored mid-modal — see /deposit-quote above.
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+
+    const result = await StripeService.finalizeEstimateDepositPayment({
+      estimateId: estimate.id,
+      quoteToken,
+    });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    logger.error(`[estimate-slots-public:deposit-finalize] ${err.message}`, { stack: err.stack });
+    return res.status(400).json({ error: 'Could not complete the deposit payment. Please try again.' });
+  }
+});
+
+// POST /:token/deposit-reset — the WALLET PREFLIGHT (Codex #2705 r4): every
+// Express Checkout confirm calls this first and must obey the verdict.
+// It (1) re-checks the same live gates the card path's /deposit-finalize
+// enforces — kill switch, already-accepted, inactive — so a wallet tap
+// can't collect a deposit the accept no longer requires; and (2) returns
+// the PI to FACE value when a failed manual-card finalize left it at the
+// surcharged total (wallets pay face — Phase-1). Responds { ok: true }
+// only when the PI is verified clean and confirmable; { ok: false } means
+// DO NOT confirm (e.g. mid-3DS residue, which clears when the abandoned
+// challenge expires back to requires_payment_method).
+router.post('/:token/deposit-reset', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const { paymentIntentId } = req.body || {};
+    if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted', exemptReason: 'already_accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+
+    const result = await StripeService.resetEstimateDepositIntentToFace({
+      estimateId: estimate.id,
+      paymentIntentId,
+    });
+    return res.json({ success: true, ok: result.clean === true, ...result });
+  } catch (err) {
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    logger.error(`[estimate-slots-public:deposit-reset] ${err.message}`, { stack: err.stack });
+    return res.status(400).json({ error: 'Could not verify the deposit payment. Please try again.' });
   }
 });
 
@@ -689,10 +884,38 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       return res.status(409).json({ error: 'No card hold is required for this estimate', exemptReason: policy.exemptReason || null });
     }
 
+    // Auto-satisfy (spec §3.2: existing customers with a saved card are
+    // never re-asked): a saved consented card backs the hold at accept, so
+    // no capture modal — the 409 exemptReason makes the client fall through
+    // to accept, where the gate resolves the same saved method. Lookup
+    // failure mints normally (fail toward asking).
+    try {
+      // Phone-only estimates: resolve the same unambiguous customer match
+      // the accept gate + transaction use, or an existing customer's saved
+      // card is invisible here and they get re-asked (r4 P2).
+      let holdCustomerId = estimate.customer_id || null;
+      if (!holdCustomerId && estimate.customer_phone) {
+        const { match } = await matchAcceptCustomerByPhone(estimate);
+        holdCustomerId = match?.id || null;
+      }
+      const savedCard = holdCustomerId
+        ? await require('../services/payment-method-consents').findConsentedChargeableCard(holdCustomerId)
+        : null;
+      if (savedCard?.stripe_payment_method_id) {
+        return res.status(409).json({ error: 'A saved card already covers this booking', exemptReason: 'saved_method' });
+      }
+    } catch (err) {
+      logger.warn(`[estimate-slots-public:card-hold-intent] saved-method check failed — minting capture intent: ${err.message}`);
+    }
+
     const intent = await createCardHoldSetupIntentForEstimate(estimate);
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }
+    // The customer reached the save-a-card step — the only local evidence of
+    // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
+    // payment-step-abandoned follow-up stage.
+    await recordCheckoutStepReached(estimate.id, CHECKOUT_KIND.CARD_HOLD, intent.setupIntentId);
     return res.json({
       success: true,
       clientSecret: intent.clientSecret,
@@ -705,6 +928,100 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     });
   } catch (err) {
     logger.error(`[estimate-slots-public:card-hold-intent] ${err.message}`, { stack: err.stack });
+    return res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+// POST /:token/recurring-card-intent — Stripe SetupIntent that saves the card
+// powering Auto Pay on a RECURRING accept (dark until RECURRING_CARD_ON_FILE).
+// No money is taken: the deposit is charged separately through /deposit-intent
+// exactly as before, and completed applications later auto-charge the enrolled
+// method. Gates mirror accept: token format, terminal/expired rejection, the
+// quote gate, and the recurring card policy (one-time / invoice-mode / prepay /
+// plan-member / payer-billed / already-on-Auto-Pay owe no card here). The
+// client confirms the SetupIntent, then calls accept with
+// recurringCardSetupIntentId.
+router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+    await reconcileFrozenMembershipSnapshot(estimate);
+
+    const estData = parseEstimateData(estimate);
+    const pricingBundle = await buildPricingBundle(estimate);
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
+    if (quoteRequirement.quoteRequired) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+    if (estimateTrenchingReviewRequired(estData)) {
+      return res.status(409).json(TRENCHING_REVIEW_409);
+    }
+
+    // The Auto Pay card only applies to the recurring lane — a one-time
+    // request keeps its own card-hold intent endpoint.
+    const treatAsOneTime = req.body?.serviceMode === 'one_time'
+      || isStructuralOneTimeOnlyEstimate(estData, estimate);
+    // Mirror accept's contact gate BEFORE capturing a card: a recurring accept
+    // with no linked customer and no phone is rejected pre-commit
+    // (CUSTOMER_CONTACT_REQUIRED — accept-time customer creation is
+    // phone-keyed), so letting an email-only estimate confirm a SetupIntent
+    // here would strand a captured payment method on an acceptance the server
+    // will refuse (Codex #2668 P2). Same shape as /deposit-intent's
+    // invoice-mode contact mirror.
+    if (!treatAsOneTime && !estimate.customer_id && !estimate.customer_phone) {
+      return res.status(400).json({ error: 'Please call Waves to complete this estimate.' });
+    }
+    // Commercial manual-billing accepts collect nothing at accept — the SAME
+    // commercialAcceptDepositExempt predicate the accept gate and
+    // /deposit-intent run. Without it, a commercial auto-priced recurring
+    // estimate could capture a card the accept-side exemption never enrolls.
+    {
+      const lc = commercialLowConfidenceRange(estData);
+      if (commercialAcceptDepositExempt({
+        isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+        siteConfirmationHold: !treatAsOneTime && lc.hasLowConfidence && !lc.forceSiteQuote,
+        treatAsOneTime,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+      })) {
+        return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: 'commercial_manual_billing' });
+      }
+    }
+    const membership = await buildEstimateMembershipContext(estimate);
+    const policy = await resolveRecurringCardPolicyForEstimate({
+      estimate,
+      membership,
+      treatAsOneTime,
+      billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+      paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+    });
+    if (!policy.required) {
+      return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: policy.exemptReason || null });
+    }
+
+    const intent = await createRecurringCardSetupIntentForEstimate(estimate);
+    if (!intent) {
+      return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+    }
+    // The customer reached the save-a-card step — the only local evidence of
+    // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
+    // payment-step-abandoned follow-up stage.
+    await recordCheckoutStepReached(estimate.id, CHECKOUT_KIND.RECURRING_CARD, intent.setupIntentId);
+    return res.json({
+      success: true,
+      clientSecret: intent.clientSecret,
+      setupIntentId: intent.setupIntentId,
+      // Both estimate UIs bootstrap Stripe Elements from this response — the
+      // public estimate pages have no other authenticated key source.
+      publishableKey: require('../config/stripe-config').publishableKey,
+    });
+  } catch (err) {
+    logger.error(`[estimate-slots-public:recurring-card-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });

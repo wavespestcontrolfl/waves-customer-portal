@@ -173,12 +173,16 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
     const notifExistsChain = chain({ first: null });
     const custNameChain = chain({ first: { id: 'c6', first_name: 'Pat', last_name: 'Doe' } });
+    // text-reachability guard (#2586): no prefs row; getAppointmentContacts is
+    // mocked to [] so no sms_log/messaging_suppression lookups follow.
+    const prefsChain = chain({ first: null });
 
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain, custUpdateChain, custNameChain],
       appointment_reminders: [reminderChain],
       notifications: [notifExistsChain],
+      notification_prefs: [prefsChain],
     });
 
     await AppointmentReminders.handleUndeliveredSms({

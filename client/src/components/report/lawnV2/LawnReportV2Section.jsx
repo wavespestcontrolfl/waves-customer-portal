@@ -30,7 +30,7 @@ export default function LawnReportV2Section({ data, print = false }) {
   if (!data) return null;
   return (
     <PrintContext.Provider value={print}>
-    <div style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 32px' }}>
+    <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
       {data.snapshot ? <LawnSnapshotHero snapshot={data.snapshot} /> : null}
       {data.followUp?.scheduled ? <LawnFollowUpCard followUp={data.followUp} /> : null}
       {data.insights?.length ? <LawnInsightCards insights={data.insights} /> : null}

@@ -46,6 +46,26 @@ const gates = {
   // — i.e. everyone today — are unaffected at any setting.
   payerStatements: process.env.GATE_PAYER_STATEMENTS === 'true',
 
+  // Portal ACH Auto Pay (2026-07-13): existing customers add a bank account
+  // in the portal (Financial Connections first, micro-deposit fallback) and
+  // put Auto Pay on it. Opt-in in EVERY environment — it's a customer-facing
+  // money surface. OFF also closes a pre-existing leak: the AutopayCard
+  // Payment Element minted card_or_bank unconditionally, letting a bank
+  // account be saved while the customer saw the CARD consent copy; with the
+  // gate off the portal setup-intent route now mints card-only. Kill
+  // switch: unset or any non-'true' value. Booking/estimate flows stay
+  // card-only regardless (owner ruling 2026-07-13).
+  portalAchAutopay: process.env.GATE_PORTAL_ACH_AUTOPAY === 'true',
+
+  // Customer duplicate auto-merge (customer-dedupe.js green tier). An
+  // auto-WRITER — merges shell duplicate rows into their real customer on the
+  // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
+  // environment; dev/staging pointed at prod snapshots must never merge rows
+  // silently. Detection + the /admin/customers/duplicates review queue are
+  // read-only and NOT behind this gate. Kill switch: unset or set to any
+  // non-'true' value; every merge is journaled and hand-reversible.
+  customerDedupeAutoMerge: process.env.GATE_CUSTOMER_DEDUPE_AUTO_MERGE === 'true',
+
   // Photo-assessment lead magnets (wavespestcontrol.com/lawn-assessment +
   // /pest-identifier). Public, unauthenticated, and every accepted upload is a
   // paid dual-model vision call — explicit opt-in in EVERY environment, and the
@@ -73,6 +93,15 @@ const gates = {
   // text/email real customers. Still subject to twilioSms + per-customer pref.
   // One-off manual sends from the same tab are NOT gated by this.
   reviewSequences: process.env.GATE_REVIEW_SEQUENCES === 'true',
+
+  // Digital business card — the card.issued email a customer gets after their
+  // FIRST completed visit (services/customer-card.js). The card row and the
+  // /card/:token page are NOT behind this gate (tokenized, unlisted,
+  // customer-initiated — same contract as the other public token pages); the
+  // gate covers ONLY the outbound email. Customer-facing auto-send → explicit
+  // opt-in in EVERY environment per house rule, so a dev/preview env with real
+  // SendGrid creds can't email real customers on a completion.
+  digitalBusinessCard: process.env.GATE_DIGITAL_BUSINESS_CARD === 'true',
 
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,
@@ -116,6 +145,24 @@ const gates = {
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
 
+  // Call re-transcription backfill (voice-corpus training) — hourly, batched
+  // upgrade of consented legacy call recordings to diarized transcripts via
+  // the same pipeline new calls use; feeds the corpus miner. DEFAULT ON per
+  // the 2026-07-11 hands-off/training directive (kill switch
+  // GATE_CALL_RETRANSCRIBE_BACKFILL=false). Self-terminating: exactly one
+  // attempt per call, no-ops once the backlog drains. No sends, no
+  // customer-visible effect; spend bounded by RETRANSCRIBE_BATCH_LIMIT.
+  callRetranscribeBackfill: process.env.GATE_CALL_RETRANSCRIBE_BACKFILL !== 'false',
+
+  // Voice-Profile Distiller (brand-voice loop, Loop 2) — DAILY distillation
+  // of the redacted corpus into a style-only voice profile. Exception-based:
+  // green auto-applies, flagged parks for review in the Agents hub. DEFAULT
+  // ON (owner directive 2026-07-11: hands-off — merging this IS the flip);
+  // kill switch GATE_VOICE_PROFILE_DISTILLER=false. Deliberately not the
+  // opt-in pattern: no sends, no customer-visible effect (sole consumer is
+  // the owner-activation-gated phone agent), ≤1 DEEP call/day.
+  voiceProfileDistiller: process.env.GATE_VOICE_PROFILE_DISTILLER !== 'false',
+
   // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of
   // message_drafts status='shadow' rows against the reply a human actually
   // sent, per intent class (shadow_draft_judgments). LLM is called only
@@ -156,6 +203,12 @@ const gates = {
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
   cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : true,
 
+  // Weekly lawn pricing invariant sweep — re-runs the pricing engine across the
+  // full track×size×tier grid against LIVE DB config and raises an admin alert
+  // on ladder violations or material-budget drift vs live inventory COGS.
+  // Read-only + one alert upsert; kill = unset GATE_LAWN_PRICING_SWEEP.
+  lawnPricingInvariantSweep: isProd ? process.env.GATE_LAWN_PRICING_SWEEP === 'true' : true,
+
   // Webhooks — process inbound Twilio/Stripe/Lead webhooks
   webhooks: isProd ? process.env.GATE_WEBHOOKS === 'true' : true,
 
@@ -170,6 +223,15 @@ const gates = {
 
   // Self-Booking — customer self-scheduling after estimate acceptance
   selfBooking: isProd ? process.env.GATE_SELF_BOOKING === 'true' : true,
+
+  // Estimate accept — widen existing-appointment detection to ANY upcoming
+  // pending/confirmed appointment belonging to the estimate's customer (not
+  // just rows already linked to the estimate). A match swaps the accept
+  // wizard's slot picker for payment options and the accept stamps
+  // source_estimate_id onto that visit. Changes which visit an acceptance
+  // attaches to, so it FAILS CLOSED (explicit opt-in in every environment)
+  // until the owner verifies the first customer-wide match end-to-end.
+  estimateExistingApptCustomerWide: process.env.GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE === 'true',
 
   // Backlink Agent — Playwright browser automation for profile signups
   backlinkAgent: isProd ? process.env.GATE_BACKLINK_AGENT === 'true' : true,
@@ -263,6 +325,34 @@ const gates = {
   // claims or sends.
   estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
+  // Payment-step-abandonment follow-up EMAIL — emails customers who reached
+  // the save-a-card step of accepting an estimate (Auto Pay card on a
+  // recurring accept, or the one-time card hold; estimate_checkout_events
+  // row) but never completed the acceptance. Successor to the deposit-
+  // abandonment recovery above — deposits are retired from the accept flow.
+  // Customer-facing auto-send: explicit opt-in in EVERY environment. Until
+  // the gate is on, the follow-up cron only logs candidate counts (shadow)
+  // and never claims or sends.
+  paymentStepFollowup: process.env.GATE_PAYMENT_STEP_FOLLOWUP === 'true',
+
+  // Estimate engagement engine — behavior-triggered follow-up EMAILS keyed
+  // to estimate view sessions (return visit, dark-then-return, high intent,
+  // unopened, gone-quiet, expiring). V1 scope: pest + lawn estimates only.
+  // Customer-facing auto-send: explicit opt-in in EVERY environment. Until
+  // the gate is on, the engine still schedules and consumes jobs but marks
+  // them 'shadow' and logs the would-send — volume is judgeable with zero
+  // send risk and no post-flip backlog burst.
+  estimateEngagementFollowup: process.env.GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP === 'true',
+
+  // Nightly critical-churn "CHURN ALERT" SMS to the owner's phone
+  // (retention-engine, 3AM Customer Intelligence Pipeline). Internal-only —
+  // it texts ADAM_PHONE, never a customer — but the owner paused health
+  // notifications 2026-07-11, so it fails CLOSED in every environment until
+  // explicitly re-enabled with GATE_CHURN_ALERT_SMS=true. Retention outreach
+  // drafts still queue as pending_approval either way; only the owner-alert
+  // SMS is gated.
+  churnAlertSms: process.env.GATE_CHURN_ALERT_SMS === 'true',
+
   // Abandoned-booking recovery — chases /book drop-offs (booking_intents) with a
   // ~1h recovery SMS + ~24h email. A customer-facing auto-send, so it FAILS CLOSED
   // (explicit opt-in in EVERY environment) per the house rule — a preview/dev env
@@ -321,6 +411,66 @@ const gates = {
   // get a non_mobile suppression row.
   proactiveLineTypeLookup: process.env.GATE_PROACTIVE_LINETYPE_LOOKUP === 'true',
 
+  // Zero-triage call pipeline (2026-07-10 mining mission) — all dark by
+  // default; see docs/call-mining-2026-07-10.md.
+  // Disposition rules layer: stamps a terminal disposition on every processed
+  // call (call_log.disposition). No behavior change beyond the stamp.
+  callDispositionV1: process.env.GATE_CALL_DISPOSITION_V1 === 'true',
+  // Layered spam classifier: records verdicts to call_spam_verdicts (100%
+  // precision offline; any discard action is a separate consumer decision).
+  callSpamClassifier: process.env.GATE_CALL_SPAM_CLASSIFIER === 'true',
+  // Profile-enrichment writer: gate codes/pets/notes from extraction into
+  // property_preferences + customers.internal_notes (admin-edit-preserving).
+  callProfileEnrichment: process.env.GATE_CALL_PROFILE_ENRICHMENT === 'true',
+  // Nightly self-audit: samples recent calls, strong-model re-read, drift
+  // metrics to call_audit_findings; alerts ONLY on threshold breach.
+  callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
+  // Fail-open booking: a CONFIRMED appointment books despite recoverable
+  // contact-field flags (ANI satisfies caller_phone_missing; an existing
+  // customer's on-file address clears address flags; garbled email is
+  // advisory). Google Address Validation still governs new addresses; hard
+  // blocks (out_of_service_area, do_not_contact, caller_not_authorized, spam)
+  // stay. Creates real appointments — owner-flip only.
+  callFailOpenBooking: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  // Implied consent for INBOUND bookings: a caller who called us and agreed to
+  // a time has implied consent for the transactional confirmation SMS
+  // (established business relationship). do-not-contact always overrides.
+  // Sends customer SMS — owner-flip only.
+  callInboundImpliedConsent: process.env.GATE_CALL_INBOUND_IMPLIED_CONSENT === 'true',
+  // Payer (third-party Bill-To) linkage from a call: when a caller names a
+  // DISTINCT paying party (e.g. "the owner Jim pays by credit card", "bill the
+  // management company"), find-or-create a `payers` Bill-To from that contact
+  // and stamp payer_id on the booking so the completion invoice routes to the
+  // payer's AP inbox. Reuses the existing (live) payer subsystem; only fires
+  // alongside GATE_CALL_SECONDARY_CONTACT (the payer IS a secondary party).
+  callPayerLinking: process.env.GATE_CALL_PAYER_LINKING === 'true',
+  // Review-gated OUTBOUND-callback bookings: a confirmed booking taken on an
+  // outbound call (a return call to an inbound lead) creates the appointment
+  // PENDING/needs-review — customer_confirmed=false, NO auto-SMS, a distinct
+  // source_action so the customer can't self-confirm it, and an
+  // outbound_booking_review triage item — instead of being skipped as
+  // 'outbound_call'. The office confirms it in dispatch (which arms reminders).
+  // Requires a real catalog service (no generic-placeholder fallback for
+  // outbound). Off → outbound bookings stay manual (current behavior).
+  callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
+  // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
+  // call ledger against call_log and rings an admin bell for any answered
+  // inbound call (completed, >=20s) the pipeline never received — born from
+  // the 2026-07 reconciliation that found 391 Feb–Mar calls silently never
+  // ingested. Read-only against Twilio; writes only admin notifications.
+  // Off → cron ticks are no-ops.
+  callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Bounce-triggered call-audio email re-verification: a hard bounce on a
+  // call-captured address re-runs the source RECORDING through transcription
+  // (letter-fidelity contact pass) + a deterministic name-anchored candidate
+  // generator, and cards the ranked corrections for the owner's read-back
+  // confirm. Writes nothing to the customer, sends nothing. LIVE BY DEFAULT
+  // (owner call 2026-07-11: bounces are rare, the card is pure upside) —
+  // GATE_CALL_BOUNCE_REVERIFY=false is the kill switch (stops the
+  // transcription spend; bounces then behave as before: domain-corrector
+  // recovery + admin alert only).
+  callBounceReverify: process.env.GATE_CALL_BOUNCE_REVERIFY !== 'false',
+
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message
   // about X — get your quote: …"). A customer-facing auto-send, so it FAILS
@@ -358,6 +508,44 @@ const gates = {
   // trigger has been verified with run history and idempotency checks.
   emailTemplateAutomations: isProd ? process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS === 'true' : true,
 
+  // Treatment Automation Enroll — for wired pests (bed_bug only for now; the
+  // per-pest map in appointment-tagger.js controls which, so flipping this
+  // gate never silently enables an unwired pest), a first-time booking
+  // enrolls the Automations-tab sequence and that sequence REPLACES the
+  // transactional prep.<pest> email as the one guide email (owner directive
+  // 2026-07-11: exactly one email per booking, editable in the tab). The
+  // prep SMS legs key off the enrollment. Explicit opt-in in EVERY
+  // environment (like universalLinks): it emails customers, and non-prod runs
+  // the same every-minute scheduler, so a dev/staging booking replay must
+  // never enroll anyone by default.
+  // Kill: unset reverts wired pests to the transactional prep lane AND stops
+  // new enrollments; toggling the automation off in the Automations tab holds
+  // in-flight enrollments (the runner only picks enabled templates).
+  treatmentAutomationEnroll: process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true',
+
+  // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
+  // environment, same rationale as treatmentAutomationEnroll; each kill =
+  // unset the var, or toggle the sequence off in the tab to hold in-flight):
+  //
+  // Google review attributed to a customer (4-5 stars) → the matching
+  // location's Review Thank You sequence. Once per customer ever.
+  reviewThankYouEnroll: process.env.GATE_REVIEW_THANKYOU_ENROLL === 'true',
+  // Autopay charge failure → payment_failed sequence, REPLACING the
+  // transactional retry-notice email (owner rule: one email; the failure SMS
+  // with the card-update link is unchanged). 14-day dedupe = one enrollment
+  // per failure episode across the retry ladder. Unset = retry-notice email
+  // returns.
+  paymentFailedEnroll: process.env.GATE_PAYMENT_FAILED_ENROLL === 'true',
+  // GATE_SERVICE_RENEWAL_ENROLL removed 2026-07-13: the renewal announcement
+  // lane was scrapped (owner: no-term services never get "renewal" language;
+  // termite-bond SMS reminders remain in workflows/renewal-reminder.js, and
+  // price changes use the price-change notice workflow).
+  // Positive-review referral invite → referral_nudge sequence, REPLACING the
+  // transactional referral.invite email (one email; the referral SMS nudge is
+  // unchanged). Once per customer ever, mirroring referral.invite's own
+  // idempotency. Unset = referral.invite email returns.
+  referralNudgeEnroll: process.env.GATE_REFERRAL_NUDGE_ENROLL === 'true',
+
   // Field Content Module — master gate for the tech capture → review →
   // publish pipeline (content_prompts, dispatches, media_uploads,
   // content_queue). Off means no routes, no cron, no UI. Sub-flags for
@@ -391,6 +579,17 @@ const gates = {
   // seo_llm_mentions tracker has several days of data and the opportunities
   // have been eyeballed. When off, the aeo_gap bucket miner returns [].
   aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
+
+  // Listicle brief overlay — when a supporting-blog brief's query is
+  // list-shaped ("signs of…", "10 natural…"), the brief-builder layers the
+  // citable-listicle architecture (count-in-title, numbered H2 per item,
+  // 60-word quick answer, sourced methodology note, dated line) on top of the
+  // normal supporting-blog contract. Informational lists only — the overlay's
+  // voice notes forbid vendor rankings, and transactional queries never reach
+  // the blog lane anyway (router's terminal guard). Default OFF in prod, ON in
+  // dev; page_type stays 'supporting-blog' so every existing quality/SEO gate
+  // and the Codex publish review apply untouched. Kill switch: unset.
+  listicleBriefs: isProd ? process.env.GATE_LISTICLE_BRIEFS === 'true' : true,
 
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,
@@ -429,6 +628,18 @@ const gates = {
   // Off in prod until the rendered section is verified on a live estimate.
   // Enable with GATE_ESTIMATE_SHOW_YOUR_WORK=true.
   estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
+
+  // Estimate extension request — "Request an extension" button on the React
+  // estimate page's expired/not-found screen. First click per estimate
+  // AUTO-GRANTS +7 days (shared estimate-extension service: expiry push,
+  // status revival, `estimate_extended` SMS with the refreshed link — SMS
+  // sending still requires the Twilio gate and passes the consent/opt-out
+  // checks inside sendCustomerMessage). The auto-grant is capped at one per
+  // estimate lifetime; repeat requests only notify the office. Gates BOTH
+  // the /data 404 eligibility flag (which is what makes the button render)
+  // and the POST endpoint itself.
+  // Enable with GATE_ESTIMATE_EXTENSION_REQUEST=true.
+  estimateExtensionRequest: isProd ? process.env.GATE_ESTIMATE_EXTENSION_REQUEST === 'true' : true,
 
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to
@@ -509,6 +720,16 @@ const gates = {
   // zero drafts, zero sends. Explicit opt-in in EVERY environment (off in dev
   // too) so campaign drafts never accumulate silently in a preview/dev queue.
   campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',
+
+  // WDO Report Payment Hold — "pay before you get the report". Arms the
+  // hold option on the WDO send-with-invoice flow: the customer gets the
+  // invoice + pay link only, and the FDACS-13645 report is emailed
+  // automatically once the invoice settles (release sweep). A money-path +
+  // customer-facing delivery change, so it FAILS CLOSED (explicit opt-in in
+  // EVERY environment). The gate governs CREATING new holds only — releases
+  // of already-held reports (payment sweep, manual send, public 402 gate)
+  // always run, so flipping it off can never strand a held report.
+  wdoReportPaymentHold: process.env.GATE_WDO_REPORT_PAYMENT_HOLD === 'true',
 
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"

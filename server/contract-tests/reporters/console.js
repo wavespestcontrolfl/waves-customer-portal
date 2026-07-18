@@ -16,11 +16,14 @@ function print(results, { verbose = false } = {}) {
   let critical = 0, warning = 0, pass = 0;
   const lines = [];
   for (const [tool, rs] of byTool) {
-    const failed = rs.filter(r => !r.pass);
-    if (failed.length === 0) { pass++; continue; }
+    // A result is reportable if it failed OR carries warning severity —
+    // validators like db-columns return pass:true + severity:'warning' for
+    // dynamic raw SQL, and those must be counted (and block) too.
+    const reportable = rs.filter(r => !r.pass || r.severity === 'warning');
+    if (reportable.length === 0) { pass++; continue; }
     const surface = rs[0].surface;
     lines.push(paint(C.bold, `\n✗ ${tool}`) + paint(C.dim, `  (${surface})`));
-    for (const r of failed) {
+    for (const r of reportable) {
       const sev = r.severity === 'critical' ? paint(C.red, '[critical]') :
                   r.severity === 'warning'  ? paint(C.yellow, '[warning]') :
                                               paint(C.dim, '[info]');

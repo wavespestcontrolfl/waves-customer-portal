@@ -13,6 +13,14 @@ const { decideVoiceRoute } = require('../services/voice-route-decision');
 const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
 const { isRelayAttached } = require('../services/voice-agent/relay-server');
 
+// Single TTS voice for every <Say> in the voice flow. The flow previously
+// mixed three tiers — legacy `alice`, standard Polly.Joanna, and bare <Say>
+// (Twilio default voice) — which sounded like three different robots on one
+// call. Polly.Joanna-Neural is the highest GA/SLA-covered tier of the same
+// Joanna voice; the pre-recorded ElevenLabs brand assets remain <Play>.
+// Env-swappable without a code change.
+const SAY_VOICE = process.env.TWILIO_SAY_VOICE || 'Polly.Joanna-Neural';
+
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
     logger.error(`[twilio-alerts] async notification failed: ${err.message}`);
@@ -174,6 +182,19 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
     });
 }
 
+// Compact, parse-safe capture of Twilio's Marketplace `AddOns` webhook param
+// for the call_log metadata audit trail. Parsed object when valid JSON,
+// truncated string when not (still evidence of WHAT arrived), null when the
+// param is absent entirely.
+function parseAddOnsForAudit(addOnsRaw) {
+  if (!addOnsRaw) return null;
+  try {
+    return typeof addOnsRaw === 'string' ? JSON.parse(addOnsRaw) : addOnsRaw;
+  } catch {
+    return String(addOnsRaw).slice(0, 1000);
+  }
+}
+
 function metadataHasForwardAcceptance(metadata, { parentCallSid, dialCallSid }) {
   const acceptance = parseJsonObject(metadata).forward_acceptance || {};
   if (acceptance.accepted !== true) return false;
@@ -209,6 +230,14 @@ function resolveInboundDialCompletion({ status, duration, forwardAccepted }) {
   if (shouldRecordVoicemail) answeredBy = 'voicemail';
 
   return { shouldRecordVoicemail, answeredBy };
+}
+
+function shouldAlertInboundDialFailure({ status, shouldRecordVoicemail }) {
+  // A failed staff-forward leg is not a failed customer call when the same
+  // TwiML response deliberately continues into Waves-owned voicemail. Alert
+  // only when the dial failure is terminal; downstream webhook/recording
+  // failures have their own failure paths.
+  return isFailureStatus(status) && !shouldRecordVoicemail;
 }
 
 function parseForwardNumbers(value) {
@@ -285,7 +314,7 @@ const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 function appendVoicemailRecording(twiml) {
   const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
   twiml.play(voicemailAudio);
-  twiml.say({ voice: 'alice' }, 'Your message will be recorded and transcribed.');
+  twiml.say({ voice: SAY_VOICE }, 'Your message will be recorded and transcribed.');
   twiml.record({
     maxLength: 120,
     action: VOICEMAIL_COMPLETE_ACTION,
@@ -417,7 +446,7 @@ router.post('/voice', async (req, res) => {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
       logger.info(`[GATE BLOCKED] Voice call from ${maskPhone(req.body.From)} (gate: twilioVoice)`);
-      return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Thank you for calling Waves Pest Control. Please call back during business hours or text us at 941-318-7612.</Say></Response>');
+      return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">Thank you for calling Waves Pest Control. Please call back during business hours or text us at 941-318-7612.</Say></Response>`);
     }
 
     const { From, To, CallSid, CallStatus, Direction } = req.body;
@@ -439,6 +468,10 @@ router.post('/voice', async (req, res) => {
     const { checkInboundBlock } = require('../middleware/spam-block');
     const blockResult = await checkInboundBlock({
       from: From, to: To, channel: 'voice', twilioSid: CallSid, addOns: req.body.AddOns,
+      // Blocked calls return TwiML before the call_log insert below ever
+      // runs, so their spam evidence must ride the blocked_call_attempts
+      // audit row instead — same fields the allowed path stores in metadata.
+      signals: { stir_verstat: req.body.StirVerstat || null, addons: parseAddOnsForAudit(req.body.AddOns) },
       recordAttempt: firstDelivery,
     });
     if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
@@ -483,6 +516,15 @@ router.post('/voice', async (req, res) => {
         // Read back after press-1 by connectingAnnouncement(). Stored server-side
         // so the caller's name never enters a callback URL (request-logger safe).
         screen_caller_name: spokenCallerName(customer),
+        // Spam-signal ground truth (2026-07-09): the STIR/SHAKEN attestation
+        // and the Marketplace AddOns verdicts arrive ONLY on this initial
+        // webhook and were previously dropped on the floor. Captured so
+        // screening accuracy can be judged from call_log against the
+        // pipeline's own spam classifications BEFORE any caller is ever
+        // challenged or blocked. NULL addons = Twilio attached nothing —
+        // that absence is itself a finding (Marchex was silent for months).
+        stir_verstat: req.body.StirVerstat || null,
+        addons: parseAddOnsForAudit(req.body.AddOns),
       }),
     });
     // call_log now committed — don't release the claim on a later error.
@@ -624,7 +666,7 @@ router.post('/voice', async (req, res) => {
       to: req.body?.To,
       link: '/admin/communications',
     });
-    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>We're sorry, please try again.</Say></Response>`);
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">We're sorry, please try again.</Say></Response>`);
   }
 });
 
@@ -655,7 +697,7 @@ router.post('/call-complete', async (req, res) => {
     await db('call_log').where('twilio_call_sid', CallSid).update(callUpdate);
     queueVoiceMessageSync(CallSid);
 
-    if (isFailureStatus(status)) {
+    if (shouldAlertInboundDialFailure({ status, shouldRecordVoicemail })) {
       notifyTwilioFailure({
         channel: 'voice',
         direction: 'inbound',
@@ -850,8 +892,8 @@ router.post('/inbound-forward-screen', (req, res) => {
       timeout: 7,
     });
 
-    gather.say({ voice: 'Polly.Joanna' }, 'Waves call. Press 1 to connect.');
-    twiml.say({ voice: 'Polly.Joanna' }, 'No input received. Goodbye.');
+    gather.say({ voice: SAY_VOICE }, 'Waves call. Press 1 to connect.');
+    twiml.say({ voice: SAY_VOICE }, 'No input received. Goodbye.');
     twiml.hangup();
 
     res.type('text/xml').send(twiml.toString());
@@ -890,9 +932,9 @@ router.post('/inbound-forward-accept', async (req, res) => {
           logger.warn(`[voice] forward-accept caller lookup failed for ${maskSid(parentCallSid)}: ${lookupErr.message}`);
         }
       }
-      twiml.say({ voice: 'Polly.Joanna' }, connectingAnnouncement(callRow));
+      twiml.say({ voice: SAY_VOICE }, connectingAnnouncement(callRow));
     } else {
-      twiml.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
+      twiml.say({ voice: SAY_VOICE }, 'Goodbye.');
       twiml.hangup();
     }
 
@@ -930,23 +972,74 @@ router.post('/recording-status', async (req, res) => {
       const requestFrom = req.body.From || null;
       const requestTo = req.body.To || null;
 
+      // PAN-quarantined rows must never re-attach audio: the built-in
+      // transcription webhook can flag + quarantine BEFORE this callback
+      // delivers the recording URL, and storing it here would put the card
+      // audio right back on the row/message (Codex #2676 round-5 P1). The
+      // updates skip quarantined rows; the freshly delivered recording is
+      // then deleted at Twilio below instead of stored.
+      const notQuarantined = function notQuarantined() {
+        this.whereNull('transcription_metadata')
+          .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true'");
+      };
       let updated = 0;
       let matchedSid = null;
       if (ParentCallSid) {
         updated = await db('call_log')
           .where('twilio_call_sid', ParentCallSid)
+          .where(notQuarantined)
           .update(recordingData);
         if (updated > 0) matchedSid = ParentCallSid;
       }
       if (updated === 0) {
         updated = await db('call_log')
           .where('twilio_call_sid', CallSid)
+          .where(notQuarantined)
           .update(recordingData);
         if (updated > 0) matchedSid = CallSid;
       }
 
+      let quarantinedMatch = null;
+      let stampedRaceRow = null;
+      if (updated === 0) {
+        quarantinedMatch = await db('call_log')
+          .whereIn('twilio_call_sid', [ParentCallSid, CallSid].filter(Boolean))
+          .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+          .first();
+      }
+
       if (updated > 0) {
         logger.info(`Recording saved: ${matchedSid} → ${RecordingSid} (${RecordingDuration}s)`);
+      } else if (quarantinedMatch) {
+        logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} arrived for PAN-quarantined call ${maskSid(quarantinedMatch.twilio_call_sid)} — deleting instead of attaching`);
+        await require('../services/call-recording-processor').quarantineCardRecording(
+          {
+            ...quarantinedMatch,
+            // The recording that JUST arrived is RecordingSid — preferring
+            // the row's stale recording_sid would re-delete the old audio
+            // and leave the newly delivered PAN-bearing recording at Twilio
+            // (Codex #2676 round-11 P1).
+            recording_sid: RecordingSid || quarantinedMatch.recording_sid,
+            recording_url: RecordingUrl ? `${RecordingUrl}.mp3` : quarantinedMatch.recording_url,
+          },
+          { source: 'recording_status_post_quarantine' },
+        ).catch((e) => logger.error(`[recording-status] post-quarantine recording delete failed: ${e.message}`));
+        // The masked transcript is still a REAL transcript — extraction /
+        // lead / appointment processing must run for this call (Codex #2676
+        // round-9 P1). Processed IMMEDIATELY (round-11 P1): there is no CDN
+        // propagation to wait out (the transcript is already stored and the
+        // audio is gone), and the 10-minute in-memory timer would strand the
+        // row on a restart. processAllPending's quarantined branch is the
+        // durable backstop. processRecording handles the null recording_url
+        // by falling back to the stored (masked) transcription.
+        try {
+          const qProcessor = require('../services/call-recording-processor');
+          void qProcessor.processRecording(quarantinedMatch.twilio_call_sid)
+            .catch((e) => logger.error(`[recording-status] quarantined-transcript processing failed: ${e.message}`));
+          queueVoiceMessageSync(quarantinedMatch.twilio_call_sid);
+        } catch (e) {
+          logger.error(`[recording-status] quarantined-transcript processing setup failed: ${e.message}`);
+        }
       } else if (!ParentCallSid) {
         const primaryCallSid = CallSid;
         try {
@@ -961,9 +1054,18 @@ router.post('/recording-status', async (req, res) => {
 
             const existing = await trx('call_log').where('twilio_call_sid', primaryCallSid).first();
             if (existing) {
-              await trx('call_log').where({ id: existing.id }).update(recordingData);
-              matchedSid = primaryCallSid;
-              logger.info(`[recording-status] Attached recording ${maskSid(RecordingSid)} to existing Studio-originated call ${maskSid(primaryCallSid)}`);
+              // Same quarantine guard as the direct updates above — and the
+              // same zero-row handling (round-18 P2): a stamp landing
+              // between the earlier lookup and this transaction means the
+              // guarded update silently skips, and the just-arrived
+              // recording must be quarantine-deleted, not left at Twilio.
+              const guardedCount = await trx('call_log').where({ id: existing.id }).where(notQuarantined).update(recordingData);
+              if (guardedCount === 0) {
+                stampedRaceRow = existing;
+              } else {
+                matchedSid = primaryCallSid;
+                logger.info(`[recording-status] Attached recording ${maskSid(RecordingSid)} to existing Studio-originated call ${maskSid(primaryCallSid)}`);
+              }
               return;
             }
 
@@ -1023,6 +1125,29 @@ router.post('/recording-status', async (req, res) => {
         );
       }
 
+      if (stampedRaceRow) {
+        // The Studio-branch race resolved to a PAN-stamped row — same
+        // handling as quarantinedMatch: delete the just-arrived recording
+        // and process the masked transcript immediately (round-18 P2).
+        logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} arrived for PAN-stamped call ${maskSid(stampedRaceRow.twilio_call_sid)} (guarded update raced) — deleting instead of attaching`);
+        await require('../services/call-recording-processor').quarantineCardRecording(
+          {
+            ...stampedRaceRow,
+            recording_sid: RecordingSid || stampedRaceRow.recording_sid,
+            recording_url: RecordingUrl ? `${RecordingUrl}.mp3` : stampedRaceRow.recording_url,
+          },
+          { source: 'recording_status_post_quarantine' },
+        ).catch((e) => logger.error(`[recording-status] raced post-quarantine delete failed: ${e.message}`));
+        try {
+          const rProcessor = require('../services/call-recording-processor');
+          void rProcessor.processRecording(stampedRaceRow.twilio_call_sid)
+            .catch((e) => logger.error(`[recording-status] raced quarantined-transcript processing failed: ${e.message}`));
+          queueVoiceMessageSync(stampedRaceRow.twilio_call_sid);
+        } catch (e) {
+          logger.error(`[recording-status] raced quarantined processing setup failed: ${e.message}`);
+        }
+      }
+
       // Auto-process recording when ready. Use the SID we actually
       // landed the recording on — for forwarded inbound calls that's
       // the parent CallSid, not the child dial leg's CallSid that
@@ -1071,33 +1196,80 @@ router.post('/transcription', async (req, res) => {
       // by the parent CallSid. Try ParentCallSid first, fall back to
       // CallSid for non-dial single-leg cases.
       const ParentCallSid = req.body.ParentCallSid || null;
-      const update = {
-        transcription: TranscriptionText,
-        transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
-        transcription_provider: 'twilio_builtin',
-        transcription_model: null,
-        transcription_metadata: JSON.stringify({
-          provider: 'twilio_builtin',
-          source: 'twilio_transcription_webhook',
-          transcription_status: TranscriptionStatus || null,
-          transcript_chars: TranscriptionText.length,
-          recording_sid_present: !!RecordingSid,
-        }),
-        updated_at: new Date(),
-      };
-
+      // PAN redaction guard (card-on-file spec Phase 0): this is the one
+      // transcript persistence path that bypasses call-recording-processor's
+      // scrub (Twilio's built-in transcription writes the row directly), so
+      // a blurted card number must be masked here too.
+      const panScrub = require('../utils/pan-scrub').scrubPansDetailed(TranscriptionText);
+      const scrubbedTranscription = panScrub.text;
+      // Resolve the target row FIRST (parent preferred, child fallback) so
+      // the metadata write can MERGE an existing PAN-quarantine stamp — a
+      // fresh metadata object here would drop pan_detected when this
+      // webhook lands after a provider/backfill quarantine whose card
+      // readback Twilio's own transcript happened to omit, and the
+      // recording-status/recovery guards key on that stamp
+      // (Codex #2676 round-10 P1).
+      let targetRow = null;
+      if (ParentCallSid) {
+        targetRow = await db('call_log').where('twilio_call_sid', ParentCallSid).first('id', 'twilio_call_sid');
+      }
+      if (!targetRow) {
+        targetRow = await db('call_log').where('twilio_call_sid', CallSid).first('id', 'twilio_call_sid');
+      }
       let updated = 0;
       let matchedSid = null;
-      if (ParentCallSid) {
-        updated = await db('call_log').where('twilio_call_sid', ParentCallSid).update(update);
-        if (updated > 0) matchedSid = ParentCallSid;
-      }
-      if (updated === 0) {
-        updated = await db('call_log').where('twilio_call_sid', CallSid).update(update);
-        if (updated > 0) matchedSid = CallSid;
+      if (targetRow) {
+        const CallProc = require('../services/call-recording-processor');
+        const update = {
+          transcription: scrubbedTranscription,
+          transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
+          transcription_provider: 'twilio_builtin',
+          transcription_model: null,
+          transcription_metadata: JSON.stringify(await CallProc.withPanStamps(targetRow.id, {
+            provider: 'twilio_builtin',
+            source: 'twilio_transcription_webhook',
+            transcription_status: TranscriptionStatus || null,
+            transcript_chars: scrubbedTranscription.length,
+            recording_sid_present: !!RecordingSid,
+            // Detection stamped in the SAME write that persists the scrubbed
+            // text (round-12 P1): a crash before the best-effort quarantine
+            // below — or a concurrent /recording-status callback — must
+            // still see a durable pan_detected on the row.
+            ...(panScrub.count > 0 ? { pan_detected: true, pan_count: panScrub.count, quarantine_source: 'twilio_transcription_webhook_pending' } : {}),
+          })),
+          updated_at: new Date(),
+        };
+        updated = await db('call_log').where({ id: targetRow.id }).update(update);
+        if (updated > 0) matchedSid = targetRow.twilio_call_sid;
       }
 
       if (updated > 0) {
+        // Card data detected: the recording itself still carries it — the
+        // transcript mask alone leaves the PAN replayable from the audio.
+        // Quarantine (Twilio delete + reference strip + office heads-up)
+        // BEFORE the message sync so the media never lands in the thread.
+        if (panScrub.count > 0) {
+          try {
+            const callRow = await db('call_log').where('twilio_call_sid', matchedSid).first();
+            if (callRow) {
+              // This webhook can arrive BEFORE /recording-status stamps the
+              // row — carry its own RecordingSid so the Twilio delete can
+              // still identify the audio (Codex #2676 round-5 P1). The
+              // /recording-status guard covers the reverse ordering.
+              await require('../services/call-recording-processor')
+                .quarantineCardRecording(
+                  // The audio that produced THIS PAN transcript is the
+                  // callback's RecordingSid — prefer it over a stale row SID
+                  // so a second recording is the one deleted immediately
+                  // (round-12 P1; mirrors the recording-status path).
+                  { ...callRow, recording_sid: RecordingSid || callRow.recording_sid || null },
+                  { source: 'twilio_transcription_webhook' },
+                );
+            }
+          } catch (qErr) {
+            logger.error(`[transcription] PAN quarantine failed for ${maskSid(matchedSid)}: ${qErr.message}`);
+          }
+        }
         queueVoiceMessageSync(matchedSid);
         logger.info(`Transcription received: ${maskSid(CallSid)} (${TranscriptionText.length} chars)`);
       } else {
@@ -1129,13 +1301,13 @@ router.post('/lead-alert-announce', async (req, res) => {
     const spokenPhone = leadPhoneRaw.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1. $2. $3.');
     const twiml = new VoiceResponse();
     twiml.pause({ length: 1 });
-    twiml.say({ voice: 'alice' }, `${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
+    twiml.say({ voice: SAY_VOICE }, `${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
     twiml.pause({ length: 1 });
-    twiml.say({ voice: 'alice' }, `Again. ${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
+    twiml.say({ voice: SAY_VOICE }, `Again. ${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Lead alert announce error: ${err.message}`);
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>New lead received. Check admin portal.</Say></Response>');
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">New lead received. Check admin portal.</Say></Response>`);
   }
 });
 
@@ -1165,17 +1337,17 @@ router.post('/outbound-admin-prompt', async (req, res) => {
     });
 
     gather.say(
-      { voice: 'Polly.Joanna' },
+      { voice: SAY_VOICE },
       `${eventLabel ? `${eventLabel}. ` : ''}Calling ${firstName}. Press 1 to connect.`
     );
 
-    twiml.say('No response received. Goodbye.');
+    twiml.say({ voice: SAY_VOICE }, 'No response received. Goodbye.');
     twiml.hangup();
 
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Outbound admin prompt error: ${err.message}`);
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Error. Goodbye.</Say></Response>');
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">Error. Goodbye.</Say></Response>`);
   }
 });
 
@@ -1193,7 +1365,7 @@ router.post('/outbound-connect', async (req, res) => {
     // hangs up cleanly so we don't bridge a customer to a voicemail tone.
     if (digits !== '1') {
       const reject = new VoiceResponse();
-      reject.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
+      reject.say({ voice: SAY_VOICE }, 'Goodbye.');
       reject.hangup();
       return res.type('text/xml').send(reject.toString());
     }
@@ -1240,7 +1412,7 @@ router.post('/outbound-connect', async (req, res) => {
       to: req.body?.To,
       link: '/admin/communications',
     });
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, unable to connect.</Say></Response>');
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">Sorry, unable to connect.</Say></Response>`);
   }
 });
 
@@ -1378,11 +1550,13 @@ router._test = {
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,
+  parseAddOnsForAudit,
   spokenCallerName,
   rememberForwardAccept,
   resolveCsrName,
   resolveInboundDialCompletion,
   sanitizeVoiceProviderError,
+  shouldAlertInboundDialFailure,
   wasForwardAccepted,
 };
 

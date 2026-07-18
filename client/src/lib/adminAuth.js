@@ -1,5 +1,5 @@
 export function getAdminAuthToken() {
-  return localStorage.getItem('waves_admin_token') || localStorage.getItem('adminToken') || '';
+  return localStorage.getItem('waves_admin_token') || '';
 }
 
 export function getAdminUser() {

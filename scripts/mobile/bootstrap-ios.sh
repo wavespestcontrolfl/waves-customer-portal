@@ -8,7 +8,7 @@
 #   - An Apple Developer account + Team ID (signing)
 #
 # What it does:
-#   1. installs/updates the Capacitor deps in client/
+#   1. installs the exact lockfile-pinned Capacitor deps
 #   2. builds the web app into client/dist (the webDir Capacitor copies)
 #   3. generates the native Xcode project at client/ios/App (idempotent)
 #   4. syncs web assets + native plugins into the iOS project
@@ -20,12 +20,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT/client"
 
-echo "==> 1/5  Installing Capacitor deps (pinning to latest majors)…"
-npm install \
-  @capacitor/core@latest @capacitor/cli@latest @capacitor/ios@latest \
-  @capacitor/push-notifications@latest @capacitor/app@latest \
-  @capacitor/status-bar@latest @capacitor/splash-screen@latest \
-  @capacitor/filesystem@latest @capacitor/share@latest
+echo "==> 1/5  Installing lockfile-pinned native dependencies…"
+# Run from client/ intentionally: npm resolves the workspace root lockfile.
+# `npm ci` refuses drift instead of silently moving Capacitor/plugin versions
+# between release builds.
+npm ci
 
 echo "==> 2/5  Building web bundle (dist/)…"
 npm run build
@@ -184,4 +183,8 @@ cat <<'NOTES'
        APNs env vars (see docs/mobile/apns-backend-pr-plan.md).
    • Run on a real device (push does not work in the simulator).
 NOTES
-npx cap open ios
+if [ "${CI:-}" = "true" ]; then
+  echo "==> CI mode: native project synced; skipping Xcode launch."
+else
+  npx cap open ios
+fi

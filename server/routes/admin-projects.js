@@ -22,8 +22,16 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, isValidProjectType, getProjectType } = require('../services/project-types');
-const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId } = require('../services/service-completion-profiles');
+const {
+  PROJECT_TYPES,
+  PROJECT_TYPE_KEYS,
+  WDO_CONSTRUCTION_OPTIONS,
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+  isValidProjectType,
+  getProjectType,
+} = require('../services/project-types');
+const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
 const serviceLibrary = require('../services/service-library');
@@ -46,6 +54,8 @@ const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { isEnabled } = require('../config/feature-gates');
+const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('../services/wdo-inspection-fee');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -70,11 +80,31 @@ const s3 = new S3Client({
     : undefined,
 });
 const PHOTO_PREFIX = 'project-photos/';
+// project_photos.caption is varchar(200): a longer caption would fail the
+// INSERT after the image is already in S3, stranding an orphan object and
+// blocking every Save retry. Clamp rather than reject — losing the tail of a
+// description is recoverable; a wedged photo upload is not.
+const PHOTO_CAPTION_MAX = 200;
+function clampPhotoCaption(value) {
+  const caption = String(value ?? '').trim();
+  return caption ? caption.slice(0, PHOTO_CAPTION_MAX) : null;
+}
 const AI_PHOTO_LIMIT = 8;
 const AI_PHOTO_MAX_BYTES = 4.5 * 1024 * 1024;
 const AI_PHOTO_TOTAL_MAX_BYTES = 12 * 1024 * 1024;
 const AI_SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Official termite documents use the same invoice-first customer delivery:
+// invoice now, report/certificate held until settlement, automatic release.
+// Ordinary service reports continue to send immediately and are never gated.
+const REPORT_PAYMENT_HOLD_PROJECT_TYPES = new Set([
+  'wdo_inspection',
+  'pre_treatment_termite_certificate',
+]);
+
+function supportsReportPaymentHold(projectType) {
+  return REPORT_PAYMENT_HOLD_PROJECT_TYPES.has(String(projectType || ''));
+}
 
 function isAdmin(req) {
   return req.techRole === 'admin';
@@ -437,6 +467,83 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
   };
 }
 
+// --- Previous-treatment photo extraction (WDO Section 3) -------------------
+// Reads ONE field photo — typically a prior company's treatment sticker or
+// notice on the electrical panel (company name, dates, materials, organism,
+// often handwritten), or physical evidence like drill holes / bait stations —
+// and transcribes it into the previous-treatment fields. Unlike
+// /wdo-intelligence this deliberately skips the (slow, web-search) property
+// lookup: it is the point-the-camera-at-the-sticker fast path.
+
+function buildWdoTreatmentPhotoPrompt(propertyAddress) {
+  return `You are reading a field photo taken during a Florida FDACS-13645 WDO (wood-destroying organism) inspection${propertyAddress ? ` at ${propertyAddress}` : ''}. The photo may show evidence of PREVIOUS WDO treatment: a termite-protection or treatment sticker/notice from a prior pest-control company (often affixed to the electrical panel, water heater, or a garage wall), drill holes in the slab or foundation, bait-station covers, patched drill marks, trench lines, or an old treatment tag.
+
+Return JSON only. Transcribe, don't invent: only report company names, dates, products, and organisms you can actually read in the photo. Handwriting is common on these stickers — transcribe it carefully and write "[illegible]" for any part you cannot read with confidence. Transcribe dates exactly as written (do not expand two-digit years).
+
+Fields:
+- previous_treatment_evidence: "Yes" only if the photo clearly shows prior-treatment evidence (sticker, notice, tag, drill holes, bait stations). "No" only if the photo clearly shows a relevant area with no treatment indicators. Leave blank if the photo is unclear or unrelated.
+- previous_treatment_notes: 1-4 short sentences written for the report's "Previous treatment observations" field. If a sticker or notice is present, state what it is, the company, where it appears if identifiable, and every legible detail: date of WDO inspection, date(s) of treatment, materials/products used, organism treated for, and any lot or permit number. If only physical evidence is visible, describe it and its location. Do not speculate beyond what is visible.
+
+Respond with exactly this JSON shape:
+{
+  "suggestedFindings": {
+    "previous_treatment_evidence": "Yes|No|",
+    "previous_treatment_notes": "<field text or blank>"
+  },
+  "confidence": "high|medium|low",
+  "reviewNotes": ["<operator review note>", "..."]
+}`;
+}
+
+function normalizeWdoTreatmentPhotoResult(raw) {
+  const suggested = raw?.suggestedFindings || raw?.findings || {};
+  const evidence = cleanOneLine(suggested.previous_treatment_evidence || '', 20);
+  return {
+    suggestedFindings: {
+      previous_treatment_evidence: /^yes$/i.test(evidence) ? 'Yes' : /^no$/i.test(evidence) ? 'No' : '',
+      previous_treatment_notes: cleanMultiline(suggested.previous_treatment_notes, 1200),
+    },
+    confidence: ['high', 'medium', 'low'].includes(String(raw?.confidence || '').toLowerCase())
+      ? String(raw.confidence).toLowerCase()
+      : 'low',
+    reviewNotes: Array.isArray(raw?.reviewNotes || raw?.review_notes)
+      ? (raw.reviewNotes || raw.review_notes).map((item) => cleanOneLine(item, 260)).filter(Boolean).slice(0, 4)
+      : [],
+  };
+}
+
+async function extractWdoTreatmentPhoto({ photo, propertyAddress }) {
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const msg = await anthropic.messages.create({
+    model: MODELS.VISION,
+    max_tokens: 700,
+    temperature: 0.2,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: buildWdoTreatmentPhotoPrompt(propertyAddress) },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: photo.mediaType,
+            data: photo.buffer.toString('base64'),
+          },
+        },
+      ],
+    }],
+  });
+  const text = (msg.content || []).filter((block) => block.type === 'text').map((block) => block.text).join('\n');
+  const parsed = parseAiJsonObject(text);
+  if (!parsed) {
+    const err = new Error('AI returned an unreadable treatment-photo response');
+    err.status = 502;
+    throw err;
+  }
+  return normalizeWdoTreatmentPhotoResult(parsed);
+}
+
 // Section-1 administrative fields the WDO property lookup auto-fills on its own.
 // They are NOT inspection findings — a report carrying only these would file
 // with a blank inspection body, so they must not satisfy "Findings captured".
@@ -549,9 +656,52 @@ function evaluateProjectSendReadiness({ project, customer }) {
     );
   }
 
+  // Termite Phase-3 compliance content (Codex P1 r2 on #2703): the termite
+  // lanes still route through this project flow (project_required in the
+  // completion-lane registry), which never runs validateTypedFindings — so
+  // the send gate must enforce the same FS 482.226 / FAC 5E-14 content the
+  // typed path enforces, or the project path stays a bypass. Method lists
+  // are shared with the typed validator (project-types.js).
+  // `hard: true` keeps these out of the override_reason escape (Codex P1
+  // r3): an admin can override a thin narrative, not a statutory omission.
+  if (project?.project_type === 'termite_inspection') {
+    required.push(
+      { key: 'ti_areas_not_inspected', label: 'Areas not inspected / why ("None" if all visible areas were inspected)', ok: hasMeaningfulValue(findings.areas_not_inspected), hard: true },
+      // FS 482.226 wants the report to state the notice WAS affixed — 'No'
+      // blocks the send just like the typed path.
+      { key: 'ti_inspection_notice_affixed', label: 'Inspection notice affixed ("Yes" required)', ok: String(findings.inspection_notice_affixed || '') === 'Yes', hard: true },
+    );
+  }
+
+  if (project?.project_type === 'termite_treatment') {
+    const method = String(findings.treatment_method || '');
+    // The method itself must be recorded before the method-conditional
+    // requirements can mean anything — a blank method would silently skip
+    // the % solution rule and soften the posted-notice rule (Codex P1 r3).
+    required.push(
+      { key: 'tt_treatment_method', label: 'Treatment method', ok: hasMeaningfulValue(method), hard: true },
+      { key: 'tt_epa_registration', label: 'EPA reg. no.', ok: hasMeaningfulValue(findings.epa_registration), hard: true },
+      {
+        key: 'tt_posted_notice',
+        label: TERMITE_PERIMETER_METHODS.includes(method)
+          ? 'Posted notice placed ("Yes" required for exterior/perimeter applications)'
+          : 'Posted notice placed',
+        ok: TERMITE_PERIMETER_METHODS.includes(method)
+          ? String(findings.posted_notice || '') === 'Yes'
+          : hasMeaningfulValue(findings.posted_notice),
+        hard: true,
+      },
+    );
+    if (TERMITE_LIQUID_DILUTION_METHODS.includes(method)) {
+      required.push({ key: 'tt_percent_solution', label: '% solution', ok: hasMeaningfulValue(findings.percent_solution), hard: true });
+    }
+  }
+
   return {
     required,
     missing: required.filter(item => !item.ok).map(({ key, label }) => ({ key, label })),
+    // Compliance blockers that a send override_reason must NOT bypass.
+    hardMissing: required.filter(item => !item.ok && item.hard).map(({ key, label }) => ({ key, label })),
   };
 }
 
@@ -689,90 +839,12 @@ async function buildAiPhotoInputs(photos = []) {
   };
 }
 
-function compactText(value, max = 360) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!text) return '';
-  return text.length > max ? `${text.slice(0, max - 3).trim()}...` : text;
-}
-
-function formatContextDate(value) {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toISOString().slice(0, 10);
-}
-
-function contextTimestamp(value) {
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? 0 : d.getTime();
-}
-
-async function getCustomerCommunicationContext(customerId) {
-  if (!customerId) return '';
-  const [calls, sms, emails] = await Promise.all([
-    db('call_log')
-      .where({ customer_id: customerId })
-      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes')
-      .orderBy('created_at', 'desc')
-      .limit(3)
-      .catch((err) => {
-        logger.warn(`[projects] call context unavailable: ${err.message}`);
-        return [];
-      }),
-    db('sms_log')
-      .where({ customer_id: customerId })
-      .select('created_at', 'direction', 'message_body', 'message_type')
-      .orderBy('created_at', 'desc')
-      .limit(4)
-      .catch((err) => {
-        logger.warn(`[projects] sms context unavailable: ${err.message}`);
-        return [];
-      }),
-    db('emails')
-      .where({ customer_id: customerId })
-      .select('received_at', 'subject', 'snippet', 'body_text')
-      .orderBy('received_at', 'desc')
-      .limit(3)
-      .catch((err) => {
-        logger.warn(`[projects] email context unavailable: ${err.message}`);
-        return [];
-      }),
-  ]);
-
-  const entries = [];
-  for (const call of calls) {
-    const summary = compactText(call.lead_synopsis || call.notes || call.transcription);
-    if (summary) {
-      entries.push({
-        ts: contextTimestamp(call.created_at),
-        line: `Call ${formatContextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`,
-      });
-    }
-  }
-  for (const msg of sms) {
-    const summary = compactText(msg.message_body, 260);
-    if (summary) {
-      entries.push({
-        ts: contextTimestamp(msg.created_at),
-        line: `Text ${formatContextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`,
-      });
-    }
-  }
-  for (const email of emails) {
-    const summary = compactText(email.snippet || email.body_text, 260);
-    const subject = compactText(email.subject, 120);
-    if (summary || subject) {
-      entries.push({
-        ts: contextTimestamp(email.received_at),
-        line: `Email ${formatContextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`,
-      });
-    }
-  }
-  return entries
-    .sort((a, b) => b.ts - a.ts)
-    .slice(0, 6)
-    .map(entry => entry.line)
-    .join('\n');
-}
+// F1 (universal one-time services, ratified Q13): the comms context now
+// comes from the shared WINDOWED builder in
+// services/completion-comms-context (recurring = since last completed
+// visit of the line, cap 120d; one-time = since job origin, cap 180d).
+// The legacy unbounded builder and its helpers were retired with it.
+const { buildCompletionCommsContext } = require('../services/completion-comms-context');
 
 // Array findings (certificate application rows) flatten to readable
 // "key: value" rows — String() on an object would feed the writer
@@ -1000,7 +1072,11 @@ router.get('/types', async (_req, res) => {
   const managed = await appointmentManagedProjectTypes();
   const types = {};
   for (const key of PROJECT_TYPE_KEYS) {
-    types[key] = { ...PROJECT_TYPES[key], appointmentManaged: managed.has(key) };
+    types[key] = {
+      ...PROJECT_TYPES[key],
+      appointmentManaged: managed.has(key),
+      linkedCreationOnly: PROJECT_CREATION_LINKED_ONLY_TYPES.has(key),
+    };
   }
   res.json({ types, keys: PROJECT_TYPE_KEYS, appointmentManaged: Array.from(managed) });
 });
@@ -1063,6 +1139,84 @@ router.get('/applicators', async (req, res, next) => {
       defaultTechnicianId: isAdmin(req) ? null : req.technicianId || null,
     });
   } catch (err) { next(err); }
+});
+
+function parseDefaultProductNames(value) {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = parsed.split(','); }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+}
+
+function pretreatMethodForPlannedProduct(productName, serviceLabel = '') {
+  const value = `${productName || ''} ${serviceLabel || ''}`.toLowerCase();
+  if (/bora[- ]?care|borate|wood treatment/.test(value)) return 'Wood treatment (borate)';
+  if (/trelona|sentricon|bait/.test(value)) return 'Bait system';
+  return 'Soil barrier (chemical)';
+}
+
+// GET /api/admin/projects/scheduled-service/:id/application-prefill
+// The certificate is post-service paperwork, so its application rows begin
+// with the products already planned by the appointment's primary service and
+// add-on lines. They remain editable because the applicator must record what
+// was actually used, not blindly certify the schedule's plan.
+router.get('/scheduled-service/:id/application-prefill', async (req, res, next) => {
+  try {
+    const scheduled = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+    if (!scheduled) return res.status(404).json({ error: 'Scheduled service not found' });
+    if (!isAdmin(req) && String(scheduled.technician_id || '') !== String(req.technicianId || '')) {
+      return res.status(403).json({ error: 'Scheduled service access denied' });
+    }
+
+    const addonRows = await db('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduled.id })
+      .orderBy('created_at', 'asc')
+      .select('service_id', 'service_name')
+      .catch(() => []);
+    const serviceIds = [scheduled.service_id, ...addonRows.map((row) => row.service_id)].filter(Boolean);
+    const libraryRows = serviceIds.length
+      ? await db('services').whereIn('id', serviceIds).select('id', 'name', 'default_products')
+      : [];
+    const libraryById = new Map(libraryRows.map((row) => [String(row.id), row]));
+    const serviceLines = [
+      {
+        serviceId: scheduled.service_id,
+        label: libraryById.get(String(scheduled.service_id || ''))?.name || scheduled.service_type || 'Scheduled service',
+      },
+      ...addonRows.map((row) => ({
+        serviceId: row.service_id,
+        label: libraryById.get(String(row.service_id || ''))?.name || row.service_name || 'Scheduled add-on',
+      })),
+    ];
+    const planned = serviceLines.flatMap((line) => {
+      const library = libraryById.get(String(line.serviceId || ''));
+      return parseDefaultProductNames(library?.default_products).map((productName) => ({
+        productName,
+        serviceLabel: line.label,
+      }));
+    });
+    const productNames = [...new Set(planned.map((row) => row.productName))];
+    const productRows = productNames.length
+      ? await db('products_catalog').whereIn('name', productNames).select('*').catch(() => [])
+      : [];
+    const productByName = new Map(productRows.map((row) => [String(row.name || '').toLowerCase(), row]));
+    const applications = planned.map((row) => {
+      const product = productByName.get(row.productName.toLowerCase()) || {};
+      return {
+        _scheduled_service_label: row.serviceLabel,
+        treatment_method: pretreatMethodForPlannedProduct(row.productName, row.serviceLabel),
+        product_name: row.productName,
+        epa_registration: product.epa_reg_number || product.epa_registration_number || '',
+        active_ingredient: product.active_ingredient || '',
+      };
+    });
+
+    return res.json({ applications, source: 'scheduled_service' });
+  } catch (err) { return next(err); }
 });
 
 // ---------------------------------------------------------------------------
@@ -1232,6 +1386,12 @@ router.get('/:id', async (req, res, next) => {
         wdo_applicator: wdoApplicator,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
+        // Drives the "Hold report until paid" toggle in the drawer for both
+        // official termite documents. The columns ride on ...project above.
+        report_payment_hold_available: supportsReportPaymentHold(project.project_type)
+          && isEnabled('wdoReportPaymentHold')
+          && !project.sent_at
+          && project.status !== 'sent',
       },
       prepGuide,
       upcomingAppointment: upcomingAppointment ? {
@@ -1361,21 +1521,117 @@ router.post('/', async (req, res, next) => {
         code: 'project_type_appointment_managed',
       });
     }
+    // Owner ruling 2026-07-13: WDO + pre-treat certs are never done without a
+    // scheduled visit, so ad-hoc/unlinked creation closes, and the link must
+    // be THE compliance visit itself — either the linked profile's pointer
+    // matches, or (legacy rows with no service_id, whose name-based profile
+    // resolution finds nothing — Codex r2) the visit's own service text
+    // matches the compliance service. A random lawn/pest visit must not
+    // carry a WDO/cert create (Codex r3). Typed visits already 422'd above
+    // as scheduled_service_appointment_managed; the completion machinery
+    // (FDACS signature/PDF/filing) is unchanged.
+    if (PROJECT_CREATION_LINKED_ONLY_TYPES.has(project_type)) {
+      if (!linkedScheduledServiceId) {
+        return res.status(422).json({
+          error: 'WDO and pre-treat certificate reports are created from their scheduled visit — open the appointment in Dispatch or the tech portal and create the report there.',
+          code: 'project_type_linked_only',
+        });
+      }
+      if (!linkedProjectTypeMatches) {
+        const linkedVisit = await db('scheduled_services')
+          .where({ id: linkedScheduledServiceId })
+          .first('service_type');
+        const label = String(linkedVisit?.service_type || '');
+        const legacyLabelMatches = project_type === 'wdo_inspection'
+          ? /\bwdo\b|wood[\s-]?destroying/i.test(label)
+          : /pre[\s-]?treat|slab/i.test(label);
+        if (!legacyLabelMatches) {
+          return res.status(422).json({
+            error: 'The linked appointment is not a WDO / pre-treat visit — open the report from the compliance visit it documents.',
+            code: 'project_type_link_mismatch',
+          });
+        }
+      }
+    }
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
-    const [row] = await db('projects').insert({
-      customer_id,
-      project_type,
-      project_date: projectDate,
-      title: title || null,
-      findings: findings || null,
-      recommendations: recommendations || null,
-      service_record_id: service_record_id || null,
-      scheduled_service_id: scheduled_service_id || null,
-      status: 'draft',
-      created_by_tech_id: req.technicianId,
-    }).returning('*');
+    // One visit, one report (#2717 server hardening): stale client caches
+    // (week rows, continue snapshots) repeatedly re-offered the create
+    // sheet for already-linked visits, and nothing here prevented a second
+    // row. This is a CONFLICT, not a silent merge (Codex P2 on #2732): the
+    // submitted body may carry freshly typed findings, and returning the
+    // existing row as a success would let the client discard that draft.
+    // A 409 keeps the client's local draft intact (create-failure path
+    // never clears it) and names the existing report to continue in.
+    // Keeper preference matches migration 20260714000010: strongest report
+    // first (closed > sent > draft), then oldest.
+    //
+    // Legacy record-only links count too (Codex round-2 P2): a project
+    // created before the derived link was persisted carries
+    // scheduled_service_id = NULL while its service record points at the
+    // visit — the direct-column lookup (and the partial unique index)
+    // would miss it and let the visit mint a second report. Migration
+    // 20260714000010 backfills those rows; the join here covers any that
+    // appear between deploys or in environments where the backfill was
+    // guarded out.
+    const existingByVisit = () => db('projects')
+      .leftJoin('service_records', 'projects.service_record_id', 'service_records.id')
+      .where((q) => q
+        .where('projects.scheduled_service_id', linkedScheduledServiceId)
+        .orWhere('service_records.scheduled_service_id', linkedScheduledServiceId))
+      .orderByRaw("CASE projects.status WHEN 'closed' THEN 0 WHEN 'sent' THEN 1 ELSE 2 END")
+      .orderBy('projects.created_at', 'asc')
+      .select('projects.*')
+      .first();
+    if (linkedScheduledServiceId) {
+      const existing = await existingByVisit();
+      if (existing) {
+        logger.info(`[projects] create for visit ${linkedScheduledServiceId} refused — existing project ${existing.id}`);
+        return res.status(409).json({
+          error: 'This visit already has a report — open it to continue instead of starting a new one.',
+          code: 'visit_already_reported',
+          project: existing,
+        });
+      }
+    }
+
+    let row;
+    try {
+      [row] = await db('projects').insert({
+        customer_id,
+        project_type,
+        project_date: projectDate,
+        title: title || null,
+        findings: findings || null,
+        recommendations: recommendations || null,
+        service_record_id: service_record_id || null,
+        // Persist the DERIVED link too (record-only callers): the linked-only
+        // gate accepted this create because the record resolved to a scheduled
+        // visit, and the schedule/tech continuation path looks projects up by
+        // projects.scheduled_service_id — dropping it here would let the same
+        // visit mint a duplicate report (Codex round-2 P2).
+        scheduled_service_id: linkedScheduledServiceId || null,
+        status: 'draft',
+        created_by_tech_id: req.technicianId,
+      }).returning('*');
+    } catch (insertErr) {
+      // Unique-violation on the partial index (migration 20260714000010) =
+      // we lost a same-visit create race — same 409 contract as the
+      // pre-insert check above, naming the winner.
+      if (insertErr?.code === '23505' && linkedScheduledServiceId) {
+        const winner = await existingByVisit();
+        if (winner) {
+          logger.info(`[projects] create race for visit ${linkedScheduledServiceId} lost to existing project ${winner.id}`);
+          return res.status(409).json({
+            error: 'This visit already has a report — open it to continue instead of starting a new one.',
+            code: 'visit_already_reported',
+            project: winner,
+          });
+        }
+      }
+      throw insertErr;
+    }
 
     logger.info(`[projects] created ${row.id} (${project_type}) by tech ${req.technicianId}`);
     await logProjectActivity(
@@ -1402,9 +1658,20 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
     const typeCfg = getProjectType(project_type);
     const customer = customer_id ? await db('customers').where({ id: customer_id }).first() : null;
     const tech = req.technicianId ? await db('technicians').where({ id: req.technicianId }).first() : null;
-    const communicationContext = include_communications === false
-      ? ''
-      : await getCustomerCommunicationContext(customer_id);
+    const previewComms = include_communications === false
+      ? { text: '', promptHint: '' }
+      : await buildCompletionCommsContext({
+        // Preview has no job origin: the create modal posts only
+        // customer/type/date, and project_date is the INSPECTION date —
+        // anchoring there would filter out the pre-visit booking comms
+        // this feature exists to summarize (Codex r2, reversing r1's
+        // project_date suggestion). The bare 180-day cap is the honest
+        // window until the project is saved with a linked booking.
+        customerId: customer_id,
+      }).catch(() => ({ text: '', promptHint: '' }));
+    const communicationContext = previewComms.text
+      ? `${previewComms.promptHint}\n${previewComms.text}`
+      : '';
     const report = await draftProjectReport({
       typeCfg,
       findings: findings || {},
@@ -1500,6 +1767,61 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
     res.json(result);
   } catch (err) {
     logger.error(`[projects] WDO intelligence failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/wdo-treatment-photo — extract prior-treatment
+// details from a single photo (a previous company's treatment sticker/notice,
+// or visible evidence) into the WDO Previous Treatment fields. Photo-only
+// fast path: no property lookup, one vision call.
+// ---------------------------------------------------------------------------
+router.post('/wdo-treatment-photo', upload.single('previous_treatment_photo'), async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+    if (!req.file) return res.status(400).json({ error: 'Previous-treatment photo required' });
+    if (req.file.buffer.length > AI_PHOTO_MAX_BYTES) {
+      return res.status(400).json({ error: 'Prior-treatment photo is too large for AI review' });
+    }
+    const mediaType = validateUploadedImage(req.file);
+
+    // Same access posture as /wdo-intelligence: an existing project scopes by
+    // project access; a pre-save technician call must be linked to an
+    // assigned visit; admins can extract freely.
+    const customerId = req.body.customer_id || null;
+    const projectId = req.body.project_id || null;
+    if (projectId) {
+      const project = await db('projects').where({ id: projectId }).first();
+      if (!(await requireProjectAccess(req, res, project))) return;
+      if (project.project_type !== 'wdo_inspection') return res.status(400).json({ error: 'Project is not a WDO inspection' });
+      if (customerId && project.customer_id && String(customerId) !== String(project.customer_id)) {
+        return res.status(400).json({ error: 'Customer does not belong to the selected project' });
+      }
+    } else if (!isAdmin(req)) {
+      if (!customerId) return res.status(400).json({ error: 'Customer required for technician WDO intelligence' });
+      await validateProjectCreateScope(req, {
+        customer_id: customerId,
+        service_record_id: req.body.service_record_id || null,
+        scheduled_service_id: req.body.scheduled_service_id || null,
+      });
+    }
+
+    const result = await extractWdoTreatmentPhoto({
+      photo: { buffer: req.file.buffer, mediaType },
+      propertyAddress: cleanOneLine(req.body.property_address, 500),
+    });
+
+    logger.info('[projects] WDO treatment-photo extraction', {
+      customerId,
+      projectId,
+      confidence: result.confidence,
+      evidence: result.suggestedFindings.previous_treatment_evidence || '(blank)',
+      notesChars: result.suggestedFindings.previous_treatment_notes.length,
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error(`[projects] WDO treatment-photo extraction failed: ${err.message}`);
     next(err);
   }
 });
@@ -1905,6 +2227,55 @@ const MAX_ADDENDUM_PHOTOS = 16; // 8 addendum pages (2 per page)
 const MAX_ADDENDUM_RAW_PHOTO_BYTES = 32 * 1024 * 1024;
 const MAX_ADDENDUM_TOTAL_BYTES = 14 * 1024 * 1024;
 
+const WDO_ADDENDUM_CATEGORY_CAPTIONS = Object.freeze({
+  wdo_evidence: 'Visible WDO evidence documented at the inspected property.',
+  wdo_damage: 'Visible WDO damage documented at the inspected property.',
+  inaccessible_area: 'Obstruction or inaccessible area documented during the inspection.',
+  previous_treatment: 'Evidence of previous treatment documented at the inspected property.',
+  notice: 'Inspection or treatment notice documented at the inspected property.',
+  treatment_document: 'Prior treatment document reviewed during the inspection.',
+  exterior: 'Exterior condition documented at the inspected structure.',
+  interior: 'Interior condition documented at the inspected structure.',
+  living_area: 'Living-area condition documented during the inspection.',
+  kitchen: 'Kitchen-area condition documented during the inspection.',
+  bathroom: 'Bathroom-area condition documented during the inspection.',
+  garage: 'Garage condition documented during the inspection.',
+  attic: 'Attic condition documented during the inspection.',
+  crawlspace: 'Crawlspace condition documented during the inspection.',
+  other: 'Site condition documented during the WDO inspection.',
+});
+
+const WDO_ADDENDUM_FINDING_DETAILS = Object.freeze({
+  wdo_evidence: { keys: ['wdo_evidence', 'live_wdo'], prefix: 'Visible WDO evidence' },
+  wdo_damage: { keys: ['wdo_damage'], prefix: 'Visible WDO damage' },
+  inaccessible_area: { keys: ['inaccessible_areas'], prefix: 'Obstruction or inaccessible area' },
+  previous_treatment: { keys: ['previous_treatment_notes'], prefix: 'Previous treatment evidence' },
+  treatment_document: { keys: ['previous_treatment_notes'], prefix: 'Prior treatment document' },
+  notice: { keys: ['notice_location'], prefix: 'Inspection notice location' },
+});
+
+function wdoAddendumPhotoCaption(photo = {}, project = null) {
+  const typed = String(photo.caption || '').trim();
+  if (typed) return typed;
+  const category = String(photo.category || '').trim().toLowerCase();
+  const findings = project ? parseFindings(project) : {};
+  const detailConfig = WDO_ADDENDUM_FINDING_DETAILS[category];
+  const detail = detailConfig?.keys
+    .map((key) => String(findings[key] || '').replace(/\s+/g, ' ').trim())
+    .find(Boolean);
+  if (detail) {
+    return `${detailConfig.prefix}: ${detail}`.slice(0, 300);
+  }
+  if (WDO_ADDENDUM_CATEGORY_CAPTIONS[category]) {
+    return WDO_ADDENDUM_CATEGORY_CAPTIONS[category];
+  }
+  if (category) {
+    const label = category.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return `${label.charAt(0).toUpperCase()}${label.slice(1)} documented during the WDO inspection.`;
+  }
+  return 'Site condition documented during the WDO inspection.';
+}
+
 // Fetch the project's photos from S3 for the PDF photo addendum, ordered the
 // way the tech arranged them, normalizing each (normalizeAddendumPhoto:
 // EXIF rotation baked in, bounded JPEG). When normalization can't decode the
@@ -1958,7 +2329,7 @@ async function loadWdoAddendumPhotos(project) {
         break;
       }
       totalBytes += buffer.length;
-      out.push({ buffer, contentType, caption: ph.caption || '' });
+      out.push({ buffer, contentType, caption: wdoAddendumPhotoCaption(ph, project) });
     } catch (err) {
       logger.warn(`[projects] addendum photo fetch failed for ${ph.id}: ${err.message}`);
     }
@@ -2042,36 +2413,6 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
   };
 }
 
-// WDO inspection auto-invoice fee. The tech enters any fee on the form
-// (findings.inspection_fee) — WDO pricing varies by construction (wood frame),
-// new build, prior termite history, etc., so it's a free amount, not fixed
-// tiers. That entry always wins. If it's left blank, fall back to tiering by
-// the structure footprint they entered (≤2500 → $150 · ≤3500 → $200 · >3500 →
-// $250), and if neither is set default to the top $250 tier (conservative;
-// surfaced in the dry-run for the operator to adjust). We never tier on
-// customers.property_sqft (that's lawn area).
-const WDO_FEE_TIERS = [
-  { maxSqFt: 2500, price: 150 },
-  { maxSqFt: 3500, price: 200 },
-  { maxSqFt: Infinity, price: 250 },
-];
-function parseWdoFee(value) {
-  const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  const n = m ? Number(m[1]) : 0;
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-function resolveWdoInspectionFee(findings) {
-  const picked = parseWdoFee(findings?.inspection_fee);
-  if (picked > 0) return picked;
-  const sqft = Number(String(findings?.structure_sqft ?? '').replace(/[^0-9.]/g, '')) || 0;
-  if (sqft > 0) {
-    for (const tier of WDO_FEE_TIERS) {
-      if (sqft <= tier.maxSqFt) return tier.price;
-    }
-  }
-  return 250; // nothing picked or measured — top tier, operator adjusts in dry-run
-}
-
 function isReusableInvoice(inv) {
   return inv && !['void', 'paid'].includes(inv.status);
 }
@@ -2080,7 +2421,7 @@ const WDO_INVOICE_LINE_DESCRIPTION = 'WDO Inspection (FDACS-13645 Wood-Destroyin
 
 // If a reused invoice is still the auto-created WDO draft (untouched: draft
 // status, our title + single WDO line item) and the resolved fee has since
-// changed (the tech edited inspection_fee / structure_sqft between the dry-run
+// changed (the tech edited inspection_fee between the dry-run
 // and the send), reprice its line item so we never bill the stale amount. A
 // manually edited invoice (different title/lines) is left untouched.
 async function maybeRepriceWdoDraft(invoice, project) {
@@ -2091,6 +2432,10 @@ async function maybeRepriceWdoDraft(invoice, project) {
   if (!String(items[0].description || '').startsWith('WDO Inspection (FDACS')) return invoice;
 
   const fee = resolveWdoInspectionFee(parseFindings(project));
+  // Never reprice a draft down to $0 — a no-charge WDO is refused before any
+  // reuse path runs (wdo_no_charge guard); this is defense in depth for any
+  // future caller that skips that guard.
+  if (fee <= 0) return invoice;
   if (Number(items[0].amount ?? items[0].unit_price) === fee) return invoice;
   try {
     const updated = await InvoiceService.update(invoice.id, {
@@ -2146,7 +2491,21 @@ async function previewWdoInvoiceTotals(project, customer, fee) {
 // be ad-hoc (no service_record_id / scheduled_service_id), so reuse must not
 // rely on a service linkage alone — every resolved invoice is recorded back on
 // the project.
-async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false }) {
+async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false, holdRequested = false }) {
+  // No-charge WDO (owner ruling 2026-07-15, #2751 follow-up): an explicit $0
+  // inspection fee means nothing is billed for this visit. Refuse the
+  // combined report+invoice send on EVERY path — before the explicit-id and
+  // reuse checks, so no draft is minted, repriced, or attached — and point
+  // the operator at the report-only send. Billing it anyway requires typing
+  // a non-zero fee first (the entry always wins). This also settles the
+  // no-charge × hold-until-paid interaction: with nothing to pay there is
+  // nothing to hold, so the hold send fails here with the same guidance.
+  if (project.project_type === 'wdo_inspection'
+    && resolveWdoInspectionFee(parseFindings(project)) === 0) {
+    const err = new Error('This WDO inspection is recorded as no charge ($0 inspection fee) — use "Send report" to deliver the FDACS report without an invoice. To bill it, enter a non-zero inspection fee first.');
+    err.code = 'wdo_no_charge';
+    throw err;
+  }
   if (invoiceId) {
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
@@ -2233,7 +2592,35 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
 
     // 3. Nothing to reuse — mint the project's draft invoice. How the draft is
     //    built depends on the project type.
+    //
+    // Hold-until-paid must never CREATE a statement-accrued invoice as a side
+    // effect of a send the route is about to reject. This applies equally to
+    // WDO reports and pre-treatment certificates. Predict accrual before the
+    // type-specific create path runs; existing/reused invoices are guarded by
+    // payer_statement_id in the route after resolution.
+    if (holdRequested) {
+      let holdSsId = project.scheduled_service_id || null;
+      if (!holdSsId && project.service_record_id) {
+        const srLink = await trx('service_records')
+          .where({ id: project.service_record_id, customer_id: project.customer_id })
+          .first('scheduled_service_id').catch(() => null);
+        if (srLink?.scheduled_service_id) holdSsId = srLink.scheduled_service_id;
+      }
+      const resolvedHoldPayer = await require('../services/payer').resolveForInvoice({
+        customerId: project.customer_id,
+        scheduledServiceId: holdSsId,
+      }).catch(() => null);
+      if (resolvedHoldPayer?.payerId
+        && ['net15', 'net30'].includes(String(resolvedHoldPayer.paymentTerms || ''))
+        && isEnabled('payerStatements')) {
+        const err = new Error('This service bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices');
+        err.code = 'hold_statement_accrued';
+        throw err;
+      }
+    }
+
     if (project.project_type === 'wdo_inspection') {
+
       // WDO bills a single auto-priced "WDO Inspection" line. On a dry-run, DON'T
       // mint a real draft just to show the amount — every cancelled preview would
       // strand an orphan invoice + burn an invoice number. Return a non-persisted
@@ -2275,22 +2662,26 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     }
 
     // Non-WDO service reports bill what the visit actually was, so the draft's
-    // line items come from the linked service record's scheduled-service pricing.
+    // line items come from the linked scheduled-service pricing. A pre-treatment
+    // certificate reaches this path before closeout creates its service record,
+    // so scheduled_service_id alone is a valid invoice source.
     // Unlike WDO there's no cheap synthetic fee to preview, and replaying the
     // full discount/tax math outside create() would risk drift, so we mint the
     // real draft on BOTH the dry-run and the send. That's safe: the draft is
     // persisted + linked to the project, so a re-preview or the follow-up send
     // reuses the SAME draft (reuse path 1 above) — a cancelled preview leaves at
     // most one legitimate draft per project, never duplicates.
-    if (!project.service_record_id) {
-      const err = new Error('This service report isn’t linked to a completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
+    if (!project.service_record_id && !project.scheduled_service_id) {
+      const err = new Error('This service report isn’t linked to an appointment or completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
       err.code = 'invoice_build_failed';
       throw err;
     }
-    const serviceRecord = await trx('service_records')
-      .where({ id: project.service_record_id, customer_id: project.customer_id })
-      .first();
-    if (!serviceRecord) {
+    const serviceRecord = project.service_record_id
+      ? await trx('service_records')
+        .where({ id: project.service_record_id, customer_id: project.customer_id })
+        .first()
+      : null;
+    if (project.service_record_id && !serviceRecord) {
       const err = new Error('The visit linked to this report wasn’t found for this customer, so an invoice can’t be built automatically.');
       err.code = 'invoice_build_failed';
       throw err;
@@ -2303,10 +2694,10 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // is a separate denormalized link that, if it disagrees, would price the
     // invoice off a different appointment than the one being reported on. Without
     // any scheduled service there's no priced line set to bill from.
-    const scheduledServiceId = serviceRecord.scheduled_service_id || project.scheduled_service_id;
+    const scheduledServiceId = serviceRecord?.scheduled_service_id || project.scheduled_service_id;
     const built = scheduledServiceId
       ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
-          fallbackDescription: serviceRecord.service_type || getProjectType(project.project_type)?.label || 'Service visit',
+          fallbackDescription: serviceRecord?.service_type || getProjectType(project.project_type)?.label || 'Service visit',
         })
       : { lineItems: [], discountIds: [] };
     // Sum the non-discount (positive) lines — a draft with no positive lines
@@ -2321,7 +2712,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     }
     const createdNonWdo = await InvoiceService.create({
       customerId: project.customer_id,
-      serviceRecordId: project.service_record_id,
+      serviceRecordId: project.service_record_id || undefined,
       scheduledServiceId: scheduledServiceId || undefined,
       lineItems: built.lineItems,
       discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
@@ -2389,6 +2780,14 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       : null;
 
     const readiness = evaluateProjectSendReadiness({ project, customer });
+    // Statutory compliance blockers are not overridable (Codex P1 r3) —
+    // override_reason exists for judgment calls, not FS/FAC omissions.
+    if (readiness.hardMissing.length > 0) {
+      return res.status(422).json({
+        error: 'Project report is missing required compliance details (cannot be overridden)',
+        missing: readiness.hardMissing,
+      });
+    }
     const overrideReason = String(req.body?.override_reason || '').trim();
     const hasReadinessOverride = readiness.missing.length > 0 && overrideReason.length > 0;
     if (readiness.missing.length > 0 && !hasReadinessOverride) {
@@ -2400,6 +2799,37 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
     const projectCols = await db('projects').columnInfo().catch(() => ({}));
+
+    // Payment-hold mutual exclusion (Codex P2 on #2753): a manual send on a
+    // HELD report is the manual release, and it must take the SAME atomic
+    // claim the payment sweep takes — otherwise an admin click while the
+    // sweep is mid-delivery ('releasing') would email + archive the same
+    // FDACS filing twice. Already-releasing rows 409 instead of racing; a
+    // crashed claim un-sticks via the sweep's 10-minute stale recovery.
+    let manualHoldClaim = false;
+    if (reportHoldColumnsPresent(projectCols)
+      && ['held', 'releasing'].includes(String(project.report_hold_status || ''))) {
+      const claimed = await db('projects')
+        .where({ id: project.id, report_hold_status: 'held' })
+        .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
+      if (!claimed) {
+        return res.status(409).json({
+          error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
+          code: 'release_in_progress',
+        });
+      }
+      manualHoldClaim = true;
+    }
+    // Return the manual claim to 'held' on any abort so the sweep can retry
+    // and a later manual send isn't blocked behind a stale claim.
+    const revertManualHoldClaim = async () => {
+      if (!manualHoldClaim) return;
+      await db('projects')
+        .where({ id: project.id, report_hold_status: 'releasing' })
+        .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] manual hold claim revert failed for ${project.id}: ${err.message}`));
+    };
+
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
       logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
       return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
@@ -2432,6 +2862,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // delivered without an email address — fail up front rather than text a bare
     // link and record the official report as sent.
     if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}).email) {
+      await revertManualHoldClaim();
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
     }
 
@@ -2442,6 +2873,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     try {
       wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
     } catch (e) {
+      await revertManualHoldClaim();
       logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
@@ -2459,6 +2891,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           sentByTechId: req.technicianId || null,
         });
       } catch (e) {
+        await revertManualHoldClaim();
         logger.error(`[projects] WDO filing archive failed for ${updatedProject.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not archive the FDACS filing; nothing was sent.' });
       }
@@ -2586,9 +3019,27 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           [JSON.stringify([wdoFiling])],
         );
       }
+      // A manual Send report on a payment-held project IS the release escape
+      // hatch (requireAdmin). The release fields ride the SAME row update as
+      // the sent stamp (Codex P2 on #2753): a separate follow-up write could
+      // fail/crash after the project was marked sent, leaving a delivered
+      // report 402ing publicly and the sweep primed to re-deliver it.
+      if (manualHoldClaim) {
+        deliveryUpdate.report_hold_status = 'released';
+        deliveryUpdate.report_hold_released_at = db.fn.now();
+        deliveryUpdate.report_hold_release_source = 'manual_send';
+        deliveryUpdate.report_hold_locked_at = null;
+        deliveryUpdate.report_hold_last_error = null;
+      }
     }
 
     await db('projects').where({ id: req.params.id }).update(deliveryUpdate);
+
+    // Nothing went out — return the manual claim so the sweep (or a retry
+    // of this endpoint) can deliver later.
+    if (manualHoldClaim && !delivered) {
+      await revertManualHoldClaim();
+    }
 
     const sendAction = delivered
       ? (project.sent_at || project.status === 'sent' ? 'project_report_resent' : 'project_report_sent')
@@ -2696,6 +3147,387 @@ function normalizeUsPhone(phone) {
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
   if (digits.length === 10) return `+1${digits}`;
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Official termite document payment hold — release ("pay before delivery")
+// ---------------------------------------------------------------------------
+
+// Failed release deliveries retry on the sweep with exponential backoff,
+// capped at 6h. No terminal cap: a held report is a paid-for legal document,
+// so it keeps retrying (visibly — last_error shows in the drawer) until it
+// delivers or the operator releases it manually via Send report.
+function reportHoldBackoffMinutes(attempts) {
+  return Math.min(360, 5 * Math.pow(2, Math.max(0, attempts - 1)));
+}
+
+function reportHoldColumnsPresent(projectCols) {
+  return Boolean(projectCols.report_hold_status && projectCols.report_hold_attempts);
+}
+
+function reportHoldReleaseSmsKey(projectId, invoiceId) {
+  return `project_report_hold_release:${safeIdempotencySegment(projectId)}:${safeIdempotencySegment(invoiceId)}`;
+}
+
+async function acceptedProviderSmsForClaim(claimId) {
+  return db('sms_log')
+    .where({ direction: 'outbound' })
+    .whereIn('status', ['queued', 'sent', 'delivered'])
+    .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(claimId)])
+    .first('id');
+}
+
+// Persist a claim before calling Twilio. Its id is forwarded through the
+// messaging adapter and written onto Twilio's provider-side sms_log row. If
+// the process crashes after Twilio accepts but before the project release is
+// stamped, the next hold retry sees that sibling row and does not text twice.
+async function claimReportHoldReleaseSms({ projectId, invoiceId, customerId, toPhone, messageBody }) {
+  const releaseKey = reportHoldReleaseSmsKey(projectId, invoiceId);
+  let claim = await db('sms_log')
+    .whereRaw("metadata->>'report_hold_release_key' = ?", [releaseKey])
+    .first();
+
+  if (claim) {
+    const providerRow = await acceptedProviderSmsForClaim(claim.id);
+    if (providerRow || claim.status === 'sent') {
+      if (claim.status !== 'sent') {
+        await db('sms_log').where({ id: claim.id }).update({ status: 'sent', updated_at: db.fn.now() });
+      }
+      return { id: claim.id, alreadySent: true };
+    }
+    await db('sms_log').where({ id: claim.id }).update({
+      status: 'sending',
+      message_body: messageBody,
+      to_phone: toPhone,
+      updated_at: db.fn.now(),
+    });
+    return { id: claim.id, alreadySent: false };
+  }
+
+  claim = { id: crypto.randomUUID() };
+  await db('sms_log').insert({
+    id: claim.id,
+    customer_id: customerId || null,
+    direction: 'outbound',
+    from_phone: config.twilio?.phoneNumber || 'system',
+    to_phone: toPhone,
+    message_body: messageBody,
+    status: 'sending',
+    message_type: 'project_report_release',
+    metadata: JSON.stringify({ report_hold_release_key: releaseKey }),
+  });
+  return { id: claim.id, alreadySent: false };
+}
+
+async function finishReportHoldReleaseSmsClaim(claimId, sent) {
+  if (!claimId) return;
+  await db('sms_log').where({ id: claimId }).update({
+    status: sent ? 'sent' : 'failed',
+    updated_at: db.fn.now(),
+  });
+}
+
+/**
+ * Deliver a payment-held project report. Called by the release sweep (and
+ * payment-event nudges) once the linked invoice settles — this is the /send
+ * WDO delivery with a system actor instead of an operator request.
+ *
+ * Claim discipline mirrors the receipt queue: held → releasing (atomic
+ * UPDATE claim) → released on success, back to held with attempts+1 and
+ * backoff on any failure. A crashed release is recovered by the sweep's
+ * stale-claim pass (releasing + locked_at > 10 min → held).
+ *
+ * The FDACS PDF is rebuilt from LIVE data at release, so the signature gates
+ * re-run here: findings edited (unsigned) while the report was held block
+ * the release — 'held' with last_error — until the licensee re-signs, rather
+ * than ever emailing content the licensee never saw.
+ */
+async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } = {}) {
+  const projectCols = await db('projects').columnInfo().catch(() => ({}));
+  if (!reportHoldColumnsPresent(projectCols)) return { released: false, reason: 'hold_columns_missing' };
+
+  const claimed = await db('projects')
+    .where({ id: projectId, report_hold_status: 'held' })
+    .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
+  if (!claimed) return { released: false, reason: 'not_held' };
+
+  const project = await db('projects').where({ id: projectId }).first();
+  if (!project) return { released: false, reason: 'project_missing' };
+  const attemptsSoFar = Number(project.report_hold_attempts || 0);
+
+  // Revert the claim so the sweep retries later. `countAttempt: false` is for
+  // "not actually due yet" reverts (unsettled invoice) — not delivery failures.
+  const revertToHeld = async (reason, { countAttempt = true } = {}) => {
+    const nextAttempts = countAttempt ? attemptsSoFar + 1 : attemptsSoFar;
+    const delayMinutes = countAttempt ? reportHoldBackoffMinutes(nextAttempts) : 2;
+    await db('projects')
+      .where({ id: projectId, report_hold_status: 'releasing' })
+      .update({
+        report_hold_status: 'held',
+        report_hold_locked_at: null,
+        report_hold_attempts: nextAttempts,
+        report_hold_next_attempt_at: new Date(Date.now() + delayMinutes * 60 * 1000),
+        report_hold_last_error: String(reason || 'release failed').slice(0, 500),
+        updated_at: db.fn.now(),
+      })
+      .catch((err) => logger.warn(`[projects] hold revert failed for ${projectId}: ${err.message}`));
+    // One activity entry when a hold FIRST gets stuck (not per retry) so the
+    // drawer surfaces the block without the sweep spamming the trail.
+    if (countAttempt && attemptsSoFar === 0) {
+      await logProjectActivity(
+        null,
+        project,
+        'project_report_release_blocked',
+        `Paid report release blocked: ${String(reason || 'release failed').slice(0, 200)}`,
+        { source },
+      ).catch(() => {});
+    }
+    return { released: false, reason: String(reason || 'release_failed') };
+  };
+
+  try {
+    // The hold releases on SETTLED money only — 'paid' or credit-covered
+    // 'prepaid'. ACH 'processing' stays held until the webhook settles it.
+    const invoice = project.invoice_id
+      ? await db('invoices').where({ id: project.invoice_id }).first().catch(() => null)
+      : null;
+    if (!invoice || !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) {
+      return await revertToHeld('invoice_not_settled', { countAttempt: false });
+    }
+
+    const customer = project.customer_id
+      ? await db('customers').where({ id: project.customer_id }).first()
+      : null;
+    if (!customer) return await revertToHeld('customer_missing');
+
+    // Same gates as /send: never release a report the licensee hasn't signed
+    // off on in its current form, or one missing statutory content.
+    if (project.project_type === 'wdo_inspection') {
+      const sigState = wdoSignatureFreshness(project);
+      if (!sigState.signed) return await revertToHeld('Licensee signature required — re-sign to release the paid report');
+      if (!sigState.fresh) return await revertToHeld('Findings were edited after signing — the licensee must re-sign to release the paid report');
+      const contradiction = wdoSectionTwoContradiction(project);
+      if (contradiction) return await revertToHeld(contradiction);
+      const incomplete = wdoCoreFindingsIncomplete(project);
+      if (incomplete) return await revertToHeld(incomplete);
+    }
+    const readiness = evaluateProjectSendReadiness({ project, customer });
+    if (readiness.hardMissing.length > 0) {
+      return await revertToHeld(`Missing required compliance details: ${readiness.hardMissing.map((m) => m.label).join('; ')}`);
+    }
+    // Certificate fields are intentionally soft during an interactive send so
+    // an admin can explicitly override a thin draft. Automatic release has no
+    // operator present to make that judgment, so revalidate every required
+    // statutory field against the current (possibly edited) certificate.
+    if (project.project_type === 'pre_treatment_termite_certificate' && readiness.missing.length > 0) {
+      return await revertToHeld(`Missing required certificate details: ${readiness.missing.map((m) => m.label).join('; ')}`);
+    }
+
+    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
+    if (project.project_type === 'wdo_inspection' && !emailRecipient.email) {
+      return await revertToHeld('No email on file — the FDACS-13645 PDF is delivered by email');
+    }
+
+    // Token + portal stamps mirror /send (the hold send parked the report with
+    // portal_visible=false; the release is the real send, so recompute).
+    const token = project.report_token || crypto.randomBytes(16).toString('hex');
+    const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
+      logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
+      return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
+    });
+    const tokenUpdate = { report_token: token, updated_at: db.fn.now() };
+    if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
+    if (projectCols.portal_visibility) {
+      tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
+    }
+    if (projectCols.portal_attach_policy) {
+      tokenUpdate.portal_attach_policy = portalAttachment.completionProfile?.portalAttachPolicy || project.portal_attach_policy || 'active_portal_customer';
+    }
+    if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
+      tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
+    }
+    await db('projects').where({ id: projectId }).update(tokenUpdate);
+    const refreshed = await db('projects').where({ id: projectId }).first();
+    const reportPath = await projectReportPathForProject(db, refreshed, customer);
+    const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
+
+    // Build + archive the FDACS PDF before any channel send (fail-closed, same
+    // as /send): the archive is the only durable record of the filed document.
+    let wdoPdf = null;
+    let wdoFiling = null;
+    try {
+      wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
+      if (wdoPdf) {
+        wdoFiling = await archiveWdoFiling({
+          project: refreshed,
+          buffer: wdoPdf.buffer,
+          source: `report_hold_release:${source}`,
+          invoiceId: invoice.id,
+          sentByTechId: null,
+        });
+      }
+    } catch (err) {
+      return await revertToHeld(`FDACS PDF build/archive failed: ${err.message}`);
+    }
+
+    const typeLabel = getProjectType(refreshed.project_type)?.label || 'Service';
+    const firstName = customer.first_name || 'there';
+    const channels = {};
+
+    try {
+      // The recipient email is hashed into the key (same pattern as the payer
+      // AP leg): a retry after the operator corrects a blocked/bounced address
+      // must mint a NEW key and actually deliver, not dedupe into the old
+      // terminal result.
+      const recipientHash = crypto.createHash('sha1')
+        .update(String(emailRecipient.email || '').toLowerCase())
+        .digest('hex')
+        .slice(0, 12);
+      const result = await ProjectEmail.sendProjectReportReady({
+        project: refreshed,
+        customer,
+        reportUrl,
+        isResend: false,
+        attachments: wdoPdf ? [wdoPdf.attachment] : [],
+        idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${safeIdempotencySegment(invoice.id)}:${recipientHash}`,
+      });
+      channels.email = result.ok
+        ? { ok: true, messageId: result.messageId || null }
+        : { ok: false, error: result.reason || result.error || 'Email send blocked/failed' };
+    } catch (err) {
+      channels.email = { ok: false, error: err.message };
+    }
+
+    // The FDACS PDF is email-only, so the release is delivered only when the
+    // email succeeds (mirrors /send). SMS + third-party copies follow it.
+    const isWdo = refreshed.project_type === 'wdo_inspection';
+    if (isWdo && !channels.email?.ok) {
+      return await revertToHeld(`Report email failed: ${channels.email?.error || 'unknown'}`);
+    }
+
+    if (isWdo && channels.email?.ok) {
+      const copyPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+      const [copyBilling] = getInvoiceEmailRecipients(customer, copyPrefs || {});
+      const copies = await sendWdoReportCopies({
+        req: null,
+        project: refreshed,
+        customer,
+        reportUrl,
+        attachment: wdoPdf ? wdoPdf.attachment : null,
+        excludeEmails: [emailRecipient.email, customer?.email, copyBilling?.email],
+        isResend: false,
+      });
+      if (copies) channels.report_copies = copies;
+    }
+
+    const normalizedPhone = normalizeUsPhone(customer.phone);
+    if (!normalizedPhone) {
+      channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
+    } else {
+      try {
+        const smsBody = await renderRequiredSmsTemplate('project_report_ready', {
+          first_name: firstName,
+          project_type: typeLabel,
+          report_url: reportUrl,
+        }, {
+          workflow: 'project_report_ready',
+          entity_type: 'project',
+          entity_id: refreshed.id,
+        });
+        const smsClaim = await claimReportHoldReleaseSms({
+          projectId: refreshed.id,
+          invoiceId: invoice.id,
+          customerId: customer.id,
+          toPhone: normalizedPhone,
+          messageBody: smsBody,
+        });
+        if (smsClaim.alreadySent) {
+          channels.sms = { ok: true, deduplicated: true };
+        } else {
+          const result = await sendCustomerMessage({
+            to: normalizedPhone,
+            body: smsBody,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'support_resolution',
+            customerId: customer.id,
+            identityTrustLevel: 'phone_matches_customer',
+            entryPoint: 'project_report_hold_release',
+            metadata: {
+              original_message_type: 'project_report',
+              project_id: refreshed.id,
+              invoice_id: invoice.id,
+              scheduled_sms_log_id: smsClaim.id,
+            },
+          });
+          await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
+          channels.sms = result.sent
+            ? { ok: true }
+            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+        }
+      } catch (err) {
+        channels.sms = { ok: false, error: err.message };
+      }
+    }
+
+    const availableChannels = [
+      customer.phone ? 'sms' : null,
+      emailRecipient.email ? 'email' : null,
+    ].filter(Boolean);
+    const successfulChannelCount = availableChannels.filter((ch) => channels[ch]?.ok).length;
+    // Non-WDO official documents can release by email OR SMS, but at least one
+    // real customer channel must succeed. Never mark a paid certificate as
+    // released when every delivery attempt failed (or no contact exists).
+    if (!isWdo && successfulChannelCount === 0) {
+      const reasons = availableChannels.length
+        ? availableChannels.map((ch) => channels[ch]?.error).filter(Boolean).join('; ')
+        : 'No customer email or phone on file';
+      return await revertToHeld(`Certificate delivery failed: ${reasons || 'unknown'}`);
+    }
+    const deliveryStatus = successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
+
+    const releaseUpdate = {
+      status: refreshed.status === 'closed' ? refreshed.status : 'sent',
+      sent_at: refreshed.sent_at || db.fn.now(),
+      last_delivery_at: db.fn.now(),
+      delivery_channels: channels,
+      delivery_status: deliveryStatus,
+      report_hold_status: 'released',
+      report_hold_released_at: db.fn.now(),
+      report_hold_release_source: source,
+      report_hold_locked_at: null,
+      report_hold_last_error: null,
+      updated_at: db.fn.now(),
+    };
+    if (wdoFiling && projectCols.wdo_sent_filings) {
+      // Atomic jsonb append — never read-modify-write the filing index.
+      releaseUpdate.wdo_sent_filings = db.raw(
+        "coalesce(wdo_sent_filings, '[]'::jsonb) || ?::jsonb",
+        [JSON.stringify([wdoFiling])],
+      );
+    }
+    await db('projects').where({ id: projectId }).update(releaseUpdate);
+
+    await logProjectActivity(
+      null,
+      refreshed,
+      'project_report_released_after_payment',
+      `Paid report released: ${typeLabel} (invoice ${invoice.invoice_number || invoice.id} settled)`,
+      { invoice_id: invoice.id, channels, source },
+    ).catch(() => {});
+
+    logger.info(`[projects] hold release delivered ${projectId} source=${source} email=${channels.email?.ok} sms=${channels.sms?.ok}`);
+    return { released: true, channels, reportUrl };
+  } catch (err) {
+    logger.error(`[projects] hold release failed for ${projectId}: ${err.message}`);
+    return await revertToHeld(err.message);
+  }
+}
+
+// The invoice id rides in an idempotency key; strip anything exotic so the key
+// stays within email_messages' varchar bounds and charset.
+function safeIdempotencySegment(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40);
 }
 
 // ---------------------------------------------------------------------------
@@ -2904,6 +3736,19 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   // Tracks an invoice claimed as 'sending' so any abort (a throw before the
   // normal finalize/restore path) releases it instead of stranding it.
   let claimedInvoice = null;
+  // Tracks a held→releasing claim taken for an UN-HELD delivery of a
+  // currently-held report (Codex P2 on #2753) — hoisted like claimedInvoice
+  // so the outer catch returns the row to 'held' on any abort. The revert
+  // matches status='releasing' only, so it no-ops after a successful release.
+  let heldReportClaim = null;
+  const revertHeldReportClaimOnAbort = async () => {
+    if (!heldReportClaim) return;
+    await db('projects')
+      .where({ id: heldReportClaim.projectId, report_hold_status: 'releasing' })
+      .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
+      .catch((err) => logger.warn(`[projects] combined-send hold claim revert failed for ${heldReportClaim.projectId}: ${err.message}`));
+    heldReportClaim = null;
+  };
   // Seam-applied credit on the combined report+invoice send. Hoisted (with its
   // reversal) so the outer catch can return it on ANY abort, not just the
   // explicit WDO/no-delivery paths. Reverses ONLY this send's amount; on full
@@ -2992,6 +3837,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
 
     // Readiness gate mirrors /send so we never email an incomplete report.
     const readiness = evaluateProjectSendReadiness({ project, customer });
+    // Statutory compliance blockers are not overridable (Codex P1 r3) —
+    // mirrors /send.
+    if (readiness.hardMissing.length > 0) {
+      return res.status(422).json({ error: 'Project report is missing required compliance details (cannot be overridden)', missing: readiness.hardMissing });
+    }
     const overrideReason = String(req.body?.override_reason || '').trim();
     const hasReadinessOverride = readiness.missing.length > 0 && overrideReason.length > 0;
     if (readiness.missing.length > 0 && !hasReadinessOverride) {
@@ -3001,12 +3851,51 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Explicit boolean — a stringified `dry_run: "false"` must NOT read as truthy
     // (and silently preview instead of send), nor `dry_run: 0` send for real.
     const dryRun = req.body?.dry_run === true || req.body?.dry_run === 'true';
+    // Card-on-file completion needs a durable draft invoice id before the
+    // explicit charge. This mode performs all report/readiness/billing checks
+    // but sends nothing and never arms a report hold.
+    const prepareInvoice = req.body?.prepare_invoice === true || req.body?.prepare_invoice === 'true';
+
+    // Payment hold ("pay before you get the report"): deliver the invoice +
+    // pay link ONLY, and park the report/certificate until the invoice settles
+    // (the release sweep then delivers it). Limited to the two official termite
+    // documents; ordinary service reports continue to deliver immediately.
+    const holdRequested = req.body?.hold_report_until_paid === true || req.body?.hold_report_until_paid === 'true';
+    if (holdRequested) {
+      if (!isEnabled('wdoReportPaymentHold')) {
+        return res.status(422).json({ error: 'Report payment hold is not enabled (GATE_WDO_REPORT_PAYMENT_HOLD)', code: 'hold_not_enabled' });
+      }
+      if (!supportsReportPaymentHold(project.project_type)) {
+        return res.status(422).json({ error: 'Hold-until-paid is available for WDO reports and pre-treatment certificates only', code: 'hold_not_supported' });
+      }
+      if (project.sent_at || project.status === 'sent') {
+        return res.status(422).json({ error: 'This report was already delivered — a payment hold can only apply before the first send', code: 'hold_after_send' });
+      }
+      // The automatic release re-validates every required certificate field
+      // with no operator present (releaseHeldProjectReport), and a readiness
+      // override accepted here is not persisted — so a hold armed over
+      // missing soft fields would collect payment and then never deliver.
+      // Refuse the hold up front (dry_run included, so the operator learns at
+      // preview): complete the certificate, or send it now without the hold.
+      if (project.project_type === 'pre_treatment_termite_certificate' && readiness.missing.length > 0) {
+        return res.status(422).json({
+          error: 'Hold-until-paid needs a complete certificate — the automatic release re-checks every required field, so a held certificate with missing details would never deliver. Fill in the missing fields, or send now without the hold.',
+          code: 'hold_requires_complete_certificate',
+          missing: readiness.missing,
+        });
+      }
+      const holdCols = await db('projects').columnInfo().catch(() => ({}));
+      if (!reportHoldColumnsPresent(holdCols)) {
+        return res.status(422).json({ error: 'Report hold columns are not migrated yet', code: 'hold_columns_missing' });
+      }
+    }
 
     const { invoice, created } = await resolveOrCreateProjectInvoice({
       project,
       customer,
       invoiceId: req.body?.invoice_id,
-      dryRun,
+      dryRun: dryRun && !prepareInvoice,
+      holdRequested,
     });
 
     // Match the canonical invoice non-sendable statuses (invoice.js): don't
@@ -3014,6 +3903,31 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // a bank payment (ACH) already in flight ('processing').
     if (['paid', 'prepaid', 'void', 'processing', 'sending'].includes(invoice.status)) {
       return res.status(409).json({ error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id });
+    }
+
+    // Phase 2: an accrued invoice settles via the payer's consolidated monthly
+    // statement — holding the report on that cycle would park a legal document
+    // for weeks behind AR the homeowner doesn't control. Send normally (or
+    // collect payment first) instead.
+    if (holdRequested && invoice.payer_statement_id) {
+      return res.status(422).json({
+        error: 'This invoice bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices',
+        code: 'hold_statement_accrued',
+      });
+    }
+
+    if (prepareInvoice) {
+      return res.json({
+        prepared: true,
+        invoice: {
+          id: invoice.id,
+          invoice_number: invoice.invoice_number,
+          total: invoice.total,
+          status: invoice.status,
+          created,
+          payer_billed: !!invoice.payer_id,
+        },
+      });
     }
 
     // dry_run: surface the resolved invoice + amount, send nothing and (for a
@@ -3068,6 +3982,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         : [];
       return res.json({
         dry_run: true,
+        report_hold: holdRequested,
         invoice: {
           id: invoice.id,
           invoice_number: invoice.invoice_number,
@@ -3120,7 +4035,33 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
     });
     const tokenUpdate = { report_token: token, updated_at: db.fn.now() };
-    if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
+    // A held report must not surface in the customer portal's documents tab
+    // before payment — the release recomputes real portal attachment. If the
+    // hold falls through below (credit fully covered), this is re-stamped.
+    if (projectCols.portal_visible) tokenUpdate.portal_visible = holdRequested ? false : portalAttachment.portalAttached;
+    // Stamp the hold BEFORE any customer delivery (Codex P1 on #2753), in the
+    // same write that mints the token: a pre-existing report_token (from an
+    // earlier failed send / admin-shared draft link) would otherwise serve
+    // the FULL report for the whole invoice-send window, and a crash after
+    // the invoice email went out would leave the report never-held — pay
+    // link delivered, but nothing for the release sweep to ever deliver.
+    // Deliberately NOT reverted on a failed/aborted send: the operator
+    // declared pay-before-report, so the safe failure mode is "report stays
+    // gated, delivery_status shows the failure" — a retry re-sends the
+    // invoice, and Send report remains the manual escape hatch. If credit
+    // fully covers below (holdActive flips false), the un-held claim
+    // machinery takes over this freshly-held row and releases it atomically
+    // with that delivery.
+    if (holdRequested && reportHoldColumnsPresent(projectCols)) {
+      tokenUpdate.report_hold_status = 'held';
+      tokenUpdate.report_hold_at = db.fn.now();
+      tokenUpdate.report_hold_released_at = null;
+      tokenUpdate.report_hold_release_source = null;
+      tokenUpdate.report_hold_attempts = 0;
+      tokenUpdate.report_hold_next_attempt_at = null;
+      tokenUpdate.report_hold_locked_at = null;
+      tokenUpdate.report_hold_last_error = null;
+    }
     if (projectCols.portal_visibility) {
       tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
     }
@@ -3161,6 +4102,41 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       logger.warn(`[projects] account-credit auto-apply skipped for invoice ${invoice.id}: ${creditErr.message}`);
     }
 
+    // Hold resolution: if this send's credit application fully covered the
+    // invoice (now prepaid), payment is already settled — fall through to the
+    // normal combined send instead of holding a paid-for report.
+    let holdActive = holdRequested;
+    if (holdActive && ['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())) {
+      holdActive = false;
+      if (projectCols.portal_visible) {
+        await db('projects').where({ id: project.id }).update({ portal_visible: portalAttachment.portalAttached, updated_at: db.fn.now() });
+      }
+    }
+
+    // Un-held delivery of a currently-HELD report (operator unchecked the
+    // box on a resend, or this send's credit fully settled a hold request):
+    // take the SAME atomic held→releasing claim the payment sweep takes
+    // BEFORE any delivery work (Codex P2 on #2753). Flipping held→released
+    // only after emailing left a window where a just-settled invoice let the
+    // sweep claim the row and deliver the same FDACS filing concurrently.
+    if (!holdActive
+      && reportHoldColumnsPresent(projectCols)
+      && ['held', 'releasing'].includes(String(refreshed.report_hold_status || ''))) {
+      const claimedHold = await db('projects')
+        .where({ id: project.id, report_hold_status: 'held' })
+        .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
+      if (!claimedHold) {
+        await db('invoices').where({ id: invoice.id, status: 'sending' })
+          .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+        await reverseProjectCreditOnAbort();
+        return res.status(409).json({
+          error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
+          code: 'release_in_progress',
+        });
+      }
+      heldReportClaim = { projectId: project.id };
+    }
+
     // Pay link (short URL, same shape as invoice-email).
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
@@ -3174,27 +4150,33 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const attachments = [];
     let wdoFiling = null;
     let wdoPdf = null;
-    try {
-      wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
-      if (wdoPdf) {
-        attachments.push(wdoPdf.attachment);
-        // Archive the exact PDF being emailed BEFORE any channel send
-        // (fail-closed) — sends regenerate the PDF from live data, so this is
-        // the only durable record of the delivered legal filing.
-        wdoFiling = await archiveWdoFiling({
-          project: refreshed,
-          buffer: wdoPdf.buffer,
-          source: 'send_with_invoice',
-          invoiceId: invoice.id,
-          sentByTechId: req.technicianId || null,
-        });
+    // Hold mode sends NO report artifacts: the FDACS PDF is rebuilt from live
+    // (re-gated) data and archived at RELEASE time, when it is actually
+    // emailed — archiving here would record a filing that was never sent.
+    if (!holdActive) {
+      try {
+        wdoPdf = await buildWdoPdfAttachment(refreshed, customer);
+        if (wdoPdf) {
+          attachments.push(wdoPdf.attachment);
+          // Archive the exact PDF being emailed BEFORE any channel send
+          // (fail-closed) — sends regenerate the PDF from live data, so this is
+          // the only durable record of the delivered legal filing.
+          wdoFiling = await archiveWdoFiling({
+            project: refreshed,
+            buffer: wdoPdf.buffer,
+            source: 'send_with_invoice',
+            invoiceId: invoice.id,
+            sentByTechId: req.technicianId || null,
+          });
+        }
+      } catch (e) {
+        await db('invoices').where({ id: invoice.id, status: 'sending' })
+          .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+        await reverseProjectCreditOnAbort();
+        await revertHeldReportClaimOnAbort();
+        logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
+        return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
       }
-    } catch (e) {
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
-      await reverseProjectCreditOnAbort();
-      logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
-      return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
     try {
       await require('../services/payer').attachToInvoice(invoice);
@@ -3224,23 +4206,34 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // (and retries can't duplicate that text). For non-WDO the email is a bonus
     // (the report link rides in the SMS), so its failure doesn't block the text.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
-    if (emailRecipient.email) {
+    if (holdActive && isPayerInvoice) {
+      // Payer-billed hold: the homeowner receives nothing until the payer's
+      // invoice settles — the release delivers their report. The payer AP leg
+      // below carries the invoice + pay link.
+      channels.email = { ok: false, skipped: true, error: 'Held — homeowner report delivers automatically once the payer invoice is paid' };
+    } else if (emailRecipient.email) {
       try {
-        const result = isPayerInvoice
-          // Payer-billed: homeowner gets the report only (FDACS PDF for WDO +
-          // report link) — never the invoice PDF or pay link.
-          ? await ProjectEmail.sendProjectReportReady({
-              project: refreshed, customer, reportUrl,
-              attachments: reportAttachments,
-              isResend: Boolean(project.sent_at || project.status === 'sent'),
+        const result = holdActive
+          // Payment hold: invoice PDF + pay link ONLY — no report link, no
+          // FDACS attachment. The release sends the report once paid.
+          ? await ProjectEmail.sendProjectInvoiceBeforeReport({
+              project: refreshed, customer, payUrl, invoice, attachments,
             })
-          : await ProjectEmail.sendProjectReportWithInvoice({
-              project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-              // Only WDO attaches a report PDF (the FDACS-13645); non-WDO
-              // attaches just the invoice PDF and delivers the report as a
-              // link. Drives the template's attachments sentence.
-              reportAttached: isWdoProject,
-            });
+          : isPayerInvoice
+            // Payer-billed: homeowner gets the report only (FDACS PDF for WDO +
+            // report link) — never the invoice PDF or pay link.
+            ? await ProjectEmail.sendProjectReportReady({
+                project: refreshed, customer, reportUrl,
+                attachments: reportAttachments,
+                isResend: Boolean(project.sent_at || project.status === 'sent'),
+              })
+            : await ProjectEmail.sendProjectReportWithInvoice({
+                project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+                // Only WDO attaches a report PDF (the FDACS-13645); non-WDO
+                // attaches just the invoice PDF and delivers the report as a
+                // link. Drives the template's attachments sentence.
+                reportAttached: isWdoProject,
+              });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
           : { ok: false, error: projectEmailFailureMessage(result) };
@@ -3280,19 +4273,28 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     } else if (payerBilled) {
       billingCopyEmail = String(payerBilling.email).trim().toLowerCase();
       try {
-        const result = await ProjectEmail.sendProjectReportWithInvoice({
-          project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-          reportAttached: isWdoProject,
-          recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
-          // Stable-per-recipient key: dedupes the AP copy after the first success
-          // so a /send-with-invoice retry (the invoice can finalize off the payer
-          // delivery even when the homeowner report leg fails) doesn't re-bill the
-          // AP a duplicate — BUT keys on a hash of the AP email so that after an
-          // operator corrects a wrong/blocked AP address, the retry produces a new
-          // key and actually delivers to the corrected inbox instead of returning
-          // the old terminal (blocked/bounced) result.
-          idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:payer:${require('crypto').createHash('sha1').update(billingCopyEmail).digest('hex').slice(0, 12)}`,
-        });
+        // Stable-per-recipient key: dedupes the AP copy after the first success
+        // so a /send-with-invoice retry (the invoice can finalize off the payer
+        // delivery even when the homeowner report leg fails) doesn't re-bill the
+        // AP a duplicate — BUT keys on a hash of the AP email so that after an
+        // operator corrects a wrong/blocked AP address, the retry produces a new
+        // key and actually delivers to the corrected inbox instead of returning
+        // the old terminal (blocked/bounced) result.
+        const payerEmailHash = require('crypto').createHash('sha1').update(billingCopyEmail).digest('hex').slice(0, 12);
+        const result = holdActive
+          // Payment hold: the payer AP inbox gets the invoice + pay link only;
+          // the held report (and its FDACS PDF) delivers at release.
+          ? await ProjectEmail.sendProjectInvoiceBeforeReport({
+              project: refreshed, customer, payUrl, invoice, attachments,
+              recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
+              idempotencyKey: `project.invoice_before_report:${project.id}:${invoice.id}:payer:${payerEmailHash}`,
+            })
+          : await ProjectEmail.sendProjectReportWithInvoice({
+              project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+              reportAttached: isWdoProject,
+              recipient: { email: payerBilling.email, name: payerBilling.name || '', role: 'payer' },
+              idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:payer:${payerEmailHash}`,
+            });
         channels.payer_email = result.ok
           ? { ok: true, recipient: billingCopyEmail }
           : { ok: false, recipient: billingCopyEmail, error: projectEmailFailureMessage(result) };
@@ -3326,12 +4328,18 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       if (billingEmail && billingEmail !== String(emailRecipient.email || '').trim().toLowerCase()) {
         billingCopyEmail = billingEmail;
         try {
-          const result = await ProjectEmail.sendProjectReportWithInvoice({
-            project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
-            reportAttached: isWdoProject,
-            recipient: { email: billing.email, name: billing.name || '', role: billing.role || 'billing' },
-            idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:billing:${new Date().toISOString()}`,
-          });
+          const result = holdActive
+            ? await ProjectEmail.sendProjectInvoiceBeforeReport({
+                project: refreshed, customer, payUrl, invoice, attachments,
+                recipient: { email: billing.email, name: billing.name || '', role: billing.role || 'billing' },
+                idempotencyKey: `project.invoice_before_report:${project.id}:${invoice.id}:billing:${new Date().toISOString()}`,
+              })
+            : await ProjectEmail.sendProjectReportWithInvoice({
+                project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
+                reportAttached: isWdoProject,
+                recipient: { email: billing.email, name: billing.name || '', role: billing.role || 'billing' },
+                idempotencyKey: `project.report_with_invoice:${project.id}:${invoice.id}:billing:${new Date().toISOString()}`,
+              });
           channels.billing_email = result.ok
             ? { ok: true, recipient: billingEmail }
             : { ok: false, recipient: billingEmail, error: projectEmailFailureMessage(result) };
@@ -3345,8 +4353,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Third-party report copies — the FDACS "Report Sent to Requestor and
     // to:" line is a delivery claim; any emails the tech entered there get a
     // report-only copy (FDACS PDF + report link, never the invoice or pay
-    // link) once the customer email has succeeded.
-    if (isWdoProject && channels.email?.ok) {
+    // link) once the customer email has succeeded. Held sends defer these to
+    // the release: nobody receives the report before payment.
+    if (isWdoProject && !holdActive && channels.email?.ok) {
       const copies = await sendWdoReportCopies({
         req,
         project: refreshed,
@@ -3369,15 +4378,24 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const normalized = normalizeUsPhone(customer.phone);
     if (!normalized) {
       channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
+    } else if (holdActive && isPayerInvoice) {
+      // Payer-billed hold: no pay link for the homeowner (AR routes to the
+      // payer) and no report yet — nothing actionable to text.
+      channels.sms = { ok: false, skipped: true, error: 'Held — homeowner report delivers automatically once the payer invoice is paid' };
     } else if (isWdoProject && !channels.email?.ok) {
       channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
     } else {
       try {
         // Payer-billed: the homeowner still gets the report link (their
         // service) but NOT the pay link — AR routes to the payer's AP inbox.
-        const smsBody = isPayerInvoice
-          ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
-          : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
+        // Held sends text the pay link only — the report link must not go out
+        // before payment.
+        const holdReleaseDelivery = emailRecipient.email ? 'emailed' : 'sent by text';
+        const smsBody = holdActive
+          ? `Hi ${firstName}, your Waves ${typeLabel} is complete. Invoice ${invoice.invoice_number} — pay online: ${payUrl}\n\nYour report is ${holdReleaseDelivery} automatically as soon as it's paid.`
+          : isPayerInvoice
+            ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
+            : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
         const result = await sendCustomerMessage({
           to: normalized,
           body: smsBody,
@@ -3425,12 +4443,22 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // invoiceDelivered (below) is still gated on !accruedOnStatement, so the
     // accrued invoice itself is never finalized here.
     const payerLegOk = !isPayerInvoice || accruedOnStatement || !!channels.payer_email?.ok;
-    const delivered = delivered_report && payerLegOk;
+    // Payment hold: the only deliverable is the INVOICE reaching its bill-to
+    // party (payer AP inbox, or the customer's invoice-before-report email) —
+    // there is no report leg yet. Payer holds skip the homeowner channels by
+    // design, so they never count against the delivery status.
+    const delivered = holdActive
+      ? (isPayerInvoice
+          ? !!channels.payer_email?.ok
+          : isWdoProject
+            ? !!channels.email?.ok
+            : successfulChannelCount > 0)
+      : (delivered_report && payerLegOk);
     const anySuccess = successfulChannelCount > 0
       || (isPayerInvoice && (accruedOnStatement || !!channels.payer_email?.ok));
     const deliveryStatus = !delivered
       ? (anySuccess ? 'partial' : 'failed')
-      : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
+      : ((holdActive && isPayerInvoice) || successfulChannelCount >= availableChannels.length ? 'sent' : 'partial');
 
     // Finalize the invoice as delivered (it went out alongside the report).
     // markDeliverySent uses the canonical finalization semantics: it promotes
@@ -3477,9 +4505,22 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
       await reverseProjectCreditOnAbort();
+      await revertHeldReportClaimOnAbort();
     }
 
-    if (delivered) {
+    if (delivered && holdActive) {
+      // Invoice is out. The hold itself was stamped BEFORE delivery (in the
+      // token update — see the Codex P1 note there), so this records only
+      // the delivery bookkeeping. The project stays in its pre-send
+      // lifecycle (no status='sent' / sent_at — the report has not been
+      // delivered) and the release sweep owns the next transition.
+      await db('projects').where({ id: project.id }).update({
+        last_delivery_at: db.fn.now(),
+        delivery_channels: channels,
+        delivery_status: deliveryStatus,
+        updated_at: db.fn.now(),
+      });
+    } else if (delivered) {
       await db('projects').where({ id: project.id }).update({
         // Resending a closed project's report must not regress its lifecycle
         // (closed_at stays set and closeout artifacts key on status='closed').
@@ -3496,16 +4537,36 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
             [JSON.stringify([wdoFiling])],
           ),
         } : {}),
+        // An explicit un-held (re)send while a hold was active IS the report
+        // delivery — the release fields ride the SAME sent-stamp update
+        // (atomic, Codex P2) so the sweep can't re-send it on payment and a
+        // crash can't leave a delivered report 402ing publicly.
+        ...(heldReportClaim ? {
+          report_hold_status: 'released',
+          report_hold_released_at: db.fn.now(),
+          report_hold_release_source: 'manual_send',
+          report_hold_locked_at: null,
+          report_hold_last_error: null,
+        } : {}),
       });
+      // Released atomically above — nothing left for the outer catch to revert.
+      heldReportClaim = null;
     }
 
     await logProjectActivity(
       req, project,
-      delivered ? 'project_report_with_invoice_sent' : 'project_report_with_invoice_failed',
       delivered
-        ? `Report + invoice sent: ${typeLabel} (${invoice.invoice_number})`
-        : `Report + invoice delivery failed: ${typeLabel}`,
+        ? (holdActive ? 'project_invoice_sent_report_held' : 'project_report_with_invoice_sent')
+        : (holdActive ? 'project_invoice_report_hold_failed' : 'project_report_with_invoice_failed'),
+      delivered
+        ? (holdActive
+          ? `Invoice sent, report held until paid: ${typeLabel} (${invoice.invoice_number})`
+          : `Report + invoice sent: ${typeLabel} (${invoice.invoice_number})`)
+        : (holdActive
+          ? `Invoice delivery failed (report hold not armed): ${typeLabel}`
+          : `Report + invoice delivery failed: ${typeLabel}`),
       { report_token: token, invoice_id: invoice.id, invoice_created: created, channels,
+        ...(holdActive ? { report_hold: true } : {}),
         ...(hasReadinessOverride ? { readiness_override: { reason: overrideReason, missing: readiness.missing } } : {}) },
     );
 
@@ -3517,6 +4578,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       channels,
       delivery_status: deliveryStatus,
       sent: delivered,
+      ...(holdRequested ? { report_held: delivered && holdActive } : {}),
     });
   } catch (err) {
     // Release the 'sending' claim on any abort so the invoice isn't stranded
@@ -3532,6 +4594,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // pay link delivered. Runs after the claim release above so reverseAppliedCredit
     // isn't refused on a still-'sending' row.
     await reverseProjectCreditOnAbort();
+    // And return any held→releasing claim this send took, so the sweep isn't
+    // blocked behind a stale claim until the 10-minute recovery.
+    await revertHeldReportClaimOnAbort();
     if (err?.message === 'Invoice not found for this customer') {
       return res.status(404).json({ error: err.message });
     }
@@ -3541,10 +4606,21 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (err?.code === 'invoice_build_failed') {
       return res.status(422).json({ error: err.message, code: err.code });
     }
+    // Hold-until-paid on a would-be statement-accrued invoice — refused
+    // BEFORE the invoice was created (nothing to clean up).
+    if (err?.code === 'hold_statement_accrued') {
+      return res.status(422).json({ error: err.message, code: err.code });
+    }
     // The visit is already billed on a paid/in-flight invoice — block the
     // duplicate send with a 409 and point at the existing invoice.
     if (err?.code === 'already_billed') {
       return res.status(409).json({ error: err.message, code: err.code, invoice_id: err.invoiceId, invoice_number: err.invoiceNumber });
+    }
+    // No-charge WDO ($0 fee): nothing to bill — the operator sends the
+    // report by itself instead. Same shape on dry-run and send, so the UI
+    // shows the actionable message in the confirm flow.
+    if (err?.code === 'wdo_no_charge') {
+      return res.status(409).json({ error: err.message, code: err.code });
     }
     next(err);
   }
@@ -3819,8 +4895,20 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       : null;
     const includeCommunications = req.body.include_communications !== false;
     const includePhotos = req.body.include_photos !== false;
-    const communicationContext = includeCommunications
-      ? await getCustomerCommunicationContext(project.customer_id)
+    const projectComms = includeCommunications
+      ? await buildCompletionCommsContext({
+        customerId: project.customer_id,
+        scheduledServiceId: project.scheduled_service_id || null,
+        // created_at is when the JOB opened; project_date is the
+        // inspection date and would drop the pre-visit booking comms this
+        // feature summarizes (Codex r3 — same rule as the preview above).
+        originDate: project.created_at || null,
+      }).catch(() => ({ text: '', promptHint: '' }))
+      : { text: '', promptHint: '' };
+    // Thread the relevance hint with the block (Codex P2) — the window
+    // alone can hold unrelated-line comms the prompt must be told to skip.
+    const communicationContext = projectComms.text
+      ? `${projectComms.promptHint}\n${projectComms.text}`
       : '';
     const photos = includePhotos
       ? await db('project_photos')
@@ -3873,7 +4961,7 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       project_id: project.id,
       s3_key: key,
       category: req.body.category || null,
-      caption: req.body.caption || null,
+      caption: clampPhotoCaption(req.body.caption),
       visit: req.body.visit === 'followup' ? 'followup' : 'primary',
       uploaded_by_tech_id: req.technicianId,
     }).returning('*');
@@ -3944,7 +5032,9 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
     if (!(await requireProjectAccess(req, res, project))) return;
     const updates = {};
     for (const f of ['caption', 'category', 'sort_order']) {
-      if (req.body[f] !== undefined) updates[f] = req.body[f];
+      if (req.body[f] !== undefined) {
+        updates[f] = f === 'caption' ? clampPhotoCaption(req.body[f]) : req.body[f];
+      }
     }
     if (Object.keys(updates).length === 0) return res.json({ ok: true });
     await db('project_photos')
@@ -3964,6 +5054,14 @@ router._private = {
   evaluateProjectSendReadiness,
   completeProjectBackedService,
   dropStaleCertTreatmentDate,
+  reportHoldBackoffMinutes,
+  resolveWdoInspectionFee,
+  wdoAddendumPhotoCaption,
+  wdoFeeIsExplicitZero,
 };
 
 module.exports = router;
+// Payment-hold release — consumed by services/project-report-hold.js (the
+// sweep) via lazy require; lives here so it reuses the send path's WDO
+// helpers (PDF build, filing archive, copies, gates) without moving them.
+module.exports.releaseHeldProjectReport = releaseHeldProjectReport;

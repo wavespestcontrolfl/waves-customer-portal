@@ -8,9 +8,47 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { generateConfirmationCode } = require('../utils/slot-offer-token');
 
 function bookingError(message, code, statusCode = 409) {
   return Object.assign(new Error(message), { code, statusCode, isOperational: true });
+}
+
+// ---- global self-booking day cap (shared by EVERY writer) -----------------
+//
+// max_self_books_per_day is GLOBAL by calendar date, but the writers'
+// narrower locks (customer/tech/zone) don't serialize two confirms in
+// DIFFERENT zones — both could observe a cap-1 count and insert, exceeding
+// the cap. These two primitives centralize the fix: one date-scoped advisory
+// lock + one global count, required by BOTH self_booked_appointments writers
+// (routes/booking.js createSelfBooking and confirmBooking below) so neither
+// can bypass the other. Lock-ordering contract: every writer takes its
+// narrower locks FIRST (createSelfBooking: customer → tech → zone;
+// confirmBooking: zone) and this date lock LAST — same relative order
+// everywhere, so concurrent confirms can never deadlock.
+const SELF_BOOKING_DAY_CAP_LOCK_NS = 'self-booking-day-cap';
+
+async function acquireSelfBookingDayCapLock(trx, dateStr) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    [SELF_BOOKING_DAY_CAP_LOCK_NS, String(dateStr)],
+  );
+}
+
+// Same non-cancelled predicate the availability builder counts full days
+// with. excludeSelfBookingId: a same-day reschedule replaces its own row —
+// counting the row being moved would reject the move on a full day even
+// though the final count is unchanged.
+async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingId = null } = {}) {
+  const row = await trx('self_booked_appointments')
+    .where('date', String(dateStr))
+    .whereNot('status', 'cancelled')
+    .modify((q) => {
+      if (excludeSelfBookingId) q.whereNot('id', excludeSelfBookingId);
+    })
+    .count('* as count')
+    .first();
+  return parseInt(row?.count || 0, 10);
 }
 
 class AvailabilityEngine {
@@ -39,6 +77,14 @@ class AvailabilityEngine {
     const days = [];
     const today = new Date();
 
+    // Owner blackout days apply to this legacy engine too — it feeds the
+    // lead-response availability tool, which quotes days to customers.
+    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const blackout = await getBlackoutDates(
+      etDateString(addETDays(today, config.advance_days_min)),
+      etDateString(addETDays(today, config.advance_days_max)),
+    );
+
     for (let i = config.advance_days_min; i <= config.advance_days_max; i++) {
       // ET calendar math — toISOString() reads the UTC date (already tomorrow
       // between 8 PM and midnight ET) and getDay() reads the UTC weekday, so
@@ -47,6 +93,7 @@ class AvailabilityEngine {
       if (etParts(date).dayOfWeek === 0) continue; // skip Sunday (ET)
 
       const dateStr = etDateString(date);
+      if (blackout.has(dateStr)) continue;
 
       // Find techs working in this zone on this day
       const techBlocks = await db('tech_schedule_blocks')
@@ -66,15 +113,15 @@ class AvailabilityEngine {
       // If no tech blocks AND no existing services in zone, skip this day
       if (techBlocks.length === 0 && scheduledInZone.length === 0) continue;
 
-      // Count existing self-bookings for this zone/day
-      const existingBookings = await db('self_booked_appointments')
-        .where('service_zone_id', zone.id)
-        .where('date', dateStr)
-        .whereNot('status', 'cancelled')
-        .count('* as count')
-        .first();
+      // Day-cap filter: max_self_books_per_day is GLOBAL by calendar date
+      // (the shared helper confirmBooking enforces under the day-cap lock).
+      // Counting only this zone's bookings here let the engine keep OFFERING
+      // a day that another zone had already filled — every confirm on those
+      // offers then failed with SLOT_TAKEN. Same count, same predicate, so
+      // the builder never offers a day the confirm path would reject on cap.
+      const existingBookingsCount = await countActiveSelfBookingsForDay(db, dateStr);
 
-      if (parseInt(existingBookings.count) >= config.max_self_books_per_day) continue;
+      if (existingBookingsCount >= (config.max_self_books_per_day || 3)) continue;
 
       // Build occupied slots from scheduled_services
       const occupied = scheduledInZone.map(s => ({
@@ -194,6 +241,14 @@ class AvailabilityEngine {
     if (etParts(parseETDateTime(`${dateStr}T12:00`)).dayOfWeek === 0) {
       throw bookingError('We are closed on Sundays — please pick another day', 'INVALID_DATE', 400);
     }
+    // Owner blackout re-check at COMMIT — the quoted option may predate the
+    // blackout (AI book_appointment confirms options quoted earlier).
+    {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(dateStr)) {
+        throw bookingError('That day is no longer available — please pick another day', 'INVALID_DATE', 409);
+      }
+    }
     const startMin = this.timeToMin(startTime);
     const endMin = this.timeToMin(endTime);
     if (dateStr === todayStr) {
@@ -203,7 +258,10 @@ class AvailabilityEngine {
       }
     }
 
-    const confCode = 'WPC-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
+    // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served
+    // by the same public /booking/status/:code as the /book confirm path, so a
+    // guessable four-char code here would undercut the ≈50-bit codes there.
+    const confCode = generateConfirmationCode();
     const serviceType = estimate?.services?.[0] || estimate?.service_type || 'General Pest Control';
     const zoneCities = zone?.cities || [];
 
@@ -228,23 +286,23 @@ class AvailabilityEngine {
         ['slot-reserve', `zone:${zone?.id || 'unknown'}:${dateStr}`],
       );
 
-      if (zone) {
-        const existingBookings = await trx('self_booked_appointments')
-          .where('service_zone_id', zone.id)
-          .where('date', dateStr)
-          .whereNot('status', 'cancelled')
-          // A same-day reschedule replaces its own booking — counting the
-          // row being moved against the daily cap would reject the move
-          // on a full day even though the final count is unchanged.
-          .modify((q) => {
-            if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
-          })
-          .count('* as count')
-          .first();
-        if (parseInt(existingBookings.count) >= maxPerDay) {
-          throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
-        }
+      // Global day cap — the shared lock + count every
+      // self_booked_appointments writer takes (see the helpers above). The
+      // zone lock only serializes same-zone writers; the cap is global by
+      // date, so a per-zone count here let cross-zone confirms (this engine
+      // vs the public /book confirm) exceed max_self_books_per_day. Lock
+      // order stays fixed — zone THEN day, the same relative order as
+      // createSelfBooking's customer → tech → zone → day — so concurrent
+      // confirms across both writers can never deadlock.
+      await acquireSelfBookingDayCapLock(trx, dateStr);
+      const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
+        excludeSelfBookingId: options.excludeSelfBookingId || null,
+      });
+      if (dayCount >= maxPerDay) {
+        throw bookingError('That day just filled up — please pick another day', 'SLOT_TAKEN');
+      }
 
+      if (zone) {
         // Mirror getAvailableSlots' occupied set: zone services + live
         // self-bookings. Any overlap means the slot was taken since the
         // customer loaded the picker.
@@ -398,3 +456,7 @@ class AvailabilityEngine {
 }
 
 module.exports = new AvailabilityEngine();
+// Shared global day-cap primitives — required by routes/booking.js's
+// createSelfBooking (lazily, so the route ↔ service load order can't cycle).
+module.exports.acquireSelfBookingDayCapLock = acquireSelfBookingDayCapLock;
+module.exports.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;

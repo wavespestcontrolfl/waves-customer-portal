@@ -6,7 +6,7 @@ import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
-import { useGlassSurface, fireGlassConfetti } from '../glass/glass-engine';
+import { fireGlassConfetti } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 
@@ -70,8 +70,8 @@ function captureBookingAttribution() {
 }
 
 export default function PublicBookingPage() {
-  useGlassSurface(true, 'full');
-
+  // Marketing surface — standard wavespestcontrol.com warm chrome; the glass
+  // scene stays on the tokened/portal customer surfaces only.
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';
@@ -111,10 +111,12 @@ export default function PublicBookingPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [confCode, setConfCode] = useState('');
+  const [secureCardUrl, setSecureCardUrl] = useState(null);
   // Custom date/time finder — Waves AI search + 90-day date picker
   const [searchResult, setSearchResult] = useState(null);
   const [browseDays, setBrowseDays] = useState(null);
   const [browseLoading, setBrowseLoading] = useState(false);
+  const [browseError, setBrowseError] = useState('');
   const [pickedDate, setPickedDate] = useState(null);
   // Day the customer has drilled into to see its 1-hour openings (null = day list)
   const [openDay, setOpenDay] = useState(null);
@@ -149,6 +151,7 @@ export default function PublicBookingPage() {
     setError('');
     setSearchResult(null);
     setBrowseDays(null);
+    setBrowseError('');
     setPickedDate(null);
     setOpenDay(null);
   }, []);
@@ -247,7 +250,7 @@ export default function PublicBookingPage() {
     const KNOWN_SOURCES = new Set(['direct', 'marketing-site', 'estimate-accept', 'quote-wizard', 'quote-wizard-onetime', 'newsletter-quiz']);
     const safeSource = KNOWN_SOURCES.has(source) ? source : 'other';
     track(FUNNEL_EVENTS.BOOKING_VIEWED, { source: safeSource, service: service.id });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately fires once on mount (funnel-top event).
   }, []);
 
   useEffect(() => {
@@ -329,7 +332,7 @@ export default function PublicBookingPage() {
   // otherwise leave a STALE intent (recovery would name the wrong appointment).
   useEffect(() => {
     if ((contact.phone || '').replace(/\D/g, '').length === 10 && selectedSlot) captureBookingIntent();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Deliberately keyed on slot/service/address identity, not the callback.
   }, [selectedSlot?.start_time, selectedDate, service.id, address.line1, address.line2]);
 
   const recurringPattern = ONE_TIME_BOOKING_SOURCES.has(source)
@@ -349,10 +352,22 @@ export default function PublicBookingPage() {
           // as pricing_estimate_id so it never influences identity resolution.
           pricing_estimate_id: estimateIdParam || undefined,
           estimate_token: estimateTokenParam || undefined,
+          // Accept-retry correlation — pure passthrough of the URL's
+          // estimate_id; the server validates it (uuid shape + existence)
+          // and stamps scheduled_services.source_estimate_id. Never used
+          // for identity resolution.
+          source_estimate_id: estimateIdParam || undefined,
           slot_date: selectedDate,
           slot_start: selectedSlot.start_time,
           slot_end: selectedSlot.end_time,
           technician_id: selectedSlot.technician_id,
+          // Server-signed offer from the availability response — pure
+          // passthrough; /confirm rejects slots it never offered without it.
+          slot_sig: selectedSlot.slot_sig,
+          // Catalog id the availability request was made with — the server
+          // re-derives the signed service scope (and the visit duration)
+          // from this, so it must match what step 2 fetched slots for.
+          service_id: service.id,
           service_type: quotedServiceLabel || service.label,
           quoted_service_label: quotedServiceLabel || null,
           duration_minutes: service.duration,
@@ -382,6 +397,10 @@ export default function PublicBookingPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Booking failed');
       setConfCode(data.confirmationCode || 'WPC-????');
+      // Card-on-file step (dark until the funnel's gate flips): when the
+      // server minted an inline capture link, the confirmation screen shows
+      // the "secure your booking" step pointing at /secure/:token.
+      setSecureCardUrl(data.secureCard?.url || null);
       track(FUNNEL_EVENTS.BOOKING_CONFIRMED, {
         service: service.id,
         is_existing_customer: !!existingCustomerId,
@@ -402,7 +421,7 @@ export default function PublicBookingPage() {
     width: '100%', padding: '12px 14px', borderRadius: 8,
     border: `1.5px solid ${COLORS.grayLight}`, fontSize: 15,
     color: COLORS.navy, background: '#fff',
-    outline: 'none', transition: 'border-color 0.2s',
+    transition: 'border-color 0.2s',
   };
   const labelStyle = {
     fontSize: 14, fontWeight: 500, color: COLORS.slate600,
@@ -446,6 +465,7 @@ export default function PublicBookingPage() {
     setSearchResult(null);
     setPickedDate(date);
     setBrowseDays(null);
+    setBrowseError('');
     setSelectedDate(null);
     setSelectedSlot(null);
     if (!date) {
@@ -464,20 +484,22 @@ export default function PublicBookingPage() {
       });
       if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not check that date');
       if (latestPickedDateRef.current !== date) return;
       if (data.capture_token) captureTokenRef.current = data.capture_token;
       setBrowseDays(data.days || []);
     } catch {
       if (latestPickedDateRef.current !== date) return;
-      setBrowseDays([]);
+      setBrowseDays(null);
+      setBrowseError("We couldn't check that date right now. Try again in a moment.");
     } finally {
       if (latestPickedDateRef.current === date) setBrowseLoading(false);
     }
   };
 
   const pickedDayObj = pickedDate && browseDays ? browseDays.find((d) => d.date === pickedDate) : null;
-  const pickedDateHasNoOpenTimes = pickedDate && browseDays && !browseLoading && !pickedDayObj;
+  const pickedDateHasNoOpenTimes = pickedDate && browseDays && !browseLoading && !browseError && !pickedDayObj;
 
   // Label for the selected day's recap — resilient to selections made via the
   // day list, the 90-day date picker, or the Waves AI search.
@@ -514,7 +536,7 @@ export default function PublicBookingPage() {
               style={{
                 width: '100%', padding: '12px 14px', borderRadius: 12, cursor: 'pointer',
                 background: sel ? COLORS.wavesBlue : COLORS.white,
-                color: sel ? '#fff' : COLORS.blueDeeper,
+                color: sel ? '#fff' : COLORS.glassNavy,
                 border: `1.5px solid ${sel ? COLORS.wavesBlue : COLORS.slate200}`,
                 textAlign: 'left', transition: 'background-color .15s, border-color .15s, color .15s',
               }}
@@ -553,7 +575,7 @@ export default function PublicBookingPage() {
         {/* STEP 1 — Address */}
         {step === 1 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h2>
             <div style={{ display: 'grid', gap: 14, marginBottom: 24, marginTop: 18 }}>
@@ -587,7 +609,7 @@ export default function PublicBookingPage() {
                     checkExistingCustomerByAddress(nextAddress);
                   }}
                   placeholder="Start typing your address"
-                  style={inputStyle}
+                  className="waves-focus-ring" style={inputStyle}
                 />
               </div>
               <div>
@@ -609,7 +631,7 @@ export default function PublicBookingPage() {
                   }}
                   onBlur={() => { if (address.line1) checkExistingCustomerByAddress(address); }}
                   placeholder="Apt / Unit # (optional)"
-                  style={inputStyle}
+                  className="waves-focus-ring" style={inputStyle}
                 />
               </div>
             </div>
@@ -619,7 +641,7 @@ export default function PublicBookingPage() {
                 onClick={() => { track(FUNNEL_EVENTS.BOOKING_SERVICE_SELECTED, { service: service.id }); setStep(2); }}
                 disabled={!address.line1}
                 data-glass-accent=""
-                style={{ width: '100%' }}
+                style={{ width: '100%', color: COLORS.glassNavy }}
               >
                 Find my best times →
               </Button>
@@ -632,7 +654,7 @@ export default function PublicBookingPage() {
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
             {!openDay ? (
               <>
-                <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+                <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
                   Pick a day
                 </h2>
                 <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
@@ -658,7 +680,7 @@ export default function PublicBookingPage() {
             )}
 
             {error && !loading && (
-              <div style={{
+              <div role="alert" style={{
                 background: '#FEF2F2', border: '1px solid #FECACA',
                 borderRadius: 10, padding: 14, fontSize: 14, color: '#991B1B', marginBottom: 16,
               }}>{error}</div>
@@ -669,7 +691,7 @@ export default function PublicBookingPage() {
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
                 background: COLORS.blueLight, border: `1px solid ${COLORS.wavesBlue}`,
-                borderRadius: 10, padding: '10px 12px', fontSize: 14, color: COLORS.blueDeeper,
+                borderRadius: 10, padding: '10px 12px', fontSize: 14, color: COLORS.glassNavy,
               }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 700 }}>
                   <Icon name="check" size={14} strokeWidth={3} /> Selected
@@ -698,7 +720,7 @@ export default function PublicBookingPage() {
                       }}
                     >
                       <div>
-                        <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>{day.fullDate}</div>
+                        <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.glassNavy }}>{day.fullDate}</div>
                         <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 2 }}>
                           {count} {count === 1 ? 'opening' : 'openings'}
                         </div>
@@ -732,7 +754,7 @@ export default function PublicBookingPage() {
               }
               return (
                 <div>
-                  <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+                  <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
                     {day.fullDate}
                   </h2>
                   <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 16, lineHeight: 1.5 }}>
@@ -749,7 +771,7 @@ export default function PublicBookingPage() {
                           style={{
                             width: '100%', padding: '14px 16px', borderRadius: 12, cursor: 'pointer',
                             background: sel ? COLORS.wavesBlue : COLORS.white,
-                            color: sel ? '#fff' : COLORS.blueDeeper,
+                            color: sel ? '#fff' : COLORS.glassNavy,
                             border: `1.5px solid ${sel ? COLORS.wavesBlue : COLORS.slate200}`,
                             textAlign: 'left', transition: 'background-color .15s, border-color .15s, color .15s',
                           }}
@@ -770,17 +792,18 @@ export default function PublicBookingPage() {
             {!loading && !openDay && (
               <>
                 <div data-glass="soft" style={{ position: 'relative', background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
-                  <label style={{ ...labelStyle, color: COLORS.blueDeeper, fontWeight: 700 }}>
+                  <label htmlFor="booking-custom-date" style={{ ...labelStyle, color: COLORS.glassNavy, fontWeight: 700 }}>
                     Need a date further out? Pick any day that works.
                   </label>
                   <input
+                    id="booking-custom-date"
                     type="date"
                     min={browseMin}
                     max={browseMax}
                     placeholder="mm/dd/yyyy"
                     value={pickedDate || ''}
                     onChange={(e) => onPickDate(e.target.value)}
-                    style={inputStyle}
+                    className="waves-focus-ring" style={inputStyle}
                   />
                   <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 8 }}>
                     We'll check open windows up to 90 days out.
@@ -789,6 +812,18 @@ export default function PublicBookingPage() {
 
                 {browseLoading && (
                   <div style={{ textAlign: 'center', padding: 20, color: COLORS.slate600, fontSize: 14 }}>Loading times…</div>
+                )}
+                {browseError && !browseLoading && (
+                  <div role="alert" style={{ marginTop: 14, fontSize: 14, color: '#991B1B', lineHeight: 1.45 }}>
+                    {browseError}{' '}
+                    <button
+                      type="button"
+                      onClick={() => onPickDate(pickedDate)}
+                      style={{ border: 0, padding: 0, background: 'none', color: COLORS.wavesBlue, font: 'inherit', fontWeight: 700, cursor: 'pointer' }}
+                    >
+                      Try again
+                    </button>
+                  </div>
                 )}
                 {pickedDayObj && (
                   <div style={{ marginTop: 14 }}>
@@ -805,7 +840,7 @@ export default function PublicBookingPage() {
                 {/* Waves AI date/time search */}
                 <div style={{ marginTop: 20 }}>
                   <WavesAIScheduleSearch
-                    theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.blueDeeper, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
+                    theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.glassNavy, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
                     onSearch={runAiSearch}
                   />
                 </div>
@@ -831,7 +866,7 @@ export default function PublicBookingPage() {
                 onClick={() => { track(FUNNEL_EVENTS.BOOKING_CONTACT_STARTED, { is_existing_customer: !!existingCustomerId }); setStep(3); }}
                 disabled={continueDisabled}
                 data-glass-accent=""
-                style={{ flex: 1 }}
+                style={{ flex: 1, color: COLORS.glassNavy }}
               >
                 Continue →
               </Button>
@@ -842,7 +877,7 @@ export default function PublicBookingPage() {
         {/* STEP 3 — Contact */}
         {step === 3 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
               {existingCustomerId ? 'Confirm your booking' : 'Your info'}
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
@@ -859,7 +894,7 @@ export default function PublicBookingPage() {
               <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.blueDark, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
                 Your selected time
               </div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.blueDeeper }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.glassNavy }}>
                 {selectedSlot?.fullDate || selectedDayLabel} · {selectedSlot?.start_label}
               </div>
               <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 2 }}>
@@ -893,7 +928,7 @@ export default function PublicBookingPage() {
                 <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 5 }}>
                   Customer found
                 </div>
-                <div className="ph-mask" style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>
+                <div className="ph-mask" style={{ fontSize: 17, fontWeight: 700, color: COLORS.glassNavy }}>
                   {[contact.firstName, contact.lastName].filter(Boolean).join(' ') || 'Customer on file'}
                 </div>
                 <div className="ph-mask" style={{ fontSize: 14, color: COLORS.slate600, marginTop: 4, lineHeight: 1.35 }}>
@@ -910,12 +945,15 @@ export default function PublicBookingPage() {
                 <label htmlFor="book-phone" style={labelStyle}>Phone number</label>
                 <input
                   id="book-phone"
+                  name="phone"
                   type="tel" autoFocus
+                  autoComplete="tel"
+                  inputMode="tel"
                   placeholder="(941) 555-1234"
                   value={contact.phone}
                   onChange={e => setContact(c => ({ ...c, phone: e.target.value }))}
                   onBlur={() => { checkExistingCustomer(contact.phone); captureBookingIntent(); }}
-                  style={inputStyle}
+                  className="waves-focus-ring" style={inputStyle}
                   disabled={!!existingCustomerId}
                 />
               </div>}
@@ -924,20 +962,24 @@ export default function PublicBookingPage() {
                   <label htmlFor="book-first-name" style={labelStyle}>First name</label>
                   <input
                     id="book-first-name"
+                    name="firstName"
                     type="text"
+                    autoComplete="given-name"
                     value={contact.firstName}
                     onChange={e => setContact(c => ({ ...c, firstName: e.target.value }))}
-                    style={inputStyle}
+                    className="waves-focus-ring" style={inputStyle}
                   />
                 </div>
                 <div>
                   <label htmlFor="book-last-name" style={labelStyle}>Last name</label>
                   <input
                     id="book-last-name"
+                    name="lastName"
                     type="text"
+                    autoComplete="family-name"
                     value={contact.lastName}
                     onChange={e => setContact(c => ({ ...c, lastName: e.target.value }))}
-                    style={inputStyle}
+                    className="waves-focus-ring" style={inputStyle}
                   />
                 </div>
               </div>}
@@ -945,11 +987,14 @@ export default function PublicBookingPage() {
                 <label htmlFor="book-email" style={labelStyle}>Email (optional)</label>
                 <input
                   id="book-email"
+                  name="email"
                   type="email"
+                  autoComplete="email"
+                  inputMode="email"
                   value={contact.email}
                   onChange={e => setContact(c => ({ ...c, email: e.target.value }))}
                   onBlur={() => captureBookingIntent()}
-                  style={inputStyle}
+                  className="waves-focus-ring" style={inputStyle}
                 />
               </div>}
               <div>
@@ -960,13 +1005,14 @@ export default function PublicBookingPage() {
                   placeholder="Gate code, pets, access instructions…"
                   value={notes}
                   onChange={e => setNotes(e.target.value)}
+                  className="waves-focus-ring"
                   style={{ ...inputStyle, resize: 'vertical', fontFamily: FONTS.body }}
                 />
               </div>
             </div>
 
             {error && (
-              <div style={{
+              <div role="alert" style={{
                 background: '#FEF2F2', border: '1px solid #FECACA',
                 borderRadius: 10, padding: 12, fontSize: 14, color: '#991B1B', marginBottom: 16,
               }}>{error}</div>
@@ -979,7 +1025,7 @@ export default function PublicBookingPage() {
                 onClick={handleConfirm}
                 disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || contact.phone.replace(/\D/g, '').length !== 10))}
                 data-glass-accent=""
-                style={{ flex: 1 }}
+                style={{ flex: 1, color: COLORS.glassNavy }}
               >
                 {loading ? 'Booking…' : 'Confirm booking'}
               </Button>
@@ -999,7 +1045,7 @@ export default function PublicBookingPage() {
                 <polyline points="20 6 9 17 4 12" />
               </svg>
             </div>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
               You're booked!
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
@@ -1017,12 +1063,45 @@ export default function PublicBookingPage() {
                 {confCode}
               </div>
               <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6 }}>
-                <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
+                <div><strong style={{ color: COLORS.glassNavy }}>{service?.label}</strong></div>
                 <div>{selectedSlot?.fullDate || selectedDayLabel}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>
+            {secureCardUrl ? (
+              <div data-glass="card" style={{
+                position: 'relative',
+                background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
+                borderRadius: 12, padding: 18, marginBottom: 20, textAlign: 'left',
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
+                  One last step
+                </div>
+                <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6, marginBottom: 14 }}>
+                  <strong style={{ color: COLORS.glassNavy }}>Add a card on file to secure your visit.</strong>{' '}
+                  Nothing is charged today — your card is only charged after your
+                  service is completed.
+                </div>
+                <a
+                  href={secureCardUrl}
+                  // _top, not self (Codex #2771 r3): /book embeds in the
+                  // marketing-site iframe under the embeddable helmet policy,
+                  // but /secure/:token serves under strictHelmet and is
+                  // refused inside a frame — the CTA must break out to the
+                  // top window (a no-op when not embedded).
+                  target="_top"
+                  rel="noopener"
+                  data-glass-accent=""
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    minHeight: 48, padding: '0 20px', background: COLORS.glassNavy,
+                    color: COLORS.white, border: `1px solid ${COLORS.glassNavy}`,
+                    borderRadius: 8, fontWeight: 800, fontSize: 15, textDecoration: 'none',
+                  }}
+                >Secure my visit — $0 today</a>
+              </div>
+            ) : null}
             <p style={{ fontSize: 12, color: COLORS.slate400 }}>
               Need to change it? Text us at (941) 297-5749 or reply RESCHEDULE to the confirmation text.
             </p>

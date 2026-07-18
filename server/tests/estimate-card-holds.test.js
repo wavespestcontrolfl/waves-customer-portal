@@ -3,6 +3,7 @@
 // directly, and the trust-boundary verify path checked against Stripe.
 
 let mockDbHandler = () => { throw new Error('db handler not configured'); };
+let mockDbUpdates = [];
 jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
@@ -31,7 +32,12 @@ const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
-jest.mock('../utils/datetime-et', () => ({ etDateString: jest.fn(() => '2026-06-25'), addETDays: jest.fn() }));
+jest.mock('../utils/datetime-et', () => ({
+  etDateString: jest.fn(() => '2026-06-25'),
+  addETDays: jest.fn(),
+  formatETDate: jest.fn(() => 'July 13, 2026'),
+  formatETTime: jest.fn(() => '9:00 AM'),
+}));
 // cardHoldCancelPreview resolves the appointment start via the shared helper
 // when not supplied; the cancel-path tests pass serviceStart explicitly and
 // never hit this mock.
@@ -51,6 +57,15 @@ jest.mock('../services/stripe', () => ({
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
   chargeInvoiceWithSavedCard: (...a) => mockChargeInvoiceWithSavedCard(...a),
   chargeSavedPaymentMethodOffSession: (...a) => mockChargeOffSession(...a),
+  savedCardChargeNeedsReconciliation: (err) => [
+    'STRIPE_CHARGED_DB_FAILED',
+    'STRIPE_AMBIGUOUS_OUTCOME',
+  ].includes(err?.code),
+  savedCardChargeSuppressesAlternateCollection: (err) => [
+    'STRIPE_CHARGED_DB_FAILED',
+    'STRIPE_AMBIGUOUS_OUTCOME',
+    'STRIPE_CHARGE_IN_PROGRESS',
+  ].includes(err?.code),
 }));
 
 const {
@@ -62,6 +77,10 @@ const {
   isWithinCancelWindow,
   handleCardHoldCancellation,
   cardHoldCancelPreview,
+  cardHoldReminderLine,
+  cardHoldReminderNote,
+  recordCardHoldHeld,
+  chargeCardHoldOnCompletion,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -69,6 +88,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDbUpdates = [];
   process.env.ONE_TIME_CARD_HOLD = 'true';
 });
 afterEach(() => {
@@ -82,14 +102,17 @@ function stubDb(firstResults) {
   const queue = Array.isArray(firstResults) ? [...firstResults] : [firstResults];
   mockDbHandler = () => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereNotNull', 'whereIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
+    for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
       chain[m] = jest.fn(() => chain);
     }
     chain.first = jest.fn(() => {
       const v = queue.length ? queue.shift() : null;
       return v instanceof Error ? Promise.reject(v) : Promise.resolve(v);
     });
-    chain.update = jest.fn(() => Promise.resolve(1));
+    chain.update = jest.fn((payload) => {
+      mockDbUpdates.push(payload);
+      return Promise.resolve(1);
+    });
     chain.insert = jest.fn(() => Promise.resolve([{}]));
     return chain;
   };
@@ -101,6 +124,44 @@ describe('isCardHoldEnabled — dark by default', () => {
     for (const v of ['false', '0', 'off', '']) { process.env.ONE_TIME_CARD_HOLD = v; expect(isCardHoldEnabled()).toBe(false); }
     delete process.env.ONE_TIME_CARD_HOLD;
     expect(isCardHoldEnabled()).toBe(false);
+  });
+});
+
+describe('completion charge reconciliation outcomes', () => {
+  const hold = { id: 'hold-1', customer_id: 'cust-1', stripe_payment_method_id: 'pm-stripe-1' };
+  const invoice = { id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: 75 };
+  const paymentMethod = { id: 'pm-row-1' };
+
+  test.each([
+    ['STRIPE_CHARGED_DB_FAILED', { stripePaymentIntentId: 'pi-orphan-1' }],
+    ['STRIPE_AMBIGUOUS_OUTCOME', {}],
+  ])('parks invoice and card hold for terminal %s', async (code, extra) => {
+    stubDb([hold, invoice, paymentMethod]);
+    mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('reconcile me'), { code, ...extra }));
+
+    await expect(chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' }))
+      .resolves.toEqual(expect.objectContaining({ charged: false, reason: 'charge_review' }));
+
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'processing' }),
+      expect.objectContaining({ status: 'charge_review' }),
+    ]));
+  });
+
+  test('restores a fresh concurrent claim collision for retry without exposing another rail', async () => {
+    stubDb([hold, invoice, paymentMethod]);
+    mockChargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('first attempt declined'), {
+      code: 'STRIPE_CHARGE_IN_PROGRESS',
+    }));
+
+    await expect(chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' }))
+      .resolves.toEqual(expect.objectContaining({ charged: false, reason: 'charge_in_progress' }));
+    expect(mockDbUpdates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'charging' }),
+      expect.objectContaining({ status: 'held' }),
+    ]));
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'charge_review' })]));
+    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: 'processing' })]));
   });
 });
 
@@ -190,6 +251,105 @@ describe('isWithinCancelWindow', () => {
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T10:00:00Z'), now })).toBe(false); // exactly grace boundary (start + 2h == now)
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T08:00:00Z'), now })).toBe(false); // same-day morning visit never delivered
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-20T12:00:00Z'), now })).toBe(false); // days-stale (churn-sweep rescheduled phantom)
+  });
+
+  // Card-on-file spec Phase 1 (owner default, spec §5 #1): the effective
+  // window is min(cancel_window_hours, time since booking) — a same-day
+  // booking is no longer instantly inside the fee window.
+  describe('inside-window booking grace (window anchored to booking age)', () => {
+    const start = new Date('2026-06-24T15:00:00Z'); // visit 3h from `now`
+    it('free cancel right after a same-day booking', () => {
+      const freshHold = { cancel_window_hours: 24, held_at: new Date('2026-06-24T11:55:00Z') }; // booked 5 min ago
+      expect(isWithinCancelWindow({ hold: freshHold, serviceStart: start, now })).toBe(false);
+    });
+    it('fee applies once the booking has aged past the time remaining', () => {
+      const agedHold = { cancel_window_hours: 24, held_at: new Date('2026-06-24T08:00:00Z') }; // booked 4h ago, visit in 3h
+      expect(isWithinCancelWindow({ hold: agedHold, serviceStart: start, now })).toBe(true);
+    });
+    it('booking age never WIDENS the disclosed window', () => {
+      const oldHold = { cancel_window_hours: 24, held_at: new Date('2026-06-20T12:00:00Z') }; // booked days ago
+      // visit 25h out — outside the 24h disclosed window regardless of age
+      expect(isWithinCancelWindow({ hold: oldHold, serviceStart: new Date('2026-06-25T13:00:00Z'), now })).toBe(false);
+    });
+    it('legacy rows without held_at keep the full disclosed window', () => {
+      expect(isWithinCancelWindow({ hold: { cancel_window_hours: 24 }, serviceStart: start, now })).toBe(true);
+      expect(isWithinCancelWindow({ hold: { cancel_window_hours: 24, held_at: 'not-a-date' }, serviceStart: start, now })).toBe(true);
+    });
+    it('a clock-skewed future held_at falls back to the disclosed window', () => {
+      const skewed = { cancel_window_hours: 24, held_at: new Date('2026-06-24T12:05:00Z') }; // "booked" 5 min in the future
+      expect(isWithinCancelWindow({ hold: skewed, serviceStart: start, now })).toBe(true);
+    });
+  });
+});
+
+describe('cardHoldReminderNote/Line — reminder fee-policy disclosure (spec Phase 1)', () => {
+  const HOUR = 3600000;
+  it("'' while the flag is off (dark-safe)", async () => {
+    delete process.env.ONE_TIME_CARD_HOLD;
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24 });
+    expect(await cardHoldReminderLine('svc1')).toBe('');
+  });
+  it("'' when the visit carries no held card (non-card-hold reminders stay byte-identical)", async () => {
+    stubDb(null);
+    expect(await cardHoldReminderLine('svc1')).toBe('');
+  });
+  it('states the FROZEN fee and an exact free-cancel cutoff; rescheduling stays free', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 39, cancel_window_hours: 48, held_at: new Date(Date.now() - 240 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 100 * HOUR)); // cutoff = start − 48h, in the future
+    const line = await cardHoldReminderLine('svc1');
+    expect(line.startsWith('\n\nYour card on file holds this visit — cancel free until ')).toBe(true);
+    expect(line).toContain('a $39 fee applies only if you cancel or no one is home');
+    expect(line).toContain('Rescheduling is always free.');
+    expect(line).not.toContain('reschedule or cancel free'); // fee never attributed to reschedules
+  });
+  it('booking-age grace: a fresh same-day booking discloses the midpoint cutoff, not "already inside"', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() - 1 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 3 * HOUR)); // midpoint = +1h, still free NOW
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('cancel free until');
+  });
+  it('past-cutoff bookings get the generic in-window copy (no stale cutoff)', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() - 10 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 1 * HOUR)); // midpoint 4.5h ago
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('A $49 fee applies only if you cancel or no one is home');
+    expect(note).not.toContain('cancel free until');
+  });
+  it('a clock-skewed FUTURE held_at falls back to the disclosed-window cutoff (matches the fee check)', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() + 2 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 100 * HOUR)); // disclosed cutoff = start − 24h, future
+    const note = await cardHoldReminderNote('svc1');
+    // Must NOT use the midpoint of a future booking time — the fee check
+    // ignores future held_at and charges on the full disclosed window.
+    expect(note).toContain('cancel free until');
+  });
+  it('appointment-time resolution failure degrades to the generic copy, never throws', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24 });
+    mockApptTime.mockRejectedValue(new Error('appt lookup down'));
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('$49 fee applies');
+    expect(note).not.toContain('cancel free until');
+  });
+  it("'' on a lookup error — a reminder must never fail on the policy clause", async () => {
+    stubDb(new Error('db down'));
+    expect(await cardHoldReminderLine('svc1')).toBe('');
+  });
+});
+
+describe('recordCardHoldHeld — saved-method holds carry no SetupIntent (spec §3.2)', () => {
+  it('records a hold with a null SetupIntent (fresh saved-method hold) without throwing', async () => {
+    stubDb([null]); // no existing SI-less held row → insert path
+    await expect(recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    })).resolves.toBeUndefined();
+  });
+  it('updates the existing SI-less held row on a retried accept (no duplicate holds)', async () => {
+    stubDb([{ id: 'hold-existing' }]); // existing SI-less held row → update path
+    await expect(recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    })).resolves.toBeUndefined();
   });
 });
 

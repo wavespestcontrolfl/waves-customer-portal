@@ -27,7 +27,7 @@ export const W = {
   blue: COLORS.blueDark,          // #065A8C
   blueDark: COLORS.blueDark,      // alias (Report/App showcase naming)
   blueBright: COLORS.wavesBlue,   // #009CDE
-  blueDeeper: COLORS.blueDeeper,  // #1B2C5B — headings on light bg
+  blueDeeper: COLORS.glassNavy,   // #04395E — headings on light bg (reconciled to glass navy, owner 2026-07-12)
   blueLight: COLORS.blueLight,    // #E3F5FD — soft wash
   navyDeep: '#04395E',            // glass brand navy (site-wide, owner-locked)
   navy: COLORS.navy,              // #0F172A — slate-900 strongest text
@@ -59,7 +59,24 @@ export const W = {
   warmBorder: CUSTOMER_SURFACE.border, // #E7E2D7 — warm-surface hairlines
 
   // Washes
-  badgeWash: '#EEF2FF',           // WaveGuard tier chip bg
+  badgeWash: '#EEF2FF',           // WaveGuard tier chip bg (legacy indigo; tier chips now metal-coded)
   noticeText: '#92400E',          // amber quote-required notes
   successWash: CUSTOMER_SURFACE.successBg, // #F0FDF4
 };
+
+// WaveGuard tier chips render in their METAL (owner directive 2026-07-10):
+// gold is gold, silver silver, bronze bronze — soft wash + metal text so the
+// chip stays legible on the warm glass cards. Metal text values match the
+// admin Customer-360 tier coding (Gold #D4A017 family, Silver #9CA3AF family,
+// Bronze #A16207, Platinum zinc); unknown tiers fall back to the legacy
+// indigo wash.
+const WAVEGUARD_CHIP_STYLES = {
+  gold: { background: '#FAF3DC', color: '#8A6D0B', border: '1px solid #E7D9A8' },
+  silver: { background: '#F1F5F9', color: '#5B6472', border: '1px solid #CBD5E1' },
+  bronze: { background: '#F6EBDD', color: '#A16207', border: '1px solid #E4CDA9' },
+  platinum: { background: '#F4F4F5', color: '#52525B', border: '1px solid #D4D4D8' },
+};
+export function waveGuardChipStyle(tier) {
+  const key = String(tier || '').replace(/^WaveGuard\s+/i, '').trim().toLowerCase();
+  return WAVEGUARD_CHIP_STYLES[key] || { background: '#EEF2FF', color: COLORS.glassNavy };
+}

@@ -13,9 +13,8 @@ import {
   Textarea,
   cn,
 } from "../../components/ui";
+import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
-
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const STATUS_TABS = [
   { key: "open", label: "Open" },
@@ -63,6 +62,7 @@ const REASON_LABELS = {
   address_recovered: "Address recovered — read back",
   email_unverified: "Email spelled — read back",
   email_invalid: "Email couldn't be captured",
+  secondary_contact_captured: "Second contact named — confirm",
 };
 
 // Correction evidence the call processor attaches to address/email review
@@ -75,12 +75,43 @@ function parsePayload(payload) {
   try { return JSON.parse(payload); } catch { return null; }
 }
 
-function ConfirmEvidence({ payload }) {
+export function ConfirmEvidence({ payload }) {
   const p = parsePayload(payload);
   if (!p) return null;
   const emailCandidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
   const addressCandidates = Array.isArray(p.address_candidates) ? p.address_candidates : [];
+  // secondary_contact arrives in the V2 nested shape (name_full / phone_e164)
+  // from the deterministic-flags insert or the flat shape (phone) from the
+  // processor's payload-rich insert — render either.
+  const sc = p.secondary_contact && typeof p.secondary_contact === "object" ? p.secondary_contact : null;
+  const fmtContact = (c) =>
+    [
+      c.name_full || [c.first_name, c.last_name].filter(Boolean).join(" ") || null,
+      c.role && c.role !== "unknown" ? `(${c.role.replace(/_/g, " ")})` : null,
+      c.phone || c.phone_e164 || null,
+      c.email || null,
+    ].filter(Boolean).join(" · ")
+      + (c.wants_notifications === true ? " — caller asked they get notifications" : "");
+  const scValue = sc ? fmtContact(sc) : "";
+  // 1.4.0 multi-party calls: every ADDITIONAL named party after the first —
+  // without these rows the office could only see them in raw JSON.
+  const extraContacts = Array.isArray(p.secondary_contacts)
+    ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
+    : [];
   const rows = [
+    scValue && { label: "Second contact", value: scValue },
+    ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
+    // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured
+    // three — without a row the card looks complete and nobody re-listens.
+    p.other_parties_mentioned === true && { label: "More parties", value: "Caller named more people than captured — re-listen to the call" },
+    // shared_phone_ambiguous: the office adjudicates WHICH customer this call
+    // belongs to — without the candidate names they'd have to search the
+    // number by hand (the payload already carries them).
+    Array.isArray(p.candidates) && p.candidates.length > 0 && {
+      label: "Shared phone",
+      value: p.candidates.map((c) => c.name || `Customer ${String(c.id).slice(0, 8)}`).join(" · ")
+        + (Number(p.share_count) > p.candidates.length ? ` (+${Number(p.share_count) - p.candidates.length} more)` : ""),
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },
@@ -88,6 +119,37 @@ function ConfirmEvidence({ payload }) {
     emailCandidates.length > 0 && {
       label: emailCandidates.length === 1 ? "Likely" : "Candidates",
       value: emailCandidates.map((c) => `${c.value}${typeof c.confidence === "number" ? ` (${Math.round(c.confidence * 100)}%)` : ""}`).join(" · "),
+    },
+    // One bounce-reverify card can cover SEVERAL bounced addresses from the
+    // same call — each verified one gets its own heard/candidates/read-back
+    // rows, or the office only ever sees the primary's.
+    ...(Array.isArray(p.additional_reverifications) ? p.additional_reverifications : []).flatMap((r) => [
+      r.email_as_heard && { label: "Also bounced", value: r.email_as_heard },
+      Array.isArray(r.email_candidates) && r.email_candidates.length > 0 && {
+        label: r.email_candidates.length === 1 ? "Likely" : "Candidates",
+        value: r.email_candidates.map((c) => `${c.value}${typeof c.confidence === "number" ? ` (${Math.round(c.confidence * 100)}%)` : ""}`).join(" · "),
+      },
+      r.confirmation_question && { label: "Then ask", value: `“${r.confirmation_question}”` },
+    ]),
+    // Quarantine-arbiter findings: without these rows the operator sees only
+    // the original ambiguous candidates and re-does the DNS/ownership work
+    // the arbiter already did.
+    p.arbiter?.verdict && {
+      label: "Arbiter",
+      value: `${String(p.arbiter.verdict).replace(/_/g, " ")}`
+        + (typeof p.arbiter.confidence === "number" ? ` (${Math.round(p.arbiter.confidence * 100)}%)` : "")
+        + (p.arbiter.chosen_value ? ` → ${p.arbiter.chosen_value}` : "")
+        + (p.arbiter.reasoning ? ` — ${p.arbiter.reasoning}` : ""),
+    },
+    Array.isArray(p.arbiter?.eliminated) && p.arbiter.eliminated.length > 0 && {
+      label: "Ruled out",
+      value: p.arbiter.eliminated.map((e) => `${e.value}${e.reason ? ` (${e.reason})` : ""}`).join(" · "),
+    },
+    Array.isArray(p.arbiter?.domain_evidence) && p.arbiter.domain_evidence.length > 0 && {
+      label: "DNS",
+      value: p.arbiter.domain_evidence.map((d) =>
+        `${d.domain}: ${d.deliverable === true ? "deliverable" : d.deliverable === false ? "no mail records" : "unverified"}`
+      ).join(" · "),
     },
   ].filter(Boolean);
   if (!rows.length && !p.confirmation_question) return null;
@@ -192,10 +254,13 @@ export default function TriageInboxTabV2() {
         setDenyFields([]);
         if (kind === "triage") {
           // A verdict is call-level: the server resolves every open flag for the
-          // call, so drop all sibling rows for this call_log_id, not just the
-          // clicked one, and move that many into the resolved bucket.
-          const removed = items.filter((i) => i.call_log_id === item.call_log_id).length || 1;
-          setItems((prev) => prev.filter((i) => i.call_log_id !== item.call_log_id));
+          // call EXCEPT email_bounce_reverify follow-ups (those judge a bounced
+          // address, not the call, and survive on the server) — so drop exactly
+          // the sibling rows the server resolved, and move that many.
+          const wasResolved = (i) =>
+            i.call_log_id === item.call_log_id && i.reason_code !== "email_bounce_reverify";
+          const removed = items.filter(wasResolved).length || 1;
+          setItems((prev) => prev.filter((i) => !wasResolved(i)));
           setCounts((prev) => {
             const c = { ...prev };
             if (c[status] != null) c[status] = Math.max(0, c[status] - removed);
@@ -230,6 +295,31 @@ export default function TriageInboxTabV2() {
           const c = { ...prev };
           if (c[status] != null) c[status] = Math.max(0, c[status] - 1);
           if (c.dismissed != null) c.dismissed += 1;
+          return c;
+        });
+      })
+      .catch((err) => {
+        setActioning(null);
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
+      });
+  };
+
+  // Resolve a single item WITHOUT a call verdict — the action for
+  // email_bounce_reverify cards, which aren't judgments on the call and are
+  // rejected by the /verdict endpoint. Removes only the clicked row.
+  const resolveItem = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/resolve`, {
+      method: "PUT",
+      body: JSON.stringify({}),
+    })
+      .then(() => {
+        setActioning(null);
+        setItems((prev) => prev.filter((i) => i.id !== item.id));
+        setCounts((prev) => {
+          const c = { ...prev };
+          if (c[status] != null) c[status] = Math.max(0, c[status] - 1);
+          if (c.resolved != null) c.resolved += 1;
           return c;
         });
       })
@@ -331,6 +421,14 @@ export default function TriageInboxTabV2() {
                 const synopsis = item.lead_synopsis || item.call_summary || item.summary || "No summary available.";
                 const recId = item.recording_sid || item.call_log_id;
                 const busyKey = isTriage ? item.id : item.call_log_id;
+                // Bounce follow-up cards aren't call verdicts — the server
+                // rejects accept/deny on them; they resolve individually.
+                const isBounceCard = isTriage && item.reason_code === "email_bounce_reverify";
+                // While the re-transcription is still running the card is a
+                // placeholder — resolving it would bury the candidates the
+                // worker is about to write (the worker reopens a card closed
+                // mid-analysis, but don't invite it).
+                const isAnalyzing = isBounceCard && !!parsePayload(item.payload)?.analyzing;
                 return (
                   <div
                     key={isTriage ? item.id : item.route_decision_id}
@@ -376,22 +474,36 @@ export default function TriageInboxTabV2() {
                               <XCircle size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Dismiss
                             </Button>
                           )}
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={actioning === busyKey}
-                            onClick={() => openDeny(item, isTriage ? "triage" : "auto_routed")}
-                          >
-                            <ThumbsDown size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Deny
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            disabled={actioning === busyKey}
-                            onClick={() => recordVerdict(item, isTriage ? "triage" : "auto_routed", "accept")}
-                          >
-                            <ThumbsUp size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Accept
-                          </Button>
+                          {isBounceCard ? (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={actioning === busyKey || isAnalyzing}
+                              onClick={() => resolveItem(item)}
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                              {isAnalyzing ? "Analyzing…" : actioning === busyKey ? "Saving…" : "Resolve"}
+                            </Button>
+                          ) : (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                disabled={actioning === busyKey}
+                                onClick={() => openDeny(item, isTriage ? "triage" : "auto_routed")}
+                              >
+                                <ThumbsDown size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Deny
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                disabled={actioning === busyKey}
+                                onClick={() => recordVerdict(item, isTriage ? "triage" : "auto_routed", "accept")}
+                              >
+                                <ThumbsUp size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Accept
+                              </Button>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
@@ -404,17 +516,15 @@ export default function TriageInboxTabV2() {
                       <div className="text-12 text-ink-tertiary mt-2 italic">Note: {item.resolution_note}</div>
                     )}
 
-                    {item.recording_url && (
+                    {item.recording_available && recId && (
                       <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
                         <div className="flex items-center gap-1.5 text-11 text-ink-tertiary font-medium mb-1">
                           <PhoneCall size={11} strokeWidth={1.75} aria-hidden /> Recording
                         </div>
-                        <audio controls preload="none" className="w-full h-8">
-                          <source
-                            src={`${API_BASE}/admin/call-recordings/audio/${recId}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
-                            type="audio/mpeg"
-                          />
-                        </audio>
+                        <AuthenticatedCallAudio
+                          recordingId={recId}
+                          className="w-full h-8"
+                        />
                       </div>
                     )}
                   </div>

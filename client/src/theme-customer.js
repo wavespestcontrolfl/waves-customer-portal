@@ -18,7 +18,7 @@ export const CUSTOMER_SURFACE = {
   chrome: '#F7F5EE',        // header/chrome wash (estimate)
   border: '#E7E2D7',        // hairline card border
   borderStrong: '#D8D0C0',  // inputs, emphasized dividers
-  text: '#1B2C5B',          // brand navy — headings/emphasis
+  text: '#04395E',          // brand navy (glass navy — owner ruling 2026-07-12) — headings/emphasis
   body: '#3F4A65',          // body copy
   muted: '#475569',         // supporting text (slate-600; the one blessed gray)
   soft: '#F8FCFE',          // soft blue wash (inputs, selected fills)

@@ -8,45 +8,17 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
+const { arrivalWindowRange } = require('../../utils/sms-time-format');
 
 // Tool definitions in Anthropic format
 const TOOLS = [
   {
-    name: 'lookup_customer',
-    description: 'Look up a customer by phone number or name. Returns account details, tier, balance, upcoming services.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        phone: { type: 'string', description: 'Customer phone number' },
-        name: { type: 'string', description: 'Customer name (first or full)' },
-      },
-    },
-  },
-  {
     name: 'get_upcoming_services',
-    description: 'Get the next scheduled services for a customer. Shows dates, service types, and technician.',
+    description: 'Get the authenticated customer\'s next scheduled services. Shows dates, service types, and arrival windows.',
     input_schema: {
       type: 'object',
-      properties: { customer_id: { type: 'string', description: 'Customer UUID' } },
-      required: ['customer_id'],
-    },
-  },
-  {
-    name: 'get_service_history',
-    description: 'Get recent completed services for a customer with technician notes and products used.',
-    input_schema: {
-      type: 'object',
-      properties: { customer_id: { type: 'string', description: 'Customer UUID' }, limit: { type: 'number' } },
-      required: ['customer_id'],
-    },
-  },
-  {
-    name: 'get_billing_info',
-    description: 'Get billing info: current balance, recent payments, payment methods, overdue amounts.',
-    input_schema: {
-      type: 'object',
-      properties: { customer_id: { type: 'string', description: 'Customer UUID' } },
-      required: ['customer_id'],
+      properties: {},
+      additionalProperties: false,
     },
   },
   {
@@ -70,33 +42,32 @@ const TOOLS = [
       required: ['reason'],
     },
   },
-  {
-    name: 'get_call_history',
-    description: 'Get recent call recordings and transcripts for a customer.',
-    input_schema: {
-      type: 'object',
-      properties: { customer_id: { type: 'string', description: 'Customer UUID' }, limit: { type: 'number' } },
-      required: ['customer_id'],
-    },
-  },
 ];
+
+const CUSTOMER_SCOPED_TOOLS = new Set(['get_upcoming_services']);
 
 // Tool execution
 async function executeToolCall(toolName, input, contextCustomerId) {
   try {
+    input = input && typeof input === 'object' ? input : {};
+
+    // Model-produced arguments are untrusted input. Customer scope always
+    // comes from the authenticated request/webhook context, never from a tool
+    // argument. Explicitly reject a conflicting legacy customer_id instead of
+    // silently querying it or making the boundary ambiguous in logs.
+    if (CUSTOMER_SCOPED_TOOLS.has(toolName)) {
+      if (!contextCustomerId) return { error: 'Authenticated customer context required' };
+      if (input.customer_id && String(input.customer_id) !== String(contextCustomerId)) {
+        logger.warn(`[ai-assistant] blocked cross-customer tool scope tool=${toolName}`);
+        return { error: 'Customer scope mismatch' };
+      }
+    }
+
     switch (toolName) {
-      case 'lookup_customer':
-        return await lookupCustomer(input, contextCustomerId);
       case 'get_upcoming_services':
-        return await getUpcomingServices(input.customer_id || contextCustomerId);
-      case 'get_service_history':
-        return await getServiceHistory(input.customer_id || contextCustomerId, input.limit);
-      case 'get_billing_info':
-        return await getBillingInfo(input.customer_id || contextCustomerId);
+        return await getUpcomingServices(contextCustomerId);
       case 'get_pest_advice':
         return await getPestAdvice(input.topic);
-      case 'get_call_history':
-        return await getCallHistory(input.customer_id || contextCustomerId, input.limit);
       case 'escalate':
         // Handled in assistant.js before reaching here
         return { escalated: true, reason: input.reason };
@@ -109,62 +80,14 @@ async function executeToolCall(toolName, input, contextCustomerId) {
   }
 }
 
-async function lookupCustomer(input, contextCustomerId) {
-  let customer;
-
-  if (contextCustomerId) {
-    customer = await db('customers').where('id', contextCustomerId).first();
-  }
-
-  if (!customer && input.phone) {
-    const clean = input.phone.replace(/\D/g, '');
-    customer = await db('customers').where(function () {
-      this.where('phone', clean).orWhere('phone', `+1${clean}`).orWhere('phone', `+${clean}`);
-    }).first();
-  }
-
-  if (!customer && input.name) {
-    customer = await db('customers').where('first_name', 'ilike', `%${input.name}%`).first();
-  }
-
-  if (!customer) return { found: false };
-
-  // Third-party Bill-To: exclude payer-billed payment rows (stored under the
-  // homeowner but owed by the payer) so an AP failure never surfaces as the
-  // homeowner's balance — same exclusion as getBillingInfo + /api/billing.
-  const payerInvoiceIds = await payerInvoiceIdSet(customer.id);
-  const balanceRows = await db('payments').where('customer_id', customer.id)
-    .whereIn('status', ['failed', 'overdue']).whereNull('superseded_by_payment_id')
-    .select('amount', 'metadata');
-  const outstandingBalance = balanceRows.reduce(
-    (sum, p) => (isPayerPaymentRow(p, payerInvoiceIds) ? sum : sum + parseFloat(p.amount || 0)),
-    0,
-  );
-
-  return {
-    found: true,
-    id: customer.id,
-    name: `${customer.first_name} ${customer.last_name}`,
-    firstName: customer.first_name,
-    phone: customer.phone,
-    address: `${customer.address_line1}, ${customer.city}, FL ${customer.zip}`,
-    tier: customer.waveguard_tier,
-    monthlyRate: parseFloat(customer.monthly_rate || 0),
-    memberSince: customer.member_since,
-    outstandingBalance,
-  };
-}
-
 async function getUpcomingServices(customerId) {
   if (!customerId) return { services: [] };
   const services = await db('scheduled_services')
     .where('customer_id', customerId)
     .where('scheduled_date', '>=', etDateString())
-    .whereNotIn('status', ['cancelled'])
-    .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+    .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
     .select('scheduled_services.scheduled_date', 'scheduled_services.service_type',
-      'scheduled_services.window_start', 'scheduled_services.window_end',
-      'scheduled_services.status', 'technicians.name as tech_name')
+      'scheduled_services.window_start', 'scheduled_services.status')
     .orderBy('scheduled_date')
     .limit(5);
 
@@ -172,77 +95,11 @@ async function getUpcomingServices(customerId) {
     services: services.map(s => ({
       date: s.scheduled_date,
       type: s.service_type,
-      window: s.window_start && s.window_end ? `${s.window_start}-${s.window_end}` : 'TBD',
-      tech: s.tech_name || 'TBD',
+      // window_end is the internal job-duration block, not the promised
+      // customer arrival window. Derive the same start + 2h window used by
+      // customer SMS and the portal tracker.
+      window: arrivalWindowRange(String(s.window_start || '')) || 'TBD',
       status: s.status,
-    })),
-  };
-}
-
-async function getServiceHistory(customerId, limit = 5) {
-  if (!customerId) return { services: [] };
-  const services = await db('service_records')
-    .where('customer_id', customerId)
-    .where('status', 'completed')
-    .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-    .select('service_records.service_date', 'service_records.service_type',
-      'service_records.technician_notes', 'technicians.name as tech_name')
-    .orderBy('service_date', 'desc')
-    .limit(limit);
-
-  return {
-    services: services.map(s => ({
-      date: s.service_date,
-      type: s.service_type,
-      tech: s.tech_name,
-      notes: (s.technician_notes || '').substring(0, 200),
-    })),
-  };
-}
-
-// Third-party Bill-To: a payment row stored under the homeowner's customer_id
-// but linked (via metadata.invoice_id) to a payer-billed invoice belongs to the
-// payer (AP contact), not the homeowner — drop those rows so the assistant never
-// surfaces the payer's payment or inflates the homeowner's balance. Mirrors the
-// /api/billing (billing-v2.js) filter. payerInvoiceIdSet() returns the customer's
-// payer-billed invoice ids; isPayerPaymentRow() tests a payment against that set.
-async function payerInvoiceIdSet(customerId) {
-  const rows = await db('invoices').where({ customer_id: customerId }).whereNotNull('payer_id').select('id');
-  return new Set(rows.map((r) => String(r.id)));
-}
-function isPayerPaymentRow(payment, payerInvoiceIds) {
-  if (!payerInvoiceIds || !payerInvoiceIds.size) return false;
-  let m = payment.metadata;
-  if (typeof m === 'string') { try { m = JSON.parse(m); } catch { m = null; } }
-  const invId = m && m.invoice_id != null ? String(m.invoice_id) : null;
-  return !!(invId && payerInvoiceIds.has(invId));
-}
-
-async function getBillingInfo(customerId) {
-  if (!customerId) return { error: 'No customer ID' };
-
-  const customer = await db('customers').where('id', customerId).first();
-  const payerInvoiceIds = await payerInvoiceIdSet(customerId);
-  // Over-fetch when payer rows exist, then filter, so we still return up to 5.
-  const rawPayments = await db('payments')
-    .where('customer_id', customerId)
-    .orderBy('payment_date', 'desc')
-    .limit(payerInvoiceIds.size ? 30 : 5);
-  const payments = rawPayments.filter((p) => !isPayerPaymentRow(p, payerInvoiceIds)).slice(0, 5);
-  const cards = await db('payment_methods').where('customer_id', customerId);
-  // Superseded failed attempts were collected by their retry's own row —
-  // counting them would tell the customer they owe money already taken.
-  const overdue = payments.filter(p => ['failed', 'overdue'].includes(p.status) && !p.superseded_by_payment_id);
-
-  return {
-    tier: customer?.waveguard_tier,
-    monthlyRate: parseFloat(customer?.monthly_rate || 0),
-    outstandingBalance: overdue.reduce((s, p) => s + parseFloat(p.amount || 0), 0),
-    recentPayments: payments.map(p => ({
-      date: p.payment_date, amount: parseFloat(p.amount), status: p.status, description: p.description,
-    })),
-    paymentMethods: cards.map(c => ({
-      brand: c.card_brand, lastFour: c.last_four, isDefault: c.is_default, autopay: c.autopay_enabled,
     })),
   };
 }
@@ -255,26 +112,6 @@ async function getPestAdvice(topic) {
   } catch {
     return { answer: 'Knowledge base unavailable. General SWFL advice: contact your technician for specific pest identification and treatment recommendations.' };
   }
-}
-
-async function getCallHistory(customerId, limit = 5) {
-  if (!customerId) return { calls: [] };
-  const calls = await db('call_log')
-    .where('customer_id', customerId)
-    .orderBy('created_at', 'desc')
-    .limit(limit);
-
-  return {
-    calls: calls.map(c => ({
-      date: c.created_at,
-      direction: c.direction,
-      duration: c.duration_seconds,
-      status: c.status,
-      outcome: c.call_outcome,
-      hasRecording: !!c.recording_url,
-      transcription: (c.transcription || '').substring(0, 300),
-    })),
-  };
 }
 
 module.exports = { TOOLS, executeToolCall };

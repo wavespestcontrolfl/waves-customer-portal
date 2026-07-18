@@ -53,9 +53,30 @@ describe('scheduler ad-attribution sweep wiring', () => {
   const src = read('../services/scheduler.js');
 
   test('daily sweep cron exists, serialized, before the 6:40/6:45 conversion uploads', () => {
-    expect(src).toMatch(/cron\.schedule\('15 6 \* \* \*'/);
     expect(src).toMatch(/runExclusive\('ad-attribution-sweep'/);
     expect(src).toMatch(/sweepPendingAdAttribution/);
+
+    // Bind the schedule string to the sweep's OWN cron block — scheduler.js has
+    // several unrelated '15 6 * * *' crons, so a bare toMatch on the expression
+    // would stay green if the sweep moved to a later slot.
+    const sweepIdx = src.indexOf("runExclusive('ad-attribution-sweep'");
+    const cronPrefix = "cron.schedule('";
+    const cronIdx = src.lastIndexOf(cronPrefix, sweepIdx);
+    expect(cronIdx).toBeGreaterThan(-1);
+    // The sweep call must sit inside that cron callback, not merely after some earlier cron.
+    expect(sweepIdx - cronIdx).toBeLessThan(600);
+    const exprStart = cronIdx + cronPrefix.length;
+    const sweepExpr = src.slice(exprStart, src.indexOf("'", exprStart));
+    expect(sweepExpr).toBe('15 6 * * *');
+
+    // Ordering is by wall-clock schedule, not source position: the sweep must fire
+    // strictly before both conversion-upload crons.
+    const [sweepMin, sweepHour] = sweepExpr.split(' ').map(Number);
+    for (const uploadExpr of ['40 6 * * *', '45 6 * * *']) {
+      expect(src).toContain(`cron.schedule('${uploadExpr}'`);
+      const [upMin, upHour] = uploadExpr.split(' ').map(Number);
+      expect(sweepHour * 60 + sweepMin).toBeLessThan(upHour * 60 + upMin);
+    }
   });
 
   test('default-ON with an explicit opt-out (a repair job must not ship dark)', () => {

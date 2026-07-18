@@ -174,6 +174,33 @@ function computeRefundSurcharge({
   );
 }
 
+// ── Deposit face value ───────────────────────────────────────
+// The invoice-credit authority for an estimate-deposit PaymentIntent.
+// Deposits mint with metadata.base_amount (the flat $49/$99 face value;
+// owner ruling 2026-07-13 surcharges deposits like invoices but they still
+// credit at face) — a surcharged capture's amount_received includes the
+// fee, so every ledger write derives the credit from HERE, never from
+// amount_received. Pre-revert PIs have no base_amount: their capture WAS
+// the face value, so amount_received is the honest fallback.
+function depositFaceValueDollars(paymentIntent) {
+  const meta = Number(paymentIntent?.metadata?.base_amount);
+  if (Number.isFinite(meta) && meta > 0) return Math.round(meta * 100) / 100;
+  // amount_received only once money actually arrived — a PENDING legacy PI
+  // reports amount_received: 0 (not null), and its face is `amount`
+  // (Codex #2705 r5 P2).
+  const received = Number(paymentIntent?.amount_received || 0);
+  const cents = received > 0 ? received : Number(paymentIntent?.amount || 0);
+  return Math.round(cents) / 100;
+}
+
+// Surcharge actually collected on a deposit PI — stamped by deposit
+// finalize; 0 for wallets (Express Checkout confirms at face value),
+// non-credit funding, and every pre-revert deposit.
+function depositSurchargeDollars(paymentIntent) {
+  const meta = Number(paymentIntent?.metadata?.card_surcharge);
+  return Number.isFinite(meta) && meta > 0 ? Math.round(meta * 100) / 100 : 0;
+}
+
 module.exports = {
   // Phase 1 constants
   CONFIGURED_COST_BPS,
@@ -189,6 +216,8 @@ module.exports = {
   buildSurchargeAmountDetails,
   planCardPresentSurcharge,
   computeRefundSurcharge,
+  depositFaceValueDollars,
+  depositSurchargeDollars,
 
   // Legacy (deprecated — use cents/bps API)
   CARD_SURCHARGE_RATE,

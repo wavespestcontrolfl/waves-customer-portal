@@ -27,6 +27,7 @@ jest.mock('../services/context-aggregator', () => ({
 
 jest.mock('../services/sms-suggest-mode', () => ({
   hasRedactionPlaceholder: jest.fn((text) => /\[(?:name|phone|address|date|time|email)\]/i.test(String(text || ''))),
+  hasPriceQuote: jest.fn((text) => /\$\s*\d|\b\d[\d,]*(?:\.\d+)?\s*dollars?\b/i.test(String(text || ''))),
 }));
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
@@ -209,6 +210,46 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
     expect(payload.suggested_message).not.toContain('[name]');
+  });
+
+  test('a priced reply keeps the template (house rule: no prices in SMS)', async () => {
+    seedActiveSchedulingThread();
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Hello! The re-treatment runs $415.75, want me to book it?', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1,
+      converged: true,
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'Hello what happened this morning',
+      smsLogId: 'sms-in-7',
+    });
+
+    const payload = lastDecisionInsert();
+    expect(payload.model).toBe('deterministic_rules');
+    expect(payload.suggested_message).not.toContain('$415.75');
+  });
+
+  test('a priced TEMPLATE echo also stores NULL — the fallback lane is guarded too (Codex P1)', async () => {
+    seedActiveSchedulingThread();
+    // LLM path unavailable → deterministic template, which echoes raw
+    // inbound text — including the customer's own "$50".
+    generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 0, converged: false });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'Can we do Tuesday for $50',
+      smsLogId: 'sms-in-8',
+    });
+
+    const payload = lastDecisionInsert();
+    expect(payload.model).toBe('deterministic_rules');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('empty reply (no reply warranted) stores NULL, not the template', async () => {

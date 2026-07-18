@@ -145,7 +145,10 @@ describe('runPending firing', () => {
     followups[10] = { id: 1, statement_id: 10, payer_id: 5, status: 'active', step_index: 1, touches_sent: 1 };
     joinRows = [{ id: 10, due_date: '2026-06-20', f_status: 'active', f_step_index: 1 }];
 
-    const r = await Followups.runPending();
+    // Pin now through the SUT's injection seam: the due gate compares real
+    // wall-clock time, so a bare runPending() makes this test fail forever
+    // once real time passes due+15 @ 10AM ET (2026-07-05T14:00Z).
+    const r = await Followups.runPending({ now: new Date('2026-06-21T16:00:00Z') });
     expect(r.sent).toBe(0);
     expect(sentEmails).toHaveLength(0);
   });

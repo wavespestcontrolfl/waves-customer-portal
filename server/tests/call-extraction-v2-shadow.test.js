@@ -58,14 +58,28 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('do_not_contact_request');
   });
 
+  test('includes the multi-party arranger rules (v3 — WDO/realtor gap)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    // Arranger calls must be treated as multi-party by default, relayed
+    // contact details must never land on the caller, and arranger callers
+    // get real relationship values instead of "other".
+    expect(prompt).toContain('ARRANGER CALLS ARE MULTI-PARTY BY DEFAULT');
+    expect(prompt).toContain('RELAYED CONTACT DETAILS');
+    expect(prompt).toContain('ATTRIBUTION');
+    expect(prompt).toContain('CALLER RELATIONSHIP');
+    expect(prompt).toContain('"real_estate_agent"');
+    expect(prompt).toContain('"lender"');
+    expect(prompt).toContain('The ACCESS person is a party');
+  });
+
   test('handles null caller phone', () => {
     const prompt = buildExtractionPrompt(transcript, null, callDateET);
     expect(prompt).toContain('unknown');
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v2');
-    expect(PROMPT_HASH).toMatch(/^v2-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v3');
+    expect(PROMPT_HASH).toMatch(/^v3-[a-f0-9]{12}$/);
   });
 
   test('extractionPromptVersion appends an order-sensitive catalog hash', () => {
@@ -108,7 +122,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.1.0');
+    expect(SCHEMA_VERSION).toBe('1.7.0');
   });
 
   test('prompt hash is deterministic', () => {

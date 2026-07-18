@@ -44,6 +44,17 @@ const db = require('../models/db');
 const logger = require('./logger');
 const StripeService = require('./stripe');
 const { DEPOSIT } = require('./pricing-engine/constants');
+// Surcharge revert (owner ruling 2026-07-13): a deposit PI can now capture
+// face value + card surcharge (credit funding, quoted at confirm). The
+// LEDGER stays face-value denominated — amount/credited_amount/
+// refunded_amount all speak in deposit dollars, and card_surcharge rides
+// alongside — so every consumer derives face value through these helpers,
+// never from amount_received.
+const {
+  depositFaceValueDollars,
+  depositSurchargeDollars,
+  computeRefundSurcharge,
+} = require('./stripe-pricing');
 
 function isDepositEnforced() {
   const flag = process.env.ESTIMATE_DEPOSIT_REQUIRED;
@@ -354,11 +365,18 @@ async function receivedDepositTotal(estimateId) {
 // and credit the deposit before the webhook arrives; a late webhook must
 // never downgrade credited (or refunded/failed) back to received, which
 // would make the same money eligible for a second credit.
-async function markDepositReceived({ paymentIntentId, estimateId, amountDollars }) {
+async function markDepositReceived({ paymentIntentId, estimateId, amountDollars, cardSurcharge = 0 }) {
+  // amountDollars is the FACE value (depositFaceValueDollars) — the credit
+  // authority. cardSurcharge is the fee collected on top (0 for wallets,
+  // non-credit funding, and pre-revert deposits); recorded so revenue and
+  // reconciliation reports see the fee (deposits have no payments row).
+  // The migration adding the column ships in this PR and Railway runs
+  // migrations pre-deploy, so the column exists before this code runs.
   const inserted = await db('estimate_deposits')
     .insert({
       estimate_id: estimateId,
       amount: amountDollars,
+      card_surcharge: Number(cardSurcharge) || 0,
       stripe_payment_intent_id: paymentIntentId,
       status: 'received',
       received_at: db.fn.now(),
@@ -371,6 +389,7 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars 
     .where({ stripe_payment_intent_id: paymentIntentId, status: 'pending' })
     .update({
       status: 'received',
+      card_surcharge: Number(cardSurcharge) || 0,
       received_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
@@ -380,7 +399,7 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars 
   // single receipt text. Best-effort: a receipt failure must never fail
   // deposit recording.
   if ((Array.isArray(inserted) && inserted.length > 0) || updated > 0) {
-    await sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }).catch((err) => {
+    await sendDepositReceipt({ estimateId, amountDollars, cardSurcharge, paymentIntentId }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt failed for estimate ${estimateId}: ${err.message}`);
     });
   }
@@ -400,7 +419,19 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars 
 //     no-phone gap-fill (they paid through the tokened estimate page).
 // Kill switches: deposit_receipt SMS template row / deposit.receipt email
 // template row — each leg gates independently.
-async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }) {
+// {charge_note} for the receipt templates: empty for face-value payments
+// (wallets, debit, pre-revert); the actual-charge disclosure when a card
+// surcharge was collected — the receipt is proof of payment and must state
+// what the card was charged, while `amount` stays the deposit (the credit).
+function depositChargeNote(amountDollars, cardSurcharge) {
+  const fee = Number(cardSurcharge || 0);
+  if (!(fee > 0)) return '';
+  const total = (Math.round(Number(amountDollars || 0) * 100) + Math.round(fee * 100)) / 100;
+  const fmt = (n) => `$${n.toFixed(2).replace(/\.00$/, '')}`;
+  return ` (card charge total ${fmt(total)}, includes the ${fmt(fee)} card processing fee)`;
+}
+
+async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0, paymentIntentId }) {
   const estimate = await db('estimates')
     .where({ id: estimateId })
     .first('id', 'customer_id', 'customer_phone', 'customer_name', 'customer_email', 'token');
@@ -451,7 +482,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
     : (!phone && !!leadEmail);
 
   if (wantSms && phone) {
-    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, paymentIntentId }).catch((err) => {
+    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge, paymentIntentId }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
     });
   } else if (!wantSms) {
@@ -459,14 +490,14 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
   }
 
   if (wantEmail) {
-    await sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, paymentIntentId }).catch((err) => {
+    await sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, cardSurcharge, paymentIntentId }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt email failed for estimate ${estimateId}: ${err.message}`);
     });
   }
 }
 
 // SMS leg. Kill switch = the deposit_receipt SMS template row.
-async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, paymentIntentId }) {
+async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge = 0, paymentIntentId }) {
   const estimateId = estimate.id;
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
@@ -476,6 +507,7 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
   const body = await renderSmsTemplate('deposit_receipt', {
     first_name: firstName,
     amount,
+    charge_note: depositChargeNote(amountDollars, cardSurcharge),
   }, {
     workflow: 'deposit_receipt',
     entity_type: 'estimate',
@@ -578,7 +610,7 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
 // already guarantees a single dispatch per deposit; the per-PaymentIntent
 // idempotency key is belt-and-suspenders AND deliberately NOT per-estimate —
 // a refunded deposit replaced by a new PaymentIntent must still receipt.
-async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, paymentIntentId }) {
+async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, cardSurcharge = 0, paymentIntentId }) {
   const estimateId = estimate.id;
   const sendgrid = require('./sendgrid-mail');
   if (!sendgrid.isConfigured()) {
@@ -621,6 +653,7 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
       payload: {
         first_name: firstName,
         amount,
+        charge_note: depositChargeNote(amountDollars, cardSurcharge),
         estimate_url: estimateUrl,
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
       },
@@ -654,6 +687,44 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
 // A live-retrieved PaymentIntent counts only when Stripe says it succeeded
 // AND its metadata pins it to THIS estimate — the id arrives from the
 // client, so everything about it must be re-derived server-side.
+// Surcharge-bypass audit (mirrors the invoice webhook's quarantine in
+// spirit): the PI's client secret lets a stale/modified client
+// confirmPayment directly, skipping /deposit-quote + /deposit-finalize —
+// a CREDIT card would then pay face value with no fee. Finalize always
+// stamps card_surcharge (even '0' for debit), and wallet payments carry
+// card.wallet on the PM — so quote_at_confirm + no card_surcharge key +
+// credit funding + not-a-wallet = a bypassed manual credit card. The
+// deposit itself is fully collected and MUST still satisfy the accept
+// gate (recording happens before this runs — never strand an acceptance
+// over our own missing fee); the alert makes the under-collection loud.
+// Called from BOTH recording paths — the webhook AND the accept flow's
+// live verification (Codex #2705 r6): whichever wins the race records
+// the row, and the loser returns as a replay before reaching any audit,
+// so each recorder must audit its own win. Best-effort by design.
+async function auditDepositSurchargeBypass(paymentIntent, estimateId) {
+  if (paymentIntent.metadata?.surcharge_policy !== 'quote_at_confirm'
+    || paymentIntent.metadata?.card_surcharge != null) {
+    return;
+  }
+  try {
+    const pm = await StripeService.retrievePaymentMethod(
+      typeof paymentIntent.payment_method === 'string'
+        ? paymentIntent.payment_method
+        : paymentIntent.payment_method?.id,
+    );
+    if (pm?.card?.funding === 'credit' && !pm.card.wallet) {
+      logger.error('[estimate-deposits] deposit confirmed OUTSIDE the quote/finalize path with a credit card — surcharge not collected', {
+        estimateId,
+        paymentIntentId: paymentIntent.id,
+      });
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });
+    }
+  } catch (auditErr) {
+    logger.warn(`[estimate-deposits] surcharge-bypass audit failed for ${paymentIntent.id}: ${auditErr.message}`);
+  }
+}
+
 function depositIntentMatchesEstimate(paymentIntent, estimateId) {
   return !!paymentIntent
     && paymentIntent.status === 'succeeded'
@@ -685,12 +756,20 @@ async function ensureDepositSatisfied({ estimate, depositPaymentIntentId = null,
       logger.warn('[estimate-deposits] live PI verification failed', { error: err.message });
     }
     if (depositIntentMatchesEstimate(paymentIntent, estimate.id)) {
-      const amountDollars = Math.round(paymentIntent.amount_received) / 100;
+      // Face value, not amount_received — a surcharged capture must not
+      // inflate the credit (a $49 deposit paid on a credit card captures
+      // $50.42 but credits $49; the $1.42 is the recorded fee).
+      const amountDollars = depositFaceValueDollars(paymentIntent);
       await markDepositReceived({
         paymentIntentId: paymentIntent.id,
         estimateId: estimate.id,
         amountDollars,
+        cardSurcharge: depositSurchargeDollars(paymentIntent),
       });
+      // This live verification can WIN the race against the webhook, whose
+      // replay short-circuit then never reaches its audit — so the winner
+      // audits (Codex #2705 r6).
+      await auditDepositSurchargeBypass(paymentIntent, estimate.id);
       // Ledger state is the authority, not Stripe's status: a refunded PI
       // still reports succeeded/amount_received, the monotonic mark above
       // touches 0 rows for it, and a refunded deposit must never unlock
@@ -766,6 +845,38 @@ async function createDepositIntentForEstimate(estimate, { oneTime = false } = {}
     })
     .onConflict('stripe_payment_intent_id')
     .merge({ updated_at: db.fn.now() });
+
+  // Supersede every OTHER pending intent for this estimate (Codex #2705
+  // r7): a key change (the _qac1 salt, an amount-class switch) mints a new
+  // PI while an already-open tab still holds the old one's usable client
+  // secret — if both confirm, two deposits record and both can credit.
+  // Cancel FIRST, flip the ledger row second: a cancel that loses to an
+  // in-flight success throws, the row stays pending, and the webhook
+  // records that money normally (flipping first would strand a captured
+  // payment on a terminal row). Failed rows feed retryGeneration, which is
+  // correct — they are terminal.
+  try {
+    const stalePending = await db('estimate_deposits')
+      .where({ estimate_id: estimate.id, status: 'pending' })
+      .whereNot({ stripe_payment_intent_id: paymentIntent.id })
+      .select('id', 'stripe_payment_intent_id');
+    for (const stale of stalePending) {
+      try {
+        await StripeService.cancelPaymentIntent(stale.stripe_payment_intent_id, { cancellation_reason: 'abandoned' });
+        await db('estimate_deposits')
+          .where({ id: stale.id, status: 'pending' })
+          .update({ status: 'failed', updated_at: db.fn.now() });
+        logger.info('[estimate-deposits] superseded stale pending deposit intent', {
+          estimateId: estimate.id,
+          canceledPaymentIntentId: stale.stripe_payment_intent_id,
+        });
+      } catch (cancelErr) {
+        logger.warn(`[estimate-deposits] could not cancel superseded deposit PI ${stale.stripe_payment_intent_id}: ${cancelErr.message}`);
+      }
+    }
+  } catch (sweepErr) {
+    logger.warn(`[estimate-deposits] stale-pending sweep failed for estimate ${estimate.id}: ${sweepErr.message}`);
+  }
 
   return {
     clientSecret: paymentIntent.client_secret,
@@ -986,7 +1097,10 @@ async function claimDepositRowForRefund({ paymentIntentId, estimateId, amountDol
 // same PI must not refund money the accept just consumed). Returns
 // 'refunded' | 'consumed' (accept owns it — treat as received) | 'failed'.
 async function refundStaleDeposit(paymentIntent, estimateId, reason) {
-  const amountDollars = Math.round(Number(paymentIntent.amount_received) || 0) / 100;
+  // Ledger stamps stay face-denominated; the Stripe refund below is the
+  // FULL PI (no amountCents), so a surcharged capture returns the fee to
+  // the customer too — stale money keeps nothing.
+  const amountDollars = depositFaceValueDollars(paymentIntent);
   const { claimed, row } = await claimDepositRowForRefund({
     paymentIntentId: paymentIntent.id,
     estimateId,
@@ -1031,10 +1145,13 @@ async function refundStaleDeposit(paymentIntent, estimateId, reason) {
 // only their unapplied remainder; the credited slice stays credited.
 // Best-effort by design: a Stripe failure reverts the claim, raises the
 // reconcile alert, and leaves the truth on the ledger.
-async function refundUnconsumedDeposits({ estimateId, reason }) {
+// includeSurchargeShare=false returns FACE VALUE ONLY (the captured card
+// surcharge stays earned) — owner ruling 2026-07-15 for the cancel-signup
+// offboarding path; the automated sweeps keep returning the prorated fee.
+async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeShare = true }) {
   const rows = await db('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
-    .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount', 'refunded_amount');
+    .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount', 'refunded_amount', 'card_surcharge', 'refunded_surcharge');
 
   let refunded = 0;
   for (const row of rows) {
@@ -1044,6 +1161,15 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
       - priorRefundedCents;
     if (remainderCents <= 0) continue;
 
+    // Face-only refunds pre-stamp the cumulative face total AT CLAIM TIME:
+    // the webhook echo deflates Stripe's gross assuming a prorated fee share
+    // rode along, so a face-only echo landing mid-'refunding' would stamp
+    // LESS than face and no-op the terminal update below. With the stamp
+    // already at the face total, the echo's replay guard (deflated gross <=
+    // recorded) recognizes it and leaves the row alone. Deflation only ever
+    // understates face, so the guard holds for mixed prior refunds too. A
+    // Stripe failure reverts the stamp with the claim.
+    const cumulativeFaceRefund = (priorRefundedCents + remainderCents) / 100;
     const claimedCount = await db('estimate_deposits')
       .where({
         id: row.id,
@@ -1051,14 +1177,77 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
         credited_amount: row.credited_amount,
         refunded_amount: row.refunded_amount,
       })
-      .update({ status: 'refunding', updated_at: db.fn.now() });
+      .update({
+        status: 'refunding',
+        ...(includeSurchargeShare ? {} : { refunded_amount: cumulativeFaceRefund }),
+        updated_at: db.fn.now(),
+      });
     if (!claimedCount) continue; // consumed or reversed mid-sweep — their win
 
     const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
+    // The ledger speaks face value; the Stripe charge may include a card
+    // surcharge on top. Refund the remainder's prorated share of the fee
+    // with it — the credited slice's fee stays earned, the returned slice's
+    // fee goes back. Prior refunds' fee share re-derives from the same
+    // cumulative proration (this sweep is the only partial-refund writer,
+    // so the reconstruction matches what was actually refunded before).
+    const faceCents = Math.round(Number(row.amount || 0) * 100);
+    const surchargeCents = Math.round(Number(row.card_surcharge || 0) * 100);
+    // Prior fee-share: the stored cumulative wins when a refund already
+    // stamped it; legacy rows reconstruct via the same proration the sweep
+    // historically refunded with.
+    const priorSurchargeRefundCents = row.refunded_surcharge != null
+      ? Math.round(Number(row.refunded_surcharge) * 100)
+      : computeRefundSurcharge({
+        refundBaseCents: priorRefundedCents,
+        originalBaseCents: faceCents,
+        originalSurchargeCents: surchargeCents,
+      });
+    let surchargeRefundCents = 0;
+    if (includeSurchargeShare) {
+      surchargeRefundCents = computeRefundSurcharge({
+        refundBaseCents: remainderCents,
+        originalBaseCents: faceCents,
+        originalSurchargeCents: surchargeCents,
+        totalRefundedBaseCents: priorRefundedCents,
+        alreadyRefundedSurchargeCents: priorSurchargeRefundCents,
+      });
+    }
     try {
       await StripeService.refundPaymentIntent(row.stripe_payment_intent_id, {
-        amountCents: remainderCents,
+        amountCents: remainderCents + surchargeRefundCents,
       });
+    } catch (err) {
+      // The refund call itself failed — the money never left Stripe, so the
+      // claim (and the face-only pre-stamp) rolls back and the row returns
+      // to sweepable truth.
+      await db('estimate_deposits')
+        .where({ id: row.id, status: 'refunding' })
+        .update({
+          status: 'received',
+          ...(includeSurchargeShare ? {} : { refunded_amount: row.refunded_amount }),
+          updated_at: db.fn.now(),
+        })
+        .catch(() => {});
+      logger.error('[estimate-deposits] unconsumed-deposit refund FAILED — row reverted to received', {
+        estimateId,
+        reason,
+        error: err.message,
+      });
+      try {
+        const { triggerNotification } = require('./notification-triggers');
+        await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });
+      } catch (notifyErr) {
+        logger.error('[estimate-deposits] failed to raise deposit reconcile alert', { error: notifyErr.message });
+      }
+      continue;
+    }
+    // Stripe has returned the money — NEVER roll back past this point
+    // (Codex #2752 r2 P1: with the face-only pre-stamp, a mid-'refunding'
+    // echo hits the replay guard and stamps nothing, so a revert here would
+    // make already-refunded money look sweepable again = double refund).
+    refunded += remainderCents / 100;
+    try {
       await db('estimate_deposits')
         .where({ id: row.id, status: 'refunding' })
         .update({
@@ -1066,15 +1255,17 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
           // Cumulative across partial refunds — this sweep returns only the
           // remainder on top of anything a dashboard refund already took.
           refunded_amount: (priorRefundedCents + remainderCents) / 100,
+          // Cumulative fee dollars RETURNED — face-only refunds add 0 here,
+          // which is what tells revenue stats the fee stayed earned.
+          refunded_surcharge: (priorSurchargeRefundCents + surchargeRefundCents) / 100,
           updated_at: db.fn.now(),
         });
-      refunded += remainderCents / 100;
     } catch (err) {
-      await db('estimate_deposits')
-        .where({ id: row.id, status: 'refunding' })
-        .update({ status: 'received', updated_at: db.fn.now() })
-        .catch(() => {});
-      logger.error('[estimate-deposits] unconsumed-deposit refund FAILED — row reverted to received', {
+      // Terminal stamp failed AFTER a successful refund. The 'refunding'
+      // claim stays (excluded from every sweep, can't satisfy acceptance or
+      // credit) so nothing can double-spend the row; a human or the webhook
+      // echo finishes the stamp. Loud, never silent.
+      logger.error('[estimate-deposits] refund SUCCEEDED but terminal stamp failed — row left claimed as refunding for manual reconcile', {
         estimateId,
         reason,
         error: err.message,
@@ -1190,9 +1381,13 @@ async function handleDepositIntentSucceeded(paymentIntent) {
   await markDepositReceived({
     paymentIntentId: paymentIntent.id,
     estimateId,
-    amountDollars: Math.round(Number(paymentIntent.amount_received) || 0) / 100,
+    // Face value, not amount_received — see ensureDepositSatisfied.
+    amountDollars: depositFaceValueDollars(paymentIntent),
+    cardSurcharge: depositSurchargeDollars(paymentIntent),
   });
   logger.info('[estimate-deposits] deposit received', { estimateId });
+
+  await auditDepositSurchargeBypass(paymentIntent, estimateId);
 
   // A paid deposit is an acceptance signal — convert the originating lead to
   // won if it's still open. Gated on requireAcceptedEstimate: a succeeded
@@ -1219,8 +1414,31 @@ async function handleDepositIntentSucceeded(paymentIntent) {
 // caller must NOT run its payments logic. amountRefundedCents (the charge's
 // cumulative refund total, when the caller has it) distinguishes the echo of
 // our own recorded refund from a genuinely larger dashboard reversal.
-async function handleDepositChargeReversed(paymentIntentId, context, { amountRefundedCents = null } = {}) {
+async function handleDepositChargeReversed(paymentIntentId, context, { amountRefundedCents = null, refundId = null } = {}) {
   if (!paymentIntentId) return { handled: false };
+  // Bounce fence: a refund that already FAILED (refund.failed can outrun
+  // charge.refunded) must not run the reversal — the money never left
+  // Stripe, and a stale creation event's cumulative amount still includes
+  // the bounced refund. Column-probed for pre-migration tolerance.
+  if (refundId) {
+    try {
+      const cols = await db('estimate_deposits').columnInfo();
+      if (cols.failed_refund_ids) {
+        const fenceRow = await db('estimate_deposits')
+          .where({ stripe_payment_intent_id: paymentIntentId })
+          .first('failed_refund_ids');
+        const failed = Array.isArray(fenceRow?.failed_refund_ids)
+          ? fenceRow.failed_refund_ids
+          : (typeof fenceRow?.failed_refund_ids === 'string' ? JSON.parse(fenceRow.failed_refund_ids || '[]') : []);
+        if (failed.includes(refundId)) {
+          logger.warn(`[estimate-deposits] ${context} for refund ${refundId} arrived after its failure was recorded — skipping deposit reversal`);
+          return { handled: true, bounced: true };
+        }
+      }
+    } catch (err) {
+      logger.warn(`[estimate-deposits] bounce-fence check failed for PI ${paymentIntentId}: ${err.message}`);
+    }
+  }
   // CONDITIONAL flip with bounded re-read: an accept can credit the row
   // between our read and write. The update applies only to the exact state
   // the alert decision was based on; a lost transition re-reads and
@@ -1229,23 +1447,46 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const row = await db('estimate_deposits')
       .where({ stripe_payment_intent_id: paymentIntentId })
-      .first('id', 'status', 'estimate_id', 'amount', 'credited_amount', 'credited_invoice_id', 'refunded_amount');
+      .first('id', 'status', 'estimate_id', 'amount', 'credited_amount', 'credited_invoice_id', 'refunded_amount', 'card_surcharge');
     if (!row) return { handled: false };
     if (row.status === 'refunded') return { handled: true, replay: true };
 
+    const amountCents = Math.round(Number(row.amount || 0) * 100);
+    // Stripe's cumulative refund total is GROSS (face + any card surcharge
+    // captured with it); the ledger speaks face value. TWO readings of the
+    // gross, used for different jobs (Codex #2705 r4 P2):
+    //   deflated — proportional face share; matches what OUR prorated
+    //     refund paths stamp, so it detects sweep echoes (±1c rounding).
+    //   conservative — min(gross, face); a DASHBOARD refund's intent is
+    //     unknowable (an operator refunding "$49 of $50.42" means the whole
+    //     deposit), so record the LARGER face reduction — refunded money
+    //     must never remain able to satisfy acceptance or credit an
+    //     invoice. Worst case (a fee-only refund) over-deducts toward the
+    //     loud/manual side, never the silent one.
+    const rowSurchargeCents = Math.round(Number(row.card_surcharge || 0) * 100);
+    const deflateGrossCents = (gross) => {
+      if (gross == null) return null;
+      if (rowSurchargeCents <= 0 || amountCents <= 0) return gross;
+      return Math.min(amountCents, Math.round((gross * amountCents) / (amountCents + rowSurchargeCents)));
+    };
+    const echoFaceCents = deflateGrossCents(amountRefundedCents);
+    const conservativeFaceCents = amountRefundedCents != null
+      ? Math.min(amountRefundedCents, amountCents)
+      : null;
+
     const recordedRefundCents = Math.round(Number(row.refunded_amount || 0) * 100);
-    if (amountRefundedCents != null && recordedRefundCents > 0 && amountRefundedCents <= recordedRefundCents) {
+    if (echoFaceCents != null && recordedRefundCents > 0 && echoFaceCents <= recordedRefundCents + 1) {
       // Echo of a refund WE issued and stamped (sweep / remainder) — the row
       // already reflects it; a 'credited' row here keeps its credit because
-      // only the unapplied remainder was returned.
+      // only the unapplied remainder was returned. +1c absorbs proration
+      // rounding drift between our stamp and Stripe's cumulative total.
       return { handled: true, replay: true };
     }
-    const amountCents = Math.round(Number(row.amount || 0) * 100);
     const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
     // Unknown refund size (dispute path) = treat as a full reversal — fail
     // toward the loud path, never toward silently keeping money available.
-    const refundCents = amountRefundedCents != null
-      ? Math.min(amountRefundedCents, amountCents)
+    const refundCents = conservativeFaceCents != null
+      ? conservativeFaceCents
       : amountCents;
     const fullyRefunded = refundCents >= amountCents;
     // Does the cumulative refund reach past the unapplied remainder into
@@ -1262,15 +1503,26 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
       // cumulative refund so later echoes are recognized as replays. The
       // refunder's own pending stamp is status='refunding'-guarded, so it
       // no-ops harmlessly after us.
+      // `refunding` means OUR claim is active — this gross is the echo of
+      // our own prorated refund, so it deflates to face (Codex #2705 r5
+      // P1): the conservative reading would count the fee share as face,
+      // trip refundTouchesCredit on a remainder-only refund, and flip a
+      // still-credited row with a false manual-reconciliation alert.
+      const echoRefundCents = echoFaceCents != null
+        ? Math.min(echoFaceCents, amountCents)
+        : amountCents;
+      const echoFullyRefunded = echoRefundCents >= amountCents;
+      const echoTouchesCredit = creditedCents > 0
+        && echoRefundCents > Math.max(amountCents - creditedCents, 0) + 1;
       const flipped = await db('estimate_deposits')
         .where({ id: row.id, status: 'refunding' })
         .update({
-          status: !refundTouchesCredit && creditedCents > 0 ? 'credited' : 'refunded',
-          refunded_amount: refundCents / 100,
+          status: !echoTouchesCredit && creditedCents > 0 ? 'credited' : 'refunded',
+          refunded_amount: echoRefundCents / 100,
           updated_at: db.fn.now(),
         });
       if (!flipped) continue;
-      if (refundTouchesCredit) {
+      if (echoTouchesCredit) {
         logger.error('[estimate-deposits] reversed deposit was ALREADY credited to an invoice — manual reconciliation required', {
           estimateId: row.estimate_id,
           invoiceId: row.credited_invoice_id || null,
@@ -1280,7 +1532,7 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
         logger.warn('[estimate-deposits] deposit reversal echo landed mid-refund — terminal state stamped for the in-flight refund', {
           context,
           keptCreditedAmount: creditedCents > 0 ? creditedCents / 100 : 0,
-          refundedAmount: refundCents / 100,
+          refundedAmount: echoRefundCents / 100,
         });
       }
       return { handled: true };
@@ -1374,6 +1626,52 @@ async function pendingDepositCredit(estimateId, trx = db) {
       category: 'deposit_credit',
     },
   };
+}
+
+// Customer-scoped variant for flows that mint an invoice OFF the estimate
+// path (Customer 360 / AnnualPrepayLauncher manual annual-prepay invoice):
+// walk the customer's estimates with received deposit rows (oldest row
+// first) and return the first estimate whose AGGREGATE unapplied balance is
+// positive, in the same shape as pendingDepositCredit PLUS the owning
+// estimateId — consumption is per-estimate, so the caller passes that id to
+// consumeDepositCredit. The balance check is estimate-level on purpose
+// (pendingDepositCredit sums every open row): gating on any single row
+// would let an exhausted older row hide a later open/restored row on the
+// same estimate (Codex P2). Oldest-first mirrors consumeDepositCredit's
+// FIFO allocation, so a credit restored by voiding a prior prepay invoice
+// is re-applied before any newer deposit. One estimate per call: a single
+// invoice consumes from a single estimate's ledger, keeping the credit line
+// dollar-for-dollar traceable to one estimate's deposits.
+async function pendingDepositCreditForCustomer(customerId, trx = db) {
+  if (!customerId) return null;
+  const rows = await trx('estimate_deposits as d')
+    .join('estimates as e', 'd.estimate_id', 'e.id')
+    .where('e.customer_id', customerId)
+    .where('d.status', 'received')
+    .orderBy('d.created_at', 'asc')
+    .select('d.estimate_id', 'd.amount', 'd.credited_amount', 'd.refunded_amount', 'e.estimate_slug');
+  // FIFO by each estimate's first genuinely OPEN row (Codex round-3): skip
+  // exhausted rows entirely so an estimate can't jump the queue on the
+  // strength of an early fully-consumed/refunded row while an older still-open
+  // row on another estimate waits behind it. The first estimate reached
+  // through an open row owns the oldest open credit; pendingDepositCredit then
+  // sums that estimate's full open balance for the amount actually consumed.
+  const seen = new Set();
+  for (const row of rows) {
+    const availableCents = Math.round(Number(row.amount || 0) * 100)
+      - Math.round(Number(row.credited_amount || 0) * 100)
+      - Math.round(Number(row.refunded_amount || 0) * 100);
+    if (availableCents <= 0) continue;
+    const estimateId = row.estimate_id;
+    if (!estimateId || seen.has(estimateId)) continue;
+    seen.add(estimateId);
+    const credit = await pendingDepositCredit(estimateId, trx);
+    // estimateSlug rides along so preview UIs can NAME the estimate whose
+    // deposit is being applied — cross-estimate application must be a
+    // visible operator choice, never a silent server pick.
+    if (credit) return { ...credit, estimateId, estimateSlug: row.estimate_slug || null };
+  }
+  return null;
 }
 
 // Allocate an applied credit against received rows (oldest first), tracking
@@ -1578,8 +1876,8 @@ async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = n
       .where({ estimate_id: estimateId })
       .whereIn('status', ['received', 'credited']);
     const ledgerRow = paymentIntentId
-      ? await ledgerQuery.where({ stripe_payment_intent_id: paymentIntentId }).first('amount', 'stripe_payment_intent_id')
-      : await ledgerQuery.orderBy('received_at', 'desc').first('amount', 'stripe_payment_intent_id');
+      ? await ledgerQuery.where({ stripe_payment_intent_id: paymentIntentId }).first('amount', 'card_surcharge', 'stripe_payment_intent_id')
+      : await ledgerQuery.orderBy('received_at', 'desc').first('amount', 'card_surcharge', 'stripe_payment_intent_id');
     if (!ledgerRow) return { sent: false, reason: 'no_received_deposit' };
 
     // Propagate the leg's real outcome — a no-recipient / suppression /
@@ -1590,6 +1888,7 @@ async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = n
       customer,
       prefs,
       amountDollars: Number(ledgerRow.amount || 0),
+      cardSurcharge: Number(ledgerRow.card_surcharge || 0),
       paymentIntentId: ledgerRow.stripe_payment_intent_id,
     });
     return emailResult?.sent ? { sent: true } : { sent: false, reason: emailResult?.reason || 'email_not_sent' };
@@ -1612,6 +1911,7 @@ module.exports = {
   handleDepositIntentSucceeded,
   isDepositEnforced,
   pendingDepositCredit,
+  pendingDepositCreditForCustomer,
   refundUnconsumedDeposits,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,

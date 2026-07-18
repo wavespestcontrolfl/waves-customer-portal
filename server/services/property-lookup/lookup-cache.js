@@ -11,6 +11,10 @@
  *
  * Tunables:
  *   PROPERTY_LOOKUP_CACHE_TTL_DAYS — cached-data lifetime (default 180)
+ *   PROPERTY_LOOKUP_VACANT_TTL_DAYS — lifetime for unassessed-vacant-parcel
+ *     records (vacant roll parcel, no building record; default 21 — often
+ *     new construction, and the county posts the home after CO, so these
+ *     must re-fetch soon; applied on read AND write)
  *   PROPERTY_LOOKUP_CACHE_DISABLED=1 — kill switch (reads AND writes skip;
  *     verified overrides still apply — they are corrections, not cache)
  *
@@ -21,9 +25,16 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
-const { buildPropertyDataQuality } = require('./ai-property-lookup');
+const { buildPropertyDataQuality, detectUnassessedVacantParcel } = require('./ai-property-lookup');
 
 const DEFAULT_TTL_DAYS = 180;
+// Unassessed vacant parcel (vacant roll parcel, no building record — often
+// new construction): the county posts the home after CO / the next roll
+// update, and a 180-day TTL would pin the "? sf" record long past that.
+// Short TTL so the lookup self-heals; a tech-verified save still
+// invalidates the hit immediately. Enforced on WRITE (expires_at) and on
+// READ (rows cached before this shipped carry the old 180-day expiry).
+const VACANT_PARCEL_TTL_DAYS = 21;
 
 // Fields a tech may verify from the field. Mirrors the estimator's editable
 // dimensions; anything else in a /verify payload is dropped.
@@ -87,9 +98,17 @@ function normalizeVerifiedRoof(raw) {
 
 function sanitizeVerifiedValue(field, value) {
   switch (field) {
-    case 'squareFootage': return intInRange(value, 100, 50000);
+    // squareFootage covers association aggregates / commercial buildings —
+    // the enriched profile publishes summed living area up to 200k
+    // (AGGREGATE_DIM_CAP_SQFT), and a 50k cap silently dropped a rep's
+    // downward correction on any complex bigger than that, so the county
+    // aggregate won every re-lookup (codex P2 #2721).
+    case 'squareFootage': return intInRange(value, 100, 200000);
     case 'lotSize': return intInRange(value, 100, 200000);
-    case 'stories': return intInRange(value, 1, 4);
+    // Mid/high-rise condo associations exceed 4 stories, and a verified
+    // story count is exactly how an unknown-stories aggregate resolves —
+    // dropping a tech's "6" here would pin footprintUnknown forever.
+    case 'stories': return intInRange(value, 1, 50);
     case 'yearBuilt': return intInRange(value, 1880, new Date().getFullYear() + 2);
     case 'hasPool': {
       if (typeof value === 'boolean') return value;
@@ -112,6 +131,13 @@ function sanitizeVerifiedValue(field, value) {
 function cacheTtlDays() {
   const n = Number(process.env.PROPERTY_LOOKUP_CACHE_TTL_DAYS);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TTL_DAYS;
+}
+
+function vacantParcelTtlDays() {
+  const n = Number(process.env.PROPERTY_LOOKUP_VACANT_TTL_DAYS);
+  const days = Number.isFinite(n) && n > 0 ? n : VACANT_PARCEL_TTL_DAYS;
+  // Never longer than the base TTL — the vacant window is the short case.
+  return Math.min(days, cacheTtlDays());
 }
 
 function isCacheDisabled() {
@@ -161,6 +187,19 @@ async function getCachedLookup(address) {
     if (overridesNewerThanData(row)) {
       logger.info('[lookup-cache] cached data predates a verified override — treating as miss');
       return null;
+    }
+    // Unassessed-vacant-parcel rows age out on the SHORT TTL even when their
+    // stored expires_at says otherwise — rows written before the short TTL
+    // shipped carry the base 180-day expiry, which would pin exactly the
+    // records this exists to refresh (codex P1). Rows without a data
+    // timestamp can't prove freshness — fail toward the live lookup.
+    if (detectUnassessedVacantParcel(row.property_record)) {
+      const savedAt = row.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
+      const maxAgeMs = vacantParcelTtlDays() * 24 * 60 * 60 * 1000;
+      if (!savedAt || Date.now() - savedAt > maxAgeMs) {
+        logger.info('[lookup-cache] vacant-parcel row past the short TTL — treating as miss');
+        return null;
+      }
     }
     return row;
   } catch (err) {
@@ -258,7 +297,9 @@ async function saveLookup(address, result) {
     // mid-lookup wasn't applied to this result, and anchoring here makes it
     // compare as newer than the data so the next hit invalidates.
     const dataAsOf = result.meta?.timestamp ? new Date(result.meta.timestamp) : new Date();
-    const expiresAt = new Date(Date.now() + cacheTtlDays() * 24 * 60 * 60 * 1000);
+    const vacantParcel = Boolean(detectUnassessedVacantParcel(record));
+    const ttlDays = vacantParcel ? vacantParcelTtlDays() : cacheTtlDays();
+    const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
     const payload = {
       address_hash: hash,
       normalized_address: normalizedAddress,
@@ -284,7 +325,8 @@ async function saveLookup(address, result) {
     logger.info('[lookup-cache] saved lookup', {
       county: payload.county,
       hasParcel: Boolean(record._parcel),
-      ttlDays: cacheTtlDays(),
+      ttlDays,
+      vacantParcel: vacantParcel || undefined,
     });
   } catch (err) {
     logger.warn('[lookup-cache] write failed', { error: err.message });
@@ -400,6 +442,7 @@ module.exports = {
   attachAddressAuditToCachedLookup,
   saveLookup,
   saveVerifiedOverride,
+  sanitizeVerifiedValue,
   VERIFIABLE_FIELDS,
   VERIFIED_SOURCE_WEIGHT,
 };

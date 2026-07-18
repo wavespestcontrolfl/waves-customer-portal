@@ -41,7 +41,6 @@ async function listAuthors({ force = false } = {}) {
           name: data.name,
           role: data.role || '',
           fdacs_license: data.fdacs_license || null,
-          years_swfl: data.years_swfl || null,
           photo: data.photo || null,
           bio_short: data.bio_short || '',
           credentials: Array.isArray(data.credentials) ? data.credentials : [],

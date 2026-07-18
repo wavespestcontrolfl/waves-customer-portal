@@ -76,10 +76,13 @@
 //   accurate.
 // - Dispute webhook (dispute.created): must flag the customer for
 //   the operator to review before any further charges fire.
-import { COLORS, FONTS } from '../theme-brand';
+// COLORS is used ONLY inside the Stripe Elements appearance configs — the
+// Stripe iframe can't resolve our CSS vars, so it needs literals. All inline
+// page styles use theme-doc roles.
+import { COLORS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, SHADOW, docButton } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
-import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -90,10 +93,13 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
+import BrandFooter from '../components/BrandFooter';
+import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { getStripe } from '../lib/stripeLoader';
+import { fetchWithNetworkRetry } from '../lib/fetchRetry';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -102,6 +108,23 @@ function shouldDefaultSaveCard(search = '') {
     const params = new URLSearchParams(search);
     const raw = params.get('saveCard') || params.get('save_card') || params.get('save-card');
     return /^(1|true|yes|default)$/i.test(String(raw || ''));
+  } catch {
+    return false;
+  }
+}
+
+// Recurring acceptance pay links arrive with saveRequired=1
+// (estimateInvoicePayUrlParams): a payment method on file is a signup
+// precondition (owner ruling 2026-07-09 — per-application visits and prepay
+// renewals auto-charge it), so the consent box renders checked + locked.
+// URL param = pre-load display hint ONLY; the authority is the server's
+// invoice.saveRequired (derived from billing_mode) and the pay endpoints
+// force the flag server-side regardless of what the client sends
+// (Codex #2507 P1 — a query param is user-editable).
+function shouldRequireSaveCard(search = '') {
+  try {
+    const params = new URLSearchParams(search);
+    return /^(1|true|yes)$/i.test(String(params.get('saveRequired') || ''));
   } catch {
     return false;
   }
@@ -131,12 +154,18 @@ function isInstantLinkFailure(err) {
     || msg.includes('account cannot be connected');
 }
 
-function serverReportedError(message, { status = null, inProgress = false, microdepositPending = false } = {}) {
+function serverReportedError(message, {
+  status = null,
+  inProgress = false,
+  microdepositPending = false,
+  savedCardPending = false,
+} = {}) {
   const err = new Error(message || 'Payment error');
   err.serverReported = true;
   if (status != null) err.status = status;
   err.inProgress = !!inProgress;
   err.microdepositPending = !!microdepositPending;
+  err.savedCardPending = !!savedCardPending;
   return err;
 }
 
@@ -206,16 +235,12 @@ function annualPrepayCalloutText(prepay) {
 const subtlePanel = {
   background: CUSTOMER_SURFACE.page,
   border: `1px solid ${CUSTOMER_SURFACE.border}`,
-  borderRadius: 8,
+  borderRadius: RADIUS.input,
 };
 
-const eyebrow = {
-  fontSize: 12,
-  color: 'var(--text-muted)',
-  fontWeight: 850,
-  letterSpacing: 0,
-  textTransform: 'uppercase',
-};
+// The shared uppercase eyebrow spec (DOC_EYEBROW); margin stays a
+// per-call-site delta, so zero out the token's default.
+const eyebrow = { ...DOC_EYEBROW, marginBottom: 0 };
 
 function fullName(customer = {}) {
   return [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Waves customer';
@@ -228,10 +253,10 @@ function cityStateZip(customer = {}) {
 
 function StatusPill({ tone = 'neutral', children }) {
   const tones = {
-    neutral: { bg: CUSTOMER_SURFACE.page, color: 'var(--text)', border: CUSTOMER_SURFACE.border },
+    neutral: { bg: CUSTOMER_SURFACE.page, color: DOC.ink, border: CUSTOMER_SURFACE.border },
     due: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    overdue: { bg: 'rgba(200,16,46,0.08)', color: 'var(--danger)', border: 'rgba(200,16,46,0.22)' },
-    secure: { bg: '#F0FDF4', color: 'var(--success)', border: '#BBF7D0' },
+    overdue: { bg: 'rgba(200,16,46,0.08)', color: DOC.danger, border: 'rgba(200,16,46,0.22)' },
+    secure: { bg: DOC.successBg, color: DOC.success, border: DOC.successBorder },
   };
   const t = tones[tone] || tones.neutral;
   const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
@@ -241,13 +266,13 @@ function StatusPill({ tone = 'neutral', children }) {
       alignItems: 'center',
       gap: 6,
       minHeight: 28,
-      padding: '5px 9px',
-      borderRadius: 8,
+      padding: '4px 8px',
+      borderRadius: RADIUS.input,
       background: t.bg,
       border: `1px solid ${t.border}`,
       color: t.color,
-      fontSize: 12,
-      fontWeight: 850,
+      fontSize: FS.caption,
+      fontWeight: FW.heavy,
       letterSpacing: 0,
       textTransform: 'uppercase',
       whiteSpace: 'nowrap',
@@ -273,29 +298,29 @@ function AnnualPrepayInvoicePanel({ term }) {
   return (
     <div style={{
       ...subtlePanel,
-      padding: 14,
-      marginBottom: 18,
+      padding: SP.md,
+      marginBottom: SP.lg,
       display: 'grid',
-      gap: 8,
+      gap: SP.xs,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ ...eyebrow, color: pending ? '#9A6200' : 'var(--success)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: SP.sm, flexWrap: 'wrap' }}>
+        <div style={{ ...eyebrow, color: pending ? '#9A6200' : DOC.success }}>
           {annualPrepayStatusLabel(term)}
         </div>
         {term.prepayAmount != null && (
-          <div style={{ fontFamily: FONTS.mono, fontSize: 14, fontWeight: 800, color: 'var(--text)' }}>
+          <div style={{ fontFamily: DOC_FONT, fontSize: FS.body, fontWeight: FW.heavy, color: DOC.ink }}>
             {fmtCurrency(term.prepayAmount)}
           </div>
         )}
       </div>
-      <div style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--text)' }}>
+      <div style={{ fontSize: FS.body, lineHeight: LH.body, color: DOC.ink }}>
         {term.planLabel || 'Annual prepay plan'}
         {term.termStart || term.termEnd
           ? ` · coverage ${fmtDate(term.termStart)} through ${fmtDate(term.termEnd)}`
           : ''}
       </div>
       {pending && (
-        <div style={{ fontSize: 14, lineHeight: 1.45, color: 'var(--text-muted)' }}>
+        <div style={{ fontSize: FS.body, lineHeight: LH.body, color: DOC.muted }}>
           Annual prepaid coverage activates after this invoice is paid.
         </div>
       )}
@@ -314,33 +339,33 @@ function CoverageVisitsList({ visits, status }) {
   const tag = prepaid ? 'Prepaid' : 'Included';
   return (
     <>
-      <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: 0, display: 'grid', gap: 7 }}>
+      <ul style={{ listStyle: 'none', margin: '12px 0 0', padding: 0, display: 'grid', gap: SP.xs }}>
         {visits.map((v, i) => (
           <li key={i} style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            gap: 10,
-            fontSize: 14,
-            lineHeight: 1.4,
-            color: 'var(--text)',
+            gap: SP.sm,
+            fontSize: FS.body,
+            lineHeight: LH.snug,
+            color: DOC.ink,
           }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-              <span style={{ color: 'var(--success)', display: 'inline-flex' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: SP.xs, minWidth: 0 }}>
+              <span style={{ color: DOC.success, display: 'inline-flex' }}>
                 <Icon name="check" size={14} strokeWidth={3} />
               </span>
               <span>Visit {i + 1} of {visits.length} · target {fmtDate(v.date)}</span>
             </span>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: SP.xs, whiteSpace: 'nowrap' }}>
               {v.amount != null && (
-                <span style={{ fontFamily: FONTS.mono, color: 'var(--text-muted)' }}>{fmtCurrency(v.amount)}</span>
+                <span style={{ fontFamily: DOC_FONT, color: DOC.muted }}>{fmtCurrency(v.amount)}</span>
               )}
-              <span style={{ ...eyebrow, fontSize: 10, color: prepaid ? 'var(--success)' : '#9A6200' }}>{tag}</span>
+              <span style={{ ...eyebrow, fontSize: FS.micro, color: prepaid ? DOC.success : '#9A6200' }}>{tag}</span>
             </span>
           </li>
         ))}
       </ul>
-      <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.4, color: 'var(--text-muted)' }}>
+      <div style={{ marginTop: SP.xs, fontSize: FS.caption, lineHeight: LH.snug, color: DOC.muted }}>
         Target dates — your actual visits follow your regular service route.
       </div>
     </>
@@ -350,8 +375,8 @@ function CoverageVisitsList({ visits, status }) {
 function DetailBlock({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ ...eyebrow, marginBottom: 7 }}>{label}</div>
-      <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.55 }}>
+      <div style={{ ...eyebrow, marginBottom: SP.xs }}>{label}</div>
+      <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
         {children}
       </div>
     </div>
@@ -363,20 +388,20 @@ function SummaryRow({ label, value, strong, muted }) {
     <div style={{
       display: 'flex',
       justifyContent: 'space-between',
-      gap: 16,
-      padding: strong ? '12px 0 0' : '7px 0',
-      marginTop: strong ? 8 : 0,
-      borderTop: strong ? '1px solid var(--border)' : 'none',
-      color: strong ? 'var(--text)' : 'var(--text-muted)',
-      fontSize: strong ? 16 : 14,
-      fontWeight: strong ? 850 : 500,
-      fontFamily: strong ? FONTS.body : FONTS.body,
+      gap: SP.md,
+      padding: strong ? '12px 0 0' : '8px 0',
+      marginTop: strong ? SP.xs : 0,
+      borderTop: strong ? `1px solid ${DOC.border}` : 'none',
+      color: strong ? DOC.ink : DOC.muted,
+      fontSize: strong ? FS.lead : FS.body,
+      fontWeight: strong ? FW.heavy : FW.medium,
+      fontFamily: DOC_FONT,
     }}>
       <span>{label}</span>
       <span style={{
-        color: muted ? 'var(--text-muted)' : 'var(--text)',
-        fontFamily: FONTS.mono,
-        fontWeight: strong ? 850 : 650,
+        color: muted ? DOC.muted : DOC.ink,
+        fontFamily: DOC_FONT,
+        fontWeight: strong ? FW.heavy : FW.semibold,
         whiteSpace: 'nowrap',
       }}>
         {value}
@@ -386,13 +411,22 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
+  // Synchronous mirror of `processing` for the submit/finalize single-flight
+  // guards. State alone lags a double-tap in the same frame (both reads see
+  // the stale false) — the ref flips before any await, same reasoning as
+  // syncingAmountRef below. Kept in lockstep via setProcessingSync.
+  const processingRef = useRef(false);
+  const setProcessingSync = (value) => {
+    processingRef.current = value;
+    setProcessing(value);
+  };
   const [elementError, setElementError] = useState(null);
   // Shown only after an instant bank-link (Financial Connections) failure, to
   // steer the customer to the manual routing/account entry that avoids it.
@@ -444,7 +478,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     setSyncingAmount(true);
     setAmountSyncError(false);
     try {
-      const res = await fetch(`${API_BASE}/pay/${token}/update-amount`, {
+      const res = await fetchWithNetworkRetry(`${API_BASE}/pay/${token}/update-amount`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -519,7 +553,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   useEffect(() => {
     if (!paymentIntentId || awaitingConfirm) return;
     syncAmountForMethod(selectedMethod, !!saveCard);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveCard]);
 
   useEffect(() => {
@@ -539,12 +572,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           appearance: {
             theme: 'stripe',
             variables: {
-              colorPrimary: COLORS.blueDeeper,
+              colorPrimary: COLORS.glassNavy,
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
-              fontFamily: FONTS.body,
-              borderRadius: '8px',
+              fontFamily: DOC_FONT,
+              borderRadius: `${RADIUS.input}px`,
               spacingUnit: '4px',
             },
             rules: {
@@ -554,21 +587,22 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 padding: '12px 14px',
               },
               '.Input:focus': {
-                border: `1px solid ${CUSTOMER_SURFACE.text}`,
-                boxShadow: '0 0 0 3px rgba(27,44,91,0.18)',
+                border: `1px solid ${DOC.navyLiteral}`,
+                boxShadow: SHADOW.focusRing,
               },
               '.Label': {
-                fontSize: '13px',
-                fontWeight: '500',
+                // 13px is banned on customer surfaces — 14 is the doc body size.
+                fontSize: `${FS.body}px`,
+                fontWeight: `${FW.medium}`,
                 color: COLORS.textBody,
               },
               '.Tab': {
                 border: '1px solid #E2E8F0',
-                borderRadius: '8px',
+                borderRadius: `${RADIUS.input}px`,
               },
               '.Tab--selected': {
-                borderColor: COLORS.blueDeeper,
-                backgroundColor: 'rgba(27,44,91,0.08)',
+                borderColor: COLORS.glassNavy,
+                backgroundColor: 'rgba(4,57,94,0.08)',
               },
             },
           },
@@ -611,7 +645,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           try {
             const { error, paymentIntent } = await stripeRef.current.confirmPayment({
               elements: elementsRef.current,
-              confirmParams: { return_url: window.location.href },
+              confirmParams: { return_url: redirectReturnUrl() },
               redirect: 'if_required',
             });
             if (error) {
@@ -706,11 +740,28 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     })();
 
     return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publishableKey, clientSecret, loadNonce]);
 
   const isCardFamily = selectedMethod !== 'us_bank_account';
   const buttonAmount = displayedTotal;
+
+  // Return URL for redirect tenders (bank auth, wallet handoff): component
+  // state does not survive the redirect, so carry the LIVE consent-box
+  // state as the pay link's own saveCard param — the page-level
+  // redirect-return effect re-derives saveCardDefault from the URL and
+  // would otherwise skip the consent POST for a box the customer ticked on
+  // an optional link (Codex #2507 round-6 P1). Read through a ref because
+  // the Express Checkout confirm handler is registered once on mount and
+  // would close over a stale prop. Never cleared when unticked: the server
+  // treats a non-opted-in PI's consent POST as a silent no-op.
+  const saveCardRef = useRef(saveCard);
+  useEffect(() => { saveCardRef.current = saveCard; }, [saveCard]);
+  const redirectReturnUrl = () => {
+    if (!saveCardRef.current) return window.location.href;
+    const url = new URL(window.location.href);
+    url.searchParams.set('saveCard', '1');
+    return url.toString();
+  };
 
   const selectPaymentMethod = (methodCategory) => {
     if (!ready || processing || syncingAmount || syncingAmountRef.current || methodCategory === selectedMethod) return;
@@ -741,8 +792,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const pct = Number(surchargeRatePct.toFixed(2)).toString();
 
   const handleSubmit = async () => {
-    if (!stripeRef.current || !elementsRef.current || processing) return;
-    setProcessing(true);
+    if (!stripeRef.current || !elementsRef.current || processing || processingRef.current) return;
+    setProcessingSync(true);
     setElementError(null);
     setShowManualEntryHint(false);
 
@@ -757,7 +808,6 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       try {
         // Let any in-flight tender sync settle so we re-lock from a known state.
         for (let i = 0; i < 100 && syncingAmountRef.current; i += 1) {
-          // eslint-disable-next-line no-await-in-loop
           await new Promise((resolve) => { setTimeout(resolve, 50); });
         }
         // Still running after the wait: a slow prior /update-amount could land
@@ -766,19 +816,19 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // customer retry from a settled state rather than confirm into a race.
         if (syncingAmountRef.current) {
           setElementError('Still updating your payment — please try again in a moment.');
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         const lock = await syncAmountForMethod('us_bank_account');
         if (!lock || !lock.ok) {
           // syncAmountForMethod already surfaced the error to the customer.
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         if (lock.replaced) {
           // A fresh PI was minted; Elements re-mount and the customer submits
           // again cleanly — don't confirm against the dead intent.
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         if (lock.superseded || syncingAmountRef.current || selectedMethodRef.current !== 'us_bank_account') {
@@ -786,7 +836,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           // or the tender changed mid-submit — any of these can rewrite the PI
           // before confirm. Abort and let the customer retry from a settled state.
           setElementError('Still updating your payment — please try again in a moment.');
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
       } catch (lockErr) {
@@ -796,13 +846,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           methodCategory: 'us_bank_account',
           paymentIntentId,
         }));
-        setProcessing(false);
+        setProcessingSync(false);
         return;
       }
       try {
         const { error, paymentIntent: pi } = await stripeRef.current.confirmPayment({
           elements: elementsRef.current,
-          confirmParams: { return_url: window.location.href },
+          confirmParams: { return_url: redirectReturnUrl() },
           redirect: 'if_required',
         });
         if (error) {
@@ -813,11 +863,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             methodCategory: 'us_bank_account',
             paymentIntentId,
           }));
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) onSuccess?.(pi, 'us_bank_account');
-        else if (pi?.status === 'requires_action') { setElementError('Additional verification required.'); setProcessing(false); }
+        else if (pi?.status === 'requires_action') { setElementError('Additional verification required.'); setProcessingSync(false); }
         else onSuccess?.(pi, 'us_bank_account');
       } catch (err) {
         setElementError(err.message || 'Payment failed');
@@ -827,7 +877,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           methodCategory: 'us_bank_account',
           paymentIntentId,
         }));
-        setProcessing(false);
+        setProcessingSync(false);
       }
       return;
     }
@@ -842,7 +892,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           methodCategory: selectedMethodRef.current,
           paymentIntentId,
         }));
-        setProcessing(false);
+        setProcessingSync(false);
         return;
       }
 
@@ -854,11 +904,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           methodCategory: selectedMethodRef.current,
           paymentIntentId,
         }));
-        setProcessing(false);
+        setProcessingSync(false);
         return;
       }
 
-      const quoteRes = await fetch(`${API_BASE}/pay/${token}/quote`, {
+      const quoteRes = await fetchWithNetworkRetry(`${API_BASE}/pay/${token}/quote`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ paymentMethodId: paymentMethod.id }),
@@ -873,7 +923,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       setDisplayedTotal(quote.total);
       setQuoteData({ ...quote, paymentMethodId: paymentMethod.id });
       setAwaitingConfirm(true);
-      setProcessing(false);
+      setProcessingSync(false);
     } catch (err) {
       setElementError(err.message || 'Payment failed');
       if (!err.serverReported) {
@@ -883,13 +933,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId,
         }));
       }
-      setProcessing(false);
+      setProcessingSync(false);
     }
   };
 
   const handleFinalizePayment = async () => {
-    if (!quoteData || processing) return;
-    setProcessing(true);
+    if (!quoteData || processing || processingRef.current) return;
+    setProcessingSync(true);
     setElementError(null);
 
     try {
@@ -910,7 +960,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             methodCategory: selectedMethodRef.current,
             paymentIntentId: result.paymentIntentId || paymentIntentId,
           }));
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         if (actionPI && (actionPI.status === 'succeeded' || actionPI.status === 'processing')) {
@@ -925,7 +975,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId: result.paymentIntentId || paymentIntentId,
           message: `${statusMessage} Stripe status: ${actionPI?.status || 'unknown'}`,
         });
-        setProcessing(false);
+        setProcessingSync(false);
         return;
       }
 
@@ -940,7 +990,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId: result.paymentIntentId || paymentIntentId,
           message: `${statusMessage} Stripe status: ${result.status || 'unknown'}`,
         });
-        setProcessing(false);
+        setProcessingSync(false);
         setAwaitingConfirm(false);
         setQuoteData(null);
       }
@@ -953,7 +1003,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId,
         }));
       }
-      setProcessing(false);
+      setProcessingSync(false);
       setAwaitingConfirm(false);
       setQuoteData(null);
     }
@@ -970,14 +1020,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     return (
       <div style={{
         display: 'grid',
-        gap: 12,
-        padding: 16,
-        borderRadius: 8,
+        gap: SP.sm,
+        padding: SP.md,
+        borderRadius: RADIUS.input,
         background: '#FFF7ED',
         border: '1px solid #FED7AA',
         textAlign: 'center',
       }}>
-        <div style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--text)' }}>
+        <div style={{ fontSize: FS.body, lineHeight: LH.body, color: DOC.ink }}>
           We couldn’t load the secure payment form. This is usually a brief network hiccup.
         </div>
         <button
@@ -986,12 +1036,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           style={{
             justifySelf: 'center',
             padding: '10px 20px',
-            borderRadius: 8,
+            borderRadius: RADIUS.input,
             border: 'none',
-            background: 'var(--brand, #0a6cff)',
+            background: DOC.brand,
             color: '#fff',
-            fontSize: 14,
-            fontWeight: 500,
+            fontSize: FS.body,
+            fontWeight: FW.medium,
             cursor: 'pointer',
           }}
         >
@@ -1002,28 +1052,28 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   }
 
   return (
-    <div style={{ display: 'grid', gap: 16 }}>
+    <div style={{ display: 'grid', gap: SP.md }}>
       <div style={{
         display: 'flex',
         alignItems: 'flex-start',
-        gap: 12,
-        padding: 14,
-        borderRadius: 8,
+        gap: SP.sm,
+        padding: SP.md,
+        borderRadius: RADIUS.input,
         background: '#EEF6FF',
         border: '1px solid #BFE4F8',
-        fontSize: 14,
-        lineHeight: 1.5,
-        color: 'var(--text)',
+        fontSize: FS.body,
+        lineHeight: LH.body,
+        color: DOC.ink,
       }}>
         <span data-glass="soft" style={{
           width: 32,
           height: 32,
-          borderRadius: 8,
+          borderRadius: RADIUS.input,
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
           flexShrink: 0,
-          background: '#FFFFFF',
+          background: DOC.surface,
           color: '#065A8C',
           border: '1px solid #BFE4F8',
         }}>
@@ -1036,10 +1086,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       </div>
 
       <div>
-        <div style={{ ...eyebrow, marginBottom: 8 }}>
+        <div style={{ ...eyebrow, marginBottom: SP.xs }}>
           Payment method
         </div>
-        <div role="group" aria-label="Payment method" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+        <div role="group" aria-label="Payment method" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: SP.sm }}>
           {methodOptions.map((method) => {
             const active = selectedMethod === method.value;
             return (
@@ -1051,40 +1101,44 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 disabled={methodControlsDisabled}
                 {...(active ? {} : { 'data-glass': 'chip' })}
                 style={{
+                  // Segment control — deliberately NOT docButton (different
+                  // anatomy: icon tile + two-line label, aria-pressed state).
                   minHeight: 72,
-                  borderRadius: 8,
-                  border: `1px solid ${active ? COLORS.blueDeeper : 'var(--border)'}`,
-                  background: active ? '#F8FCFE' : COLORS.white,
-                  color: 'var(--text)',
-                  padding: 12,
+                  borderRadius: RADIUS.input,
+                  border: `1px solid ${active ? DOC.navyLiteral : DOC.border}`,
+                  background: active ? DOC.soft : DOC.surface,
+                  color: DOC.ink,
+                  padding: SP.sm,
                   textAlign: 'left',
                   cursor: methodControlsDisabled ? 'not-allowed' : 'pointer',
                   opacity: methodControlsDisabled ? 0.72 : 1,
+                  // Selected ring stays brand-blue (#009CDE @ 13%) — a distinct
+                  // selected-state wash, not the navy focus ring.
                   boxShadow: active ? '0 0 0 3px rgba(0,156,222,0.13)' : 'none',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 10,
+                  gap: SP.sm,
                 }}
               >
                 <span {...(active ? { 'data-glass': 'soft' } : { 'data-glass-clear': '' })} style={{
                   width: 34,
                   height: 34,
-                  borderRadius: 8,
+                  borderRadius: RADIUS.input,
                   display: 'inline-flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   flexShrink: 0,
-                  background: active ? '#FFFFFF' : CUSTOMER_SURFACE.page,
+                  background: active ? DOC.surface : CUSTOMER_SURFACE.page,
                   border: `1px solid ${CUSTOMER_SURFACE.border}`,
-                  color: active ? COLORS.blueDeeper : 'var(--text-muted)',
+                  color: active ? DOC.navyLiteral : DOC.muted,
                 }}>
                   <Icon name={method.icon} size={17} strokeWidth={2} />
                 </span>
                 <span style={{ minWidth: 0 }}>
-                  <span style={{ display: 'block', fontWeight: 850, fontSize: 14, marginBottom: 3 }}>
+                  <span style={{ display: 'block', fontWeight: FW.heavy, fontSize: FS.body, marginBottom: SP.xxs }}>
                     {method.title}
                   </span>
-                  <span style={{ display: 'block', fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.3 }}>
+                  <span style={{ display: 'block', fontSize: FS.body, color: DOC.muted, lineHeight: LH.snug }}>
                     {method.detail}
                   </span>
                 </span>
@@ -1112,6 +1166,10 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         <div>
           <SaveCardConsent
             checked={!!saveCard}
+            locked={saveCardLocked}
+            headline={saveCardLocked
+              ? 'Payment method on file — required for recurring service'
+              : undefined}
             onChange={(v) => onSaveCardChange?.(v)}
             methodType={selectedMethod}
           />
@@ -1119,41 +1177,41 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       )}
 
       <div data-glass-clear="" style={{
-        padding: 16,
-        borderRadius: 8,
+        padding: SP.md,
+        borderRadius: RADIUS.input,
         background: CUSTOMER_SURFACE.page,
         border: `1px solid ${CUSTOMER_SURFACE.border}`,
-        fontFamily: FONTS.mono,
-        fontSize: 14,
+        fontFamily: DOC_FONT,
+        fontSize: FS.body,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-          <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
+          <span style={{ color: DOC.muted, fontFamily: DOC_FONT }}>
             Invoice total
           </span>
-          <span style={{ color: 'var(--text)' }}>{fmtCurrency(displayedBase)}</span>
+          <span style={{ color: DOC.ink }}>{fmtCurrency(displayedBase)}</span>
         </div>
         {isCardFamily && displayedSurcharge > 0 && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-            <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
+            <span style={{ color: DOC.muted, fontFamily: DOC_FONT }}>
               Credit card surcharge ({pct}%)
             </span>
-            <span style={{ color: 'var(--text)' }}>+ {fmtCurrency(displayedSurcharge)}</span>
+            <span style={{ color: DOC.ink }}>+ {fmtCurrency(displayedSurcharge)}</span>
           </div>
         )}
         {isCardFamily && quoteData && quoteData.funding !== 'credit' && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-            <span style={{ color: 'var(--text-muted)', fontFamily: FONTS.body }}>
+            <span style={{ color: DOC.muted, fontFamily: DOC_FONT }}>
               No card surcharge ({quoteData.funding || 'debit'} card)
             </span>
-            <span style={{ color: 'var(--text)' }}>$0.00</span>
+            <span style={{ color: DOC.ink }}>$0.00</span>
           </div>
         )}
         <div style={{
           display: 'flex', justifyContent: 'space-between',
-          paddingTop: 10, marginTop: 8, borderTop: '1px solid var(--border)',
-          fontWeight: 700, color: 'var(--text)',
+          paddingTop: 12, marginTop: SP.xs, borderTop: `1px solid ${DOC.border}`,
+          fontWeight: FW.bold, color: DOC.ink,
         }}>
-          <span style={{ fontFamily: FONTS.body }}>
+          <span style={{ fontFamily: DOC_FONT }}>
             {isCardFamily ? 'Total charged' : 'Total (bank transfer)'}
           </span>
           <span>{fmtCurrency(buttonAmount)}</span>
@@ -1161,13 +1219,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       </div>
 
       {elementError && (
-        <div style={{
+        <div role="alert" style={{
           background: 'rgba(200,16,46,0.06)',
-          border: '1px solid var(--danger)',
-          borderRadius: 8,
-          padding: '12px 14px',
-          fontSize: 14,
-          color: 'var(--danger)',
+          border: `1px solid ${DOC.danger}`,
+          borderRadius: RADIUS.input,
+          padding: '12px 16px',
+          fontSize: FS.body,
+          color: DOC.danger,
         }}>
           {elementError}
         </div>
@@ -1176,12 +1234,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       {showManualEntryHint && !isCardFamily && (
         <div style={{
           background: 'var(--surface-subtle, rgba(0,0,0,0.03))',
-          border: '1px solid var(--border)',
-          borderRadius: 8,
-          padding: '12px 14px',
-          fontSize: 14,
-          lineHeight: 1.5,
-          color: 'var(--text)',
+          border: `1px solid ${DOC.border}`,
+          borderRadius: RADIUS.input,
+          padding: '12px 16px',
+          fontSize: FS.body,
+          lineHeight: LH.body,
+          color: DOC.ink,
         }}>
           <strong>Trouble linking your bank?</strong> Some banks don't support instant
           linking. Choose <strong>“Enter bank details manually”</strong> above and type
@@ -1210,9 +1268,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         display: 'flex',
         justifyContent: 'center',
         alignItems: 'center',
-        gap: 7,
-        fontSize: 14,
-        color: 'var(--text-muted)',
+        gap: SP.xs,
+        fontSize: FS.body,
+        color: DOC.muted,
       }}>
         <Icon name="lock" size={14} strokeWidth={2} />
         <span>256-bit encrypted · Processed by Stripe</span>
@@ -1221,18 +1279,162 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   );
 }
 
+// ── Covered-by-credit method capture ───────────────────────────────
+// Account credit fully paid a required-save invoice, so no PaymentIntent
+// exists and the normal save-card path never runs — this compact form
+// confirms the SetupIntent /setup minted and persists the method via
+// /setup-complete. Money is already settled; the consent box renders
+// locked exactly like every required save.
+function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, onDone, onBankPending, onAchBlocked }) {
+  const mountRef = useRef(null);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  // Synchronous mirror of `processing` — same double-tap reasoning as
+  // PaymentForm's processingRef above.
+  const processingRef = useRef(false);
+  const setProcessingSync = (value) => {
+    processingRef.current = value;
+    setProcessing(value);
+  };
+  const [formError, setFormError] = useState(null);
+  const [methodType, setMethodType] = useState('card');
+
+  useEffect(() => {
+    if (!publishableKey || !clientSecret) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const stripe = await getStripe(publishableKey);
+        if (cancelled) return;
+        stripeRef.current = stripe;
+        const elements = stripe.elements({
+          clientSecret,
+          appearance: {
+            theme: 'stripe',
+            variables: {
+              colorPrimary: COLORS.glassNavy,
+              colorBackground: COLORS.white,
+              colorText: COLORS.navy,
+              colorDanger: COLORS.red,
+              fontFamily: DOC_FONT,
+              borderRadius: `${RADIUS.input}px`,
+            },
+          },
+        });
+        if (cancelled) return;
+        elementsRef.current = elements;
+        const payment = elements.create('payment');
+        payment.on('ready', () => { if (!cancelled) setReady(true); });
+        payment.on('change', (e) => {
+          if (!cancelled) setMethodType(e?.value?.type === 'us_bank_account' ? 'us_bank_account' : 'card');
+        });
+        if (mountRef.current) payment.mount(mountRef.current);
+      } catch (err) {
+        if (!cancelled) setFormError(err.message || 'Could not load the payment form');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [publishableKey, clientSecret]);
+
+  const submit = async () => {
+    if (!stripeRef.current || !elementsRef.current || processing || processingRef.current) return;
+    setProcessingSync(true);
+    setFormError(null);
+    try {
+      // redirect:'if_required' — a 3DS/bank-auth redirect returns to this
+      // page with setup_intent params (handled by the page-level return
+      // effect; the setup_intent.succeeded webhook is the backstop when
+      // the browser never comes back).
+      const { error: confirmError, setupIntent } = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        confirmParams: { return_url: window.location.href },
+        redirect: 'if_required',
+      });
+      if (confirmError) throw new Error(confirmError.message || 'Could not save the payment method');
+      // ACH micro-deposit verification finishes days later — the webhook
+      // completes enrollment then; show the pending guidance now.
+      if (setupIntent && setupIntent.status !== 'succeeded') {
+        onBankPending?.();
+        return;
+      }
+      const res = await fetch(`${API_BASE}/pay/${token}/setup-complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ setupIntentId }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (body.microdepositPending) { onBankPending?.(); return; }
+        // The bank method saved but enrollment was refused (ACH state
+        // unhealthy) — this SetupIntent already succeeded and can't be
+        // re-confirmed, so restart capture: the fresh mint is card-only
+        // while the bank state is unhealthy (Codex #2507 round-8).
+        if (body.enrollReason === 'ach_blocked') { onAchBlocked?.(body.error); return; }
+        throw new Error(body.error || 'Could not save the payment method');
+      }
+      onDone?.(body);
+    } catch (err) {
+      setFormError(err.message || 'Could not save the payment method');
+      setProcessingSync(false);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: SP.md }}>
+      <div ref={mountRef} style={{ minHeight: 90 }} />
+      <SaveCardConsent
+        checked
+        locked
+        headline="Payment method on file — required for recurring service"
+        onChange={() => {}}
+        methodType={methodType}
+      />
+      {formError && (
+        <div role="alert" style={{
+          background: 'rgba(200,16,46,0.06)',
+          border: `1px solid ${DOC.danger}`,
+          borderRadius: RADIUS.input,
+          padding: '12px 12px',
+          fontSize: FS.body,
+          color: DOC.danger,
+        }}>
+          {formError}
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={submit}
+        disabled={!ready || processing}
+        style={{
+          ...docButton('primary'),
+          fontSize: FS.lead,
+          cursor: !ready || processing ? 'default' : 'pointer',
+          opacity: !ready || processing ? 0.6 : 1,
+        }}
+      >
+        {processing ? 'Saving…' : 'Save payment method'}
+      </button>
+    </div>
+  );
+}
+
 // ── Main /pay/:token V2 page ───────────────────────────────────────
 export default function PayPageV2() {
-  // Liquid-glass 'pro' variant (visual only).
+  // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
+  // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'pro');
+  useGlassSurface(true, 'full');
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const saveCardDefault = shouldDefaultSaveCard(location.search);
+  const urlSaveRequiredHint = shouldRequireSaveCard(location.search);
+  const saveCardDefault = shouldDefaultSaveCard(location.search) || urlSaveRequiredHint;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
@@ -1249,22 +1451,54 @@ export default function PayPageV2() {
   // wrongly imply there's nothing left to do. When set, the same in-flight panel
   // shows verification guidance instead.
   const [microdepositVerifying, setMicrodepositVerifying] = useState(false);
+  // An off-session saved-method attempt owns the invoice fence. This is not an
+  // ACH-processing signal: the attempt can still decline/release, so show a
+  // distinct wait-and-refresh state instead of claiming a bank debit is moving.
+  const [savedCardAttemptPending, setSavedCardAttemptPending] = useState(false);
+  // Account credit fully covered a REQUIRED-SAVE invoice: money is settled,
+  // but the plan still needs a payment method on file (no PI was minted, so
+  // the normal save-card path never ran). invoice.captureNeeded (from the
+  // GET or the /setup response) drives a mint of the capture SetupIntent
+  // via POST /capture-setup — re-derived on every load so the step is
+  // resumable across reloads, mint failures, and Stripe redirects.
+  // States: null | {status:'minting'} | {status:'mint-error',message} |
+  // {status:'ready',clientSecret,setupIntentId,publishableKey} |
+  // {status:'done'} | {status:'bank-pending'}
+  const [setupCapture, setSetupCapture] = useState(null);
   // Guards POST /setup to once per (token, saveCard): the partial-credit display
   // sync below mutates `data`, which would otherwise re-run the setup effect and
   // re-POST /setup — churning the just-minted PaymentIntent (the second call sees
   // it as requires_payment_method and the stale-PI triage cancels/replaces it).
   const setupPostedRef = useRef(null);
   const [saveCard, setSaveCard] = useState(saveCardDefault);
+  // Server-authoritative requirement (invoice.saveRequired from the GET);
+  // the URL param only pre-locks the box before data arrives so it never
+  // flashes unlocked. Once the server says required, force the state on —
+  // the pay endpoints enforce it server-side anyway.
+  const saveCardRequired = data?.invoice?.saveRequired ?? urlSaveRequiredHint;
+  useEffect(() => {
+    if (data?.invoice?.saveRequired) setSaveCard(true);
+  }, [data?.invoice?.saveRequired]);
 
   useEffect(() => {
-    fetch(`${API_BASE}/pay/${token}`)
+    // Abort on unmount/token change so a slow response can't setState against
+    // an unmounted page (or land stale data under a different token).
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    fetch(`${API_BASE}/pay/${token}`, { signal: controller.signal })
       .then((r) => {
-        if (!r.ok) throw new Error(r.status === 404 ? 'Invoice not found' : 'Failed to load');
+        if (!r.ok) {
+          const loadError = new Error(r.status === 404 ? 'Invoice not found' : 'Failed to load');
+          loadError.status = r.status;
+          throw loadError;
+        }
         return r.json();
       })
-      .then((d) => { setData(d); setLoading(false); })
-      .catch((e) => { setError(e.message); setLoading(false); });
-  }, [token]);
+      .then((d) => { if (!controller.signal.aborted) { setData(d); setLoading(false); } })
+      .catch((e) => { if (!controller.signal.aborted) { setError({ message: e.message, status: e.status }); setLoading(false); } });
+    return () => controller.abort();
+  }, [token, loadAttempt]);
 
   // Stripe redirect return (3DS, bank redirect).
   //
@@ -1275,13 +1509,152 @@ export default function PayPageV2() {
   // handled server-authoritatively by the /setup effect below — its 409 carries
   // an `inProgress` flag (set only when Stripe confirms the PI is actually
   // processing/succeeded), and only then do we route to the receipt.
+  //
+  // Two save-related jobs happen here (Codex #2507 P1 round-3):
+  //  - setup_intent params = a covered-by-credit CAPTURE return — complete it
+  //    server-side (/setup-complete verifies the SI; the webhook is the
+  //    backstop if this never runs) and never bounce to a receipt that
+  //    doesn't exist for credit coverage.
+  //  - a save-card PAYMENT redirect (bank auth / 3DS) unloaded the page
+  //    before the normal post-confirm consent POST — fire it now with an
+  //    empty body (the server derives the method from the invoice's own
+  //    PaymentIntent and fails closed when save wasn't opted in).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const redirectStatus = params.get('redirect_status');
+    const returnedSetupIntentId = params.get('setup_intent');
+    if (returnedSetupIntentId) {
+      window.history.replaceState({}, '', window.location.pathname);
+      if (redirectStatus === 'succeeded') {
+        fetch(`${API_BASE}/pay/${token}/setup-complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ setupIntentId: returnedSetupIntentId }),
+        })
+          .then(async (r) => {
+            const body = await r.json().catch(() => ({}));
+            if (r.ok) {
+              // settled:false = the held credit no longer fully covers —
+              // the invoice is still payable; re-derive real state instead
+              // of showing "covered, nothing due".
+              if (body?.settled === false) {
+                window.location.replace(window.location.pathname);
+                return;
+              }
+              setSetupCapture({ status: 'done' });
+              setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
+            } else {
+              setSetupCapture(body.microdepositPending ? { status: 'bank-pending' } : { status: 'minting' });
+            }
+          })
+          .catch(() => setSetupCapture({ status: 'minting' }));
+      } else {
+        // Failed/abandoned setup return — restart capture (state re-derives
+        // from the GET's captureNeeded either way).
+        setSetupCapture({ status: 'minting' });
+      }
+      return;
+    }
     if (redirectStatus === 'succeeded') {
-      navigate(`/receipt/${token}?fresh=1`, { replace: true });
+      const finish = (consentFailed) => navigate(
+        `/receipt/${token}${consentFailed ? '?fresh=1&consent_failed=1' : '?fresh=1'}`,
+        { replace: true },
+      );
+      // Save flows post consent; a plain one-time redirect goes straight
+      // to the receipt (no false consent_failed banner on a payment that
+      // never involved saving). The gate is URL-first but SERVER-decided
+      // (Codex #2507 round-6 P1): the confirm return_url carries the live
+      // box state as saveCard=1, so saveCardDefault covers ticked flows —
+      // but a required-save invoice opened from a bare /pay/:token (old
+      // link, stripped params) has nothing in the URL, so before skipping
+      // we ask the GET payload's own invoice.saveRequired. Unknown (GET
+      // unreachable) reads as a save flow: the consent POST is a silent
+      // no-op on a non-opted-in PI, so guessing wrong costs one request.
+      // The POST is AWAITED with one retry, mirroring the normal
+      // post-confirm path (round-5 P1): webhook enrollment is
+      // consent-gated, so a dropped consent here would defer Auto Pay
+      // forever with no signal — a persistent failure flags
+      // consent_failed on the receipt instead.
+      const postConsent = () => fetch(`${API_BASE}/pay/${token}/consent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      (async () => {
+        let saveFlow = saveCardDefault;
+        if (!saveFlow) {
+          try {
+            const r = await fetch(`${API_BASE}/pay/${token}`);
+            const d = r.ok ? await r.json() : null;
+            saveFlow = d ? !!d.invoice?.saveRequired : true;
+          } catch { saveFlow = true; }
+        }
+        if (!saveFlow) { finish(false); return; }
+        try {
+          let res = await postConsent();
+          if (!res.ok) {
+            await new Promise((r) => setTimeout(r, 800));
+            res = await postConsent();
+          }
+          finish(!res.ok);
+        } catch {
+          finish(true);
+        }
+      })();
     }
   }, [navigate, token]);
+
+  // Promote "capture needed, nothing started" → the minting state. Entry
+  // points: the /setup response and a fresh GET (reload / redirect return).
+  useEffect(() => {
+    if (data?.invoice?.status === 'prepaid' && data?.invoice?.captureNeeded && !setupCapture) {
+      setSetupCapture({ status: 'minting' });
+    }
+  }, [data?.invoice?.status, data?.invoice?.captureNeeded, setupCapture]);
+
+  // Mint the covered-by-credit capture SetupIntent — fires exactly once per
+  // entry into the 'minting' state (explicit retry re-enters it). The mint
+  // is retryable and the need is re-derived server-side on every call, so a
+  // transient Stripe failure can never permanently bypass required capture.
+  useEffect(() => {
+    if (setupCapture?.status !== 'minting') return undefined;
+    let cancelled = false;
+    fetch(`${API_BASE}/pay/${token}/capture-setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+      .then(async (r) => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.error || 'Could not start the payment method setup');
+        return body;
+      })
+      .then((body) => {
+        if (cancelled) return;
+        if (body.alreadyChargeable) {
+          // settled:false = the held credit no longer fully covers — the
+          // invoice is still payable; re-derive real state instead of
+          // showing "covered, nothing due" (Codex #2507 round-9).
+          if (body.settled === false) {
+            window.location.replace(window.location.pathname);
+            return;
+          }
+          setSetupCapture({ status: 'done' });
+          setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
+          return;
+        }
+        setSetupCapture({
+          status: 'ready',
+          clientSecret: body.clientSecret,
+          setupIntentId: body.setupIntentId,
+          publishableKey: body.publishableKey || data?.stripe?.publishableKey,
+        });
+      })
+      .catch((e) => {
+        if (!cancelled) setSetupCapture({ status: 'mint-error', message: e.message });
+      });
+    return () => { cancelled = true; };
+  }, [setupCapture?.status, token]);
 
   // Already paid / ACH pending → redirect to receipt page (no ?fresh=1 — this is a return visit).
   // Prepaid (covered by account credit) does NOT redirect — it renders its own
@@ -1297,6 +1670,16 @@ export default function PayPageV2() {
 
   // Create Stripe PaymentIntent once invoice data loads
   useEffect(() => {
+    // Stripe redirect return in flight: the redirect-return effect above owns
+    // this load (setup_intent returns complete via /setup-complete; a
+    // succeeded payment return posts consent then routes to the receipt).
+    // Minting /setup underneath it races the lagging webhook — the POST 409s
+    // and fires a spurious admin reconciliation alert plus a transient error
+    // flash. Same detection as that effect; failed/processing returns fall
+    // through on purpose (/setup is their documented recovery path — see the
+    // redirect-return comment above).
+    const returnParams = new URLSearchParams(window.location.search);
+    if (returnParams.get('setup_intent') || returnParams.get('redirect_status') === 'succeeded') return;
     if (
       !data ||
       data.invoice.status === 'paid' ||
@@ -1335,6 +1718,7 @@ export default function PayPageV2() {
             status: r.status,
             inProgress: setup.inProgress,
             microdepositPending: setup.microdepositPending,
+            savedCardPending: setup.savedCardPending,
           });
         }
         return setup;
@@ -1343,9 +1727,15 @@ export default function PayPageV2() {
         // Account credit fully covered the invoice at setup (no PI minted, null
         // clientSecret) — flip to the existing "covered, nothing due" prepaid
         // state instead of mounting a card form that would hang on "Loading
-        // payment form…" with a null secret.
+        // payment form…" with a null secret. A required-save invoice with
+        // nothing chargeable on file additionally flags captureNeeded — the
+        // mint effect below POSTs /capture-setup (retryable; the same state
+        // is re-derived from the GET on any reload, so a transient mint
+        // failure can never permanently bypass the required capture).
         if (setup.coveredByCredit || setup.status === 'prepaid') {
-          setData((prev) => (prev ? { ...prev, invoice: { ...prev.invoice, status: 'prepaid' } } : prev));
+          setData((prev) => (prev
+            ? { ...prev, invoice: { ...prev.invoice, status: 'prepaid', captureNeeded: !!setup.captureNeeded } }
+            : prev));
           setPaymentState('idle');
           return;
         }
@@ -1398,6 +1788,11 @@ export default function PayPageV2() {
           // renders verification guidance instead of "nothing more to do".
           if (err.microdepositPending) setMicrodepositVerifying(true);
           setBankProcessing(true);
+          setPaymentState('idle');
+          return;
+        }
+        if (err.status === 409 && err.savedCardPending) {
+          setSavedCardAttemptPending(true);
           setPaymentState('idle');
           return;
         }
@@ -1512,8 +1907,23 @@ export default function PayPageV2() {
   if (loading) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ padding: '64px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+        <div style={{ padding: '64px 20px', textAlign: 'center', color: DOC.muted }}>
           Loading invoice…
+        </div>
+      </WavesShell>
+    );
+  }
+
+  if (error?.status === 404) {
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
+          <BrandCard>
+            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't find that invoice</SerifHeading>
+            <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+              The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
+            </p>
+          </BrandCard>
         </div>
       </WavesShell>
     );
@@ -1524,10 +1934,11 @@ export default function PayPageV2() {
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
           <BrandCard>
-            <SerifHeading style={{ marginBottom: 12 }}>We couldn't find that invoice</SerifHeading>
-            <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
-              The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
+            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't load that invoice</SerifHeading>
+            <p style={{ margin: '0 0 16px', fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+              This looks temporary. Your link is still valid—try again in a moment.
             </p>
+            <BrandButton onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Try again</BrandButton>
           </BrandCard>
         </div>
       </WavesShell>
@@ -1536,18 +1947,91 @@ export default function PayPageV2() {
 
   // Prepaid = covered by account credit. No payment is due and we don't show
   // a payment receipt (the credit may be goodwill, not a cash payment) — just
-  // a friendly confirmation that nothing is owed.
+  // a friendly confirmation that nothing is owed. A required-save invoice
+  // with nothing chargeable on file first runs the method-capture step:
+  // credit paid THIS invoice, but the recurring plan still needs a method
+  // for future visits/renewal (Codex #2507 P1).
   if (data.invoice?.status === 'prepaid') {
     return (
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
           <BrandCard>
-            <SerifHeading style={{ marginBottom: 12 }}>You're all set — nothing due</SerifHeading>
-            <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
-              Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
-              covered by your account credit, so there's no payment to make. Thanks for being a
-              Waves customer! Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
-            </p>
+            {setupCapture && setupCapture.status !== 'done' ? (
+              <>
+                <SerifHeading style={{ marginBottom: SP.sm }}>Covered by credit — one more step</SerifHeading>
+                <p style={{ margin: '0 0 16px', fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+                  Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
+                  covered by your account credit — there's no payment today. Your recurring plan
+                  does need a payment method on file for future visits, so add one below to finish up.
+                </p>
+                {setupCapture.status === 'minting' && (
+                  <p style={{ margin: 0, fontSize: FS.body, color: DOC.muted }}>Loading secure form…</p>
+                )}
+                {setupCapture.status === 'mint-error' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: SP.sm }}>
+                    <div style={{
+                      background: 'rgba(200,16,46,0.06)',
+                      border: `1px solid ${DOC.danger}`,
+                      borderRadius: RADIUS.input,
+                      padding: '12px 12px',
+                      fontSize: FS.body,
+                      color: DOC.danger,
+                    }}>
+                      {setupCapture.message || 'Could not start the payment method setup.'}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSetupCapture({ status: 'minting' })}
+                      style={{
+                        ...docButton('primary'),
+                        fontSize: FS.bodyLg,
+                      }}
+                    >
+                      Try again
+                    </button>
+                  </div>
+                )}
+                {setupCapture.status === 'bank-pending' && (
+                  <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
+                    Your bank needs to be verified first: in the next 1–2 business days your bank
+                    statement will show two small deposits from Stripe — confirm those amounts using
+                    the link in the email Stripe sent you, and your payment method will be saved and
+                    enabled automatically. Nothing else to do here.
+                  </p>
+                )}
+                {setupCapture.status === 'ready' && (
+                  <SetupMethodForm
+                    publishableKey={setupCapture.publishableKey}
+                    clientSecret={setupCapture.clientSecret}
+                    setupIntentId={setupCapture.setupIntentId}
+                    token={token}
+                    onDone={(body) => {
+                      // settled:false = the held credit no longer fully
+                      // covers (spent elsewhere mid-capture) — the invoice
+                      // is still payable, so re-derive real state instead
+                      // of showing "covered, nothing due".
+                      if (body?.settled === false) {
+                        window.location.replace(window.location.pathname);
+                        return;
+                      }
+                      setSetupCapture({ status: 'done' });
+                      setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
+                    }}
+                    onBankPending={() => setSetupCapture({ status: 'bank-pending' })}
+                    onAchBlocked={() => setSetupCapture({ status: 'minting' })}
+                  />
+                )}
+              </>
+            ) : (
+              <>
+                <SerifHeading style={{ marginBottom: SP.sm }}>You're all set — nothing due</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+                  Invoice {data.invoice.invoiceNumber || data.invoice.invoice_number || ''} has been
+                  covered by your account credit, so there's no payment to make. Thanks for being a
+                  Waves customer! Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
+                </p>
+              </>
+            )}
           </BrandCard>
         </div>
       </WavesShell>
@@ -1566,8 +2050,8 @@ export default function PayPageV2() {
           <BrandCard>
             {microdepositVerifying ? (
               <>
-                <SerifHeading style={{ marginBottom: 12 }}>Verify your bank to finish paying</SerifHeading>
-                <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                <SerifHeading style={{ marginBottom: SP.sm }}>Verify your bank to finish paying</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
                   You started a bank (ACH) payment for invoice {invoiceLabel}. In the next 1–2
                   business days your bank will show two small deposits from Stripe — enter those
                   amounts using the link in the email Stripe sent you to confirm and complete the
@@ -1577,14 +2061,33 @@ export default function PayPageV2() {
               </>
             ) : (
               <>
-                <SerifHeading style={{ marginBottom: 12 }}>Your bank payment is processing</SerifHeading>
-                <p style={{ margin: 0, fontSize: 16, color: 'var(--text)', lineHeight: 1.55 }}>
+                <SerifHeading style={{ marginBottom: SP.sm }}>Your bank payment is processing</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
                   We’ve got a bank (ACH) payment in progress for invoice {invoiceLabel}. Bank transfers
                   take a few business days to clear — there’s nothing more you need to do, and we’ll
                   email your receipt once it settles. Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
                 </p>
               </>
             )}
+          </BrandCard>
+        </div>
+      </WavesShell>
+    );
+  }
+
+  if (savedCardAttemptPending) {
+    const invoiceLabel = data.invoice?.invoiceNumber || data.invoice?.invoice_number || '';
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
+          <BrandCard>
+            <SerifHeading style={{ marginBottom: SP.sm }}>We’re verifying a payment attempt</SerifHeading>
+            <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+              A saved payment method attempt is underway for invoice {invoiceLabel}. Please don’t
+              submit another payment yet. Refresh this page in a moment; if the attempt doesn’t
+              complete, the payment form will become available again. Questions? Give us a call
+              — <HelpPhoneLink tone="dark" inline />.
+            </p>
           </BrandCard>
         </div>
       </WavesShell>
@@ -1598,7 +2101,12 @@ export default function PayPageV2() {
   const annualPrepay = invoice.annualPrepay || null;
   const isOverdue = invoice.status !== 'paid'
     && isInvoiceDueDateOverdue(invoice.dueDate);
-  const serviceLabel = invoice.title || service.type || 'Service';
+  // Generated invoice titles carry a "— Month YYYY" suffix that doubles
+  // the service date in the header — strip it when a service date renders.
+  const rawServiceLabel = invoice.title || service.type || 'Service';
+  const serviceLabel = service.date
+    ? rawServiceLabel.replace(/\s+[—–-]+\s+[A-Z][a-z]+ \d{4}$/, '')
+    : rawServiceLabel;
   const dueLabel = invoice.dueDate ? fmtDate(invoice.dueDate) : null;
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
@@ -1607,56 +2115,60 @@ export default function PayPageV2() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
+      {/* The Print button below calls window.print() — back the
+          waves-no-print marker with an actual print rule (ReceiptPage
+          defines its own local copy) so the newsletter card + identity
+          footer and shell chrome stay out of the invoice printout. */}
+      <style>{`
+        @media print {
+          @page { margin: 0.5in; }
+          body { background: #FFFFFF !important; }
+          header, footer, .waves-no-print { display: none !important; }
+        }
+      `}</style>
       <div className="waves-customer-page waves-receipt-page">
         {isOverdue && (
           <div style={{
-            marginBottom: 16,
-            padding: 14,
-            borderRadius: 8,
+            marginBottom: SP.md,
+            padding: SP.md,
+            borderRadius: RADIUS.input,
             background: 'rgba(200,16,46,0.08)',
             border: '1px solid rgba(200,16,46,0.28)',
-            color: 'var(--danger)',
-            fontSize: 14,
-            fontWeight: 750,
+            color: DOC.danger,
+            fontSize: FS.body,
+            fontWeight: FW.bold,
             display: 'flex',
             alignItems: 'center',
-            gap: 10,
+            gap: SP.sm,
           }}>
             <Icon name="warning" size={17} strokeWidth={2} />
             <span>This invoice is overdue. Please pay at your earliest convenience.</span>
           </div>
         )}
 
+        {/* Invoice PDF is the pre-existing server render; document icon tile
+            removed with the other decorative icons (owner 2026-07-09). */}
+        <DocumentActionBar
+          pdfUrl={`${API_BASE}/pay/${token}/invoice.pdf`}
+          pdfFileName="Waves_Invoice.pdf"
+          shareTitle={`Waves invoice ${invoice.invoiceNumber || ''}`.trim()}
+        />
         <BrandCard padding={28}>
           <div style={{
             display: 'flex',
             justifyContent: 'space-between',
-            gap: 16,
+            gap: SP.md,
             alignItems: 'flex-start',
             flexWrap: 'wrap',
-            marginBottom: 18,
+            marginBottom: SP.lg,
           }}>
-            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', minWidth: 0 }}>
-              <span style={{
-                width: 46,
-                height: 46,
-                borderRadius: 8,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-                background: isOverdue ? 'rgba(200,16,46,0.08)' : '#EEF6FF',
-                color: isOverdue ? 'var(--danger)' : '#065A8C',
-                border: `1px solid ${isOverdue ? 'rgba(200,16,46,0.22)' : '#BFE4F8'}`,
-              }}>
-                <Icon name={isOverdue ? 'warning' : 'document'} size={22} strokeWidth={2.4} />
-              </span>
+            <div style={{ display: 'flex', gap: SP.md, alignItems: 'flex-start', minWidth: 0 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>
                   Invoice · {invoice.invoiceNumber}
                 </div>
-                <SerifHeading style={{ marginBottom: 8 }}>Review and pay</SerifHeading>
-                <p style={{ margin: 0, fontSize: 15, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
+                <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.muted, lineHeight: LH.body }}>
                   {serviceLabel}
                   {serviceDateLabel ? ` · ${serviceDateLabel}` : ''}
                 </p>
@@ -1669,65 +2181,40 @@ export default function PayPageV2() {
 
           <div data-glass-clear="" style={{
             ...subtlePanel,
-            padding: 18,
-            marginBottom: 20,
+            padding: SP.md,
+            marginBottom: SP.lg,
             display: 'grid',
             gridTemplateColumns: 'minmax(0, 1fr) auto',
-            gap: 18,
+            gap: SP.lg,
             alignItems: 'center',
           }}>
             <div>
               <div style={eyebrow}>Amount due</div>
-              <div style={{ marginTop: 6, fontSize: 34, lineHeight: 1, fontWeight: 850, color: 'var(--text)', fontFamily: FONTS.body }}>
+              <div style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.heavy, color: DOC.ink, fontFamily: DOC_FONT }}>
                 {fmtCurrency(invoice.amountDue ?? invoice.total)}
               </div>
-              <div style={{ marginTop: 8, fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+              <div style={{ marginTop: SP.xs, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
                 Pay securely online. Credit card surcharge, if any, is shown before payment.
               </div>
             </div>
-            <span data-glass="soft" style={{
-              width: 42,
-              height: 42,
-              borderRadius: 8,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--brand)',
-              background: '#FFFFFF',
-              border: '1px solid var(--border)',
-            }}>
-              <Icon name="document" size={20} strokeWidth={2} />
-            </span>
+            {/* Document icon tile removed (owner 2026-07-09 — no decorative icons). */}
           </div>
 
             {prepayCalloutText && (
               <div style={{
                 display: 'flex',
                 alignItems: 'flex-start',
-                gap: 12,
-                padding: 16,
-                borderRadius: 8,
-                marginBottom: 20,
+                gap: SP.sm,
+                padding: SP.md,
+                borderRadius: RADIUS.input,
+                marginBottom: SP.lg,
                 background: '#EEF6FF',
                 border: '1px solid #BFE4F8',
               }}>
-                <span data-glass="soft" style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: 8,
-                  flexShrink: 0,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: '#FFFFFF',
-                  color: '#065A8C',
-                  border: '1px solid #BFE4F8',
-                }}>
-                  <Icon name="calendar" size={18} strokeWidth={2} />
-                </span>
+                {/* Calendar icon tile removed (owner 2026-07-09 — no decorative icons). */}
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ ...eyebrow, color: '#065A8C', marginBottom: 5 }}>Annual prepayment</div>
-                  <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.5 }}>
+                  <div style={{ ...eyebrow, color: '#065A8C', marginBottom: SP.xxs }}>Annual prepayment</div>
+                  <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body }}>
                     {prepayCalloutText}
                   </div>
                   <CoverageVisitsList
@@ -1743,22 +2230,22 @@ export default function PayPageV2() {
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-              gap: 16,
-              marginBottom: 20,
+              gap: SP.md,
+              marginBottom: SP.lg,
             }}>
               <DetailBlock label="Billed to">
                 {payer ? (
                   <>
-                    <div style={{ fontWeight: 800 }}>{payer.name}</div>
+                    <div style={{ fontWeight: FW.heavy }}>{payer.name}</div>
                     {payer.address && <div>{payer.address}</div>}
                     {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
                       <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
                     )}
-                    {payer.poNumber && <div style={{ color: 'var(--text-muted)' }}>PO: {payer.poNumber}</div>}
+                    {payer.poNumber && <div style={{ color: DOC.muted }}>PO: {payer.poNumber}</div>}
                   </>
                 ) : (
                   <>
-                    <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                    <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
                     {customer.address && <div>{customer.address}</div>}
                     {locationLine && <div>{locationLine}</div>}
                   </>
@@ -1766,31 +2253,28 @@ export default function PayPageV2() {
               </DetailBlock>
               {payer && (
                 <DetailBlock label="Service address">
-                  <div style={{ fontWeight: 800 }}>{fullName(customer)}</div>
+                  <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
                   {locationLine && <div>{locationLine}</div>}
                 </DetailBlock>
               )}
               <DetailBlock label="Service">
-                <div style={{ fontWeight: 800 }}>{serviceLabel}</div>
+                <div style={{ fontWeight: FW.heavy }}>{serviceLabel}</div>
                 {serviceDateLabel && <div>{serviceDateLabel}</div>}
-                {service.techName && <div style={{ color: 'var(--text-muted)' }}>Technician: {service.techName}</div>}
+                {service.techName && <div style={{ color: DOC.muted }}>Technician: {service.techName}</div>}
               </DetailBlock>
             </div>
 
             {visibleLineItems.length > 0 && (
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>Invoice items</div>
-                <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+              <div style={{ marginBottom: SP.lg }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Invoice items</div>
+                <div style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
                   <div data-glass-clear="" style={{
+                    ...eyebrow,
                     display: 'grid',
                     gridTemplateColumns: '1fr auto auto',
-                    gap: '0 14px',
-                    padding: '10px 12px',
-                    fontSize: 12,
-                    color: 'var(--text-muted)',
-                    fontWeight: 850,
-                    textTransform: 'uppercase',
+                    gap: '0 16px',
+                    padding: '12px',
                     background: CUSTOMER_SURFACE.page,
                     borderBottom: `1px solid ${CUSTOMER_SURFACE.border}`,
                   }}>
@@ -1804,19 +2288,19 @@ export default function PayPageV2() {
                       style={{
                         display: 'grid',
                         gridTemplateColumns: '1fr auto auto',
-                        gap: '0 14px',
+                        gap: '0 16px',
                         padding: '12px',
-                        borderBottom: idx < visibleLineItems.length - 1 ? '1px solid var(--border)' : 'none',
-                        fontSize: 14,
-                        color: 'var(--text)',
+                        borderBottom: idx < visibleLineItems.length - 1 ? `1px solid ${DOC.border}` : 'none',
+                        fontSize: FS.body,
+                        color: DOC.ink,
                         alignItems: 'start',
                       }}
                     >
-                      <div style={{ lineHeight: 1.45, minWidth: 0 }}>{item.description}</div>
-                      <div style={{ textAlign: 'right', fontFamily: FONTS.mono }}>
+                      <div style={{ lineHeight: LH.snug, minWidth: 0 }}>{item.description}</div>
+                      <div style={{ textAlign: 'right', fontFamily: DOC_FONT }}>
                         {item.quantity || 1}
                       </div>
-                      <div style={{ textAlign: 'right', fontFamily: FONTS.mono, minWidth: 82, fontWeight: 650 }}>
+                      <div style={{ textAlign: 'right', fontFamily: DOC_FONT, minWidth: 82, fontWeight: FW.semibold }}>
                         {fmtCurrency(item.amount ?? (item.quantity || 1) * (item.unit_price || 0))}
                       </div>
                     </div>
@@ -1826,9 +2310,9 @@ export default function PayPageV2() {
             )}
 
             {invoiceAttachments.length > 0 && (
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>Attachments</div>
-                <div style={{ display: 'grid', gap: 8 }}>
+              <div style={{ marginBottom: SP.lg }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Attachments</div>
+                <div style={{ display: 'grid', gap: SP.xs }}>
                   {invoiceAttachments.map((attachment) => (
                     <a
                       key={attachment.id}
@@ -1841,39 +2325,39 @@ export default function PayPageV2() {
                         display: 'grid',
                         gridTemplateColumns: 'auto minmax(0, 1fr) auto',
                         alignItems: 'center',
-                        gap: 10,
-                        padding: '10px 12px',
-                        borderRadius: 8,
-                        border: '1px solid var(--border)',
-                        color: 'var(--text)',
+                        gap: SP.sm,
+                        padding: '12px 12px',
+                        borderRadius: RADIUS.input,
+                        border: `1px solid ${DOC.border}`,
+                        color: DOC.ink,
                         textDecoration: 'none',
-                        background: '#FFFFFF',
+                        background: DOC.surface,
                       }}
                     >
                       <Icon name="paperclip" size={16} strokeWidth={2} />
                       <span style={{ minWidth: 0 }}>
                         <span style={{
                           display: 'block',
-                          fontSize: 14,
-                          fontWeight: 750,
+                          fontSize: FS.body,
+                          fontWeight: FW.bold,
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
                         }}>
                           {attachment.fileName}
                         </span>
-                        <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                        <span style={{ display: 'block', fontSize: FS.caption, color: DOC.muted, marginTop: 2 }}>
                           {fmtFileSize(attachment.fileSizeBytes)}
                         </span>
                       </span>
-                      <Icon name="download" size={16} strokeWidth={2} style={{ color: 'var(--brand)' }} />
+                      <Icon name="download" size={16} strokeWidth={2} style={{ color: DOC.brand }} />
                     </a>
                   ))}
                 </div>
               </div>
             )}
 
-            <div data-glass-clear="" style={{ ...subtlePanel, padding: 16, marginBottom: 24 }}>
+            <div data-glass-clear="" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
               {invoice.discountAmount > 0 && (
                 <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
@@ -1891,9 +2375,9 @@ export default function PayPageV2() {
             </div>
 
             {invoice.notes && (
-              <div data-glass-clear="" style={{ marginBottom: 24, ...subtlePanel, padding: 16 }}>
-                <div style={{ ...eyebrow, marginBottom: 8 }}>Notes</div>
-                <p style={{ margin: 0, fontSize: 15, color: 'var(--text)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+              <div data-glass-clear="" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
+                <div style={{ ...eyebrow, marginBottom: SP.xs }}>Notes</div>
+                <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body, whiteSpace: 'pre-wrap' }}>
                   {invoice.notes}
                 </p>
               </div>
@@ -1904,15 +2388,15 @@ export default function PayPageV2() {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
-              gap: 12,
-              marginBottom: 16,
+              gap: SP.sm,
+              marginBottom: SP.md,
             }}>
               <div>
                 <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
-                <div style={{ fontSize: 26, fontWeight: 900, color: 'var(--text)', lineHeight: 1 }}>
+                <div style={{ fontSize: FS.h2, fontWeight: FW.heavy, color: DOC.ink, lineHeight: LH.solid }}>
                   {fmtCurrency(invoice.amountDue ?? invoice.total)}
                 </div>
-                <div style={{ marginTop: 6, fontSize: 14, color: 'var(--text-muted)' }}>
+                <div style={{ marginTop: 6, fontSize: FS.body, color: DOC.muted }}>
                   {invoiceStatusLabel}
                 </div>
               </div>
@@ -1923,15 +2407,15 @@ export default function PayPageV2() {
             </div>
 
             {paymentError && (
-              <div style={{
+              <div role="alert" style={{
                 background: 'rgba(200,16,46,0.06)',
-                border: '1px solid var(--danger)',
-                borderRadius: 8,
-                padding: '12px 14px',
-                fontSize: 14,
-                color: 'var(--danger)',
-                marginBottom: 16,
-                lineHeight: 1.45,
+                border: `1px solid ${DOC.danger}`,
+                borderRadius: RADIUS.input,
+                padding: '12px 16px',
+                fontSize: FS.body,
+                color: DOC.danger,
+                marginBottom: SP.md,
+                lineHeight: LH.body,
               }}>
                 {paymentError}
               </div>
@@ -1948,6 +2432,7 @@ export default function PayPageV2() {
                 onSuccess={handlePaymentSuccess}
                 onError={(msg) => setPaymentError(msg)}
                 saveCard={payer ? false : saveCard}
+                saveCardLocked={!payer && saveCardRequired}
                 onSaveCardChange={setSaveCard}
                 thirdPartyBilled={!!payer}
                 customerName={payer ? payer.name : [customer.firstName, customer.lastName].filter(Boolean).join(' ')}
@@ -1955,76 +2440,22 @@ export default function PayPageV2() {
                 onPaymentIntentReplaced={handlePaymentIntentReplaced}
               />
             ) : paymentState === 'error' ? null : (
-              <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
+              <div style={{ padding: '24px 0', textAlign: 'center', color: DOC.muted, fontSize: FS.body }}>
                 Loading payment form…
               </div>
             )}
             </div>
 
-            <div style={{ marginTop: 22, display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 14 }}>
-              <a
-                href={`${API_BASE}/pay/${token}/invoice.pdf`}
-                onClick={(e) => {
-                  // Capacitor webview: a bare PDF navigation replaces the SPA
-                  // with no back control — share sheet instead (F-046). Old
-                  // binaries without the plugins keep the legacy navigation.
-                  if (canSaveNative()) {
-                    e.preventDefault();
-                    saveUrlNative(`${API_BASE}/pay/${token}/invoice.pdf`, 'Waves_Invoice.pdf')
-                      .catch(() => window.alert('Could not save the PDF. Please try again.'));
-                  }
-                }}
-                data-glass="chip" data-glass-pill=""
-                style={{
-                  minHeight: 40,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--brand)',
-                  textDecoration: 'none',
-                  fontSize: 14,
-                  fontWeight: 800,
-                  background: '#FFFFFF',
-                }}
-              >
-                <Icon name="download" size={16} strokeWidth={2} />
-                Invoice PDF
-              </a>
-              {/* window.print() is a no-op in the Capacitor webview — hide the
-                  button there; the Invoice PDF share sheet carries Print on iOS. */}
-              {isNativeApp() ? null : (
-              <button
-                type="button"
-                onClick={() => window.print()}
-                data-glass="chip" data-glass-pill=""
-                style={{
-                  minHeight: 40,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '0 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--brand)',
-                  background: '#FFFFFF',
-                  fontSize: 14,
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                  fontFamily: FONTS.body,
-                }}
-              >
-                <Icon name="print" size={16} strokeWidth={2} />
-                Print
-              </button>
-              )}
-            </div>
+            {/* In-card PDF/Print chips superseded by the DocumentActionBar
+                at the top of the page (owner 2026-07-09). */}
           </BrandCard>
 
-        <div style={{ marginTop: 28, textAlign: 'center', fontSize: 16, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-          Questions about this invoice? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
+        {/* "Questions about this invoice?" help line removed (owner 2026-07-09). */}
+        {/* Newsletter signup lives only on the newsletter pages (owner
+            2026-07-09, supersedes the 2026-07-08 glass-footer ruling).
+            Hidden from the invoice printout via waves-no-print. */}
+        <div className="waves-no-print">
+          <BrandFooter />
         </div>
       </div>
     </WavesShell>

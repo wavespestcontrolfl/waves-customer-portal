@@ -17,6 +17,10 @@ import {
   formatETDate,
   formatETDateTime,
 } from "../../lib/timezone";
+import {
+  addStaffCalendarDays as addDays,
+  staffMondayET as getMonday,
+} from "../../lib/staffTimeDate";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -130,28 +134,6 @@ const TYPE_COLORS = {
   admin_time: "#71717A", // zinc-500
 };
 
-function getMonday(d) {
-  const dt = new Date(d);
-  const day = dt.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  dt.setDate(dt.getDate() + diff);
-  return etDateString(dt);
-}
-
-function addDays(dateStr, n) {
-  // Pure calendar arithmetic on a 'YYYY-MM-DD' string. `new Date(dateStr)`
-  // parses the date-only string as UTC midnight, but getDate/setDate then run
-  // in the browser's local zone and etDateString re-projects to ET — west of
-  // UTC that combination shifts the result a day early (addDays(x,0) === x-1),
-  // which dropped Sunday from the payroll week. Do the math in UTC and format
-  // the UTC components so the answer is timezone-independent.
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  dt.setUTCDate(dt.getUTCDate() + n);
-  const pad = (v) => String(v).padStart(2, "0");
-  return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
-}
-
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const STAFF_SECTIONS = [
   { key: "dashboard", label: "Dashboard", Icon: LayoutDashboard },
@@ -259,7 +241,12 @@ export default function TimeTrackingPage() {
         </div>
       )}
       {tab === "dashboard" && <DashboardTab showToast={showToast} />}
-      {tab === "timesheet" && <TimesheetTab showToast={showToast} />}
+      {tab === "timesheet" && (
+        <TimesheetTab
+          showToast={showToast}
+          onOpenApprovals={() => setTab("approvals")}
+        />
+      )}
       {tab === "approvals" && <ApprovalsTab showToast={showToast} />}
       {tab === "entries" && <EntriesTab showToast={showToast} />}
       {tab === "analytics" && <AnalyticsTab />}
@@ -752,7 +739,7 @@ function WeekBarChart({ weekDailies, weekStart }) {
 // =============================================================================
 // TIMESHEET TAB
 // =============================================================================
-function TimesheetTab({ showToast }) {
+function TimesheetTab({ showToast, onOpenApprovals }) {
   const [weekStart, setWeekStart] = useState(() => getMonday(new Date()));
   const [dailies, setDailies] = useState([]);
   const [techs, setTechs] = useState([]);
@@ -802,32 +789,25 @@ function TimesheetTab({ showToast }) {
     [expanded],
   );
 
-  const bulkApprove = useCallback(async () => {
-    const pendingIds = dailies
-      .filter((d) => d.status === "pending")
-      .map((d) => d.id);
-    if (pendingIds.length === 0) {
-      showToast("No pending entries");
-      return;
-    }
-    try {
-      const res = await adminFetch("/admin/timetracking/daily/bulk-approve", {
-        method: "POST",
-        body: { ids: pendingIds },
-      });
-      showToast(`Approved ${res.approved} day(s)`);
-      load();
-    } catch (e) {
-      showToast("Bulk approve failed");
-    }
-  }, [dailies, load]);
-
   const exportCSV = useCallback(() => {
-    window.open(
-      `${API_BASE}/admin/timetracking/payroll-export?weekStart=${weekStart}`,
-      "_blank",
-    );
-  }, [weekStart]);
+    const token = localStorage.getItem("waves_admin_token");
+    fetch(`${API_BASE}/admin/timesheets/export?weekStart=${weekStart}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.blob();
+      })
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `approved_payroll_week_${weekStart}.csv`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => showToast("Approved payroll export failed"));
+  }, [weekStart, showToast]);
 
   // Group dailies by tech
   const byTech = useMemo(() => {
@@ -894,11 +874,11 @@ function TimesheetTab({ showToast }) {
           Next &#9654;
         </button>{" "}
         <div style={{ flex: 1 }} />{" "}
-        <button onClick={bulkApprove} style={sBtn(D.green, D.white)}>
-          Approve All Pending
+        <button onClick={onOpenApprovals} style={sBtn(D.green, D.white)}>
+          Review &amp; Approve Weeks
         </button>{" "}
         <button onClick={exportCSV} style={sBtn(D.teal, D.white)}>
-          Export CSV
+          Export Approved CSV
         </button>{" "}
       </div>
       {/* Timesheet grid */}
@@ -2363,7 +2343,7 @@ const EMPTY_TECH_FORM = {
   ssnLast4: "",
 };
 
-function TeamTab({ showToast }) {
+export function TeamTab({ showToast }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -2462,52 +2442,33 @@ function TeamTab({ showToast }) {
     setSaving(false);
   };
 
-  const handleToggleActive = async (tech) => {
+  const handleActivate = async (tech) => {
     try {
       await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "PUT",
-        body: JSON.stringify({ active: !tech.active }),
+        body: JSON.stringify({ active: true }),
       });
-      showToast(
-        tech.active ? `${tech.name} deactivated` : `${tech.name} activated`,
-      );
+      showToast(`${tech.name} activated`);
       load();
     } catch (e) {
       showToast("Failed: " + e.message);
     }
   };
 
-  const handleDelete = async (tech) => {
-    if (!confirm(`Permanently delete ${tech.name}? This cannot be undone.`))
-      return;
+  const handleDeactivate = async (tech) => {
+    if (
+      !confirm(
+        `Deactivate ${tech.name}'s staff account? They will be signed out and can no longer access Staff tools. Historical time, payroll, job, and audit records will be kept.`,
+      )
+    ) return;
     try {
       await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "DELETE",
       });
-      showToast(`${tech.name} deleted`);
+      showToast(`${tech.name} deactivated`);
       load();
     } catch (e) {
-      const msg = String(e.message || "");
-      if (msg.includes("linked records") || msg.includes("409")) {
-        if (
-          !confirm(
-            `${tech.name} has linked records (time entries, jobs, assignments, etc.). Purge all related data and delete anyway? This is NOT reversible.`,
-          )
-        )
-          return;
-        try {
-          await adminFetch(
-            `/admin/timetracking/technicians/${tech.id}?force=true`,
-            { method: "DELETE" },
-          );
-          showToast(`${tech.name} force-deleted`);
-          load();
-        } catch (e2) {
-          showToast("Force delete failed: " + e2.message);
-        }
-      } else {
-        showToast("Failed: " + msg);
-      }
+      showToast("Failed to deactivate: " + String(e.message || "Unknown error"));
     }
   };
 
@@ -3168,7 +3129,9 @@ function TeamTab({ showToast }) {
                       {uploadingId === t.id ? "Uploading…" : "Photo"}
                     </button>{" "}
                     <button
-                      onClick={() => handleToggleActive(t)}
+                      onClick={() => (
+                        t.active ? handleDeactivate(t) : handleActivate(t)
+                      )}
                       style={{
                         padding: "4px 10px",
                         background: "transparent",
@@ -3180,20 +3143,6 @@ function TeamTab({ showToast }) {
                       }}
                     >
                       {t.active ? "Deactivate" : "Activate"}
-                    </button>{" "}
-                    <button
-                      onClick={() => handleDelete(t)}
-                      style={{
-                        padding: "4px 10px",
-                        background: "transparent",
-                        border: `1px solid ${D.red}55`,
-                        borderRadius: 6,
-                        color: D.red,
-                        fontSize: 11,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Delete
                     </button>{" "}
                   </div>{" "}
                 </td>{" "}
@@ -4320,9 +4269,7 @@ function DocumentsTab({ showToast }) {
 // ===========================================================================
 function ApprovalsTab({ showToast }) {
   const lastMonday = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 7);
-    return getMonday(d);
+    return addDays(getMonday(new Date()), -7);
   }, []);
   const [weekStart, setWeekStart] = useState(lastMonday);
   const [techs, setTechs] = useState([]);
@@ -4386,9 +4333,12 @@ function ApprovalsTab({ showToast }) {
 
   const approveOne = async (techId) => {
     try {
+      const reviewToken = techs.find(
+        (candidate) => candidate.technician_id === techId,
+      )?.review_token;
       await adminFetch("/admin/timesheets/approve", {
         method: "POST",
-        body: { technicianId: techId, weekStart },
+        body: { technicianId: techId, weekStart, reviewToken },
       });
       showToast("Week approved");
       load();
@@ -4408,7 +4358,15 @@ function ApprovalsTab({ showToast }) {
     try {
       const r = await adminFetch("/admin/timesheets/bulk-approve", {
         method: "POST",
-        body: { technicianIds: [...selected], weekStart },
+        body: {
+          technicianIds: [...selected],
+          weekStart,
+          reviewTokens: Object.fromEntries(
+            techs
+              .filter((candidate) => selected.has(candidate.technician_id))
+              .map((candidate) => [candidate.technician_id, candidate.review_token]),
+          ),
+        },
       });
       showToast(
         `Approved ${r.approved}${r.failed?.length ? `, ${r.failed.length} failed` : ""}`,
@@ -4423,9 +4381,12 @@ function ApprovalsTab({ showToast }) {
     const reason = prompt("Reason for unlocking this week?");
     if (!reason) return;
     try {
+      const reviewToken = techs.find(
+        (candidate) => candidate.technician_id === techId,
+      )?.review_token;
       await adminFetch("/admin/timesheets/unlock", {
         method: "POST",
-        body: { technicianId: techId, weekStart, reason },
+        body: { technicianId: techId, weekStart, reason, reviewToken },
       });
       showToast("Week unlocked");
       load();
@@ -4454,7 +4415,10 @@ function ApprovalsTab({ showToast }) {
     fetch(`${API_BASE}/admin/timesheets/export?weekStart=${weekStart}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
-      .then((r) => r.blob())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.blob();
+      })
       .then((blob) => {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");

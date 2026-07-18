@@ -441,6 +441,10 @@ function validatePestPricingConfig(snapshot = constants) {
   if (!isNonNegativeNumber(preSlabTermiticide.complianceAdminCost)) {
     errors.push('SPECIALTY.preSlabTermiticide.complianceAdminCost must be non-negative');
   }
+  // 0 = usage-step disabled (the kill switch), so non-negative not positive.
+  if (!isNonNegativeNumber(preSlabTermiticide.usageStepSqFt)) {
+    errors.push('SPECIALTY.preSlabTermiticide.usageStepSqFt must be a non-negative number');
+  }
   for (const key of ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p']) {
     const product = products[key] || {};
     if (!isPositiveNumber(product.containerCost)) {
@@ -698,6 +702,68 @@ function syncBedBugPricingConfig(bedBugConfig) {
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
 
+// ── Pre-slab inventory-price link (owner decision 2026-07-10) ─────────────
+// Approved inventory prices drive pre-slab container costs: each product
+// with a catalogProductName is looked up in products_catalog, and an active,
+// priced (needs_pricing=false, best_price>0, unit_size_oz>0) row whose
+// best_vendor_pricing_id points at an ACTIVE, APPROVED/auto-approved
+// vendor_pricing row overrides containerCost/containerOz for this sync.
+// Fail-open everywhere — a missing table/row/field, an unapproved or
+// inactive backing vendor price, or a per-oz price outside [0.5x, 2x] of
+// the pricing_config value (fat-finger/bad-scrape guard), keeps the config
+// value for that product. Runs every sync AFTER config re-applies the base costs, so
+// disabling the link or fixing the catalog self-heals within one sync.
+async function syncPreSlabContainerCostsFromCatalog(db) {
+  const termiticide = constants.SPECIALTY.preSlabTermiticide;
+  if (termiticide?.linkContainerCostsToCatalog !== true) return;
+  const entries = Object.entries(termiticide.products || {}).filter(
+    ([, product]) => typeof product?.catalogProductName === 'string' && product.catalogProductName.trim()
+  );
+  if (!entries.length) return;
+  try {
+    if (!(await db.schema.hasTable('products_catalog'))) return;
+    const rows = await db('products_catalog')
+      .whereIn('name', entries.map(([, product]) => product.catalogProductName.trim()))
+      .where({ active: true, needs_pricing: false })
+      .select('name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id');
+    // Only trust a best_price backed by an ACTIVE, APPROVED vendor price.
+    // Some inventory recalc paths cache the lowest vendor_pricing.price
+    // without filtering approval_status/is_active, and a pending scrape must
+    // never reprice customer quotes (codex r1).
+    const backingIds = rows.map((row) => row.best_vendor_pricing_id).filter(Boolean);
+    const approvedBackingIds = new Set();
+    if (backingIds.length) {
+      const backing = await db('vendor_pricing')
+        .whereIn('id', backingIds)
+        .where({ is_active: true })
+        .whereIn('approval_status', ['approved', 'auto_approved'])
+        .select('id');
+      for (const row of backing) approvedBackingIds.add(row.id);
+    }
+    const byName = new Map(rows.map((row) => [row.name, row]));
+    for (const [key, product] of entries) {
+      const row = byName.get(product.catalogProductName.trim());
+      if (!row?.best_vendor_pricing_id || !approvedBackingIds.has(row.best_vendor_pricing_id)) continue;
+      const price = Number(row?.best_price);
+      const oz = Number(row?.unit_size_oz);
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(oz) || oz <= 0) continue;
+      const configPerOz = Number(product.containerCost) / Number(product.containerOz);
+      if (!Number.isFinite(configPerOz) || configPerOz <= 0) continue;
+      const catalogPerOz = price / oz;
+      if (catalogPerOz > configPerOz * 2 || catalogPerOz < configPerOz * 0.5) {
+        console.warn(
+          `[pricing-engine] pre-slab ${key}: catalog $${catalogPerOz.toFixed(4)}/oz outside sanity band of config $${configPerOz.toFixed(4)}/oz — keeping config value`
+        );
+        continue;
+      }
+      product.containerCost = price;
+      product.containerOz = oz;
+    }
+  } catch (err) {
+    console.warn('[pricing-engine] pre-slab inventory-price link skipped:', err.message);
+  }
+}
+
 async function syncConstantsFromDB(dbInstance) {
   const db = dbInstance || require('../../models/db');
   let constantsSnapshot = null;
@@ -744,6 +810,19 @@ async function syncConstantsFromDB(dbInstance) {
 
     if (config.lawn_pricing_v2) {
       deepMergePlainObject(constants.LAWN_PRICING_V2, config.lawn_pricing_v2);
+      // Tier availability: the row's per-tier metadata drives which lawn
+      // cadences are sellable without a deploy. hidden wins when present;
+      // customerFacing is the older flag from the 2026-06-15 metadata
+      // migration and is honored as its inverse. Unknown tier keys are
+      // ignored (never invent a tier from config).
+      const tierMeta = config.lawn_pricing_v2.tiers;
+      if (tierMeta && typeof tierMeta === 'object' && !Array.isArray(tierMeta)) {
+        for (const [tierKey, meta] of Object.entries(tierMeta)) {
+          if (!constants.LAWN_TIERS[tierKey] || !meta || typeof meta !== 'object') continue;
+          if (typeof meta.hidden === 'boolean') constants.LAWN_TIERS[tierKey].hidden = meta.hidden;
+          else if (typeof meta.customerFacing === 'boolean') constants.LAWN_TIERS[tierKey].hidden = !meta.customerFacing;
+        }
+      }
     }
 
     // ── Estimate acceptance deposit (flat per service class) ──
@@ -763,6 +842,15 @@ async function syncConstantsFromDB(dbInstance) {
     }
 
     // ── Pest Control ─────────────────────────────────────────
+    // Post-discount program-floor kill switch: the constants object is
+    // mutated in place across syncs, so EVERY sync restores the in-code
+    // default (enabled) unless the DB carries an explicit boolean override —
+    // an absent key (or absent pest_base row) must not leave a previously
+    // synced false sticking until the process restarts.
+    constants.PEST.enforceFloorPostDiscount =
+      typeof config.pest_base?.enforce_floor_post_discount === 'boolean'
+        ? config.pest_base.enforce_floor_post_discount
+        : true;
     if (config.pest_base) {
       if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);
       if (config.pest_base.floor) constants.PEST.floor = r(config.pest_base.floor);
@@ -798,14 +886,10 @@ async function syncConstantsFromDB(dbInstance) {
       if (f.shrubs_heavy != null) adj.shrubs_heavy = r(f.shrubs_heavy);
       if (f.shrubs_moderate != null) adj.shrubs_moderate = r(f.shrubs_moderate);
       if (f.shrubs_light != null) adj.shrubs_light = f.shrubs_light >= 0 ? r(f.shrubs_light) : -r(Math.abs(f.shrubs_light));
-      if (f.trees_heavy != null) adj.trees_heavy = r(f.trees_heavy);
-      if (f.trees_moderate != null) adj.trees_moderate = r(f.trees_moderate);
-      if (f.trees_light != null) adj.trees_light = f.trees_light >= 0 ? r(f.trees_light) : -r(Math.abs(f.trees_light));
       if (f.landscape_complex != null) adj.complexity_complex = f.landscape_complex >= 0 ? r(f.landscape_complex) : -r(Math.abs(f.landscape_complex));
       if (f.landscape_moderate != null) adj.complexity_moderate = f.landscape_moderate >= 0 ? r(f.landscape_moderate) : -r(Math.abs(f.landscape_moderate));
       if (f.landscape_simple != null) adj.complexity_simple = f.landscape_simple >= 0 ? r(f.landscape_simple) : -r(Math.abs(f.landscape_simple));
       if (f.near_water != null) adj.nearWater = f.near_water;
-      if (f.large_driveway != null) adj.largeDriveway = f.large_driveway;
       if (f.indoor != null) adj.indoor = r(f.indoor);
       if (f.attached_garage != null) adj.attachedGarage = r(f.attached_garage);
     }
@@ -1218,6 +1302,25 @@ async function syncConstantsFromDB(dbInstance) {
       if (ot.pest_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.pest = Number(ot.pest_mult);
       if (ot.fungicide_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.fungicide = Number(ot.fungicide_mult);
     }
+    // onetime_wdo was seeded 20260414000026 but never read — the estimate
+    // engine kept pricing off stale constants while the admin row sat inert
+    // (the Q8 three-way fee disagreement). DB shape {brackets: [{max_sqft,
+    // price}]} maps onto SPECIALTY.wdo.brackets; a terminal max_sqft >=
+    // 999999 becomes Infinity so the sorted-brackets validation (which
+    // requires terminal Infinity) holds. Malformed rows are ignored — the
+    // post-sync validation snapshot-restores on errors anyway.
+    if (Array.isArray(config.onetime_wdo?.brackets) && config.onetime_wdo.brackets.length) {
+      const mapped = config.onetime_wdo.brackets
+        .map((b) => ({
+          maxSqFt: Number(b.max_sqft ?? b.maxSqFt) >= 999999 ? Infinity : Number(b.max_sqft ?? b.maxSqFt),
+          price: r(Number(b.price)),
+        }))
+        .filter((b) => (b.maxSqFt === Infinity || b.maxSqFt > 0) && Number.isFinite(b.price) && b.price > 0)
+        .sort((a, b) => (a.maxSqFt === Infinity ? 1 : b.maxSqFt === Infinity ? -1 : a.maxSqFt - b.maxSqFt));
+      if (mapped.length && mapped[mapped.length - 1].maxSqFt === Infinity) {
+        constants.SPECIALTY.wdo.brackets = mapped;
+      }
+    }
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;
       if (ot.per_lf_dirt != null) constants.SPECIALTY.trenching.dirtPerLF = r(Number(ot.per_lf_dirt));
@@ -1276,6 +1379,12 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(constants.SPECIALTY.boraCare, 'minJobPrice', bc.min_job_price ?? bc.minJobPrice, Number);
       setNumber(constants.SPECIALTY.boraCare, 'surfaceLaborSqFtPerHour', bc.surface_labor_sqft_per_hr ?? bc.surfaceLaborSqFtPerHour, Number);
     }
+    // Pre-slab step/link kill switches mutate in place across syncs, so EVERY
+    // sync restores the in-code defaults before the row (if any) is applied —
+    // a removed key must fall back to the default, not a stale prior value
+    // (same pattern as the pest program-floor kill switch above).
+    constants.SPECIALTY.preSlabTermiticide.usageStepSqFt = 100;
+    constants.SPECIALTY.preSlabTermiticide.linkContainerCostsToCatalog = true;
     if (config.onetime_preslab) {
       const ps = config.onetime_preslab;
       setNumber(constants.SPECIALTY.preSlabTermidor, 'bottleCost', ps.ps_btl ?? ps.bottleCost, Number);
@@ -1293,6 +1402,10 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(constants.SPECIALTY.preSlabTermidor, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
       const termiticide = constants.SPECIALTY.preSlabTermiticide;
       setString(termiticide, 'defaultProductKey', ps.defaultProductKey ?? ps.default_product_key);
+      // Usage-step + inventory link (owner decision 2026-07-10). 0 sqft = step
+      // off; false = link off — both are the no-deploy kill switches.
+      setNumber(termiticide, 'usageStepSqFt', ps.usage_step_sqft ?? ps.usageStepSqFt, Number);
+      setBoolean(termiticide, 'linkContainerCostsToCatalog', ps.link_container_costs_to_catalog ?? ps.linkContainerCostsToCatalog);
       setNumber(termiticide, 'equipCost', ps.ps_equip ?? ps.equipCost ?? ps.equip_cost, Number);
       setNumber(termiticide, 'complianceAdminCost', ps.complianceAdminCost ?? ps.compliance_admin_cost, money);
       setNumber(termiticide, 'warrantyExtended', ps.warrantyExtended ?? ps.warranty_extended, money);
@@ -1334,6 +1447,7 @@ async function syncConstantsFromDB(dbInstance) {
         const target = termiticide.products?.[key];
         if (!target || !data || typeof data !== 'object') return;
         setString(target, 'label', data.label);
+        setString(target, 'catalogProductName', data.catalogProductName ?? data.catalog_product_name);
         setString(target, 'supplierSku', data.supplierSku ?? data.supplier_sku);
         setString(target, 'packageLabel', data.packageLabel ?? data.package_label);
         setString(target, 'activeIngredient', data.activeIngredient ?? data.active_ingredient);
@@ -1516,6 +1630,8 @@ async function syncConstantsFromDB(dbInstance) {
         }
       }
     }
+
+    await syncPreSlabContainerCostsFromCatalog(db);
 
     assertValidPestPricingConfig(constants);
 

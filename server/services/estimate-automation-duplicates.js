@@ -18,16 +18,20 @@ function phoneLookupValues(phone) {
   };
 }
 
-async function findDuplicateEstimateByPhone(phone, options = {}) {
+// All of a phone's open estimates, newest first. Callers doing
+// property-level duplicate decisions need every open row (each with its
+// address), not just the newest — a phone can hold open estimates for
+// several properties at once.
+async function listOpenEstimatesByPhone(phone, options = {}) {
   const database = options.database || db;
   const statuses = Array.isArray(options.statuses) && options.statuses.length
     ? options.statuses
     : OPEN_ESTIMATE_STATUSES;
   const values = phoneLookupValues(phone);
-  if (!values.last10) return null;
+  if (!values.last10) return [];
 
   const query = database('estimates')
-    .select('id', 'status', 'source', 'created_at')
+    .select('id', 'status', 'source', 'address', 'created_at')
     .whereRaw(
       "right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
       [values.last10]
@@ -42,7 +46,12 @@ async function findDuplicateEstimateByPhone(phone, options = {}) {
     query.whereNot('id', options.excludeEstimateId);
   }
 
-  return query.first();
+  return query;
+}
+
+async function findDuplicateEstimateByPhone(phone, options = {}) {
+  const rows = await listOpenEstimatesByPhone(phone, options);
+  return rows[0] || null;
 }
 
 function automatedDuplicateBlock(existingEstimate) {
@@ -80,6 +89,7 @@ module.exports = {
   automatedDuplicateBlock,
   blockIfAutomatedEstimateDuplicate,
   findDuplicateEstimateByPhone,
+  listOpenEstimatesByPhone,
   OPEN_ESTIMATE_STATUSES,
   phoneLookupValues,
   withAutomatedEstimatePhoneLock,

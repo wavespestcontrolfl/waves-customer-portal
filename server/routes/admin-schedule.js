@@ -6,6 +6,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
@@ -19,6 +20,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
@@ -532,6 +534,10 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
     );
   } catch (e) {
     logger.error(`[schedule] Reminder registration failed for spawned visit ${scheduledServiceId}: ${e.message}`);
+    try {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      await AppointmentReminders.alertRegistrationFailure({ scheduledServiceId, customerId, source, errorMessage: e.message });
+    } catch { /* best-effort — never fail the caller */ }
   }
 }
 
@@ -569,6 +575,8 @@ function copyLineDiscountFields(target, source, cols) {
   if (cols.line_discount_type && source.line_discount_type) target.line_discount_type = source.line_discount_type;
   if (cols.line_discount_amount && source.line_discount_amount != null) target.line_discount_amount = source.line_discount_amount;
   if (cols.line_discount_dollars && source.line_discount_dollars != null) target.line_discount_dollars = source.line_discount_dollars;
+  if (cols.service_key_snapshot) target.service_key_snapshot = source.service_key_snapshot || null;
+  if (cols.service_category_snapshot) target.service_category_snapshot = source.service_category_snapshot || null;
 }
 
 function copyAppointmentDiscountFields(target, source, cols) {
@@ -578,6 +586,29 @@ function copyAppointmentDiscountFields(target, source, cols) {
   if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
   if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
+  if (cols.discount_service_key_filter) target.discount_service_key_filter = source.discount_service_key_filter || null;
+  if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
+}
+
+function clearAppointmentDiscountCatalogFields(target, cols) {
+  if (!target || !cols) return;
+  if (cols.discount_id) target.discount_id = null;
+  if (cols.discount_name) target.discount_name = null;
+  if (cols.discount_service_key_filter) target.discount_service_key_filter = null;
+  if (cols.discount_service_category_filter) target.discount_service_category_filter = null;
+}
+
+function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
+  const existingType = existing?.discount_type || null;
+  const existingAmount = existing?.discount_amount == null || existing.discount_amount === ''
+    ? null
+    : Number(existing.discount_amount);
+  const nextType = discountType === undefined ? existingType : (discountType || null);
+  const nextAmount = discountAmount === undefined
+    ? existingAmount
+    : (discountAmount == null || discountAmount === '' ? null : Number(discountAmount));
+  return nextType !== existingType
+    || (nextAmount == null ? existingAmount != null : existingAmount == null || Math.abs(nextAmount - existingAmount) >= 0.005);
 }
 
 function copyAddonDiscountFields(target, source, cols) {
@@ -588,6 +619,8 @@ function copyAddonDiscountFields(target, source, cols) {
   if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
   if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
+  if (cols.service_key_snapshot) target.service_key_snapshot = source.service_key_snapshot || null;
+  if (cols.service_category_snapshot) target.service_category_snapshot = source.service_category_snapshot || null;
 }
 
 function httpError(status, message) {
@@ -825,10 +858,18 @@ async function loadInvoiceDiscount(discountId) {
   return discount;
 }
 
-async function resolveLineDiscount(input, baseAmount, customer) {
+async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}) {
   const discountId = input?.discountId || input?.id || null;
   if (!discountId) return null;
   const row = await loadInvoiceDiscount(discountId);
+  const failures = await DiscountEngine.manualEligibilityFailures(row, customer, {
+    subtotal: baseAmount,
+    serviceKey: serviceContext.serviceKey || null,
+    serviceCategory: serviceContext.serviceCategory || null,
+  });
+  if (failures.length) {
+    throw httpError(400, `${row.name} is not eligible: ${failures.join(', ')}`);
+  }
   const resolved = calculateDiscountDollars(row, baseAmount, input?.discountAmount ?? input?.amount);
   if (!(resolved.dollars > 0)) return null;
   return {
@@ -847,21 +888,42 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
 
   const primaryBaseFallback = serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice;
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
-  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer);
+  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
+    serviceKey: serviceRecord?.service_key,
+    serviceCategory: serviceRecord?.category,
+  });
   const primaryNet = primaryBase == null
     ? null
     : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
+  const appointmentServiceLines = [{
+    amount: primaryNet || 0,
+    serviceKey: serviceRecord?.service_key || null,
+    serviceCategory: serviceRecord?.category || null,
+  }];
 
   const addonLines = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
     const base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
-    const lineDiscount = await resolveLineDiscount(addon, base || 0, customer);
+    const addonService = addon.serviceId
+      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category')
+      : null;
+    const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
+      serviceKey: addonService?.service_key,
+      serviceCategory: addonService?.category,
+    });
     const net = base == null
       ? null
       : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
+    appointmentServiceLines.push({
+      amount: net || 0,
+      serviceKey: addonService?.service_key || null,
+      serviceCategory: addonService?.category || null,
+    });
     addonLines.push({
       serviceId: addon.serviceId || null,
       serviceName: addon.name || addon.serviceName,
+      serviceKey: addonService?.service_key || null,
+      serviceCategory: addonService?.category || null,
       base,
       price: net,
       estimatedDuration: addon.estimatedDuration ?? addon.duration ?? addon.default_duration_minutes ?? null,
@@ -880,14 +942,40 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
     const appointmentDiscount = await loadInvoiceDiscount(discountId);
+    let appointmentDiscountBase = subtotal;
+    if (appointmentDiscount) {
+      const isServiceScoped = Boolean(
+        appointmentDiscount.service_key_filter || appointmentDiscount.service_category_filter
+      );
+      const matchingLines = isServiceScoped
+        ? appointmentServiceLines.filter((line) => (
+          (!appointmentDiscount.service_key_filter || appointmentDiscount.service_key_filter === line.serviceKey)
+          && (!appointmentDiscount.service_category_filter || appointmentDiscount.service_category_filter === line.serviceCategory)
+        ))
+        : appointmentServiceLines;
+      const eligibilityContext = matchingLines[0] || {};
+      appointmentDiscountBase = isServiceScoped
+        ? matchingLines.reduce((sum, line) => sum + line.amount, 0)
+        : subtotal;
+      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscount, customer, {
+        subtotal: appointmentDiscountBase,
+        serviceKey: eligibilityContext.serviceKey || null,
+        serviceCategory: eligibilityContext.serviceCategory || null,
+      });
+      if (failures.length) {
+        throw httpError(400, `${appointmentDiscount.name} is not eligible: ${failures.join(', ')}`);
+      }
+    }
     const resolvedAppointmentDiscount = appointmentDiscount
-      ? calculateDiscountDollars(appointmentDiscount, subtotal, discountAmount)
+      ? calculateDiscountDollars(appointmentDiscount, appointmentDiscountBase, discountAmount)
       : null;
     finalPrice = Math.max(0, Math.round((subtotal - (resolvedAppointmentDiscount?.dollars || 0)) * 100) / 100);
     return {
       finalPrice,
       primaryBase,
       primaryNet,
+      primaryServiceKey: serviceRecord?.service_key || null,
+      primaryServiceCategory: serviceRecord?.category || null,
       primaryDiscount,
       addonLines,
       appointmentDiscount: appointmentDiscount ? {
@@ -896,6 +984,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         discountType: appointmentDiscount.discount_type,
         discountAmount: resolvedAppointmentDiscount.amount,
         discountDollars: resolvedAppointmentDiscount.dollars,
+        serviceKeyFilter: appointmentDiscount.service_key_filter || null,
+        serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
       } : null,
     };
   }
@@ -904,6 +994,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     finalPrice,
     primaryBase,
     primaryNet,
+    primaryServiceKey: serviceRecord?.service_key || null,
+    primaryServiceCategory: serviceRecord?.category || null,
     primaryDiscount,
     addonLines,
     appointmentDiscount: null,
@@ -920,6 +1012,8 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
       estimated_price: addon.price != null ? addon.price : null,
     };
     if (addonCols.base_price && addon.base != null) addonData.base_price = addon.base;
+    if (addonCols.service_key_snapshot) addonData.service_key_snapshot = addon.serviceKey || addon.service_key_snapshot || null;
+    if (addonCols.service_category_snapshot) addonData.service_category_snapshot = addon.serviceCategory || addon.service_category_snapshot || null;
     if (addonCols.estimated_duration_minutes && addon.estimatedDuration != null && addon.estimatedDuration !== '' && !isNaN(parseInt(addon.estimatedDuration, 10))) {
       addonData.estimated_duration_minutes = parseInt(addon.estimatedDuration, 10);
     }
@@ -982,19 +1076,32 @@ function calculateAppointmentDiscountDollars(discount, subtotal) {
 }
 
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
+  const addons = Array.isArray(addonLines) ? addonLines : [];
   const subtotal = (pricing.primaryNet || 0)
-    + (Array.isArray(addonLines) ? addonLines : []).reduce((sum, line) => sum + (line.price || 0), 0);
+    + addons.reduce((sum, line) => sum + (line.price || 0), 0);
   if (!(subtotal > 0)) {
     return { price: null, appointmentDiscountDollars: null };
   }
-  const appointmentDiscountDollars = calculateAppointmentDiscountDollars(pricing.appointmentDiscount, subtotal);
+  const discount = pricing.appointmentDiscount;
+  const isServiceScoped = Boolean(discount?.serviceKeyFilter || discount?.serviceCategoryFilter);
+  const matchesScope = (serviceKey, serviceCategory) => (
+    (!discount?.serviceKeyFilter || discount.serviceKeyFilter === serviceKey)
+    && (!discount?.serviceCategoryFilter || discount.serviceCategoryFilter === serviceCategory)
+  );
+  const discountBase = isServiceScoped
+    ? (matchesScope(pricing.primaryServiceKey, pricing.primaryServiceCategory) ? (pricing.primaryNet || 0) : 0)
+      + addons.reduce((sum, line) => (
+        matchesScope(line.serviceKey, line.serviceCategory) ? sum + (line.price || 0) : sum
+      ), 0)
+    : subtotal;
+  const appointmentDiscountDollars = calculateAppointmentDiscountDollars(discount, discountBase);
   return {
     price: Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100),
     appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
   };
 }
 
-function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows) {
+function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope = null) {
   const addons = Array.isArray(addonRows) ? addonRows : [];
   const addonNetTotal = addons.reduce((sum, addon) => {
     const n = Number(addon.estimated_price);
@@ -1016,19 +1123,36 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows) {
       : 0;
   }
   const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
+  let discountBase = subtotal;
+  if (discountScope?.isScoped) {
+    const servicesById = discountScope.servicesById || new Map();
+    const matchesScope = (serviceId) => {
+      const service = servicesById.get(serviceId) || {};
+      return (!discountScope.serviceKeyFilter || discountScope.serviceKeyFilter === service.service_key)
+        && (!discountScope.serviceCategoryFilter || discountScope.serviceCategoryFilter === service.category);
+    };
+    discountBase = matchesScope(parent?.service_id) ? primaryNet : 0;
+    discountBase += addons.reduce((sum, addon) => {
+      const amount = Number(addon.estimated_price);
+      return matchesScope(addon.service_id) && Number.isFinite(amount) && amount > 0
+        ? sum + amount
+        : sum;
+    }, 0);
+    discountBase = Math.round(discountBase * 100) / 100;
+  }
   const appointmentDiscountDollars = calculateAppointmentDiscountDollars({
     discountType: parent?.discount_type,
     discountAmount: parent?.discount_amount,
-  }, subtotal);
+  }, discountBase);
   return {
     price: subtotal > 0 ? Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100) : null,
     appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
   };
 }
 
-function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAddonRows) {
+function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAddonRows, discountScope = null) {
   if (!target || !cols) return;
-  const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows);
+  const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope);
   if (cols.estimated_price && financials.price != null) target.estimated_price = financials.price;
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = financials.appointmentDiscountDollars;
   // Re-service callbacks must stay flagged on every cloned visit (ongoing
@@ -1038,6 +1162,33 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   // billing a free callback — and drop it from callback reporting — once the
   // seeded visits are exhausted.
   if (cols.is_callback && parent?.is_callback) target.is_callback = true;
+}
+
+async function loadStoredDiscountScope(_database, parent, addonRows = []) {
+  const serviceKeyFilter = parent?.discount_service_key_filter || null;
+  const serviceCategoryFilter = parent?.discount_service_category_filter || null;
+  if (!serviceKeyFilter && !serviceCategoryFilter) return null;
+
+  const lines = [parent, ...(Array.isArray(addonRows) ? addonRows : [])];
+  const servicesById = new Map();
+  for (const line of lines) {
+    if (!line?.service_id) continue;
+    if ((serviceKeyFilter && !line.service_key_snapshot)
+      || (serviceCategoryFilter && !line.service_category_snapshot)) {
+      throw new Error('Cannot replay a scoped recurring discount because a service identity snapshot is missing');
+    }
+    servicesById.set(line.service_id, {
+      id: line.service_id,
+      service_key: line.service_key_snapshot || null,
+      category: line.service_category_snapshot || null,
+    });
+  }
+  return {
+    isScoped: true,
+    serviceKeyFilter,
+    serviceCategoryFilter,
+    servicesById,
+  };
 }
 
 function formatServiceDisplay(primaryType, addons = []) {
@@ -1188,10 +1339,50 @@ const ZONE_LABELS = {
   sarasota: 'Sarasota', venice_north_port: 'Venice/N.Port', ellenton: 'Ellenton',
 };
 
+// Compact, client-safe summary of an attached invoice's line items for the
+// schedule payloads. An invoice attached to a scheduled service is what the
+// visit actually collects — completion billing and Charge-now both reuse it
+// as-is — so the sheets need its breakdown to explain a first visit whose
+// accept-minted invoice carries the WaveGuard setup fee on top of the
+// per-application price. Amounts fall back to quantity * unit_price when a
+// line has no amount (InvoiceService.create computes subtotals that way too).
+function compactCheckoutInvoiceLines(rawLines) {
+  let lines = rawLines;
+  if (typeof lines === 'string') {
+    try { lines = JSON.parse(lines); } catch { return []; }
+  }
+  if (!Array.isArray(lines)) return [];
+  return lines
+    .map((li) => {
+      const quantity = Number(li?.quantity) || 1;
+      const unitPrice = Number(li?.unit_price) || 0;
+      const amount = li?.amount != null && Number.isFinite(Number(li.amount))
+        ? Number(li.amount)
+        : Math.round(quantity * unitPrice * 100) / 100;
+      return {
+        description: String(li?.description || '').slice(0, 160),
+        amount,
+      };
+    })
+    .filter((li) => li.description && Number.isFinite(li.amount))
+    .slice(0, 8);
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
     const date = req.query.date || etDateString();
+
+    // Server-resolved Bill-To for the completion banner: per-job payer, else
+    // the customer default (unless the visit is pinned to self-pay), and only
+    // when the payer is ACTIVE — the same resolution resolveForInvoice applies.
+    // Resolved HERE because this day view is the tech-visible payload
+    // (requireTechOrAdmin) while /admin/payers/* is admin-only, so the client
+    // can't look the payer up itself in the field. Column-guarded (cached).
+    const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
+    const effectiveBillToSql = hasSelfPayCol
+      ? 'COALESCE(scheduled_services.payer_id, CASE WHEN COALESCE(scheduled_services.self_pay_override, false) THEN NULL ELSE customers.payer_id END)'
+      : 'COALESCE(scheduled_services.payer_id, customers.payer_id)';
 
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })
@@ -1204,10 +1395,24 @@ router.get('/', async (req, res, next) => {
       .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
       .select(
         'scheduled_services.*',
+        'bill_to_payer.id as billed_to_payer_id',
+        'bill_to_payer.display_name as billed_to_payer_name',
+        'bill_to_payer.company_name as billed_to_payer_company',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        // Visit-specific stamped address (call bookings for a secondary/
+        // rental property) wins over the customer's primary mirror — same
+        // field names, so the schedule/tech-home consumers keep working.
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        // Divergent stamps keep THEIR unit line (condo/duplex bookings need
+        // their door); non-divergent stamps fall back to the primary's unit
+        // (codex round-4/round-5 P2).
+        db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.property_sqft', 'customers.lot_sqft', 'customers.lead_score',
         'customers.service_preferences',
@@ -1243,8 +1448,25 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNot('status', 'void')
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'token');
+          .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
       } catch { /* scheduled_service_id may be absent before migration */ }
+      // Whether the visit's recorded prepayment has ALREADY been consumed by
+      // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
+      // and books a scheduled_service_prepaid payment). The sheets need this
+      // to avoid netting the same prepayment twice in the charge preview.
+      // Same detection the reuse path uses; gated to the rare prepaid+invoice
+      // overlap so the hot day-view stays cheap.
+      let checkoutInvoicePrepaidApplied = false;
+      if (checkoutInvoice && s.prepaid_amount != null && Number(s.prepaid_amount) > 0) {
+        try {
+          checkoutInvoicePrepaidApplied = !!(await db('payments')
+            .where({ customer_id: s.customer_id, status: 'paid' })
+            .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [checkoutInvoice.id])
+            .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [s.id])
+            .first('id'));
+        } catch { /* fail toward not-applied — preview still nets the prepaid */ }
+      }
 
       const alerts = [];
       if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
@@ -1296,9 +1518,26 @@ router.get('/', async (req, res, next) => {
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
+        selfPayOverride: s.self_pay_override === true,
+        // Resolved ACTIVE Bill-To (or null = self-pay) — see the join above.
+        billedToPayer: s.billed_to_payer_id
+          ? {
+            id: s.billed_to_payer_id,
+            name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
+          }
+          : null,
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+        checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
+        checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
+        checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+        checkoutInvoicePrepaidApplied,
+        // The INVOICE's own Bill-To: a payer-billed invoice survives the
+        // visit's payer being cleared/deactivated, and the Charge-now reuse
+        // path refuses it — the sheets must not present it as collectible
+        // even when the visit itself resolves self-pay.
+        checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
         completionProfile: projectCompletionContext.completionProfile || null,
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
@@ -1307,7 +1546,7 @@ router.get('/', async (req, res, next) => {
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
-        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,
@@ -1417,6 +1656,17 @@ router.get('/week', async (req, res, next) => {
     const startDate = req.query.start || etDateString();
     const start = new Date(startDate + 'T12:00:00');
     const days = [];
+    // Column-guarded (cached) — an unguarded explicit select would 500 this
+    // whole endpoint on a pre-migration database.
+    const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
+    // Server-resolved Bill-To, same resolution as the day view (per-job payer,
+    // else the customer default unless pinned self-pay, ACTIVE payers only).
+    // The week payload needs it for the same reason: the checkout sheet must
+    // never present a payer-billed visit's attached invoice as collectible,
+    // and a default-payer visit carries no scheduled_services.payer_id.
+    const effectiveBillToSql = hasSelfPayCol
+      ? 'COALESCE(scheduled_services.payer_id, CASE WHEN COALESCE(scheduled_services.self_pay_override, false) THEN NULL ELSE customers.payer_id END)'
+      : 'COALESCE(scheduled_services.payer_id, customers.payer_id)';
 
     for (let i = 0; i < 7; i++) {
       const d = new Date(start);
@@ -1429,7 +1679,11 @@ router.get('/week', async (req, res, next) => {
         .whereNotIn('status', ['cancelled', 'rescheduled'])
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
         .select('scheduled_services.id', 'scheduled_services.customer_id',
+          'bill_to_payer.id as billed_to_payer_id',
+          'bill_to_payer.display_name as billed_to_payer_name',
+          'bill_to_payer.company_name as billed_to_payer_company',
           'scheduled_services.service_id',
           'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
@@ -1440,6 +1694,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
           'scheduled_services.payer_id', 'scheduled_services.po_number',
+          ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -1475,8 +1730,21 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNot('status', 'void')
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'token');
+            .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
+        // Mirrors the day-view enrichment: has the visit's prepayment already
+        // been consumed by this invoice? Gated to the prepaid+invoice overlap.
+        let checkoutInvoicePrepaidApplied = false;
+        if (checkoutInvoice && s.prepaid_amount != null && Number(s.prepaid_amount) > 0) {
+          try {
+            checkoutInvoicePrepaidApplied = !!(await db('payments')
+              .where({ customer_id: s.customer_id, status: 'paid' })
+              .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+              .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [checkoutInvoice.id])
+              .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [s.id])
+              .first('id'));
+          } catch { /* fail toward not-applied — preview still nets the prepaid */ }
+        }
         const autopayActive = await customerOnAutopay({
           id: s.customer_id,
           autopay_enabled: s.autopay_enabled,
@@ -1512,9 +1780,24 @@ router.get('/week', async (req, res, next) => {
           createInvoiceOnComplete: !!s.create_invoice_on_complete,
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
+        selfPayOverride: s.self_pay_override === true,
+          // Resolved ACTIVE Bill-To (or null = self-pay) — same shape as the
+          // day payload so the sheets' payer guards work from either view.
+          billedToPayer: s.billed_to_payer_id
+            ? {
+              id: s.billed_to_payer_id,
+              name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
+            }
+            : null,
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+          checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
+          checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
+          checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+          checkoutInvoicePrepaidApplied,
+          // Same invoice-level Bill-To flag as the day payload (see there).
+          checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
           completionProfile: projectCompletionContext.completionProfile || null,
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
@@ -1569,8 +1852,11 @@ router.get('/month', async (req, res, next) => {
     const gridStart = new Date(firstDay);
     gridStart.setDate(gridStart.getDate() - firstDay.getDay()); // Back to Sunday
     const gridEnd = new Date(lastDay);
-    const remaining = 6 - lastDay.getDay();
-    if (remaining < 6) gridEnd.setDate(gridEnd.getDate() + remaining); // Forward to Saturday
+    // Always extend to the rendered Saturday: the weeks builder below paints
+    // full 7-day rows past gridEnd, so a month ending on Sunday (remaining=6)
+    // used to render its trailing next-month cells with no services queried —
+    // six visible days that always showed empty (e.g. Jun 1–6 on May 2026).
+    gridEnd.setDate(gridEnd.getDate() + (6 - lastDay.getDay())); // Forward to Saturday
 
     // Fetch all services for the full grid range
     const services = await db('scheduled_services')
@@ -2117,6 +2403,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
+      if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
+      if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
       if (cols.estimated_price && finalPrice != null) insertData.estimated_price = finalPrice;
       if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
@@ -2141,6 +2429,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.discount_type && appointmentDiscountType) insertData.discount_type = appointmentDiscountType;
       if (cols.discount_amount && appointmentDiscountAmount != null) insertData.discount_amount = Number(appointmentDiscountAmount);
       if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
+      if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+      if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
       if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
       if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -2193,6 +2483,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
+        if (cols.service_id && serviceId) childData.service_id = serviceId;
+        if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || null;
+        if (cols.service_category_snapshot) childData.service_category_snapshot = pricing.primaryServiceCategory || null;
         if (cols.recurring_nth && rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) childData.recurring_nth = parseInt(rOpts.nth);
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
@@ -2215,6 +2508,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.discount_type && appointmentDiscountType) childData.discount_type = appointmentDiscountType;
         if (cols.discount_amount && appointmentDiscountAmount != null) childData.discount_amount = Number(appointmentDiscountAmount);
         if (pricing.appointmentDiscount && cols.discount_dollars) childData.discount_dollars = childFinancials.appointmentDiscountDollars;
+        if (pricing.appointmentDiscount && cols.discount_service_key_filter) childData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+        if (pricing.appointmentDiscount && cols.discount_service_category_filter) childData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
         if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) childData.line_discount_id = pricing.primaryDiscount.discountId;
         if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -2259,6 +2554,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
             notes: combinedNotes,
           };
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
+          if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
+          if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
@@ -2278,6 +2575,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.discount_type && appointmentDiscountType) boosterData.discount_type = appointmentDiscountType;
           if (cols.discount_amount && appointmentDiscountAmount != null) boosterData.discount_amount = Number(appointmentDiscountAmount);
           if (pricing.appointmentDiscount && cols.discount_dollars) boosterData.discount_dollars = boosterFinancials.appointmentDiscountDollars;
+          if (pricing.appointmentDiscount && cols.discount_service_key_filter) boosterData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+          if (pricing.appointmentDiscount && cols.discount_service_category_filter) boosterData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
           if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) boosterData.line_discount_id = pricing.primaryDiscount.discountId;
           if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -2651,6 +2950,9 @@ router.get('/list', async (req, res, next) => {
     const page = Math.max(1, parseInt(pageParam) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(limitParam) || 25));
     const offset = (page - 1) * limit;
+    // Column-guarded (cached) — an unguarded explicit select would 500 this
+    // whole endpoint on a pre-migration database.
+    const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
 
     let q = db('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -2720,7 +3022,15 @@ router.get('/list', async (req, res, next) => {
         // blank payerId/poNumber and silently clears an existing per-job payer/PO
         // (and trips the admin-only actual-change 403 for techs).
         'scheduled_services.payer_id', 'scheduled_services.po_number',
-        'customers.first_name', 'customers.last_name', 'customers.address_line1 as address', 'customers.city', 'customers.zip',
+        ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
+        'customers.first_name', 'customers.last_name',
+        // Stamped visit-specific address wins over the primary mirror here
+        // too — this list is a display surface for the booked property. The
+        // unit line rides along (condo/duplex visits are indistinguishable
+        // by street alone — codex round-6 P2).
+        db.raw(`TRIM(CONCAT(COALESCE(scheduled_services.service_address_line1, customers.address_line1), ' ', COALESCE(${stampedLine2Sql('scheduled_services', 'customers')}, ''))) as address`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'technicians.name as tech_name'
       )
       .orderBy('scheduled_services.scheduled_date')
@@ -2759,6 +3069,7 @@ router.get('/list', async (req, res, next) => {
       sourceEstimateId: s.source_estimate_id || null,
       payerId: s.payer_id || null,
       poNumber: s.po_number || null,
+      selfPayOverride: s.self_pay_override === true,
     }));
 
     res.json({
@@ -2872,6 +3183,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'cancel': {
             const svc = await db('scheduled_services').where({ id }).first();
             if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
+            // Terminal rows are one-way (#2717 server hardening): a bulk
+            // selection built from a stale board must not flip a finished
+            // visit to cancelled (and void its paid invoice downstream).
+            // Already-cancelled rows flow through — cancelled→cancelled
+            // passes the atomic guard and reruns the idempotent
+            // cancellation handling, matching the retry semantics of the
+            // status routes. Other terminal rows land in failed[] with
+            // the reason.
+            if (['completed', 'skipped', 'no_show'].includes(String(svc.status))) {
+              throw Object.assign(new Error(`already ${svc.status}`), { isValidation: true });
+            }
             const fromStatus = svc.status;
             await db.transaction(async (trx) => {
               await transitionJobStatus({
@@ -3044,10 +3366,23 @@ router.put('/:id/update-details', async (req, res, next) => {
       addons,
       serviceId,
       createInvoice,
-      payerId, poNumber,
+      payerId, poNumber, selfPayOverride,
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
+    let appointmentDiscountChanged = false;
+    let appointmentDiscountCols = null;
+    if (discountType !== undefined || discountAmount !== undefined) {
+      appointmentDiscountCols = await db('scheduled_services').columnInfo();
+      const existingDiscount = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .first('discount_type', 'discount_amount');
+      appointmentDiscountChanged = appointmentDiscountInputChanged(
+        existingDiscount,
+        discountType,
+        discountAmount
+      );
+    }
     // When the Edit appointment "Services and items" section sends an explicit
     // `addons` array, we treat it as the full desired set of additional service
     // lines for this appointment (replace strategy) and recompute the stored
@@ -3073,26 +3408,34 @@ router.put('/:id/update-details', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         let incomingIsReService = null; // null = unknown → leave flag as-is
         let resolvedServiceId; // undefined = don't touch service_id
+        let resolvedServiceKey;
+        let resolvedServiceCategory;
 
         if (serviceId !== undefined) {
           const svcRow = serviceId
-            ? await db('services').where({ id: serviceId }).first('service_key', 'name').catch(() => null)
+            ? await db('services').where({ id: serviceId }).first('service_key', 'category', 'name').catch(() => null)
             : null;
           incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
           resolvedServiceId = serviceId || null;
+          resolvedServiceKey = svcRow?.service_key || null;
+          resolvedServiceCategory = svcRow?.category || null;
         } else if (isReService({ serviceType })) {
           // Label-only switch INTO a re-service (dispatch card). Resolve the
           // catalog row so completion-profile resolution (keyed off service_id)
           // is correct; lawn vs pest is inferred from the label.
           incomingIsReService = true;
           const reKey = /lawn|turf/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
-          const reSvc = await db('services').where({ service_key: reKey }).first('id').catch(() => null);
+          const reSvc = await db('services').where({ service_key: reKey }).first('id', 'service_key', 'category').catch(() => null);
           resolvedServiceId = reSvc?.id || null;
+          resolvedServiceKey = reSvc?.service_key || null;
+          resolvedServiceCategory = reSvc?.category || null;
         }
 
         if (incomingIsReService !== null) {
           if (cols.is_callback) updates.is_callback = incomingIsReService;
           if (cols.service_id && resolvedServiceId !== undefined) updates.service_id = resolvedServiceId;
+          if (cols.service_key_snapshot && resolvedServiceId !== undefined) updates.service_key_snapshot = resolvedServiceKey || null;
+          if (cols.service_category_snapshot && resolvedServiceId !== undefined) updates.service_category_snapshot = resolvedServiceCategory || null;
         }
 
         if (incomingIsReService === true) {
@@ -3182,8 +3525,9 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
         if (cols.skip_weekends && skipWeekends !== undefined) updates.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && weekendShift !== undefined) updates.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
-        if (cols.discount_type) updates.discount_type = discountType || null;
-        if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (cols.discount_type && discountType !== undefined) updates.discount_type = discountType || null;
+        if (cols.discount_amount && discountAmount !== undefined) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
         if (cols.create_invoice_on_complete && createInvoice !== undefined) updates.create_invoice_on_complete = !!createInvoice;
       } catch {}
     }
@@ -3195,32 +3539,46 @@ router.put('/:id/update-details', async (req, res, next) => {
     }
     // Per-job third-party Bill-To override + PO. Null clears the override so
     // the job falls back to the customer's default payer (or self-pay).
-    // CHANGING the payer/PO is admin-only (it controls where the invoice is
-    // routed and who pays). The edit modal always echoes these fields on every
-    // save, so a tech editing something unrelated must NOT be rejected — only
-    // an actual change vs the stored values is admin-gated.
-    if (payerId !== undefined || poNumber !== undefined) {
+    // selfPayOverride=true pins the visit to "customer pays (self)" so the
+    // account-default payer is NOT inherited; a concrete payerId always wins
+    // over the flag (mutually exclusive on write, so the flag can never mask
+    // an explicitly-routed Bill-To).
+    // CHANGING the payer/PO/self-pay pin is admin-only (it controls where the
+    // invoice is routed and who pays). The edit modal always echoes these
+    // fields on every save, so a tech editing something unrelated must NOT be
+    // rejected — only an actual change vs the stored values is admin-gated.
+    if (payerId !== undefined || poNumber !== undefined || selfPayOverride !== undefined) {
       try {
         const cols = await db('scheduled_services').columnInfo();
         const hasPayerCol = !!cols.payer_id;
         const hasPoCol = !!cols.po_number;
-        if (hasPayerCol || hasPoCol) {
+        const hasSelfPayCol = !!cols.self_pay_override;
+        if (hasPayerCol || hasPoCol || hasSelfPayCol) {
+          const existingCols = ['payer_id', 'po_number'].filter((c) => cols[c]);
+          if (hasSelfPayCol) existingCols.push('self_pay_override');
           const existing = await db('scheduled_services')
             .where({ id: req.params.id })
-            .first('payer_id', 'po_number');
+            .first(existingCols);
           const nextPayerId = payerId === undefined
             ? (existing?.payer_id ?? null)
             : ((payerId === '' || payerId == null) ? null : (parseInt(payerId, 10) || null));
           const nextPo = poNumber === undefined
             ? (existing?.po_number ?? null)
             : (poNumber ? String(poNumber).trim().slice(0, 64) : null);
+          let nextSelfPay = selfPayOverride === undefined
+            ? (existing?.self_pay_override === true)
+            : (selfPayOverride === true || selfPayOverride === 'true');
+          // Mutual exclusion: a concrete per-job payer beats the self-pay pin.
+          if (nextPayerId) nextSelfPay = false;
           const payerChanged = hasPayerCol && (existing?.payer_id ?? null) !== nextPayerId;
           const poChanged = hasPoCol && (existing?.po_number ?? null) !== nextPo;
-          if ((payerChanged || poChanged) && req.techRole !== 'admin') {
+          const selfPayChanged = hasSelfPayCol && (existing?.self_pay_override === true) !== nextSelfPay;
+          if ((payerChanged || poChanged || selfPayChanged) && req.techRole !== 'admin') {
             return res.status(403).json({ error: 'Admin access required to change the billing payer or PO' });
           }
           if (payerChanged) updates.payer_id = nextPayerId;
           if (poChanged) updates.po_number = nextPo;
+          if (selfPayChanged) updates.self_pay_override = nextSelfPay;
         }
       } catch {}
     }
@@ -3229,6 +3587,16 @@ router.put('/:id/update-details', async (req, res, next) => {
     // primary line + add-on lines, then replace add-on rows in the transaction.
     if (Array.isArray(addons)) {
       const cols = await db('scheduled_services').columnInfo();
+      const addonServiceIds = Array.from(new Set(addons
+        .map((addon) => addon?.serviceId)
+        .filter(Boolean)));
+      const addonServices = addonServiceIds.length > 0
+        ? await db('services').whereIn('id', addonServiceIds).select('id', 'service_key', 'category')
+        : [];
+      const addonServiceById = new Map(addonServices.map((service) => [service.id, service]));
+      if (addonServices.length !== addonServiceIds.length) {
+        return res.status(400).json({ error: 'One or more add-on services no longer exist' });
+      }
       const toMoney = (v) => {
         if (v == null || v === '') return null;
         const n = Number(v);
@@ -3238,6 +3606,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       for (const a of addons) {
         const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
         if (!serviceName) continue;
+        const catalogService = a.serviceId ? addonServiceById.get(a.serviceId) : null;
         const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
@@ -3256,6 +3625,8 @@ router.put('/:id/update-details', async (req, res, next) => {
         }
         normalizedAddons.push({
           serviceId: a.serviceId || null,
+          serviceKey: catalogService?.service_key || null,
+          serviceCategory: catalogService?.category || null,
           serviceName: serviceName.slice(0, 200),
           base: gross,
           price: net,
@@ -3279,16 +3650,25 @@ router.put('/:id/update-details', async (req, res, next) => {
           primaryGross = Math.max(0, Math.round((total - addonGross) * 100) / 100);
         }
       }
-      const addonNetTotal = normalizedAddons.reduce((s, l) => s + (l.price || 0), 0);
       const hasAnyPrice = primaryGross != null || normalizedAddons.some((l) => l.price != null);
       if (hasAnyPrice) {
         // This editor neither displays nor edits the appointment-level discount
         // or the primary line discount, and it runs on every save once an
         // appointment has add-ons. Preserve both so an unrelated edit can't
         // silently drop a discount and overcharge at invoicing.
+        const existingFields = [
+          'service_id',
+          'discount_type',
+          'discount_amount',
+          'line_discount_dollars',
+        ];
+        if (cols.service_key_snapshot) existingFields.push('service_key_snapshot');
+        if (cols.service_category_snapshot) existingFields.push('service_category_snapshot');
+        if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
+        if (cols.discount_service_category_filter) existingFields.push('discount_service_category_filter');
         const existing = await db('scheduled_services')
           .where({ id: req.params.id })
-          .first('discount_type', 'discount_amount', 'line_discount_dollars')
+          .first(...existingFields)
           .catch(() => null);
 
         // Appointment-level discount: the editor only sends discountType/
@@ -3314,20 +3694,31 @@ router.put('/:id/update-details', async (req, res, next) => {
           ? Math.max(0, Math.round((primaryGross - primaryLineDiscountDollars) * 100) / 100)
           : 0;
 
-        const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
-        const finalPrice = applyDiscount(subtotal, effDiscountType, effDiscountAmount);
-        const discountDollars = Math.max(0, Math.round((subtotal - finalPrice) * 100) / 100);
-        if (cols.estimated_price) updates.estimated_price = finalPrice;
+        const financials = calculateVisitFinancialsForAddons({
+          primaryNet,
+          primaryServiceKey: updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
+          primaryServiceCategory: updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
+          appointmentDiscount: effDiscountType ? {
+            discountType: effDiscountType,
+            discountAmount: effDiscountAmount,
+            serviceKeyFilter: appointmentDiscountChanged
+              ? null
+              : (existing?.discount_service_key_filter || null),
+            serviceCategoryFilter: appointmentDiscountChanged
+              ? null
+              : (existing?.discount_service_category_filter || null),
+          } : null,
+        }, normalizedAddons);
+        if (cols.estimated_price) updates.estimated_price = financials.price;
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
         // Only rewrite the appointment-level discount columns when the request
         // explicitly carried a discount value; otherwise leave them as-is.
         if (discountProvided) {
-          if (cols.discount_id) updates.discount_id = null;
-          if (cols.discount_name) updates.discount_name = null;
+          if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
           if (cols.discount_type) updates.discount_type = effDiscountType;
           if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
         }
-        if (cols.discount_dollars) updates.discount_dollars = discountDollars > 0 ? discountDollars : null;
+        if (cols.discount_dollars) updates.discount_dollars = financials.appointmentDiscountDollars;
         // Leave the primary line_discount_* columns untouched — invoicing reads
         // them and this editor can't resend them.
       }
@@ -3373,8 +3764,7 @@ router.put('/:id/update-details', async (req, res, next) => {
         const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
         if (cols.primary_line_price) updates.primary_line_price = primaryGross;
-        if (cols.discount_id) updates.discount_id = null;
-        if (cols.discount_name) updates.discount_name = null;
+        clearAppointmentDiscountCatalogFields(updates, cols);
         if (cols.discount_type) updates.discount_type = discountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
         if (cols.discount_amount) {
           updates.discount_amount = (discountAmount != null && discountAmount !== '')
@@ -3396,7 +3786,11 @@ router.put('/:id/update-details', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.discount_type) updates.discount_type = discountType || null;
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
       } catch {}
+    }
+    if (appointmentDiscountChanged) {
+      clearAppointmentDiscountCatalogFields(updates, appointmentDiscountCols);
     }
     // Converting an existing priced visit to a WaveGuard re-service: the price
     // handling above may have stored the prior service's carried-over price.
@@ -3469,7 +3863,8 @@ router.put('/:id/update-details', async (req, res, next) => {
         // doesn't run when only the Bill-To changed). Without this, editing just
         // the payer/PO on a series leaves future visits routed to the old payer.
         const payerOrPoChanged = Object.prototype.hasOwnProperty.call(updates, 'payer_id')
-          || Object.prototype.hasOwnProperty.call(updates, 'po_number');
+          || Object.prototype.hasOwnProperty.call(updates, 'po_number')
+          || Object.prototype.hasOwnProperty.call(updates, 'self_pay_override');
         if (payerOrPoChanged) {
           const parentRow = await trx('scheduled_services')
             .where({ id: req.params.id })
@@ -3482,6 +3877,9 @@ router.put('/:id/update-details', async (req, res, next) => {
             }
             if (Object.prototype.hasOwnProperty.call(updates, 'po_number') && seriesCols.po_number) {
               childPayerUpdates.po_number = parentRow.po_number ?? null;
+            }
+            if (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && seriesCols.self_pay_override) {
+              childPayerUpdates.self_pay_override = updates.self_pay_override === true;
             }
             if (Object.keys(childPayerUpdates).length > 0) {
               await trx('scheduled_services')
@@ -3746,6 +4144,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               // (freshly-updated) series parent so a payer change propagates.
               if (seriesCols.payer_id) childUpdates.payer_id = parent.payer_id ?? null;
               if (seriesCols.po_number) childUpdates.po_number = parent.po_number ?? null;
+              if (seriesCols.self_pay_override) childUpdates.self_pay_override = parent.self_pay_override === true;
               await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
               if (childDateChanged) {
                 await resetAppointmentReminderForScheduleRewrite(
@@ -3829,6 +4228,7 @@ router.put('/:id/update-details', async (req, res, next) => {
           try {
             parentAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: parent.id });
           } catch (e) { /* table may not exist pre-migration — non-blocking */ }
+          const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
           // Dedupe shifted child dates — same rationale as the POST spawn:
           // skip-weekends can collapse consecutive recurrences onto the
           // same weekday.
@@ -3878,7 +4278,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
               const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr);
-              applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons);
+              applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons, storedDiscountScope);
               const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
               if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
               // Inherit the (freshly-updated) parent's third-party Bill-To so
@@ -3886,6 +4286,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               // of silently falling back to the customer default / self-pay.
               if (cols.payer_id) childData.payer_id = parent.payer_id ?? null;
               if (cols.po_number) childData.po_number = parent.po_number ?? null;
+              if (cols.self_pay_override) childData.self_pay_override = parent.self_pay_override === true;
             } catch { /* non-blocking */ }
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
             if (childRow?.id) {
@@ -4069,6 +4470,87 @@ function shouldAttemptPrepaidReceipt({ gateEnabled, emailReceipt, applyToSeries,
 // double-charge window. See services/prepaid-pi-guard.
 const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
 
+// Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
+// estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
+// of calling InvoiceService.createFromService (the only other roll-forward
+// site), so a mint here that skips the deposit credit permanently strands the
+// customer's paid deposit — accepted estimates are deliberately outside the
+// terminal-refund sweep — and the visit double-collects (deposit + full price).
+// Same discipline as createFromService: request the full unapplied balance,
+// let create() cap it against the after-tax total, consume exactly the
+// effective amount in the SAME transaction; a mismatch throws (the mint rolls
+// back), one retry re-reads the fresh balance, and a second failure falls back
+// to an UNCREDITED mint + reconcile alert — deposit machinery failures never
+// block door collection. The advisory lock serializes the two mint callers
+// (this helper's callers and Charge-now) so a double-tap can't race a visit
+// into two open invoices; the in-lock re-check returns the first request's
+// invoice to the replay.
+async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }) {
+  const InvoiceService = require('../services/invoice');
+  const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
+  const sourceEstimateId = svc.source_estimate_id || null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const withDeposit = attempt < 2 && !!sourceEstimateId;
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['schedule.invoice.mint', String(svc.id)],
+        );
+        // Replay = the double-tap window returning the FIRST request's fresh
+        // invoice. Terminal invoices (refunded/cancelled — every payment
+        // route rejects them) are not replay candidates: returning one here
+        // would resurrect a dead invoice the caller's reuse filter just
+        // skipped, instead of minting the replacement.
+        const replayed = await trx('invoices')
+          .where({ scheduled_service_id: svc.id })
+          .whereNot('status', 'void')
+          .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
+          .orderBy('created_at', 'desc')
+          .first();
+        if (replayed) return { invoice: replayed, reused: true };
+        const depositCredit = withDeposit
+          ? await pendingDepositCredit(sourceEstimateId, trx)
+          : null;
+        const created = await InvoiceService.create({
+          ...buildCreateParams(),
+          database: trx,
+          ...(depositCredit && Number(depositCredit.amount) > 0
+            ? { depositCredit: { amount: depositCredit.amount, estimateId: sourceEstimateId } }
+            : {}),
+        });
+        const effective = Number(created?.applied_deposit_credit) || 0;
+        if (effective > 0) {
+          const allocated = await consumeDepositCredit({
+            estimateId: sourceEstimateId,
+            amount: effective,
+            invoiceId: created.id,
+            trx,
+          });
+          if (Math.round(allocated * 100) !== Math.round(effective * 100)) {
+            throw new Error(`deposit allocation mismatch (applied ${effective}, allocated ${allocated})`);
+          }
+        }
+        return { invoice: created, reused: false };
+      });
+    } catch (err) {
+      lastErr = err;
+      if (!withDeposit) throw err;
+      logger.warn(`[schedule] mint deposit roll-forward failed for service ${svc.id} (attempt ${attempt + 1}): ${err.message}`);
+      if (attempt === 1) {
+        try {
+          const { triggerNotification } = require('../services/notification-triggers');
+          await triggerNotification('estimate_deposit_reconcile_needed', { estimateId: sourceEstimateId });
+        } catch (notifyErr) {
+          logger.error(`[schedule] failed to raise deposit reconcile alert: ${notifyErr.message}`);
+        }
+      }
+    }
+  }
+  throw lastErr; // defensive — the uncredited final attempt returns or rethrows above
+}
+
 // Mint-or-reuse the invoice for a scheduled visit at the visit's standard price
 // (no operator extras — that's the Charge-now sheet's job, which is why that
 // route keeps its own inline mint). Serialized on the SAME advisory lock as
@@ -4092,19 +4574,9 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     fallbackAmount: amount,
     fallbackDescription: svc.service_type || 'Service visit',
   });
-  return db.transaction(async (trx) => {
-    await trx.raw(
-      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-      ['schedule.invoice.mint', String(svc.id)],
-    );
-    const replayed = await trx('invoices')
-      .where({ scheduled_service_id: svc.id })
-      .whereNot('status', 'void')
-      .orderBy('created_at', 'desc')
-      .first();
-    if (replayed) return { invoice: replayed, reused: true };
-    const created = await InvoiceService.create({
-      database: trx,
+  return mintScheduledServiceInvoiceWithDeposit({
+    svc,
+    buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
       title: formatServiceDisplay(svc.service_type, []),
@@ -4113,8 +4585,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
       trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
       dueDate: etDateString(),
-    });
-    return { invoice: created, reused: false };
+    }),
   });
 }
 
@@ -4505,7 +4976,15 @@ router.post('/:id/invoice', async (req, res, next) => {
         if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
 
         const invoiceTotalCents = toCents(lockedInvoice.total);
-        if (!(invoiceTotalCents > 0)) {
+        // The prepayment settles the amount DUE (total − credit_applied), not
+        // the gross: capping against the gross would consume more of the
+        // prepayment than is owed, and closing only when the GROSS hits zero
+        // left a credit-applied invoice open with $0 due (e.g. $214 total,
+        // $50 account credit, $164 prepayment — fully settled, never marked
+        // paid).
+        const creditAppliedCents = toCents(lockedInvoice.credit_applied);
+        const dueCents = Math.max(0, invoiceTotalCents - creditAppliedCents);
+        if (!(dueCents > 0)) {
           return { invoice: lockedInvoice, prepaidCredit: 0 };
         }
         const existingCredit = await trx('payments')
@@ -4518,14 +4997,14 @@ router.post('/:id/invoice', async (req, res, next) => {
           return { invoice: lockedInvoice, prepaidCredit: 0 };
         }
 
-        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
+        const creditCents = Math.min(prepaidCents, dueCents);
         const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
         const prepaidCredit = centsToDollars(creditCents);
         const remainingTotal = centsToDollars(remainingCents);
         const stamp = etDateString();
         const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
         const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
-        const paidByPrepayment = remainingCents <= 0;
+        const paidByPrepayment = dueCents - creditCents <= 0;
         const [updatedInvoice] = await trx('invoices')
           .where({ id: lockedInvoice.id })
           .update({
@@ -4564,10 +5043,15 @@ router.post('/:id/invoice', async (req, res, next) => {
     };
 
     // Reuse the existing invoice for this visit if one already exists and isn't
-    // void — avoids dupes if the tech taps "Charge now" twice.
+    // void — avoids dupes if the tech taps "Charge now" twice. Refunded/
+    // cancelled invoices are terminal too: every payment route rejects them,
+    // so reusing one would hand the tech an uncollectible token and block the
+    // sheet from minting the replacement it promises. Skip them so a fresh
+    // invoice mints below instead.
     let existing = await db('invoices')
       .where({ scheduled_service_id: svc.id })
       .whereNot('status', 'void')
+      .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
@@ -4584,15 +5068,22 @@ router.post('/:id/invoice', async (req, res, next) => {
       }
       const applied = await applyPrepaidCredit(existing);
       existing = applied.invoice;
-      const alreadyPaid = ['paid', 'prepaid'].includes(existing.status);
+      // Settled = nothing left to collect. A zero amount due counts too
+      // (account credit fully covers an invoice that was never marked paid)
+      // — returning total 0 with alreadyPaid false would send the parent
+      // into tender selection for a $0 charge.
+      const alreadyPaid = ['paid', 'prepaid'].includes(existing.status)
+        || invoiceAmountDue(existing) <= 0;
       return res.json({
         success: true,
         reused: true,
         invoiceId: existing.id,
         // Settled invoices have nothing left to collect — report 0 due and an
         // alreadyPaid flag so the tech checkout sheet doesn't open tender
-        // options for a covered/prepaid visit.
-        total: alreadyPaid ? 0 : Number(existing.total),
+        // options for a covered/prepaid visit. Otherwise report the amount
+        // DUE (net of credit_applied) — the gross would over-collect on
+        // cash/check tenders for a credit-applied invoice.
+        total: alreadyPaid ? 0 : invoiceAmountDue(existing),
         prepaidCredit: applied.prepaidCredit,
         token: existing.token,
         status: existing.status,
@@ -4680,29 +5171,18 @@ router.post('/:id/invoice', async (req, res, next) => {
       extraLineItems: invoiceExtraLines,
     });
 
-    // Mint inside a transaction holding an advisory xact lock keyed on the
-    // scheduled_service_id (same pattern as services/stripe.js
-    // 'stripe.pi.payment'). invoices.scheduled_service_id has no unique
+    // Mint through the shared deposit-aware helper: advisory xact lock keyed on
+    // the scheduled_service_id (invoices.scheduled_service_id has no unique
     // index, so the unlocked check above can race a double-tap into TWO open
-    // invoices — and applyPrepaidCredit dedupes per invoice id, so the
-    // prepaid credit would then apply in full to both. The lock serializes
-    // concurrent mints; the re-check inside the lock returns the first
-    // request's invoice to the replay instead of minting a second one.
-    // InvoiceService.create rides the same trx (database: trx), so the
-    // invoice row commits atomically with the lock release.
-    const minted = await db.transaction(async (trx) => {
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['schedule.invoice.mint', String(svc.id)],
-      );
-      const replayed = await trx('invoices')
-        .where({ scheduled_service_id: svc.id })
-        .whereNot('status', 'void')
-        .orderBy('created_at', 'desc')
-        .first();
-      if (replayed) return { invoice: replayed, reused: true };
-      const created = await InvoiceService.create({
-        database: trx,
+    // invoices — and applyPrepaidCredit dedupes per invoice id, so the prepaid
+    // credit would then apply in full to both; the in-lock re-check returns the
+    // first request's invoice to the replay), plus the estimate-deposit
+    // roll-forward — completion reuses this pre-minted invoice, so skipping the
+    // credit here would strand the customer's paid deposit and collect full
+    // price on top of it.
+    const minted = await mintScheduledServiceInvoiceWithDeposit({
+      svc,
+      buildCreateParams: () => ({
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
         title: formatServiceDisplay(svc.service_type, []),
@@ -4711,8 +5191,7 @@ router.post('/:id/invoice', async (req, res, next) => {
         taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
         trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
         dueDate: etDateString(),
-      });
-      return { invoice: created, reused: false };
+      }),
     });
 
     let invoice = minted.invoice;
@@ -4737,14 +5216,22 @@ router.post('/:id/invoice', async (req, res, next) => {
     } else {
       logger.info(`[schedule] Pre-completion invoice ${invoice.invoice_number} minted for service ${svc.id}: $${invoice.total}`);
     }
+    // Mirrors the reuse branch: settled or zero-due (credit-covered) means
+    // nothing to collect — never hand the parent a $0 tender flow.
+    const mintAlreadyPaid = ['paid', 'prepaid'].includes(invoice.status)
+      || invoiceAmountDue(invoice) <= 0;
     res.json({
       success: true,
       reused: minted.reused,
       invoiceId: invoice.id,
-      total: Number(invoice.total),
+      // Amount DUE (net of any auto-applied account credit) — the tender
+      // sheets collect this figure, so it must match what record-payment
+      // will actually book.
+      total: mintAlreadyPaid ? 0 : invoiceAmountDue(invoice),
       prepaidCredit: applied.prepaidCredit,
       token: invoice.token,
       status: invoice.status,
+      alreadyPaid: mintAlreadyPaid,
     });
   } catch (err) { next(err); }
 });
@@ -4812,6 +5299,23 @@ router.put('/:id/status', async (req, res, next) => {
       });
     }
 
+    // ALL terminal statuses are one-way here too (#2717 server hardening —
+    // mirror of the admin-dispatch guard): a stale board on another device
+    // must not flip a completed/cancelled/skipped visit into a different
+    // terminal state. Same-status re-sends flow through so retries rerun
+    // the idempotent post-commit effects; only a different target 409s.
+    {
+      const { evaluateTerminalTransition } = require('../services/job-status');
+      const terminal = evaluateTerminalTransition(svc.status, toStatus);
+      if (terminal?.conflict) {
+        return res.status(409).json({
+          error: `This visit is already ${terminal.status}. Refresh and try again.`,
+          code: 'already_terminal',
+          status: terminal.status,
+        });
+      }
+    }
+
     // Setting no_show belongs to the dispatch action (PUT /admin/dispatch/
     // :id/status), which runs the source/window guards and the no-show side
     // effects (customer SMS, tech-status clear, invoice void, missed-
@@ -4837,6 +5341,22 @@ router.put('/:id/status', async (req, res, next) => {
         error: `This job is scheduled for ${dateOnly(svc.scheduled_date)} — it may have been rescheduled while this page was open. Refresh, or move it to today to run it early.`,
         code: 'future_scheduled_date',
       });
+    }
+
+    // A pending outbound-callback booking must be office-CONFIRMED before any
+    // day-of transition — advancing it straight to en_route texts the customer a
+    // tracking link, bypassing the review (and its reminder-arming confirm hook).
+    // Only 'confirmed' / 'cancelled' are allowed until the office confirms it.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && svc.status === 'pending' && !svc.customer_confirmed
+        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
     }
 
     const fromStatus = svc.status;
@@ -4877,6 +5397,15 @@ router.put('/:id/status', async (req, res, next) => {
         });
       });
     } catch (err) {
+      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+        // Expected block from the shared writer's review-booking guard —
+        // conflict, not a 500 (mirrors the pre-guard above for statuses it
+        // doesn't cover, e.g. a race past it).
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -4929,6 +5458,19 @@ router.put('/:id/status', async (req, res, next) => {
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
     }
 
+    // Outbound-callback booking confirmed by the office → arm the deferred
+    // reminders, convert the originating call lead, resolve the review card.
+    // Shared hook (services/outbound-review-confirm) so the admin-dispatch
+    // status route — the other surface staff confirm from — runs the exact
+    // same side effects and the two paths can't drift.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
+        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+        await runOutboundReviewConfirmHook(db, svc, 'admin-schedule');
+      }
+    }
+
     // En-route: track-transitions flip (which fires the customer SMS
     // with track link) + in-app notification. markEnRoute is
     // internally idempotent (atomic guard on track_state='scheduled',
@@ -4957,7 +5499,12 @@ router.put('/:id/status', async (req, res, next) => {
 
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, { icon: '\u{1F697}' });
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
+          icon: '\u{1F697}',
+          preferenceKey: 'tech_en_route',
+          dedupeKey: `scheduled-service:${svc.id}:en-route`,
+          metadata: { scheduledServiceId: svc.id },
+        });
       } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
     }
 
@@ -5045,7 +5592,13 @@ router.put('/:id/status', async (req, res, next) => {
         const NotificationService = require('../services/notification-service');
         // PortalPage only honors ?tab= deep links — a '/documents' path just
         // lands on the Home tab.
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Service completed', `Your ${sanitizeServiceType(svc.service_type)} has been completed. View your report in Documents.`, { icon: '\u{1F3E0}', link: '/?tab=documents' });
+        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Service completed', `Your ${sanitizeServiceType(svc.service_type)} has been completed. View your report in Documents.`, {
+          icon: '\u{1F3E0}',
+          link: '/?tab=documents',
+          preferenceKey: 'service_completed',
+          dedupeKey: `scheduled-service:${svc.id}:completed`,
+          metadata: { scheduledServiceId: svc.id },
+        });
       } catch (e) { logger.error(`[notifications] Service completed notification failed: ${e.message}`); }
 
       // --- Post-service automation chain (all fire-and-forget, non-blocking) ---
@@ -5197,8 +5750,9 @@ router.put('/:id/status', async (req, res, next) => {
                   parentAddons = await db('scheduled_service_addons')
                     .where({ scheduled_service_id: parentId });
                 } catch { parentAddons = []; }
+                const storedDiscountScope = await loadStoredDiscountScope(db, parent, parentAddons);
                 const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
-                applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons);
+                applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
                 const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
                 // Post-insert re-check closes the remaining race: a
                 // cancellation can stop the series between the pre-insert
@@ -5332,9 +5886,15 @@ router.post('/optimize', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
-        'customers.city', 'customers.zip',
+        // Primary-home coords are only a valid fallback when the visit's
+        // stamped address doesn't DIVERGE from the primary — a divergent
+        // stamp with no coords must degrade to "no pin" (optimizer appends
+        // coordless stops), never route to the wrong house. City/zip follow
+        // the stamp so zone grouping reflects the booked property.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
@@ -5423,9 +5983,15 @@ router.post('/optimize-route', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
-        'customers.city', 'customers.zip',
+        // Primary-home coords are only a valid fallback when the visit's
+        // stamped address doesn't DIVERGE from the primary — a divergent
+        // stamp with no coords must degrade to "no pin" (optimizer appends
+        // coordless stops), never route to the wrong house. City/zip follow
+        // the stamp so zone grouping reflects the booked property.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
@@ -5535,7 +6101,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
     const est = await db('estimates')
       .where({ id: svc.source_estimate_id })
       .first(
-        'id', 'customer_id', 'token', 'estimate_data',
+        'id', 'customer_id', 'token', 'estimate_data', 'estimate_slug',
         'monthly_total', 'annual_total', 'onetime_total',
         'bill_by_invoice', 'created_at', 'status',
         'service_interest', 'waveguard_tier',
@@ -5585,6 +6151,10 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       linked: true,
       estimateId: est.id,
       estimateToken: est.token,
+      // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
+      // customer sees on the public quote page, so the provenance card can
+      // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
+      estimateSlug: est.estimate_slug || null,
       quotedTotal,
       monthlyTotal: Number(est.monthly_total || 0),
       annualTotal: Number(est.annual_total || 0),
@@ -5602,7 +6172,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
 router.post('/:id/regenerate-brief', async (req, res, next) => {
   try {
     const AppointmentTagger = require('../services/appointment-tagger');
-    await AppointmentTagger.onServiceScheduled(req.params.id);
+    await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
     res.json({ success: true, brief: svc.pre_service_brief ? JSON.parse(svc.pre_service_brief) : null });
   } catch (err) { next(err); }
@@ -5875,6 +6445,7 @@ router.post('/generate-report', async (req, res) => {
       serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
+      includeCustomerComms,
     } = req.body;
 
     const asArray = (v) => (Array.isArray(v) ? v.filter(Boolean).map((x) => String(x).trim()).filter(Boolean) : []);
@@ -6168,7 +6739,27 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
     }
 
-    const fullUserMessage = `${userMessage}${contextText}`;
+    // F2 (universal one-time services, ratified Q13): opt-in windowed comms
+    // context on the recurring report draft. Rides the SAME grounding
+    // authorization — an unauthorized caller degrades to a notes-only draft
+    // and never pulls another customer's communications.
+    let commsBlock = '';
+    if (includeCustomerComms === true && groundingCustomerId) {
+      try {
+        const { buildCompletionCommsContext } = require('../services/completion-comms-context');
+        const comms = await buildCompletionCommsContext({
+          customerId: groundingCustomerId,
+          scheduledServiceId,
+        });
+        if (comms.text) {
+          commsBlock = `\n\nRECENT CUSTOMER COMMUNICATIONS\n${comms.promptHint}\n${comms.text}`;
+        }
+      } catch (commsErr) {
+        logger.warn(`[generate-report] comms context failed: ${commsErr.message}`);
+      }
+    }
+
+    const fullUserMessage = `${userMessage}${contextText}${commsBlock}`;
     const cacheKey = crypto.createHash('sha256')
       .update(`v5|openai:${primaryModel}|anthropic:${backupModel}|${fullUserMessage}`)
       .digest('hex');
@@ -6589,6 +7180,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     try {
       parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parentId });
     } catch (e) { /* table may not exist pre-migration — non-blocking */ }
+    const storedDiscountScope = await loadStoredDiscountScope(db, parent, parentAddons);
 
     // Boosters share recurring_parent_id but have is_recurring=false;
     // exclude them so the next-date math keys off the true cadence.
@@ -6677,7 +7269,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -6736,7 +7328,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -6809,9 +7401,76 @@ router.get('/next-visit', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Blackout days (owner ask 2026-07-14) ─────────────────────────────────
+// Dates the business takes off: any date here is removed from every
+// customer-facing offer surface (enforced at the single date-enumeration
+// point in scheduling/find-time.js). Admin manual scheduling stays
+// unblocked by design. Managed from /admin/settings?tab=blackout-days.
+
+router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
+  try {
+    const rows = await db('schedule_blackout_dates')
+      .where('date', '>=', db.raw("(now() AT TIME ZONE 'America/New_York')::date - interval '30 days'"))
+      .orderBy('date', 'asc')
+      .select('id', 'date', 'reason', 'created_at');
+    res.json({
+      blackouts: rows.map((r) => ({
+        id: r.id,
+        date: typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0],
+        reason: r.reason || null,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
+  try {
+    const date = typeof req.body?.date === 'string' ? req.body.date.trim() : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 200) : null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
+    }
+    // Upsert keeps the button idempotent — re-adding a date just updates
+    // the reason instead of tripping the unique constraint.
+    const [row] = await db('schedule_blackout_dates')
+      .insert({ date, reason: reason || null })
+      .onConflict('date')
+      .merge({ reason: reason || null })
+      .returning(['id', 'date', 'reason']);
+    // Reason is free-form admin text — never log it (PII rule): a staffer
+    // may type a name/phone/address into it. Date + presence only.
+    logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
+    flushEstimateSlotCaches();
+    res.json({ success: true, blackout: { id: row.id, date, reason: row.reason || null } });
+  } catch (err) { next(err); }
+});
+
+router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const deleted = await db('schedule_blackout_dates').where({ id: req.params.id }).del();
+    if (!deleted) return res.status(404).json({ error: 'Not found' });
+    flushEstimateSlotCaches();
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// A blackout mutation changes a schedule-wide fact — flush the estimate
+// slot wrapper cache (5-min TTL) so no cached list keeps offering (or
+// hiding) the toggled date until expiry. Best-effort.
+function flushEstimateSlotCaches() {
+  try {
+    const { invalidateAllEstimates } = require('../services/estimate-slot-availability');
+    invalidateAllEstimates();
+  } catch (err) {
+    logger.warn(`[schedule] estimate slot cache flush failed: ${err.message}`);
+  }
+}
+
 router._test = {
   buildAssignedScheduleEtaQuery,
   buildTechStatusQuery,
+  compactCheckoutInvoiceLines,
   formatAssignedVehicleLocation,
   calculateAssignedScheduleEta,
   normalizeAssignmentScope,
@@ -6821,10 +7480,17 @@ router._test = {
   reportCopyRejection,
   generateReportCopyWithFallback,
   buildDeterministicReportCopy,
+  buildAppointmentPricing,
+  calculateVisitFinancialsForAddons,
+  calculateStoredVisitFinancials,
+  loadStoredDiscountScope,
+  clearAppointmentDiscountCatalogFields,
+  appointmentDiscountInputChanged,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
+  mintScheduledServiceInvoiceWithDeposit,
 };
 
 module.exports = router;

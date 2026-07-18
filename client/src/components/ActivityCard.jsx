@@ -25,6 +25,15 @@ const TREND_KEY_MAP = {
   worsening: 'increasing',
 };
 
+// serviceDate arrives as bare YYYY-MM-DD (see activity-scores-store
+// toDateOnly); noon anchoring avoids the UTC-midnight day shift.
+function formatProgressDate(value) {
+  if (!value) return null;
+  const date = new Date(`${value}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 export default function ActivityCard({ data, sectionId = 'activity' }) {
   if (!data || data.score === null || data.score === undefined) return null;
 
@@ -62,6 +71,30 @@ export default function ActivityCard({ data, sectionId = 'activity' }) {
                 ? 'Activity is about the same as the last visit.'
                 : (data.trendWord ? `Activity has ${data.trendWord}.` : null))}
           </div>
+          {/* Cumulative knockdown progress (TYPED_PROGRESS_SUMMARY, server-
+              gated): the payload carries `progress` only for knockdown-family
+              indicators whose current score improved on the recorded
+              baseline — factual numbers only, never absence/clearance claims. */}
+          {data.progress ? (
+            <div style={{
+              marginTop: 10,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              background: '#ECFDF3',
+              border: '1px solid #BBE5C8',
+              borderRadius: 999,
+              padding: '5px 12px',
+              fontSize: 14,
+              fontWeight: 600,
+              color: '#166534',
+            }}>
+              <span aria-hidden="true">▼</span>
+              Down from {data.progress.baselineScore}/5{formatProgressDate(data.progress.baselineDate)
+                ? ` at your first visit (${formatProgressDate(data.progress.baselineDate)})`
+                : ' at your first visit'}
+            </div>
+          ) : null}
         </div>
         <TrendChip trend={trendKey} delta={null} />
       </header>

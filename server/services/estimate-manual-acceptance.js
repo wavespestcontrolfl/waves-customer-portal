@@ -520,6 +520,10 @@ async function markEstimateManuallyAccepted({
           skipAutoSchedule: true,
           skipMembershipEmail: true,
           skipSetupInvoice: !annualPrepaySelected,
+          // The commercial-schedule admin notification writes through the
+          // GLOBAL pool — defer it so a rolled-back Mark Won can't page staff
+          // about an unaccepted estimate. Dispatched post-commit below.
+          deferCommercialScheduleNotification: true,
         };
         if (annualPrepaySelected) {
           // Re-run the one-time guard on the row THIS transaction claimed:
@@ -667,6 +671,23 @@ async function markEstimateManuallyAccepted({
       const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
       void sendNewRecurringWelcome(conversion.welcomeSms)
         .catch((err) => logger.warn(`[estimate-manual-acceptance] welcome SMS failed for estimate ${acceptedEstimate.id}: ${err.message}`));
+    }
+
+    // Deferred commercial-schedule admin notification (see convertOptions):
+    // fire it only now that the acceptance transaction committed.
+    if (conversion?.commercialScheduleNotification) {
+      const commercialNotify = conversion.commercialScheduleNotification;
+      try {
+        const NotificationService = require('./notification-service');
+        void NotificationService.notifyAdmin(
+          commercialNotify.type,
+          commercialNotify.title,
+          commercialNotify.body,
+          commercialNotify.options,
+        ).catch((err) => logger.warn(`[estimate-manual-acceptance] commercial-schedule admin notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] commercial-schedule admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
+      }
     }
   }
 

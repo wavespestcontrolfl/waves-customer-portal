@@ -2,7 +2,7 @@
  * Service Library Service — single source of truth for all Waves services
  */
 const db = require('../models/db');
-const { auditServiceCatalogChange } = require('./audit-log');
+const { auditServiceCatalogChange, auditServicePackageChange } = require('./audit-log');
 const { inferCloseoutDefaults } = require('./service-closeout-requirements');
 
 const SERVICE_COLS = [
@@ -218,6 +218,11 @@ function validateServicePayload(data, { partial = false } = {}) {
     throw validationError('Invalid service frequency');
   }
 
+  const integerKeys = new Set([
+    'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
+    'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
+    'min_tech_skill_level', 'required_photo_count', 'sort_order',
+  ]);
   for (const key of [
     'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     'scheduling_buffer_minutes', 'follow_up_interval_days', 'visits_per_year',
@@ -228,6 +233,9 @@ function validateServicePayload(data, { partial = false } = {}) {
     const parsed = Number(data[key]);
     if (!Number.isFinite(parsed)) throw validationError(`Invalid numeric value for ${key}`);
     if (parsed < 0) throw validationError(`${key} cannot be negative`);
+    if (integerKeys.has(key) && !Number.isInteger(parsed)) {
+      throw validationError(`${key} must be a whole number`);
+    }
   }
 }
 
@@ -250,10 +258,32 @@ function assertPricingConsistency(merged) {
   }
 }
 
+function assertOperationalConsistency(merged) {
+  const min = numOrNull(merged.min_duration_minutes);
+  const normal = numOrNull(merged.default_duration_minutes);
+  const max = numOrNull(merged.max_duration_minutes);
+  if (min != null && normal != null && min > normal) {
+    throw validationError('min_duration_minutes cannot exceed default_duration_minutes');
+  }
+  if (normal != null && max != null && normal > max) {
+    throw validationError('default_duration_minutes cannot exceed max_duration_minutes');
+  }
+  if (min != null && max != null && min > max) {
+    throw validationError('min_duration_minutes cannot exceed max_duration_minutes');
+  }
+  if (merged.requires_follow_up === true && !(numOrNull(merged.follow_up_interval_days) > 0)) {
+    throw validationError('Follow-up services require a positive follow_up_interval_days');
+  }
+}
+
 /**
  * Paginated list of services with filters
  */
 async function getServices({ category, billingType, isActive, isArchived, includeArchived = false, search, limit = 50, offset = 0 } = {}) {
+  const parsedLimit = Number(limit);
+  const parsedOffset = Number(offset);
+  const safeLimit = Number.isInteger(parsedLimit) ? Math.min(500, Math.max(1, parsedLimit)) : 50;
+  const safeOffset = Number.isInteger(parsedOffset) ? Math.max(0, parsedOffset) : 0;
   let query = db('services').select(SERVICE_COLS).orderBy('sort_order', 'asc').orderBy('name', 'asc');
 
   if (category) query = query.where('category', category);
@@ -290,11 +320,11 @@ async function getServices({ category, billingType, isActive, isArchived, includ
 
   const countQuery = query.clone().clearSelect().clearOrder().count('* as total').first();
   const [rows, countResult] = await Promise.all([
-    query.limit(limit).offset(offset),
+    query.limit(safeLimit).offset(safeOffset),
     countQuery,
   ]);
 
-  return { services: rows, total: parseInt(countResult.total, 10), limit, offset };
+  return { services: rows, total: parseInt(countResult.total, 10), limit: safeLimit, offset: safeOffset };
 }
 
 /**
@@ -370,7 +400,10 @@ async function createService(data, { audit } = {}) {
       }
       if (jsonbKeys.has(key)) {
         if (typeof val === 'string') {
-          try { val = JSON.parse(val); } catch { val = null; }
+          if (!val.trim()) val = null;
+          else {
+            try { val = JSON.parse(val); } catch { throw validationError(`${key} must be valid JSON`); }
+          }
         }
         if (val !== null && val !== undefined) {
           val = JSON.stringify(val);
@@ -386,6 +419,7 @@ async function createService(data, { audit } = {}) {
     insert.closeout_requirements_source = 'manual';
   }
   assertPricingConsistency(insert);
+  assertOperationalConsistency(insert);
 
   return db.transaction(async (trx) => {
     const [row] = await trx('services').insert(insert).returning('*');
@@ -447,7 +481,10 @@ async function updateService(id, data, { audit } = {}) {
       }
       if (jsonbKeys.has(key)) {
         if (typeof val === 'string') {
-          try { val = JSON.parse(val); } catch { val = null; }
+          if (!val.trim()) val = null;
+          else {
+            try { val = JSON.parse(val); } catch { throw validationError(`${key} must be valid JSON`); }
+          }
         }
         // Stringify for jsonb — pg otherwise serializes JS arrays as Postgres array literals
         if (val !== null && val !== undefined) {
@@ -477,6 +514,12 @@ async function updateService(id, data, { audit } = {}) {
     || ['base_price', 'price_range_min', 'price_range_max']
       .some((key) => data[key] !== undefined && numOrNull(update[key]) !== numOrNull(before[key]));
   if (pricingChanged) assertPricingConsistency({ ...before, ...update });
+  const operationalChanged = [
+    'min_duration_minutes', 'default_duration_minutes', 'max_duration_minutes',
+    'requires_follow_up', 'follow_up_interval_days',
+  ].some((key) => data[key] !== undefined
+    && JSON.stringify(update[key] ?? null) !== JSON.stringify(before[key] ?? null));
+  if (operationalChanged) assertOperationalConsistency({ ...before, ...update });
 
   let archiveReferences = null;
   if (update.is_archived === true && before.is_archived !== true) {
@@ -553,30 +596,97 @@ async function getPackages() {
 /**
  * Update a package
  */
-async function updatePackage(id, data) {
-  const { items, ...pkgData } = data;
-  pkgData.updated_at = new Date();
+async function updatePackage(id, data, { audit = {} } = {}) {
+  const { packageData, items } = validatePackagePayload(data);
+  return db.transaction(async (trx) => {
+    const before = await trx('service_packages').where({ id }).forUpdate().first();
+    if (!before) return null;
+    const beforeItems = await trx('service_package_items').where({ package_id: id }).orderBy('sort_order');
+    assertPackagePriceRange({ ...before, ...packageData });
+    const update = { ...packageData, updated_at: new Date() };
+    const [pkg] = await trx('service_packages').where({ id }).update(update).returning('*');
 
-  const [pkg] = await db('service_packages').where({ id }).update(pkgData).returning('*');
-
-  // If items were provided, replace them
-  if (Array.isArray(items)) {
-    await db('service_package_items').where({ package_id: id }).del();
-    if (items.length > 0) {
-      await db('service_package_items').insert(
-        items.map((item, idx) => ({
-          package_id: id,
-          service_id: item.service_id,
-          is_included: item.is_included !== false,
-          included_visits: item.included_visits || null,
-          addon_discount_pct: item.addon_discount_pct || null,
-          sort_order: item.sort_order ?? idx,
-        }))
-      );
+    if (items) {
+      await trx('service_package_items').where({ package_id: id }).del();
+      if (items.length > 0) {
+        await trx('service_package_items').insert(items.map((item) => ({ ...item, package_id: id })));
+      }
     }
-  }
+    const afterItems = items || beforeItems;
+    await auditServicePackageChange({
+      tech_user_id: audit.actorId || null,
+      package_id: id,
+      change_type: 'update',
+      changed_fields: [
+        ...Object.keys(packageData),
+        ...(items ? ['items'] : []),
+      ],
+      before: { ...before, items: beforeItems },
+      after: { ...pkg, items: afterItems },
+      ip_address: audit.ipAddress || null,
+      user_agent: audit.userAgent || null,
+      trx,
+    });
+    return pkg;
+  });
+}
 
-  return pkg;
+function validatePackagePayload(data = {}) {
+  const allowed = new Set([
+    'name', 'tier', 'description', 'discount_pct', 'monthly_price_min',
+    'monthly_price_max', 'is_active', 'features', 'sort_order',
+  ]);
+  const packageData = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (allowed.has(key)) packageData[key] = value;
+  }
+  if (packageData.name !== undefined) {
+    packageData.name = String(packageData.name || '').trim();
+    if (!packageData.name) throw validationError('Package name is required');
+  }
+  for (const key of ['discount_pct', 'monthly_price_min', 'monthly_price_max', 'sort_order']) {
+    if (packageData[key] === undefined || packageData[key] === null || packageData[key] === '') continue;
+    const parsed = Number(packageData[key]);
+    if (!Number.isFinite(parsed) || parsed < 0) throw validationError(`Invalid numeric value for ${key}`);
+    if (key === 'discount_pct' && parsed > 100) throw validationError('Package discount cannot exceed 100');
+    if (key === 'sort_order' && !Number.isInteger(parsed)) throw validationError('sort_order must be a whole number');
+    packageData[key] = parsed;
+  }
+  if (packageData.is_active !== undefined) packageData.is_active = normalizeBoolean(packageData.is_active, 'is_active');
+  assertPackagePriceRange(packageData);
+
+  let items;
+  if (data.items !== undefined) {
+    if (!Array.isArray(data.items)) throw validationError('Package items must be an array');
+    const seen = new Set();
+    items = data.items.map((item, idx) => {
+      const serviceId = String(item?.service_id || '');
+      if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(serviceId)) throw validationError('Each package item requires a valid service_id');
+      if (seen.has(serviceId)) throw validationError('A service can only appear once in a package');
+      seen.add(serviceId);
+      const includedVisits = item.included_visits === '' || item.included_visits == null ? null : Number(item.included_visits);
+      const discount = item.addon_discount_pct === '' || item.addon_discount_pct == null ? null : Number(item.addon_discount_pct);
+      const sortOrder = item.sort_order == null ? idx : Number(item.sort_order);
+      if (includedVisits != null && (!Number.isInteger(includedVisits) || includedVisits < 0)) throw validationError('included_visits must be a non-negative whole number');
+      if (discount != null && (!Number.isFinite(discount) || discount < 0 || discount > 100)) throw validationError('addon_discount_pct must be between 0 and 100');
+      if (!Number.isInteger(sortOrder) || sortOrder < 0) throw validationError('Package item sort_order must be a non-negative whole number');
+      return {
+        service_id: serviceId,
+        is_included: item.is_included === undefined ? true : normalizeBoolean(item.is_included, 'is_included'),
+        included_visits: includedVisits,
+        addon_discount_pct: discount,
+        sort_order: sortOrder,
+      };
+    });
+  }
+  return { packageData, items };
+}
+
+function assertPackagePriceRange(data = {}) {
+  if (data.monthly_price_min != null && data.monthly_price_max != null
+    && Number(data.monthly_price_min) > Number(data.monthly_price_max)) {
+    throw validationError('monthly_price_min cannot exceed monthly_price_max');
+  }
 }
 
 /**
@@ -621,5 +731,7 @@ module.exports = {
     normalizeServiceKey,
     validateServicePayload,
     changedFields,
+    validatePackagePayload,
+    assertPackagePriceRange,
   },
 };

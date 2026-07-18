@@ -2,6 +2,7 @@ const db = require('../models/db');
 const { getIo } = require('../sockets');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
 
 const ADMIN_ROOM = 'dispatch:admins';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -46,8 +47,12 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
       's.id as job_id',
       's.customer_id',
       's.technician_id as tech_id',
-      db.raw('COALESCE(s.lat, c.latitude) AS lat'),
-      db.raw('COALESCE(s.lng, c.longitude) AS lng'),
+      // Same stamped-address rules as the board hydration query — these
+      // payloads MERGE into board state on every assignment/status/reschedule
+      // broadcast, so a plain c.* here would overwrite the corrected rental
+      // address/pin with the primary home (codex round-7 P1).
+      db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) AS lat`),
+      db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng`),
       's.status',
       's.service_type',
       's.scheduled_date',
@@ -60,11 +65,11 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
       'c.first_name as cust_first_name',
       'c.first_name',
       'c.last_name',
-      'c.address_line1',
-      'c.address_line2',
-      'c.city',
-      'c.state',
-      'c.zip'
+      db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+      db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+      db.raw('COALESCE(s.service_address_city, c.city) as city'),
+      db.raw('COALESCE(s.service_address_state, c.state) as state'),
+      db.raw('COALESCE(s.service_address_zip, c.zip) as zip')
     );
 
   if (!row) return null;

@@ -8,18 +8,23 @@ const {
 } = require('../../constants/business');
 const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
 
-// Brand palette — mirrors client/src/styles/brand-tokens.css + theme-brand.js
-const NAVY = '#1B2C5B';      // blueDeeper — headings, header bar
-const WAVES_BLUE = '#009CDE'; // primary brand accent
-const RED = '#C8102E';        // overdue / alert
-const GREEN = '#047857';      // paid badge
-const INK = NAVY;
-const BODY = '#3F4A65';
-// Mirrors client/src/theme-customer.js CUSTOMER_SURFACE.muted (server code
-// can't import the client ES module) — was drifted gray-500 #6B7280.
-const MUTED = '#475569';
-const RULE = '#E7E2D7';
-const SOFT = '#FAF8F3';
+// Unified document tokens — print twin of the web document palette (see
+// pdf-tokens.js for provenance). Navy is the canonical customer ink
+// #04395E (owner ruling); print documents carry the same ink as the pages.
+const { PDF_COLORS, PDF_TYPE } = require('./pdf-tokens');
+const {
+  navy: NAVY, // headings, header bar
+  ink: INK,
+  body: BODY,
+  muted: MUTED,
+  blue: WAVES_BLUE, // primary brand accent
+  red: RED, // overdue / alert
+  green: GREEN, // paid badge
+  rule: RULE,
+  soft: SOFT,
+  headerSub: HEADER_SUB, // reversed-out subtitle text on the navy bar
+  white: WHITE,
+} = PDF_COLORS;
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
 
@@ -48,38 +53,38 @@ function headerBar(doc, title, statusLabel, statusColor) {
   if (logoBuf) {
     doc.image(logoBuf, 24, 10, { width: 72, height: 72 });
   } else {
-    doc.fontSize(26).font('Helvetica-Bold').fillColor('#fff').text('WAVES', 40, 22);
-    doc.fontSize(9).font('Helvetica').fillColor('#B8D4EA').text('PEST CONTROL & LAWN CARE', 40, 52);
+    doc.fontSize(PDF_TYPE.display).font('Helvetica-Bold').fillColor(WHITE).text('WAVES', 40, 22);
+    doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(HEADER_SUB).text('PEST CONTROL & LAWN CARE', 40, 52);
   }
-  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_FL_LICENSE_LINE, 108, 70);
+  doc.fontSize(PDF_TYPE.micro).font('Helvetica').fillColor(HEADER_SUB).text(WAVES_FL_LICENSE_LINE, 108, 70);
 
-  doc.fontSize(10).font('Helvetica-Bold').fillColor('#fff').text(WAVES_SUPPORT_PHONE_DISPLAY, 430, 22, { width: 142, align: 'right' });
-  doc.fontSize(8).font('Helvetica').fillColor('#B8D4EA').text(WAVES_WEBSITE_HOST, 430, 38, { width: 142, align: 'right' });
+  doc.fontSize(PDF_TYPE.body).font('Helvetica-Bold').fillColor(WHITE).text(WAVES_SUPPORT_PHONE_DISPLAY, 430, 22, { width: 142, align: 'right' });
+  doc.fontSize(PDF_TYPE.micro).font('Helvetica').fillColor(HEADER_SUB).text(WAVES_WEBSITE_HOST, 430, 38, { width: 142, align: 'right' });
   doc.text('13649 Luxe Ave #110', 430, 52, { width: 142, align: 'right' });
   doc.text('Bradenton, FL 34211', 430, 64, { width: 142, align: 'right' });
   doc.restore();
 
   doc.save();
   doc.rect(0, 92, 612, 44).fill(SOFT);
-  doc.fontSize(20).font('Helvetica').fillColor(NAVY).text(title, 40, 104);
+  doc.fontSize(PDF_TYPE.h1).font('Helvetica').fillColor(NAVY).text(title, 40, 104);
 
   if (statusLabel) {
     const badgeW = doc.widthOfString(statusLabel) + 20;
     doc.roundedRect(612 - 40 - badgeW, 105, badgeW, 22, 11).fill(statusColor);
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff')
+    doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(WHITE)
       .text(statusLabel.toUpperCase(), 612 - 40 - badgeW + 10, 111);
   }
   doc.restore();
 }
 
 function sectionLabel(doc, label, x, y) {
-  doc.fontSize(8).font('Helvetica-Bold').fillColor(MUTED)
+  doc.fontSize(PDF_TYPE.micro).font('Helvetica-Bold').fillColor(MUTED)
     .text(label.toUpperCase(), x, y, { characterSpacing: 1.2 });
   return y + 14;
 }
 
 function addressLines(doc, x, y, { line1, city, state, zip, email } = {}) {
-  doc.fontSize(10).font('Helvetica').fillColor(BODY);
+  doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY);
   if (line1) { doc.text(line1, x, y); y += 12; }
   if (city || state || zip) {
     doc.text(`${city || ''}${city ? ', ' : ''}${state || 'FL'} ${zip || ''}`.trim(), x, y);
@@ -101,7 +106,7 @@ function billBlock(doc, invoice, customer, x, y) {
   // both — with the PO — is what lets an AP department actually process it.
   if (payer) {
     y = sectionLabel(doc, 'Billed to', x, y);
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(INK)
+    doc.fontSize(PDF_TYPE.lead).font('Helvetica-Bold').fillColor(INK)
       .text(payer.company_name || payer.display_name || 'Payer', x, y);
     y += 14;
     y = addressLines(doc, x, y, {
@@ -114,7 +119,7 @@ function billBlock(doc, invoice, customer, x, y) {
 
     y += 6;
     y = sectionLabel(doc, 'Service address', x, y);
-    doc.fontSize(10).font('Helvetica-Bold').fillColor(INK)
+    doc.fontSize(PDF_TYPE.body).font('Helvetica-Bold').fillColor(INK)
       .text(customerName(customer), x, y);
     y += 13;
     y = addressLines(doc, x, y, {
@@ -127,7 +132,7 @@ function billBlock(doc, invoice, customer, x, y) {
   }
 
   y = sectionLabel(doc, 'Billed to', x, y);
-  doc.fontSize(11).font('Helvetica-Bold').fillColor(INK)
+  doc.fontSize(PDF_TYPE.lead).font('Helvetica-Bold').fillColor(INK)
     .text(customerName(customer), x, y);
   y += 14;
   y = addressLines(doc, x, y, {
@@ -163,7 +168,7 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
   if (invoice.service_type) rows.push(['Service', invoice.service_type]);
   if (invoice.po_number) rows.push(['PO number', invoice.po_number]);
 
-  doc.fontSize(10).font('Helvetica');
+  doc.fontSize(PDF_TYPE.body).font('Helvetica');
   for (const [label, value] of rows) {
     doc.fillColor(MUTED).text(label, x, y, { width: 110 });
     doc.fillColor(INK).text(String(value || '—'), x + 110, y, { width: 180 });
@@ -202,20 +207,20 @@ function annualPrepayCallout(doc, prepay, x, y, width) {
   const tagW = 132;
 
   doc.save();
-  doc.fontSize(10).font('Helvetica');
+  doc.fontSize(PDF_TYPE.body).font('Helvetica');
   const bodyH = doc.heightOfString(body, { width: textW, lineGap: 2 });
   // Extra line at the bottom for the "target dates" caption.
   const visitsH = visits.length ? 6 + visits.length * lineH + lineH : 0;
   const boxH = padY * 2 + labelGap + bodyH + visitsH;
   doc.roundedRect(x, y, width, boxH, 6).lineWidth(1).fillAndStroke(SOFT, WAVES_BLUE);
-  doc.fontSize(8).font('Helvetica-Bold').fillColor(WAVES_BLUE)
+  doc.fontSize(PDF_TYPE.micro).font('Helvetica-Bold').fillColor(WAVES_BLUE)
     .text('ANNUAL PREPAYMENT', x + padX, y + padY, { characterSpacing: 1.2 });
-  doc.fontSize(10).font('Helvetica').fillColor(BODY)
+  doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY)
     .text(body, x + padX, y + padY + labelGap, { width: textW, lineGap: 2 });
 
   if (visits.length) {
     let vy = y + padY + labelGap + bodyH + 6;
-    doc.fontSize(9);
+    doc.fontSize(PDF_TYPE.caption);
     visits.forEach((v, i) => {
       const left = `•  Visit ${i + 1} of ${visits.length} · target ${formatInvoiceDateOnly(v.date)}`;
       const right = `${v.amount != null ? `${currency(v.amount)}  ` : ''}${tag}`;
@@ -223,7 +228,7 @@ function annualPrepayCallout(doc, prepay, x, y, width) {
       doc.fillColor(MUTED).text(right, x + width - padX - tagW, vy, { width: tagW, align: 'right' });
       vy += lineH;
     });
-    doc.fontSize(8).fillColor(MUTED)
+    doc.fontSize(PDF_TYPE.micro).fillColor(MUTED)
       .text('Target dates — your actual visits follow your regular service route.', x + padX, vy, { width: textW });
   }
   doc.restore();
@@ -239,7 +244,7 @@ function lineItemsTable(doc, lineItems, x, y, width) {
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 8;
-  doc.fontSize(8).font('Helvetica-Bold').fillColor(MUTED);
+  doc.fontSize(PDF_TYPE.micro).font('Helvetica-Bold').fillColor(MUTED);
   doc.text('DESCRIPTION', x, y, { characterSpacing: 1.2 });
   doc.text('QTY', x + width - 190, y, { width: 40, align: 'right', characterSpacing: 1.2 });
   doc.text('RATE', x + width - 140, y, { width: 60, align: 'right', characterSpacing: 1.2 });
@@ -248,7 +253,7 @@ function lineItemsTable(doc, lineItems, x, y, width) {
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 6;
 
-  doc.fontSize(10).font('Helvetica').fillColor(INK);
+  doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(INK);
   for (const item of visibleLineItems) {
     const description = String(item.description || '').slice(0, 200);
     const qty = Number(item.quantity || 1);
@@ -298,7 +303,7 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const valueX = x + width - 70;
 
   const row = (label, value, color = BODY, bold = false) => {
-    doc.fontSize(10).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color);
+    doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color);
     doc.text(label, labelX, y, { width: 160, align: 'right' });
     doc.text(value, valueX, y, { width: 70, align: 'right' });
     y += 14;
@@ -319,6 +324,9 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   y += 8;
 
   if (highlightTotal) {
+    // 13pt kept as a literal (no matching token; h2=14). The TOTAL row sits in
+    // a fixed-offset block (y += 20 below) tuned for this size — snapping to h2
+    // would change rendered output beyond the intended navy-only delta.
     doc.fontSize(13).font('Helvetica-Bold').fillColor(NAVY);
     doc.text('TOTAL', labelX, y, { width: 160, align: 'right', characterSpacing: 1.2 });
     doc.text(currency(total), valueX, y, { width: 70, align: 'right' });
@@ -349,7 +357,7 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
     const stampY = y + 6;
     doc.roundedRect(x, stampY, 130, 32, 4)
       .lineWidth(1.5).strokeColor(GREEN).stroke();
-    doc.fontSize(14).font('Helvetica-Bold').fillColor(GREEN)
+    doc.fontSize(PDF_TYPE.h2).font('Helvetica-Bold').fillColor(GREEN)
       .text('PAID IN FULL', x, stampY + 9, { width: 130, align: 'center', characterSpacing: 1.5 });
     doc.restore();
     y = stampY + 40;
@@ -362,11 +370,14 @@ function footerBar(doc, tagline) {
   doc.save();
   doc.page.margins.bottom = 0;
   doc.rect(0, 742, 612, 50).fill(NAVY);
-  doc.fontSize(9).font('Helvetica-Bold').fillColor('#fff').text(
+  doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(WHITE).text(
     tagline || 'Thank you for choosing Waves',
     0, 752, { width: 612, align: 'center' },
   );
-  doc.fontSize(7).font('Helvetica').fillColor('#B8D4EA').text(
+  // 7pt kept as a literal: the footer fine-print line lives in a fixed
+  // 50px bottom bar (text at y=768, page bottom 792) and must stay one
+  // line — snapping up to micro (8) risks wrapping the long address line.
+  doc.fontSize(7).font('Helvetica').fillColor(HEADER_SUB).text(
     `Waves Pest Control, LLC · ${WAVES_ADDRESS_LINE} · ${WAVES_SUPPORT_PHONE_DISPLAY} · ${WAVES_WEBSITE_HOST}`,
     0, 768, { width: 612, align: 'center' },
   );
@@ -409,9 +420,9 @@ function generateInvoicePDF(invoice, res) {
 
   if (invoice.notes) {
     y += 10;
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(MUTED).text('NOTES', L, y, { characterSpacing: 1.2 });
+    doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(MUTED).text('NOTES', L, y, { characterSpacing: 1.2 });
     y += 12;
-    doc.fontSize(10).font('Helvetica').fillColor(BODY).text(invoice.notes, L, y, { width: W, lineGap: 3 });
+    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY).text(invoice.notes, L, y, { width: W, lineGap: 3 });
   }
 
   footerBar(doc, isPaid ? 'Paid — thank you' : isPrepaid ? 'Covered by account credit — thank you' : 'Thank you for choosing Waves');
@@ -464,7 +475,7 @@ function generateReceiptPDF(invoice, payment, res) {
   const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
   if (isCommercial) {
     y += 14;
-    doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(
+    doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(MUTED).text(
       `Keep this receipt for your records. For questions, reply to your receipt email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
       L, y, { width: W, lineGap: 3 },
     );

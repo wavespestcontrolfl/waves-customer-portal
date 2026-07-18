@@ -37,6 +37,11 @@ const SECTIONS = [
     to: "/admin/settings?tab=service-reports",
   },
   {
+    key: "blackout-days",
+    label: "Blackout Days",
+    to: "/admin/settings?tab=blackout-days",
+  },
+  {
     key: "kpi-targets",
     label: "KPI Targets",
     to: "/admin/settings?tab=kpi-targets",

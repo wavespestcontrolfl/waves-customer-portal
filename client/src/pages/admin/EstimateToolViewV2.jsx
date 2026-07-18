@@ -43,6 +43,7 @@ import {
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
+import { useNavigate } from "react-router-dom";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink, Monitor, X } from "lucide-react";
@@ -107,19 +108,19 @@ const PRE_SLAB_JOB_CONTEXT_OPTIONS = [
 const PRE_SLAB_PRODUCT_META = {
   termidor_sc: {
     warning: "Premium fipronil non-repellent pre-slab treatment. Confirm label rate and builder documentation requirements.",
-    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | contextual minimum",
+    config: "78 oz @ $174.72 | 0.8 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   taurus_sc: {
     warning: "Value fipronil non-repellent pre-slab treatment. Confirm label rate and product configuration.",
-    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | contextual minimum",
+    config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   bifen_it: {
     warning: "Bifenthrin repellent barrier. Not equivalent to non-repellent fipronil positioning. Confirm label supports pre-construction subterranean termite treatment.",
-    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | contextual minimum",
+    config: "128 oz @ $41.53 | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   talstar_p: {
     warning: "Branded bifenthrin repellent barrier. Confirm exact Talstar P label and rate before treatment.",
-    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | contextual minimum",
+    config: "128 oz @ $38.99 | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
 };
 
@@ -362,6 +363,45 @@ function estimatePreviewUrlFromSave(data) {
   return data?.viewUrl || null;
 }
 
+// The server recomputes the authoritative price on save (pricing-constant
+// changes, existing-customer combined-tier fold). A difference from the
+// client preview needs the operator's eyes: banner after a draft save,
+// blocking confirm before an edit-mode publish or a send.
+function serverRecomputeNotice(saveResponse, clientMonthly, clientOnetime) {
+  const serverMonthly = Number(saveResponse.monthlyTotal);
+  const serverOnetime = Number(saveResponse.onetimeTotal);
+  const monthlyDiffers =
+    Number.isFinite(serverMonthly) &&
+    Math.abs(serverMonthly - (clientMonthly || 0)) >= 0.5;
+  const onetimeDiffers =
+    Number.isFinite(serverOnetime) &&
+    Math.abs(serverOnetime - (clientOnetime || 0)) >= 0.5;
+  if (!(monthlyDiffers || onetimeDiffers) || saveResponse.pricingAuthority !== "SERVER") {
+    return null;
+  }
+  return {
+    serverMonthly: monthlyDiffers ? serverMonthly : null,
+    clientMonthly: monthlyDiffers ? clientMonthly || 0 : null,
+    serverOnetime: onetimeDiffers ? serverOnetime : null,
+    clientOnetime: onetimeDiffers ? clientOnetime || 0 : null,
+  };
+}
+
+function describeRecomputeNotice(notice) {
+  const parts = [];
+  if (notice.serverMonthly != null) {
+    parts.push(
+      `$${notice.serverMonthly.toFixed(2)}/mo (preview showed $${Number(notice.clientMonthly || 0).toFixed(2)}/mo)`,
+    );
+  }
+  if (notice.serverOnetime != null) {
+    parts.push(
+      `$${notice.serverOnetime.toFixed(2)} one-time (preview showed $${Number(notice.clientOnetime || 0).toFixed(2)})`,
+    );
+  }
+  return parts.join(", ");
+}
+
 // ── Error Boundary ──────────────────────────────────────────────
 class EstimateErrorBoundary extends Component {
   constructor(props) {
@@ -503,7 +543,11 @@ function buildMosquitoRecommendations(form) {
   return recommendations;
 }
 
-function validateDeliveryOptions(form, estimate) {
+// deferInvoiceTotals: the commercial-proposal handoff saves a manual-quote
+// draft whose totals are zero until the proposal line items are authored —
+// the proposal PUT recomputes the billable totals immediately after, so the
+// zero-total bill-by-invoice guard below would block that flow at the save.
+function validateDeliveryOptions(form, estimate, { deferInvoiceTotals = false } = {}) {
   const oneTimeAmount = oneTimePestChoiceAmountForPreview(estimate?.results, form)
     || Number(estimate?.oneTime?.total || 0);
   const recurringAmount = Math.max(
@@ -523,7 +567,7 @@ function validateDeliveryOptions(form, estimate) {
       return "Offer one-time option requires a one-time total on the generated estimate.";
     }
   }
-  if (form.billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0) {
+  if (form.billByInvoice && !deferInvoiceTotals && oneTimeAmount <= 0 && recurringAmount <= 0) {
     return "Bill by invoice requires a billable recurring or one-time total.";
   }
   return null;
@@ -706,6 +750,10 @@ function normalizeDensityValue(value) {
 }
 
 function lookupTermiteFootprintSqFt(data = {}) {
+  // Association aggregates with unknown stories publish footprintUnknown —
+  // deriving homeSqFt/stories here would prefill a summed-living-area
+  // "slab" the lookup explicitly refused to claim (codex P1 #2721).
+  if (data.footprintUnknown === true) return undefined;
   const explicitFootprint = firstPositiveNumber(
     data.footprint,
     data.footprintSqFt,
@@ -1840,7 +1888,12 @@ export default function EstimateToolViewV2({
   initialCustomerPhone = "",
   initialCustomerEmail = "",
   initialServiceInterest = "",
+  // When set, the builder reopens this existing estimate for in-place editing:
+  // the form seeds from its saved inputs and Save PUTs a revision instead of
+  // creating a new estimate (the customer's link stays the same).
+  editEstimateId = "",
 } = {}) {
+  const navigate = useNavigate();
   // ── Google Maps script (verbatim from V1) ─────────────────────
   const addressRef = useRef(null);
   const autocompleteRef = useRef(null);
@@ -1901,7 +1954,6 @@ export default function EstimateToolViewV2({
       setTimeout(() => clearInterval(interval), 5000);
     };
     document.head.appendChild(script);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function initAutocomplete() {
@@ -1926,14 +1978,26 @@ export default function EstimateToolViewV2({
   }
 
   // ── form state (verbatim from V1) ─────────────────────────────
-  const [form, setForm] = useState({
-    leadId: initialLeadId || "",
-    customerId: initialCustomerId || "",
-    address: initialAddress || "",
-    customerName: initialCustomerName || "",
-    customerPhone: initialCustomerPhone || "",
-    customerEmail: initialCustomerEmail || "",
-    leadServiceInterest: initialServiceInterest || "",
+  // Blank builder form. A function (not a literal in useState) so edit mode
+  // can re-seed the form from a saved estimate's stored inputs merged over
+  // these defaults — fields added to the builder after that estimate was
+  // saved still initialize instead of arriving undefined.
+  const buildDefaultEstimateForm = ({
+    leadId = "",
+    customerId = "",
+    address = "",
+    customerName = "",
+    customerPhone = "",
+    customerEmail = "",
+    serviceInterest = "",
+  } = {}) => ({
+    leadId,
+    customerId,
+    address,
+    customerName,
+    customerPhone,
+    customerEmail,
+    leadServiceInterest: serviceInterest,
     homeSqFt: "",
     stories: "1",
     lotSqFt: "",
@@ -2113,6 +2177,18 @@ export default function EstimateToolViewV2({
     showOneTimeOption: false,
     billByInvoice: false,
   });
+
+  const [form, setForm] = useState(() =>
+    buildDefaultEstimateForm({
+      leadId: initialLeadId,
+      customerId: initialCustomerId,
+      address: initialAddress,
+      customerName: initialCustomerName,
+      customerPhone: initialCustomerPhone,
+      customerEmail: initialCustomerEmail,
+      serviceInterest: initialServiceInterest,
+    }),
+  );
 
   useEffect(() => {
     const incoming = {
@@ -2396,6 +2472,102 @@ export default function EstimateToolViewV2({
     Authorization: `Bearer ${token}`,
   };
 
+  // ── Edit mode: reopen an existing estimate for in-place revision ──
+  // Loaded from GET /:id/edit-source. `hasInputs` is false for estimates
+  // created outside the builder (lead auto-send / agent drafts) — those seed
+  // contact fields only and the operator rebuilds the quote before saving.
+  const [editMode, setEditMode] = useState(null);
+  const [editLoadError, setEditLoadError] = useState(null);
+
+  useEffect(() => {
+    if (!editEstimateId) return undefined;
+    let cancelled = false;
+    (async () => {
+      setEditLoadError(null);
+      try {
+        const r = await fetch(
+          `/api/admin/estimates/${editEstimateId}/edit-source`,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+            },
+          },
+        );
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        if (cancelled) return;
+        if (!d.editable) {
+          setEditMode(null);
+          setEditLoadError(
+            d.blockReason || "This estimate can no longer be edited.",
+          );
+          return;
+        }
+        const seeded = {
+          ...buildDefaultEstimateForm(),
+          ...(d.inputs || {}),
+          // Live contact columns win over the stored form snapshot, and a
+          // revise never re-links a lead — the row keeps its own linkage
+          // server-side, so the form's leadId must stay blank here.
+          leadId: "",
+          customerId: d.customerId || "",
+          address: d.address || "",
+          customerName: d.customerName || "",
+          customerPhone: d.customerPhone || "",
+          customerEmail: d.customerEmail || "",
+          // Delivery flags too: the pipeline's 1×-option / invoice-mode
+          // toggles PATCH the row columns after the original save, so the
+          // stored inputs snapshot can be stale — saving it back would
+          // silently flip the row's settings.
+          showOneTimeOption: !!d.showOneTimeOption,
+          billByInvoice: !!d.billByInvoice,
+          // Row notes win over the inputs snapshot for the same reason —
+          // lead/webhook/automation rows carry notes the builder never wrote,
+          // and the revise PUT sends form.notes back verbatim; seeding ""
+          // would erase them on a service-only edit.
+          notes: d.notes || "",
+        };
+        // Reopening the SAME job must not trip the per-job rodent-guarantee
+        // confirmation reset (it fires on identity change vs this ref).
+        rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
+        setForm(seeded);
+        setEnrichedProfile(d.engineProfile || null);
+        setSatelliteData(null);
+        setEstimate(null);
+        setSavedId(null);
+        setSavedViewUrl(null);
+        setPriceRecomputeNotice(null);
+        setEditMode({
+          id: d.id,
+          status: d.status,
+          customerName: d.customerName || "",
+          hasInputs: !!d.inputs,
+        });
+      } catch (e) {
+        if (!cancelled) {
+          setEditMode(null);
+          setEditLoadError(e.message);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [editEstimateId]);
+
+  function exitEditMode() {
+    setEditMode(null);
+    setEditLoadError(null);
+    setForm(buildDefaultEstimateForm());
+    setEnrichedProfile(null);
+    setSatelliteData(null);
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+    setPriceRecomputeNotice(null);
+  }
+
   const set = useCallback((key, val) => {
     setForm((f) => {
       const next = {
@@ -2525,7 +2697,6 @@ export default function EstimateToolViewV2({
     } catch {
       /* ignore */
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Prefill bait-station footprint from house sqft, but keep BoraCare and
@@ -2536,6 +2707,19 @@ export default function EstimateToolViewV2({
     if (sqft > 0) {
       const fp = Math.round(sqft / st);
       setForm((f) => {
+        // footprintUnknown lookup (association aggregate, story count
+        // unknown): homeSqFt is the summed living area and stories a
+        // default — deriving a "footprint" here re-arms the fake-slab
+        // autofill the lookup suppressed (codex P1 #2721). Manual entry
+        // stays possible; the box just never self-fills. A MANUALLY entered
+        // POSITIVE story count supplies the missing datum, so derivation
+        // resumes — an edited-then-cleared box does not (codex P2 r7+r8
+        // #2721).
+        if (
+          f._footprintUnknownLookup &&
+          !(f._storiesEdited && Number(f.stories) >= 1)
+        )
+          return f;
         const upd = {};
         if (!f.termiteFootprintSqFt || f._termiteFootprintAuto)
           upd.termiteFootprintSqFt = String(fp);
@@ -2562,13 +2746,11 @@ export default function EstimateToolViewV2({
     } catch {
       /* ignore */
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     const t = setTimeout(() => searchCustomers(customerSearch), 300);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerSearch]);
 
   const [enrichedProfile, setEnrichedProfile] = useState(null);
@@ -2590,7 +2772,14 @@ export default function EstimateToolViewV2({
     const fields = {};
     if (String(form.homeSqFt || "").trim() !== "") fields.squareFootage = Number(form.homeSqFt);
     if (String(form.lotSqFt || "").trim() !== "") fields.lotSize = Number(form.lotSqFt);
-    if (String(form.stories || "").trim() !== "") fields.stories = Number(form.stories);
+    // A story count nobody actually knew (lookup default, operator never
+    // touched it) must not be persisted as "tech verified" — for an
+    // unknown-stories aggregate that would defeat the footprint suppression
+    // on every future lookup of the address (codex P2 #2721).
+    const storiesIsUntouchedDefault =
+      enrichedProfile?.storiesSource === "default" && !form._storiesEdited;
+    if (String(form.stories || "").trim() !== "" && !storiesIsUntouchedDefault)
+      fields.stories = Number(form.stories);
     if (!form.address || !Object.keys(fields).length) return;
     setVerifySaveState("saving");
     try {
@@ -2604,8 +2793,7 @@ export default function EstimateToolViewV2({
     } catch {
       setVerifySaveState("error");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
+  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, enrichedProfile]);
 
   const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
     const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);
@@ -2871,9 +3059,19 @@ export default function EstimateToolViewV2({
           ...f,
           ...upd,
           ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
+          // Rides the form so the homeSqFt/stories effect can't re-derive a
+          // footprint the lookup refused to claim (codex P1 #2721).
+          _footprintUnknownLookup: ep.footprintUnknown === true,
           _poolCageSizeEdited: false,
           _storiesEdited: false,
         };
+        // With derivation suppressed nothing would refresh a previous
+        // address's auto-derived footprint — clear it (manual entries keep
+        // the same never-overwritten contract as the boxes below).
+        if (ep.footprintUnknown === true && f._termiteFootprintAuto) {
+          next.termiteFootprintSqFt = "";
+          next._termiteFootprintAuto = false;
+        }
         // Termite measurement pre-fills honor the section contract: a
         // manually entered value is never overwritten by a lookup estimate,
         // and a lookup miss clears a value only if a previous lookup put it
@@ -2903,6 +3101,14 @@ export default function EstimateToolViewV2({
         }
         return next;
       });
+      // Invalidate again at apply time (mirrors doSatelliteAnalysis): a
+      // Generate run while the lookup was in flight would otherwise mount a
+      // price from pre-lookup inputs — and Save would persist that stale
+      // engineRequest, which the server replays verbatim and *confirms*, so
+      // no drift notice ever fires.
+      setEstimate(null);
+      setSavedId(null);
+      setSavedViewUrl(null);
 
       try {
         const addrSearch = address.split(",")[0].trim();
@@ -2935,6 +3141,13 @@ export default function EstimateToolViewV2({
               customerPhone: match.phone || f.customerPhone || "",
               customerEmail: match.email || f.customerEmail || "",
             }));
+            // isRecurringCustomer is a pricing input and this apply lands
+            // after a second awaited fetch — invalidate so a Generate started
+            // after the property apply (but before this match) can't mount a
+            // price computed without the loyalty flag.
+            setEstimate(null);
+            setSavedId(null);
+            setSavedViewUrl(null);
           } else {
             setExistingCustomerMatch(null);
           }
@@ -3425,7 +3638,22 @@ export default function EstimateToolViewV2({
       } else {
         delete profile.measuredTurfSf;
       }
-      if (profile.homeSqFt)
+      // footprintUnknown (association aggregate, story count unknown): the
+      // summed living area over a defaulted story count is NOT a ground-floor
+      // footprint — deriving one here would hand pricing the exact fake slab
+      // the lookup suppressed (codex P1 #2721). A story count the operator
+      // MANUALLY entered supplies exactly the missing datum, so the flag
+      // clears and derivation (and footprint-driven pricing) resumes off the
+      // corrected value (codex P2 r7 #2721). The edit flag alone is not
+      // enough — a cleared/invalid Stories box would fall back to the
+      // default and re-derive the fake slab (codex P2 r8 #2721).
+      if (
+        profile.footprintUnknown === true &&
+        form._storiesEdited &&
+        Number(form.stories) >= 1
+      )
+        profile.footprintUnknown = false;
+      if (profile.homeSqFt && profile.footprintUnknown !== true)
         profile.footprint = Math.round(
           profile.homeSqFt / (profile.stories || 1),
         );
@@ -3543,29 +3771,36 @@ export default function EstimateToolViewV2({
         const homeSf = p.homeSqFt || p.squareFootage || 0;
         const stories = p.stories || 1;
         const fp = p.footprint || Math.round(homeSf / stories);
-        const fpAdj = interp(fp, [
-          { at: 800, adj: -15 },
-          { at: 1200, adj: -10 },
-          { at: 1500, adj: -5 },
-          { at: 1750, adj: -5 },
-          { at: 2000, adj: 0 },
-          { at: 2500, adj: 3 },
-          { at: 3000, adj: 6 },
-          { at: 4000, adj: 10 },
-          { at: 5500, adj: 16 },
-        ]);
         add(
           "property",
           `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`,
           0,
           "info",
         );
-        add(
-          "pest",
-          `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? "+" : ""}$${fpAdj}/visit`,
-          fpAdj,
-          fpAdj > 0 ? "up" : fpAdj < 0 ? "down" : "info",
-        );
+        // footprintUnknown: 0 is a refusal to claim a footprint, not a tiny
+        // slab — re-deriving homeSqFt/stories for the breakdown would show
+        // an adjustment the engine never charged (codex P1 #2721).
+        if (p.footprintUnknown === true) {
+          add("pest", "Footprint: field measurement required", 0, "info");
+        } else {
+          const fpAdj = interp(fp, [
+            { at: 800, adj: -15 },
+            { at: 1200, adj: -10 },
+            { at: 1500, adj: -5 },
+            { at: 1750, adj: -5 },
+            { at: 2000, adj: 0 },
+            { at: 2500, adj: 3 },
+            { at: 3000, adj: 6 },
+            { at: 4000, adj: 10 },
+            { at: 5500, adj: 16 },
+          ]);
+          add(
+            "pest",
+            `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? "+" : ""}$${fpAdj}/visit`,
+            fpAdj,
+            fpAdj > 0 ? "up" : fpAdj < 0 ? "down" : "info",
+          );
+        }
         if (p.poolCage === "YES") {
           const cageSize = String(p.poolCageSize || "MEDIUM").toUpperCase();
           const cageAdj =
@@ -3586,13 +3821,6 @@ export default function EstimateToolViewV2({
         else if (sd === "LIGHT")
           add("pest", "Light shrubs: -$5/visit", -5, "down");
         else add("pest", "Shrubs: not specified", 0, "info");
-        const td = p.treeDensity || p.trees;
-        if (td === "HEAVY") add("pest", "Heavy trees: +$6/visit", 6, "up");
-        else if (td === "MODERATE")
-          add("pest", "Moderate trees: $0/visit", 0, "info");
-        else if (td === "LIGHT")
-          add("pest", "Light trees: -$5/visit", -5, "down");
-        else add("pest", "Trees: not specified", 0, "info");
         const lc = p.landscapeComplexity || p.complexity;
         if (lc === "COMPLEX")
           add("pest", "Complex landscape: +$3/visit", 3, "up");
@@ -3603,8 +3831,6 @@ export default function EstimateToolViewV2({
         if (nw && nw !== "NONE" && nw !== "NO" && nw !== false)
           add("pest", "Near water: +$3/visit", 3, "up");
         else add("pest", "No water nearby: $0/visit", 0, "info");
-        if (p.hasLargeDriveway)
-          add("pest", "Large driveway: +$3/visit", 3, "up");
         if (p.yearBuilt)
           add(
             "property",
@@ -3640,16 +3866,20 @@ export default function EstimateToolViewV2({
     }
   }
 
-  async function doSave() {
-    if (!estimate) return null;
-    const deliveryError = validateDeliveryOptions(form, estimate);
+  // estimateOverride: callers that generate-then-save in one handler pass the
+  // freshly returned estimate — the `estimate` state in this closure is still
+  // the pre-generate value (React state doesn't update mid-handler).
+  async function doSave(estimateOverride = null, { deferInvoiceTotals = false } = {}) {
+    const estimateToSave = estimateOverride || estimate;
+    if (!estimateToSave) return null;
+    const deliveryError = validateDeliveryOptions(form, estimateToSave, { deferInvoiceTotals });
     if (deliveryError) {
       alert(deliveryError);
       return null;
     }
     setSaving(true);
     try {
-      const E = estimate;
+      const E = estimateToSave;
       const quoteRequired = estimateRequiresQuote(E);
       const monthlyTotal = quoteRequired ? 0 : E.recurring?.grandTotal || 0;
       const onetimeTotal = quoteRequired ? 0 : E.oneTime?.total || 0;
@@ -3657,27 +3887,61 @@ export default function EstimateToolViewV2({
         manualDiscount: E.manualDiscount || E.totals?.manualDiscount || null,
         serviceSpecificDiscounts: E.serviceSpecificDiscounts || E.totals?.serviceSpecificDiscounts || [],
       };
-      const r = await fetch("/api/admin/estimates", {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({
-          address: form.address,
-          customerName: form.customerName || "",
-          customerPhone: form.customerPhone || "",
-          customerEmail: form.customerEmail || "",
-          leadId: form.leadId || null,
-          customerId: form.customerId || existingCustomerMatch?.id || null,
-          estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
-          monthlyTotal,
-          annualTotal: monthlyTotal * 12,
-          onetimeTotal,
-          waveguardTier: E.recurring?.tier || "Bronze",
-          notes: form.notes || "",
-          satelliteUrl: satelliteData?.imageUrl || null,
-          showOneTimeOption: !!form.showOneTimeOption,
-          billByInvoice: !!form.billByInvoice,
-        }),
-      });
+      const isEditRevision = !!editMode?.id;
+      const payload = {
+        address: form.address,
+        customerName: form.customerName || "",
+        customerPhone: form.customerPhone || "",
+        customerEmail: form.customerEmail || "",
+        leadId: isEditRevision ? null : form.leadId || null,
+        customerId: form.customerId || existingCustomerMatch?.id || null,
+        estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
+        monthlyTotal,
+        annualTotal: monthlyTotal * 12,
+        onetimeTotal,
+        waveguardTier: E.recurring?.tier || "Bronze",
+        notes: form.notes || "",
+        satelliteUrl: satelliteData?.imageUrl || null,
+        showOneTimeOption: !!form.showOneTimeOption,
+        billByInvoice: !!form.billByInvoice,
+      };
+      // Edit mode publishes on save (same id + token — the customer's link
+      // starts showing the updated quote), so a server-side reprice must be
+      // confirmed BEFORE the write: preflight the same payload with dryRun.
+      // A create lands as a draft and the send flow gates on the banner, so
+      // it needs no preflight.
+      if (isEditRevision) {
+        const pf = await fetch(`/api/admin/estimates/${editMode.id}`, {
+          method: "PUT",
+          headers: authHeaders,
+          body: JSON.stringify({ ...payload, dryRun: true }),
+        });
+        if (!pf.ok)
+          throw new Error(
+            await summarizeEstimateResponseFailure(pf, "Save failed"),
+          );
+        const preflight = await pf.json();
+        const preNotice = serverRecomputeNotice(preflight, monthlyTotal, onetimeTotal);
+        if (preNotice) {
+          const proceed = window.confirm(
+            `The server recomputed the final price: ${describeRecomputeNotice(preNotice)}.\n\n` +
+              "Saving publishes this recomputed price to the customer's existing link. Save it?",
+          );
+          if (!proceed) return null;
+        }
+      }
+      // Edit mode revises the existing estimate in place; otherwise a
+      // normal create.
+      const r = await fetch(
+        isEditRevision
+          ? `/api/admin/estimates/${editMode.id}`
+          : "/api/admin/estimates",
+        {
+          method: isEditRevision ? "PUT" : "POST",
+          headers: authHeaders,
+          body: JSON.stringify(payload),
+        },
+      );
       if (!r.ok)
         throw new Error(
           await summarizeEstimateResponseFailure(r, "Save failed"),
@@ -3688,23 +3952,7 @@ export default function EstimateToolViewV2({
       // The server recomputes the authoritative price on save. If it differs
       // from the preview, surface it so we don't quote a number the system
       // won't honor.
-      const serverMonthly = Number(d.monthlyTotal);
-      const serverOnetime = Number(d.onetimeTotal);
-      const monthlyDiffers =
-        Number.isFinite(serverMonthly) &&
-        Math.abs(serverMonthly - (monthlyTotal || 0)) >= 0.5;
-      const onetimeDiffers =
-        Number.isFinite(serverOnetime) &&
-        Math.abs(serverOnetime - (onetimeTotal || 0)) >= 0.5;
-      let recomputeNotice = null;
-      if ((monthlyDiffers || onetimeDiffers) && d.pricingAuthority === "SERVER") {
-        recomputeNotice = {
-          serverMonthly: monthlyDiffers ? serverMonthly : null,
-          clientMonthly: monthlyDiffers ? monthlyTotal || 0 : null,
-          serverOnetime: onetimeDiffers ? serverOnetime : null,
-          clientOnetime: onetimeDiffers ? onetimeTotal || 0 : null,
-        };
-      }
+      const recomputeNotice = serverRecomputeNotice(d, monthlyTotal, onetimeTotal);
       setPriceRecomputeNotice(recomputeNotice);
       setSavedId(id);
       setSavedViewUrl(viewUrl);
@@ -3717,6 +3965,28 @@ export default function EstimateToolViewV2({
     } finally {
       setSaving(false);
     }
+  }
+
+  // Commercial hand-off: the estimator can't price a commercial property
+  // (manual quote required), so generate if needed, persist the draft —
+  // capturing the contact, address, and property specs — and jump straight
+  // into the proposal builder where the operator authors the line-item quote.
+  async function openProposalBuilder() {
+    // Every form/pricing/delivery-option edit clears savedId, so a non-null id
+    // is a draft that already matches the current form — reuse it. Re-saving
+    // a lead-less estimate inserts a duplicate row and leaves the earlier
+    // draft (and its customer link) dangling in the pipeline.
+    if (savedId) {
+      navigate(`/admin/estimates/${savedId}/proposal`);
+      return;
+    }
+    const generated = estimate || (await doGenerate());
+    if (!generated) return;
+    // Defer the bill-by-invoice zero-total guard: the manual-quote commercial
+    // draft has no billable totals until the proposal lines are authored on
+    // the page this navigates to.
+    const saved = await doSave(generated, { deferInvoiceTotals: true });
+    if (saved?.id) navigate(`/admin/estimates/${saved.id}/proposal`);
   }
 
   async function doSend(id, method) {
@@ -3898,12 +4168,18 @@ export default function EstimateToolViewV2({
       customerEmail: "",
       leadServiceInterest: "",
       _termiteFootprintAuto: false,
+      _footprintUnknownLookup: false,
       _trenchingPerimeterAuto: false,
       _boracareSqftAuto: false,
       _preslabSqftAuto: false,
       // Guarantee eligibility is per-job; the next property must re-confirm.
       ...Object.fromEntries(RODENT_GUARANTEE_ELIGIBILITY_KEYS.map((k) => [k, false])),
     }));
+    // Starting the next customer's quote ends any in-place edit — otherwise
+    // Save changes would still PUT the new quote over the estimate that was
+    // being edited.
+    setEditMode(null);
+    setEditLoadError(null);
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
@@ -3945,20 +4221,8 @@ export default function EstimateToolViewV2({
     // Without this gate the send fires before the recompute banner is even
     // readable, so a price the operator never saw goes to the customer.
     if (saved.recomputeNotice) {
-      const n = saved.recomputeNotice;
-      const parts = [];
-      if (n.serverMonthly != null) {
-        parts.push(
-          `$${n.serverMonthly.toFixed(2)}/mo (preview showed $${Number(n.clientMonthly || 0).toFixed(2)}/mo)`,
-        );
-      }
-      if (n.serverOnetime != null) {
-        parts.push(
-          `$${n.serverOnetime.toFixed(2)} one-time (preview showed $${Number(n.clientOnetime || 0).toFixed(2)})`,
-        );
-      }
       const proceed = window.confirm(
-        `The server recomputed the final price on save: ${parts.join(", ")}.\n\n` +
+        `The server recomputed the final price on save: ${describeRecomputeNotice(saved.recomputeNotice)}.\n\n` +
           "This recomputed price is what the customer will see. Send it?",
       );
       if (!proceed) return;
@@ -3970,6 +4234,18 @@ export default function EstimateToolViewV2({
     if (generating || saving || sending) return;
     if (!estimate) {
       alert('Click "Generate Estimate" first.');
+      return;
+    }
+    // In edit mode, saving PUBLISHES: the PUT rewrites the live row behind
+    // the customer's existing link, so the implicit save below would let a
+    // "just looking" preview push a half-finished revision to a sent/viewed
+    // estimate. Require the explicit Save changes click first.
+    if (editMode?.id && !savedViewUrl) {
+      alert(
+        'This estimate is being edited in place — previewing requires saving, ' +
+          'and saving publishes the revision to the customer\'s existing link. ' +
+          'Click "Save changes" first, then preview.',
+      );
       return;
     }
 
@@ -4324,6 +4600,48 @@ export default function EstimateToolViewV2({
             </div>
           </div>
         )}
+        {editLoadError && (
+          <div className="mb-4 flex items-start justify-between gap-4 border-hairline border-zinc-300 rounded-xs bg-zinc-50 px-4 py-3">
+            <div className="text-14 text-zinc-700">
+              <span className="font-medium text-zinc-900">
+                Couldn&apos;t open the estimate for editing.
+              </span>{" "}
+              {editLoadError}
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setEditLoadError(null)}
+            >
+              Dismiss
+            </Button>
+          </div>
+        )}
+        {editMode && (
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-hairline border-zinc-900 rounded-xs bg-zinc-50 px-4 py-3">
+            <div className="text-14 text-zinc-700">
+              <div className="font-medium text-zinc-900">
+                Editing existing estimate
+                {editMode.customerName ? ` for ${editMode.customerName}` : ""} ·
+                status {editMode.status}
+              </div>
+              <div className="mt-1">
+                Saving updates the estimate the customer already has — the link
+                stays the same. Resend after saving to notify them.
+              </div>
+              {!editMode.hasInputs && (
+                <div className="mt-1">
+                  This estimate wasn&apos;t authored in the builder, so its
+                  original inputs couldn&apos;t be restored. Re-enter the
+                  property details and services, then Generate before saving.
+                </div>
+              )}
+            </div>
+            <Button variant="secondary" size="sm" onClick={exitEditMode}>
+              Exit edit mode
+            </Button>
+          </div>
+        )}
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
           <div className="space-y-4">
@@ -4483,6 +4801,7 @@ export default function EstimateToolViewV2({
                       // missing-measurement warning suppressed.
                       trenchingEstimateFromFootprint: false,
                       _termiteFootprintAuto: false,
+                      _footprintUnknownLookup: false,
                       _trenchingPerimeterAuto: false,
                       _boracareSqftAuto: false,
                       _preslabSqftAuto: false,
@@ -4828,6 +5147,21 @@ export default function EstimateToolViewV2({
               {commercialDetected && (
                 <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
                   {COMMERCIAL_WARNING_TEXT}
+                  <div className="mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={saving || generating}
+                      title="Generates and saves a draft estimate, then opens the line-item proposal builder"
+                      onClick={openProposalBuilder}
+                    >
+                      {generating
+                        ? "Generating…"
+                        : saving
+                          ? "Saving…"
+                          : "Save draft & build commercial proposal"}
+                    </Button>
+                  </div>
                 </div>
               )}
               <div className="grid grid-cols-2 gap-3">
@@ -5032,10 +5366,11 @@ export default function EstimateToolViewV2({
                       />{" "}
                     </FieldV2>
                     <FieldV2 label="Applications / year" className="mb-0">
+                      {/* 4 — Quarterly retired for new sales (owner directive
+                          2026-07-09); the engine hides the basic tier. */}
                       <SelectV2
                         k="lawnFreq"
                         options={[
-                          { value: "4", label: "4 — Quarterly" },
                           { value: "6", label: "6 — Bi-monthly" },
                           { value: "9", label: "9 — Every 6 weeks" },
                           { value: "12", label: "12 — Monthly" },
@@ -6520,7 +6855,11 @@ export default function EstimateToolViewV2({
             <div
               className={cn(
                 "grid gap-3",
-                estimate ? "grid-cols-3" : "grid-cols-2",
+                estimate
+                  ? editMode
+                    ? "grid-cols-2 sm:grid-cols-4"
+                    : "grid-cols-3"
+                  : "grid-cols-2",
               )}
             >
               {" "}
@@ -6537,6 +6876,18 @@ export default function EstimateToolViewV2({
                     ? "Regenerate"
                     : "Generate Estimate"}
               </Button>{" "}
+              {estimate && editMode && (
+                <Button
+                  variant="secondary"
+                  size="md"
+                  className="h-12 text-12"
+                  disabled={generateBusy || saving}
+                  onClick={() => doSave()}
+                  title="Update the existing estimate — the customer's link shows the new quote without a resend"
+                >
+                  {saving ? "Saving…" : "Save changes"}
+                </Button>
+              )}
               {estimate && (
                 <Button
                   variant="secondary"
@@ -6830,7 +7181,9 @@ export default function EstimateToolViewV2({
 
             {savedId && (
               <div className="text-12 text-ink-secondary">
-                Saved — ID #{savedId}.
+                {editMode
+                  ? "Changes saved — the customer's link now shows the updated estimate. Resend to notify them."
+                  : `Saved — ID #${savedId}.`}
               </div>
             )}
 
@@ -6935,6 +7288,11 @@ export default function EstimateToolViewV2({
                       variant="ghost"
                       size="sm"
                       onClick={() => {
+                        // "New Estimate" forks to create semantics — clear
+                        // edit mode so the next save can't overwrite the
+                        // estimate that was being edited.
+                        setEditMode(null);
+                        setEditLoadError(null);
                         setEstimate(null);
                         setSavedId(null);
                         setSavedViewUrl(null);
@@ -7075,12 +7433,14 @@ export default function EstimateToolViewV2({
                         {E.fieldVerify?.length > 0 && (
                           <div className="bg-alert-bg border-hairline border-alert-fg rounded-sm px-4 py-3 mb-5 text-13 text-alert-fg">
                             {" "}
-                            <strong>Field Verify:</strong>
+                            <strong>Field Verify:</strong>{" "}
                             {E.fieldVerify
                               .map((f) =>
-                                typeof f === "string"
-                                  ? f
-                                  : f.field || f.name || JSON.stringify(f),
+                                humanizeQuoteReason(
+                                  typeof f === "string"
+                                    ? f
+                                    : f.field || f.name || JSON.stringify(f),
+                                ),
                               )
                               .join(", ")}{" "}
                             — estimated from satellite data, tech should confirm
@@ -7245,6 +7605,17 @@ export default function EstimateToolViewV2({
                               </Tag>
                               {R.lawnMeta?.grassName && (
                                 <Tag>{R.lawnMeta.grassName}</Tag>
+                              )}
+                              {R.lawnMeta?.turfConfidence &&
+                                R.lawnMeta.turfConfidence !== "HIGH" && (
+                                  <Tag>
+                                    {R.lawnMeta.turfConfidence === "LOW"
+                                      ? "Low-confidence turf"
+                                      : "Estimated turf"}
+                                  </Tag>
+                                )}
+                              {R.lawnMeta?.turfConfidence === "LOW" && (
+                                <FieldVerifyTag>FIELD VERIFY</FieldVerifyTag>
                               )}
                             </SectionTitle>{" "}
                             <TierGridV2>
@@ -7759,7 +8130,7 @@ export default function EstimateToolViewV2({
                         E.pricingMetadata.warnings?.length > 0 ||
                         E.pricingMetadata.manualReviewReasons?.length > 0) && (
                         <div className="mb-6 p-3 bg-zinc-50 border-hairline border-zinc-300 rounded-sm text-12 text-zinc-900">
-                          <div className="font-semibold mb-1">Roach Routing Notes</div>
+                          <div className="font-semibold mb-1">Pricing Review Notes</div>
                           {(E.pricingMetadata.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} className="text-ink-secondary">
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"

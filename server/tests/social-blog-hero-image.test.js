@@ -299,7 +299,10 @@ describe('blogHeroSocialImageUrl', () => {
     const src = fs.readFileSync(require.resolve('../services/content-scheduler.js'), 'utf8');
     const sourceIdx = src.indexOf("source: 'blog_scheduled'");
     expect(sourceIdx).toBeGreaterThan(-1);
-    const callStart = src.lastIndexOf('publishToAll({', sourceIdx);
+    // The scheduler lane now shares via shareUrlOnce (advisory-lock +
+    // source_url dedupe, unified with the live-flip and RSS lanes); it must
+    // still let publishToAll own image resolution (no caller imageUrl).
+    const callStart = src.lastIndexOf('shareUrlOnce({', sourceIdx);
     const callEnd = src.indexOf('});', sourceIdx);
     expect(callStart).toBeGreaterThan(-1);
     const call = src.slice(callStart, callEnd);

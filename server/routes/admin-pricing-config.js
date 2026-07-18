@@ -8,6 +8,23 @@ const { BED_BUG } = require('../services/pricing-engine/constants');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Best-effort audit insert: a failure must never block the pricing edit
+// itself, but it must be visible in logs (a bare catch here previously
+// swallowed every failure silently).
+async function insertPricingAudit({ configKey, oldValue, newValue, changedBy, reason }) {
+  try {
+    await db('pricing_config_audit').insert({
+      config_key: configKey,
+      old_value: oldValue === undefined ? null : JSON.stringify(oldValue),
+      new_value: newValue === undefined ? null : JSON.stringify(newValue),
+      changed_by: changedBy || 'admin',
+      reason: reason || null,
+    });
+  } catch (err) {
+    logger.error('[admin-pricing-config] pricing_config_audit insert failed', { configKey, error: err.message });
+  }
+}
+
 const ESTIMATE_COST_FALLBACKS = {
   pest_control: {
     serviceTypes: ['Quarterly Pest Control', 'Pest Control'],
@@ -137,7 +154,19 @@ function normalizePricingConfigRow(row) {
   return { ...row, data };
 }
 
+const RETIRED_PEST_FEATURE_KEYS = [
+  'trees_heavy',
+  'trees_moderate',
+  'trees_light',
+  'large_driveway',
+];
+
 function normalizeIncomingConfigData(configKey, data) {
+  if (configKey === 'pest_features' && data && typeof data === 'object' && !Array.isArray(data)) {
+    const normalized = { ...data };
+    RETIRED_PEST_FEATURE_KEYS.forEach((key) => delete normalized[key]);
+    return normalized;
+  }
   return data;
 }
 
@@ -156,7 +185,7 @@ async function ensureTable() {
     const configs = [
       { config_key: 'pest_base', name: 'Pest Control Base Price', category: 'pest', sort_order: 1, data: JSON.stringify({ base: 117, floor: 89 }) },
       { config_key: 'pest_footprint', name: 'Pest Footprint Modifiers', category: 'pest', sort_order: 2, data: JSON.stringify({ breakpoints: [{sqft:800,adj:-15},{sqft:1200,adj:-10},{sqft:1500,adj:-5},{sqft:1750,adj:-5},{sqft:2000,adj:0},{sqft:2500,adj:3},{sqft:3000,adj:6},{sqft:4000,adj:10},{sqft:5500,adj:16}] }) },
-      { config_key: 'pest_features', name: 'Pest Feature Modifiers', category: 'pest', sort_order: 3, data: JSON.stringify({ indoor:15,pool_cage:8,pool_cage_small:5,pool_cage_medium:8,pool_cage_large:12,pool_cage_oversized:18,pool_no_cage:0,shrubs_heavy:6,shrubs_moderate:0,shrubs_light:-5,trees_heavy:6,trees_moderate:0,trees_light:-5,landscape_simple:-5,landscape_moderate:0,landscape_complex:3,near_water:3,large_driveway:3 }) },
+      { config_key: 'pest_features', name: 'Pest Feature Modifiers', category: 'pest', sort_order: 3, data: JSON.stringify({ indoor:15,pool_cage:8,pool_cage_small:5,pool_cage_medium:8,pool_cage_large:12,pool_cage_oversized:18,pool_no_cage:0,shrubs_heavy:6,shrubs_moderate:0,shrubs_light:-5,landscape_simple:-5,landscape_moderate:0,landscape_complex:3,near_water:3 }) },
       { config_key: 'pest_property_type', name: 'Pest Property Type', category: 'pest', sort_order: 4, data: JSON.stringify({ single_family:0,townhome_end:-8,townhome_interior:-12,duplex:-10,condo_ground:-18,condo_upper:-22 }) },
       { config_key: 'pest_service_costs', name: 'Pest Service Cost Breakdown', category: 'pest', sort_order: 5, data: JSON.stringify({ chemicals:{ taurus_sc:{ bottle_price:95.00, bottle_oz:78, oz_per_service:4, cost_per_service:4.87 }, talak:{ bottle_price:41.57, bottle_oz:128, oz_per_service:4, cost_per_service:1.30 }, surfactant:{ cost:0.50 }}, labor:{ spray_minutes:10, sweep_minutes:10, total_on_site_minutes:20, rate_per_hour:35, on_site_labor_cost:11.67, drive_minutes:20, drive_labor_cost:11.67 }, direct_service_cost:17.84, fully_allocated_cost:30.01 }), description: 'Per-service cost breakdown including drive time' },
       { config_key: 'waveguard_tiers', name: 'WaveGuard Bundle Discounts', category: 'waveguard', sort_order: 10, data: JSON.stringify({ bronze:{min_services:1,discount:0},silver:{min_services:2,discount:0.10},gold:{min_services:3,discount:0.15},platinum:{min_services:4,discount:0.20} }) },
@@ -308,11 +337,29 @@ router.get('/lawn-brackets', async (req, res, next) => {
 // PUT /lawn-brackets/:track — update brackets for a track
 router.put('/lawn-brackets/:track', async (req, res, next) => {
   try {
-    const { brackets } = req.body; // array of { sqft_bracket, tier, monthly_price }
+    const { brackets, reason } = req.body; // array of { sqft_bracket, tier, monthly_price }
+    const existing = await db('lawn_pricing_brackets').where({ grass_track: req.params.track });
+    const byCell = new Map(existing.map((r) => [`${r.sqft_bracket}:${r.tier}`, r]));
+    const changes = [];
     for (const b of brackets) {
-      await db('lawn_pricing_brackets')
+      const prev = byCell.get(`${b.sqft_bracket}:${b.tier}`);
+      const nextPrice = Number(b.monthly_price);
+      if (prev && Number(prev.monthly_price) === nextPrice) continue; // no-op cell — skip write and audit
+      const updated = await db('lawn_pricing_brackets')
         .where({ grass_track: req.params.track, sqft_bracket: b.sqft_bracket, tier: b.tier })
         .update({ monthly_price: b.monthly_price, updated_at: new Date() });
+      if (updated && prev) {
+        changes.push({ sqft_bracket: b.sqft_bracket, tier: b.tier, old: Number(prev.monthly_price), new: nextPrice });
+      }
+    }
+    if (changes.length) {
+      await insertPricingAudit({
+        configKey: `lawn_brackets:${req.params.track}`,
+        oldValue: changes.map((c) => ({ sqft_bracket: c.sqft_bracket, tier: c.tier, monthly_price: c.old })),
+        newValue: changes.map((c) => ({ sqft_bracket: c.sqft_bracket, tier: c.tier, monthly_price: c.new })),
+        changedBy: req.technician?.name,
+        reason,
+      });
     }
     try {
       const modular = require('../services/pricing-engine');
@@ -346,8 +393,23 @@ router.put('/discount-rules/:serviceKey', async (req, res, next) => {
     for (const k of allowed) {
       if (req.body[k] !== undefined) updates[k] = req.body[k];
     }
+    const existing = await db('service_discount_rules').where({ service_key: req.params.serviceKey }).first();
     updates.updated_at = new Date();
     await db('service_discount_rules').where({ service_key: req.params.serviceKey }).update(updates);
+    if (existing) {
+      const changedFields = Object.keys(updates).filter(
+        (k) => k !== 'updated_at' && String(existing[k]) !== String(updates[k])
+      );
+      if (changedFields.length) {
+        await insertPricingAudit({
+          configKey: `discount_rules:${req.params.serviceKey}`,
+          oldValue: Object.fromEntries(changedFields.map((k) => [k, existing[k]])),
+          newValue: Object.fromEntries(changedFields.map((k) => [k, updates[k]])),
+          changedBy: req.technician?.name,
+          reason: req.body.reason,
+        });
+      }
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -543,15 +605,13 @@ router.put('/:key', async (req, res, next) => {
 
     // Audit log
     if (normalizedData !== undefined) {
-      try {
-        await db('pricing_config_audit').insert({
-          config_key: req.params.key,
-          old_value: JSON.stringify(oldConfig.data),
-          new_value: JSON.stringify(normalizedData),
-          changed_by: req.admin?.name || 'admin',
-          reason: reason || null
-        });
-      } catch { /* audit table may not exist */ }
+      await insertPricingAudit({
+        configKey: req.params.key,
+        oldValue: oldConfig.data,
+        newValue: normalizedData,
+        changedBy: req.technician?.name,
+        reason,
+      });
     }
 
     res.json({ success: true });

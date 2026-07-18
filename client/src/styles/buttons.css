@@ -139,6 +139,24 @@
   background: #E3F5FD;
 }
 
+/* GLASS-SCOPED NAVY SPLIT (owner ruling 2026-07-12): on glass-mounted
+   customer pages (RatePage, ReviewPage, …) the authoritative navy is the
+   glass navy #04395E. The base customer variant above keeps the marketing
+   navy #1B2C5B for retained non-glass legacy consumers.
+   Non-glass customer consumers (PublicBookingPage /book) override the ink
+   per-Button inline with COLORS.glassNavy instead. */
+html[data-glass-theme] .btn-primary[data-surface="customer"],
+html[data-glass-theme] .btn-primary:not([data-surface]),
+html[data-glass-theme] .btn-nav[data-surface="customer"],
+html[data-glass-theme] .btn-nav:not([data-surface]) {
+  color: #04395E;
+}
+html[data-glass-theme] .btn-utility[data-surface="customer"],
+html[data-glass-theme] .btn-utility:not([data-surface]) {
+  color: #04395E;
+  border-color: #04395E;
+}
+
 /* Customer surface — tablet (640px+) */
 @media (min-width: 640px) {
   .btn-primary[data-surface="customer"],

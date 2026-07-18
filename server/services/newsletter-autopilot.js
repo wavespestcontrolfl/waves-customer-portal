@@ -196,6 +196,20 @@ async function autoDraftFlagship() {
   if (existingCalendar && existingCalendar.send_id) {
     const reason = `Calendar already has send_id: ${existingCalendar.send_id}`;
     logger.info(`[newsletter-autopilot] Skipped: ${reason}`);
+    // Retry lane for a proof whose SendGrid call failed transiently.
+    // ONLY for 'drafted' weeks — a linked row whose status is 'skipped'
+    // (or scheduled/sent) was deliberately retired by the operator, and
+    // proofing it would let an approval reply send a retired campaign.
+    // sendNewsletterProof is idempotent (proof_sent_at claim) and skips
+    // non-draft sends, so calling it here is safe every tick.
+    if (existingCalendar.status === 'drafted') {
+      try {
+        const { sendNewsletterProof } = require('./newsletter-proof');
+        await sendNewsletterProof(existingCalendar.send_id);
+      } catch (e) {
+        logger.warn(`[newsletter-autopilot] proof retry failed: ${e.message}`);
+      }
+    }
     return { skipped: true, reason };
   }
 
@@ -415,6 +429,15 @@ async function autoDraftFlagship() {
       });
       logger.info(`[newsletter-autopilot] Created calendar entry for existing draft ${earlyReturn.sendId}`);
     }
+    // The draft exists but its proof may not have gone out (e.g. the 7 AM
+    // proof failed and this is the 2 PM catch-up tick). sendNewsletterProof
+    // is idempotent via proof_sent_at, so retrying here is safe.
+    try {
+      const { sendNewsletterProof } = require('./newsletter-proof');
+      await sendNewsletterProof(earlyReturn.sendId);
+    } catch (e) {
+      logger.warn(`[newsletter-autopilot] proof retry failed: ${e.message}`);
+    }
     return earlyReturn;
   }
 
@@ -457,6 +480,16 @@ async function autoDraftFlagship() {
     });
   } catch (e) {
     logger.warn(`[newsletter-autopilot] draft notification failed: ${e.message}`);
+  }
+
+  // 11. Proof-approval flow (gated OFF by default): email the owner a proof
+  //     copy; replying "approved" releases the list send. A proof failure
+  //     never kills the draft — the admin notification above still fired.
+  try {
+    const { sendNewsletterProof } = require('./newsletter-proof');
+    await sendNewsletterProof(send.id);
+  } catch (e) {
+    logger.warn(`[newsletter-autopilot] proof send failed: ${e.message}`);
   }
 
   return { skipped: false, sendId: send.id, eventCount: topEvents.length };

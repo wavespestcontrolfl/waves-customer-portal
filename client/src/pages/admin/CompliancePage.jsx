@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { ClipboardList, FileText, Gauge, ShieldCheck } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { getAdminAuthToken } from "../../lib/adminAuth";
 
 const API = "/api/admin/compliance-v2";
 const headers = (token) => ({
@@ -877,7 +878,7 @@ function LicensesTab({ token }) {
 // ═══════════ MAIN PAGE ═══════════
 export default function CompliancePage() {
   const [tab, setTab] = useState("dashboard");
-  const token = localStorage.getItem("adminToken");
+  const token = getAdminAuthToken();
 
   const tabs = [
     { key: "dashboard", label: "Dashboard", Icon: Gauge },

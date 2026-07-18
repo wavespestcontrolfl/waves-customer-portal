@@ -46,6 +46,7 @@ export default function MobileCardOnFileSheet({
   const [loading, setLoading] = useState(true);
   const [chargingId, setChargingId] = useState(null);
   const [error, setError] = useState(null);
+  const [chargeBlocked, setChargeBlocked] = useState(false);
 
   const resolvedCustomerId = customerId || service?.customerId || service?.customer_id;
   const resolvedName = customerName || service?.customerName || service?.customer_name || 'Customer';
@@ -77,12 +78,23 @@ export default function MobileCardOnFileSheet({
         body: JSON.stringify({ paymentMethodId: card.id }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || 'Charge failed');
+      if (!r.ok) {
+        const terminal = d.orphan === true || d.ambiguous === true || d.in_progress === true;
+        const failure = new Error(d.error || 'Charge failed');
+        failure.terminal = terminal;
+        throw failure;
+      }
       onChargeSuccess?.(d);
       onClose?.();
     } catch (e) {
       setError(e.message || 'Charge failed');
-      setChargingId(null);
+      if (e.terminal) {
+        // The charge either succeeded upstream or may have succeeded. Keep every
+        // button disabled so a field retry cannot collect the invoice twice.
+        setChargeBlocked(true);
+      } else {
+        setChargingId(null);
+      }
     }
   }
 
@@ -91,7 +103,7 @@ export default function MobileCardOnFileSheet({
       {/* Header — back button left, customer name centered. */}
       <div
         className="sticky top-0 bg-white flex items-center px-3 border-b border-hairline border-zinc-200"
-        style={{ height: 64, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(64px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"
@@ -102,7 +114,7 @@ export default function MobileCardOnFileSheet({
         >
           <ArrowLeft size={20} strokeWidth={2} />
         </button>
-        <div className="flex-1 text-center font-semibold text-zinc-900" style={{ fontSize: 18 }}>
+        <div className="flex-1 text-center font-medium text-zinc-900" style={{ fontSize: 18 }}>
           {resolvedName}
         </div>
         <div className="w-11" />
@@ -122,7 +134,7 @@ export default function MobileCardOnFileSheet({
         {!loading && cards.map((c) => {
           const style = brandStyle(c.brand);
           const isCharging = chargingId === c.id;
-          const anotherCharging = chargingId && chargingId !== c.id;
+          const anotherCharging = chargeBlocked || (chargingId && chargingId !== c.id);
           return (
             <div
               key={c.id}
@@ -144,7 +156,7 @@ export default function MobileCardOnFileSheet({
                     border: `1px solid ${style.border}`,
                     color: style.fg,
                     fontSize: 11,
-                    fontWeight: 800,
+                    fontWeight: 500,
                     letterSpacing: 0.3,
                     flexShrink: 0,
                   }}
@@ -152,7 +164,7 @@ export default function MobileCardOnFileSheet({
                   {brandLabel(c)}
                 </span>
                 <span
-                  className="font-semibold text-zinc-900 truncate"
+                  className="font-medium text-zinc-900 truncate"
                   style={{ fontSize: 18 }}
                 >
                   {cardTitle(c)}
@@ -166,7 +178,7 @@ export default function MobileCardOnFileSheet({
                 style={{
                   padding: '12px 24px',
                   fontSize: 16,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   borderRadius: 999,
                   background: (isCharging || anotherCharging) ? '#E5E5E5' : '#111111',
                   color: (isCharging || anotherCharging) ? '#A3A3A3' : '#FFFFFF',
@@ -174,13 +186,13 @@ export default function MobileCardOnFileSheet({
                   flexShrink: 0,
                 }}
               >
-                {isCharging ? 'Charging…' : 'Charge'}
+                {chargeBlocked ? 'Do not retry' : isCharging ? 'Charging…' : 'Charge'}
               </button>
             </div>
           );
         })}
         {error && (
-          <div className="text-alert-fg" style={{ fontSize: 13, marginTop: 12, textAlign: 'center' }}>
+          <div role="alert" className="text-alert-fg" style={{ fontSize: 13, marginTop: 12, textAlign: 'center' }}>
             {error}
           </div>
         )}

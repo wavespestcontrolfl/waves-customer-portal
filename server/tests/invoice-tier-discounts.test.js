@@ -243,7 +243,9 @@ describe('invoice tier discounts', () => {
     expect(DiscountEngine.calculateDiscounts).not.toHaveBeenCalled();
     expect(invoice.discount_amount).toBe(10);
     expect(invoice.total).toBe(90);
-    expect(ctx.getInsertedInvoice().discount_label).toBe('Line-item discounts');
+    // Resolved name, not the generic literal (owner 2026-07-11: invoices
+    // carry the label the estimate promised).
+    expect(ctx.getInsertedInvoice().discount_label).toBe('WaveGuard Silver');
     expect(DiscountEngine.recordInvoiceDiscounts).toHaveBeenCalledWith(
       'invoice-1',
       [expect.objectContaining({ id: 'silver-id', name: 'WaveGuard Silver', discount_dollars: 10 })],
@@ -277,7 +279,9 @@ describe('invoice tier discounts', () => {
 
     expect(invoice.discount_amount).toBe(10);
     expect(invoice.total).toBe(90);
-    expect(ctx.getInsertedInvoice().discount_label).toBe('Line-item discounts');
+    // Resolved name, not the generic literal (owner 2026-07-11: invoices
+    // carry the label the estimate promised).
+    expect(ctx.getInsertedInvoice().discount_label).toBe('WaveGuard Silver');
   });
 
 

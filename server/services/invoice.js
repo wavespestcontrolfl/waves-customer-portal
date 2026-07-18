@@ -7,6 +7,60 @@ const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
 const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
+const PhotoService = require("./photos");
+const config = require("../config");
+
+// Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
+// cover page DWELL time, not link age (the customer-photo blank-render class).
+// Falls back to 24h until PhotoService.CUSTOMER_DWELL_TTL_SECONDS ships.
+const SERVICE_PHOTO_VIEW_TTL_SECONDS =
+  PhotoService.CUSTOMER_DWELL_TTL_SECONDS || 24 * 60 * 60;
+
+// Recover the S3 object key from a legacy stored service_photos.s3_url so
+// pre-fix invoice snapshots (URL-only, long expired) can be re-signed instead
+// of served dead. Only trusts amazonaws.com hosts; unknown shapes return null.
+function s3KeyFromStoredUrl(storedUrl) {
+  if (!storedUrl || typeof storedUrl !== "string") return null;
+  try {
+    const url = new URL(storedUrl);
+    if (!url.hostname.endsWith(".amazonaws.com")) return null;
+    const path = decodeURIComponent(url.pathname.replace(/^\/+/, "")).split("?")[0];
+    const bucket = config.s3?.bucket;
+    if (!path || !bucket) return null;
+    // Virtual-hosted style: <bucket>.s3.<region>.amazonaws.com/<key>
+    if (url.hostname.startsWith(`${bucket}.`)) return path;
+    // Path-style: s3.<region>.amazonaws.com/<bucket>/<key>
+    if (path.startsWith(`${bucket}/`)) return path.slice(bucket.length + 1);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Presign snapshot photos fresh at read time (presign-first, stored-URL-last).
+// Snapshots persist the durable s3_key; s3_url in the OUTPUT is always a fresh
+// presign when a key is resolvable, so no consumer ever renders an expired URL.
+async function withFreshServicePhotoUrls(photos) {
+  if (!Array.isArray(photos) || photos.length === 0) return photos || [];
+  return Promise.all(
+    photos.map(async (photo) => {
+      const key =
+        photo?.s3_key || photo?.storage_key || s3KeyFromStoredUrl(photo?.s3_url);
+      if (key) {
+        try {
+          const fresh = await PhotoService.getViewUrl(
+            key,
+            SERVICE_PHOTO_VIEW_TTL_SECONDS,
+          );
+          return { ...photo, s3_url: fresh, url: fresh };
+        } catch (err) {
+          logger.warn(`[invoice] photo presign failed key=${key}: ${err.message}`);
+        }
+      }
+      return { ...photo, url: photo?.s3_url || null };
+    }),
+  );
+}
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -565,15 +619,39 @@ async function calculateUpdateFinancials({
     rate = taxRate !== undefined ? Number(taxRate) : defaultRate;
     taxAmount = Math.round(afterDiscount * rate * 100) / 100;
   }
+  // Mirror create()'s resolved-name labeling (codex 2652 r2: an admin edit
+  // recomputed the label back to the generic literal, wiping the promised
+  // "Referral Credit" from the pay page/PDF). Names come from each negative
+  // line's catalog row or its own description; same varchar(100) bound.
+  const editDiscountNames = [...new Set(
+    items
+      .filter((item) => Number(item.amount) < 0 && item.category !== "deposit_credit")
+      .map((item) => {
+        const row = item.discount_id
+          ? lineItemDiscountRowById.get(String(item.discount_id))
+          : null;
+        // Catalog rows keep their CANONICAL name (codex 2652 r3: the editor
+        // sends verbose descriptions like "WaveGuard Silver (Pest Control)",
+        // which would drift the label on a no-op save and eat the 100-char
+        // cap); only plain negative lines label from their own description.
+        return String((row && row.name) || item.description || "").trim();
+      })
+      .filter(Boolean),
+  )];
   const labelParts = [
-    lineItemDiscountAmount > 0 ? "Line-item discounts" : null,
+    ...(lineItemDiscountAmount > 0
+      ? (editDiscountNames.length ? editDiscountNames : ["Line-item discounts"])
+      : []),
   ].filter(Boolean);
 
+  const editJoinedLabel = labelParts.join(" + ");
   return {
     line_items: JSON.stringify(items),
     subtotal,
     discount_amount: discountAmount,
-    discount_label: labelParts.length ? labelParts.join(" + ") : null,
+    discount_label: labelParts.length
+      ? (editJoinedLabel.length > 100 ? `${editJoinedLabel.slice(0, 97)}...` : editJoinedLabel)
+      : null,
     tax_rate: rate,
     tax_amount: taxAmount,
     total: Math.max(
@@ -590,6 +668,7 @@ const {
   INVOICE_UNCOLLECTIBLE_STATUSES,
   assertInvoiceVoidable,
   invoiceAmountDue,
+  formatCardLine,
 } = require("./invoice-helpers");
 
 function invoiceNotSendableError(invoice) {
@@ -889,10 +968,13 @@ const InvoiceService = {
             "notes",
           );
 
+        // Snapshot the durable s3_key, not a presigned URL — stored URLs expire
+        // (new uploads don't even populate s3_url), so the read path presigns
+        // fresh at view time. Legacy s3_url kept only as a last-resort fallback.
         const photos = await database("service_photos")
           .where({ service_record_id: serviceRecordId })
           .orderBy("sort_order", "asc")
-          .select("photo_type", "s3_url", "caption");
+          .select("photo_type", "s3_key", "s3_url", "caption");
 
         const invoiceServiceDate = serviceDate || sr.service_date;
         serviceData = {
@@ -1147,11 +1229,26 @@ const InvoiceService = {
       discountAmount = subtotal;
     }
 
+    // Line-item discounts label with their RESOLVED names (owner 2026-07-11:
+    // the invoice shows the same discount label the estimate promised —
+    // "Referral Credit", not the generic "Line-item discounts"). The literal
+    // survives only as the fallback for a nameless line.
+    const lineItemDiscountNames = [...new Set(
+      lineItemDiscounts.map((m) => String(m.name || "").trim()).filter(Boolean),
+    )];
     const labelParts = [
       ...manualDiscounts.map((m) => m.row.name),
-      lineItemDiscountAmount > 0 ? "Line-item discounts" : null,
+      ...(lineItemDiscountAmount > 0
+        ? (lineItemDiscountNames.length ? lineItemDiscountNames : ["Line-item discounts"])
+        : []),
     ].filter(Boolean);
-    const discountLabel = labelParts.length ? labelParts.join(" + ") : null;
+    // invoices.discount_label is varchar(100) while discount names allow 200
+    // chars (codex 2652 r1) — bound the joined label so the insert can never
+    // fail on a long or multi-name label.
+    const joinedDiscountLabel = labelParts.join(" + ");
+    const discountLabel = labelParts.length
+      ? (joinedDiscountLabel.length > 100 ? `${joinedDiscountLabel.slice(0, 97)}...` : joinedDiscountLabel)
+      : null;
 
     const afterDiscount = subtotal - discountAmount;
 
@@ -1645,10 +1742,11 @@ const InvoiceService = {
         typeof invoice.products_applied === "string"
           ? JSON.parse(invoice.products_applied)
           : invoice.products_applied || [],
-      service_photos:
+      service_photos: await withFreshServicePhotoUrls(
         typeof invoice.service_photos === "string"
           ? JSON.parse(invoice.service_photos)
           : invoice.service_photos || [],
+      ),
       annual_prepay_term: annualPrepayTerm,
     };
   },
@@ -2360,6 +2458,51 @@ const InvoiceService = {
   // carries the receipt. Manual single-channel operator sends (via='sms')
   // must NOT declare it: the operator explicitly chose the text, and there is
   // no email leg on that route to carry the receipt (codex round 5).
+  /**
+   * The customer-facing money facts a payment-receipt text needs: exact
+   * amount collected, the " (Visa ending 4242)" card clause, and the
+   * shortened receipt link. Shared by sendReceipt and the combined
+   * completion+receipt SMS (admin-dispatch completion) so both always cite
+   * the same figures.
+   *
+   * Amount comes from the PAYMENT row, not invoiceAmountDue(invoice): a full
+   * refund zeroes credit_applied, after which invoiceAmountDue returns the
+   * gross total. On a recorded refund show net cash kept (amount − refunded)
+   * to match the receipt page/PDF; otherwise amount due (total − applied
+   * credit). Falls back to amount due when no payment row exists.
+   */
+  async receiptSmsFacts(invoice) {
+    const domain = publicPortalUrl();
+    const longReceiptUrl = invoice.token
+      ? `${domain}/pay/${invoice.token}`
+      : "";
+    const receiptUrl = longReceiptUrl
+      ? await shortenOrPassthrough(longReceiptUrl, {
+          kind: "receipt",
+          entityType: "invoices",
+          entityId: invoice.id,
+          customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        })
+      : "";
+    const cardLine = formatCardLine(invoice.card_brand, invoice.card_last_four);
+    const receiptPayment = await db("payments")
+      .where({ customer_id: invoice.customer_id })
+      .whereIn("status", ["paid", "refunded"])
+      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
+      .orderBy("created_at", "desc")
+      .first()
+      .catch(() => null);
+    const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
+    const receiptAmount = receiptRefunded > 0
+      ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
+      : invoiceAmountDue(invoice);
+    const amount = Number.isFinite(receiptAmount)
+      ? receiptAmount.toFixed(2)
+      : "0.00";
+    return { amount, cardLine, receiptUrl };
+  },
+
   async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
@@ -2384,47 +2527,9 @@ const InvoiceService = {
       .first();
     if (!customer?.phone) return { sent: false, reason: "no-phone" };
 
-    const domain = publicPortalUrl();
-    const longReceiptUrl = invoice.token
-      ? `${domain}/pay/${invoice.token}`
-      : "";
-    const receiptUrl = longReceiptUrl
-      ? await shortenOrPassthrough(longReceiptUrl, {
-          kind: "receipt",
-          entityType: "invoices",
-          entityId: invoice.id,
-          customerId: customer.id,
-          codePrefix: invoiceShortCodePrefix(invoice),
-        })
-      : "";
-
     // Template body has a {card_line} placeholder that renders as e.g.
     // " (Visa ending 4242)" when card metadata is present, or empty otherwise.
-    const cardBrand = invoice.card_brand;
-    const cardLast4 = invoice.card_last_four;
-    const cardLine =
-      cardBrand && cardLast4
-        ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} ending ${cardLast4})`
-        : "";
-    // Receipt amount from the PAYMENT row, not invoiceAmountDue(invoice): a full
-    // refund zeroes credit_applied, after which invoiceAmountDue returns the gross
-    // total. On a recorded refund show net cash kept (amount − refunded) to match
-    // the receipt page/PDF; otherwise amount due (total − applied credit). Falls
-    // back to amount due when no payment row exists.
-    const receiptPayment = await db("payments")
-      .where({ customer_id: invoice.customer_id })
-      .whereIn("status", ["paid", "refunded"])
-      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
-      .orderBy("created_at", "desc")
-      .first()
-      .catch(() => null);
-    const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
-    const receiptAmount = receiptRefunded > 0
-      ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
-      : invoiceAmountDue(invoice);
-    const amount = Number.isFinite(receiptAmount)
-      ? receiptAmount.toFixed(2)
-      : "0.00";
+    const { amount, cardLine, receiptUrl } = await InvoiceService.receiptSmsFacts(invoice);
 
     let body = null;
     try {
@@ -2912,6 +3017,50 @@ const InvoiceService = {
       // drafts too, and there is no reversal primitive to mirror — reconciling
       // would have to reverse + re-record across multiple create paths. Revisit
       // if discount reporting needs to be exact to the penny on edited drafts.
+    } else if (updates.tax_rate !== undefined) {
+      // A tax_rate-only body used to write the rate column with tax_amount /
+      // total left stale — an invoice reading "Tax (0.00%) $7.00" beside the
+      // old total. No shipped caller sends tax_rate without line_items, so
+      // this is API hardening: recompute totals against the EXISTING line
+      // items so the stored money always matches the stored rate. Same
+      // ledger-backed edit-locks as a line-item retotal — a recompute moves
+      // invoice.total, which deposit-credit and applied-credit ledgers are
+      // balanced against dollar-for-dollar.
+      const invoice = existing;
+      const hasDepositCreditLine = (items) => {
+        try {
+          const arr = typeof items === "string" ? JSON.parse(items) : items;
+          return Array.isArray(arr) && arr.some((i) => i?.category === "deposit_credit");
+        } catch {
+          return false;
+        }
+      };
+      if (hasDepositCreditLine(invoice.line_items)) {
+        throw new Error(
+          "This invoice carries an estimate deposit credit — void it (the deposit returns to the customer's ledger) and create a replacement instead of changing the tax rate",
+        );
+      }
+      if (parseFloat(invoice.credit_applied || 0) > 0) {
+        throw new Error(
+          "This invoice has account credit applied (prepaid) — reverse the applied credit before changing the tax rate",
+        );
+      }
+      const existingLineItems =
+        typeof invoice.line_items === "string"
+          ? JSON.parse(invoice.line_items)
+          : invoice.line_items || [];
+      const customer = await db("customers")
+        .where({ id: invoice.customer_id })
+        .first();
+      Object.assign(
+        data,
+        await calculateUpdateFinancials({
+          lineItems: existingLineItems,
+          customer,
+          invoice,
+          taxRate: updates.tax_rate,
+        }),
+      );
     }
 
     // Apply the editability predicates ATOMICALLY on the write so a worker
@@ -3542,7 +3691,14 @@ const InvoiceService = {
           "COUNT(*) FILTER (WHERE status = 'received' AND amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0) > 0) as on_hand_count",
         ),
         db.raw(
-          "COALESCE(SUM(amount - COALESCE(refunded_amount, 0)) FILTER (WHERE received_at IS NOT NULL), 0) as collected",
+          // Collected = NET CASH: face + captured card surcharge, minus
+          // refunds. refunded_amount is face-denominated. The fee side uses
+          // the explicit refunded_surcharge cumulative when a refund stamped
+          // it (cancel-signup refunds are FACE-ONLY — the retained fee stays
+          // collected); legacy rows without the stamp keep the historical
+          // proration, matching what those sweeps actually returned. amount
+          // and on_hand stay face-only by design (the credit authority).
+          "COALESCE(SUM(GREATEST(amount - COALESCE(refunded_amount, 0), 0) + COALESCE(CASE WHEN refunded_surcharge IS NOT NULL THEN GREATEST(COALESCE(card_surcharge, 0) - refunded_surcharge, 0) ELSE COALESCE(card_surcharge, 0) * GREATEST(amount - COALESCE(refunded_amount, 0), 0) / NULLIF(amount, 0) END, 0)) FILTER (WHERE received_at IS NOT NULL), 0) as collected",
         ),
       );
       deposits = {
@@ -3587,3 +3743,6 @@ module.exports = InvoiceService;
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
+module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
+module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
+module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;

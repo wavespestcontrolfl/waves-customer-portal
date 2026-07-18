@@ -216,7 +216,10 @@ function NewAssessmentDialog({ open, onClose, onCreated }) {
   );
 }
 
-export default function PhotoAssessmentsPage() {
+// `embedded` — rendered as the "Lead Magnets" tab inside AssessmentsHubPage:
+// the hub owns the page header + padding, so skip our own h1/padding and keep
+// the functional row (subtitle, gate badges, New assessment button).
+export default function PhotoAssessmentsPage({ embedded = false }) {
   const [assessments, setAssessments] = useState([]);
   const [gates, setGates] = useState(null);
   const [funnel, setFunnel] = useState(null);
@@ -251,10 +254,12 @@ export default function PhotoAssessmentsPage() {
   useEffect(() => { load(); }, [load]);
 
   return (
-    <div className="p-4 md:p-6 max-w-[1200px]">
+    <div className={embedded ? "max-w-[1200px]" : "p-4 md:p-6 max-w-[1200px]"}>
       <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
         <div>
-          <h1 className="text-[22px] leading-7 text-zinc-900">Photo Assessments</h1>
+          {!embedded && (
+            <h1 className="text-[22px] leading-7 text-zinc-900">Photo Assessments</h1>
+          )}
           <p className="text-[14px] text-zinc-500 mt-0.5">
             Lawn-assessment and pest-identifier lead magnets — teaser → unlock → report → booking.
           </p>

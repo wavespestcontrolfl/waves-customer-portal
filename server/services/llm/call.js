@@ -69,6 +69,15 @@ const toOpenAIImage = (img) => ({ type: 'input_image', image_url: `data:${img.mi
 const toGeminiImage = (img) => ({ inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.data } });
 const toAnthropicImage = (img) => ({ type: 'image', source: { type: 'base64', media_type: img.mimeType || 'image/jpeg', data: img.data } });
 
+function providerErrorReason(provider, err) {
+  const directStatus = Number(err?.status || err?.statusCode);
+  if (Number.isInteger(directStatus) && directStatus >= 100 && directStatus <= 599) {
+    return `${provider}_${directStatus}`;
+  }
+  const messageStatus = String(err?.message || '').match(/(?:^|\s)([1-5]\d{2})(?:\s|$)/)?.[1];
+  return messageStatus ? `${provider}_${messageStatus}` : 'error';
+}
+
 /**
  * OpenAI Responses API. System is prepended into the user text (the proven #1834
  * pattern — no separate system role). jsonMode parses the reply via parseLooseJson.
@@ -170,8 +179,12 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     if (jsonMode && !json) return { ok: false, reason: 'empty_json' };
     return { ok: true, text: out, json, model, response: resp };
   } catch (err) {
-    logger.error(`[llm] callAnthropic failed: ${err.message}`);
-    return { ok: false, reason: 'error' };
+    const reason = providerErrorReason('anthropic', err);
+    const log = reason === 'anthropic_429' || reason === 'anthropic_529'
+      ? logger.warn.bind(logger)
+      : logger.error.bind(logger);
+    log(`[llm] callAnthropic failed (${reason}): ${err.message}`);
+    return { ok: false, reason };
   }
 }
 
@@ -272,6 +285,7 @@ module.exports = {
   dispatchWithFallback,
   extractOpenAIText,
   parseLooseJson,
+  providerErrorReason,
   OPENAI_RESPONSES_API,
   geminiUrl,
 };

@@ -5,7 +5,12 @@
 // rising pests first, and the section is null when there is nothing to surface.
 // Synthetic payloads only (no customer PII).
 
-const { buildPestReportV2, stripZoneLetter, buildForecast } = require('../services/service-report/pest-report-v2');
+const {
+  buildPestReportV2,
+  pestReportV2PdfSignature,
+  stripZoneLetter,
+  buildForecast,
+} = require('../services/service-report/pest-report-v2');
 
 function premium(overrides = {}) {
   return {
@@ -87,6 +92,50 @@ describe('buildPestReportV2 — supporting metric', () => {
     const out = buildPestReportV2({ premiumExperience: premium(), pestPressure: { ...PRESSURE, showOnCustomerReport: false } });
     expect(out.supportingMetric).toBeNull();
   });
+
+  it('keeps a rating-only metric when pressure is visible but still insufficient', () => {
+    // The dashboard suppresses the standalone PestPressureCard, so the
+    // calibration picker must ride this metric even before a score exists.
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      pestPressure: {
+        displayScore: null, score: null, maxScore: 5,
+        showOnCustomerReport: true, enabled: true,
+        canCaptureClientRating: true,
+      },
+    });
+    expect(out.supportingMetric.kind).toBe('pressure');
+    expect(out.supportingMetric.score).toBeNull();
+    expect(out.supportingMetric.rating).not.toBeNull();
+  });
+
+  it('insufficient pressure with no rating capture falls through to activity', () => {
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      pestPressure: { displayScore: null, score: null, showOnCustomerReport: true, enabled: true },
+      activity: { levelWord: 'Light', score: 1, maxScore: 5, label: 'Cockroach Activity' },
+    });
+    expect(out.supportingMetric.kind).toBe('activity');
+  });
+});
+
+describe('pestReportV2PdfSignature — PDF cache-key component', () => {
+  afterEach(() => { delete process.env.PEST_REPORT_V2; });
+
+  it('is empty when the gate is off, regardless of line', () => {
+    delete process.env.PEST_REPORT_V2;
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('');
+  });
+
+  it('marks pest-line records only when the gate is on', () => {
+    process.env.PEST_REPORT_V2 = 'true';
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2b');
+    expect(pestReportV2PdfSignature({ service_type: 'Quarterly Pest Control' })).toBe('-pestv2b');
+    // Other lines keep their keys — the pest gate must not invalidate
+    // cached lawn/mosquito/termite report PDFs.
+    expect(pestReportV2PdfSignature({ service_line: 'mosquito' })).toBe('');
+    expect(pestReportV2PdfSignature({ service_type: 'Lawn Fertilization' })).toBe('');
+  });
 });
 
 describe('buildPestReportV2 — seasonal forecast', () => {
@@ -121,5 +170,27 @@ describe('buildPestReportV2 — empty guards', () => {
 
   it('returns null when premium produced nothing renderable', () => {
     expect(buildPestReportV2({ premiumExperience: {} })).toBeNull();
+  });
+});
+
+describe('buildPestReportV2 — technician AI report copy in the hero summary slot', () => {
+  const REPORT = 'A non-repellent residual was applied along the foundation line and garage entry. Ant activity was concentrated near the front walkway and should taper over the next one to two weeks.';
+
+  it('uses the tech-reviewed report over the personality copy', () => {
+    const out = buildPestReportV2({ premiumExperience: premium(), technicianReport: REPORT });
+    expect(out.aiSummary).toEqual({ headline: null, body: REPORT });
+  });
+
+  it('rejects unsafe report copy and falls back to the personality copy', () => {
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      technicianReport: 'The infestation is eliminated and your home is guaranteed pest-free.',
+    });
+    expect(out.aiSummary.body).toBe('No interior activity documented today.');
+  });
+
+  it('keeps the personality copy when no report is passed', () => {
+    const out = buildPestReportV2({ premiumExperience: premium() });
+    expect(out.aiSummary.body).toBe('No interior activity documented today.');
   });
 });

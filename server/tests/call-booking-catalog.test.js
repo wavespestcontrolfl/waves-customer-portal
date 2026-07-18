@@ -64,7 +64,7 @@ const CATALOG = [
   {
     id: 'svc-exclusion',
     service_key: 'rodent_exclusion',
-    name: 'Rodent Exclusion',
+    name: 'Rodent Exclusion & Trapping Service',
     short_name: 'Exclusion',
     billing_type: 'one_time',
     pricing_type: 'variable',
@@ -73,7 +73,72 @@ const CATALOG = [
     requires_follow_up: false,
     follow_up_interval_days: null,
   },
+  { id: 'svc-rodent-general', service_key: 'rodent_general_one_time', name: 'Rodent Pest Control Service', short_name: 'Rodent', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
+  { id: 'svc-rodent-inspection', service_key: 'rodent_inspection', name: 'Rodent Inspection Service', short_name: 'Rodent Insp', billing_type: 'one_time', pricing_type: 'fixed', base_price: '75.00', default_duration_minutes: 60 },
+  { id: 'svc-rodent-trapping', service_key: 'rodent_trapping', name: 'Rodent Trapping Service', short_name: 'Rodent Trap', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
+  { id: 'svc-rodent-bundle', service_key: 'rodent_trapping_exclusion', name: 'Rodent Trapping + Exclusion', short_name: 'Trap + Excl', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 240 },
 ];
+
+describe('rodent intent → catalog service (owner directive)', () => {
+  const R = (transcription, extracted = {}) => resolveCallBookingCatalogService({ extracted, transcription, services: CATALOG })?.service_key;
+  test('general rodent mention defaults to Rodent Pest Control Service', () => {
+    expect(R('I have rats in my attic')).toBe('rodent_general_one_time');
+  });
+  test('inspection wins over general and trapping', () => {
+    expect(R('I need a rodent inspection', { requested_service: 'rodent inspection' })).toBe('rodent_inspection');
+    expect(R('rats — need an inspection then trapping')).toBe('rodent_inspection');
+  });
+  test('trapping mention maps to Rodent Trapping Service', () => {
+    expect(R('I need rat trapping')).toBe('rodent_trapping');
+  });
+  test('trapping + exclusion maps to the dedicated bundle SKU (P2)', () => {
+    expect(R('rats, need trapping and exclusion to seal them out')).toBe('rodent_trapping_exclusion');
+  });
+  test('trapping + exclusion falls back to rodent_exclusion when the bundle row is absent (P2)', () => {
+    const withoutBundle = CATALOG.filter((s) => s.service_key !== 'rodent_trapping_exclusion');
+    const row = resolveCallBookingCatalogService({
+      extracted: {},
+      transcription: 'rats, need trapping and exclusion to seal them out',
+      services: withoutBundle,
+    });
+    expect(row?.service_key).toBe('rodent_exclusion');
+  });
+  test('a non-rodent call never maps to a rodent service', () => {
+    expect(R('I have ants in the kitchen')).toBeUndefined();
+  });
+  test('plural "rodents" maps to the general rodent service (P2)', () => {
+    expect(R('I have rodents in the attic')).toBe('rodent_general_one_time');
+  });
+  test('"inspector" context is not an inspection request (P2)', () => {
+    expect(R('the home inspector found rats, I need trapping')).toBe('rodent_trapping');
+    expect(R('the home inspector said we have mice')).toBe('rodent_general_one_time');
+  });
+  test('negated rodent mention ("not rats, just ants") does NOT map to a rodent service (P2)', () => {
+    expect(R('No, it is not rats, just ants everywhere in the kitchen')).toBeUndefined();
+    expect(R("We don't have mice, the problem is fleas in the carpet")).toBeUndefined();
+  });
+  test('coordinated negation ("no mice or rats") does NOT map to a rodent service (P2)', () => {
+    expect(R('No mice or rats, just ants everywhere')).toBeUndefined();
+    expect(R("We don't have rats and mice, the issue is fleas")).toBeUndefined();
+    expect(R('never had rats, mice, or rodents — spraying for spiders')).toBeUndefined();
+  });
+  test('historical rodent mention does NOT anchor the booking (P2)', () => {
+    expect(R('We had mice last time but now we need the spiders treated')).toBeUndefined();
+    expect(R('Last visit it was rats; this time the lawn needs treatment')).toBeUndefined();
+    expect(R('We had rats a year ago, now the problem is ants')).toBeUndefined();
+  });
+  test('a CURRENT problem with an onset time ("showed up two days ago") still books (P2)', () => {
+    expect(R('rats showed up two days ago and we need someone out')).toBe('rodent_general_one_time');
+    expect(R('the mice came back a week ago')).toBe('rodent_general_one_time');
+  });
+  test('a contrast cue after a history phrase preserves the CURRENT rodent mention (P2)', () => {
+    expect(R('Last visit we treated ants, now I have mice')).toBe('rodent_general_one_time');
+    expect(R('previously it was spiders but today rats are in the garage')).toBe('rodent_general_one_time');
+  });
+  test('adversative after a negation keeps the affirmative rodent mention (P2)', () => {
+    expect(R("We don't have ants but rats are everywhere in the attic")).toBe('rodent_general_one_time');
+  });
+});
 
 describe('resolveCallBookingCatalogService', () => {
   test('model specific_service_name pick wins (verbatim catalog name)', () => {

@@ -75,13 +75,12 @@ const PAYLOADS = {
       applicator_attestation: 'I attest that the soil treatment described above was applied in accordance with the product label and Florida Building Code 1816.1.7.',
     },
   }),
-  // WDO links are also emailed to the third parties named on the FDACS form,
-  // so the live payload redacts the homeowner's email/phone — mirror that.
   wdo: () => ({
     ...BASE,
     ...CARTER,
-    customerEmail: null,
-    customerPhone: null,
+    // owner ruling 2026-07-16: WDO shows the full identity block (the old
+    // server-side email/phone withholding is lifted) — CARTER's contact
+    // fields ride through like every other scenario
     projectType: 'wdo_inspection',
     fdacsPdfAvailable: true,
     title: 'WDO Inspection Service',
@@ -120,10 +119,27 @@ const PAYLOADS = {
     title: 'Annual termite inspection',
     findings: {
       areas_inspected: 'Exterior perimeter, garage, attic access, bath traps',
+      // Phase-3 compliance answers (FS 482.226) — required by the send gate.
+      areas_not_inspected: 'Attic beyond decked storage area — flooring blocks crawl access',
       termite_type: 'None observed',
       activity_status: 'No activity',
       treatment_recommendation: 'Continue annual inspections; monitor mulch depth at foundation',
+      inspection_notice_affixed: 'Yes',
     },
+  }),
+  // Narrative variant: the AI-drafted sectioned narrative suppresses the
+  // raw findings list, so this scenario proves the compliance answers still
+  // render in their own "Inspection record" block (Codex P1 r3 on #2703).
+  'termite-narrative': () => ({
+    ...PAYLOADS.termite(),
+    recommendations: [
+      'WHAT WE INSPECTED',
+      'We walked the full exterior perimeter, the garage, the attic access, and every bath trap.',
+      'WHAT WE FOUND',
+      'No live termite activity or new evidence anywhere we inspected today.',
+      'WHAT WE RECOMMEND',
+      'Keep mulch pulled back from the foundation and stay on the annual inspection schedule.',
+    ].join('\n'),
   }),
   'termite-treatment': () => ({
     ...BASE,
@@ -135,10 +151,30 @@ const PAYLOADS = {
       areas_treated: 'East exterior wall and garage slab expansion joint',
       treatment_method: 'Liquid perimeter',
       products_used: 'Termidor SC (fipronil 0.06%)',
+      // Phase-3 application detail (FAC 5E-14 / FS 482.2265) — required by
+      // the send gate; perimeter methods demand a 'Yes' posted notice.
+      percent_solution: '0.06%',
+      epa_registration: '7969-210',
       linear_feet_or_stations: '120 linear ft',
       gallons_or_amount: '148 gallons',
+      posted_notice: 'Yes',
       followup_plan: '30-day activity recheck',
     },
+  }),
+  // Narrative variant — proves the "Application record" compliance block
+  // renders when the narrative suppresses the raw findings list.
+  'termite-treatment-narrative': () => ({
+    ...PAYLOADS['termite-treatment'](),
+    recommendations: [
+      'WHAT WE INSPECTED',
+      'We checked the east exterior wall, the garage slab expansion joint, and the full foundation line.',
+      'WHAT WE FOUND',
+      'Active subterranean termite workers in the mud tubes along the east wall base.',
+      'WHAT WE DID',
+      'Applied a continuous Termidor SC liquid barrier along 120 linear feet of the east perimeter.',
+      'WHAT WE RECOMMEND',
+      'Leave the treated soil undisturbed and keep the 30-day recheck on the calendar.',
+    ].join('\n'),
   }),
   cockroach: () => ({
     ...BASE,
@@ -348,6 +384,20 @@ function ScenarioBar() {
           style={{
             color: s === scenario ? '#0F172A' : '#fff',
             background: s === scenario ? '#FFD700' : 'transparent',
+            border: '1px solid rgba(255,255,255,.25)',
+            borderRadius: 6, padding: '3px 8px', textDecoration: 'none', fontWeight: 700,
+          }}
+        >
+          {s}
+        </a>
+      ))}
+      <span style={{ opacity: 0.6, margin: '0 2px 0 8px' }}>service reports:</span>
+      {['lawn-v2', 'mosquito-v2', 'server-summary', 'client-built'].map((s) => (
+        <a
+          key={s}
+          href={`/preview-service-report.html?scenario=${s}`}
+          style={{
+            color: '#fff', background: 'transparent',
             border: '1px solid rgba(255,255,255,.25)',
             borderRadius: 6, padding: '3px 8px', textDecoration: 'none', fontWeight: 700,
           }}

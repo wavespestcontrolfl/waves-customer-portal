@@ -41,6 +41,14 @@ describe('address normalizer', () => {
     expect(normalizeLeadAddress({ raw: '789 Ridge Parkway, Sarasota, FL 34236' }).line1).toBe('789 Ridge Pkwy');
     expect(normalizeLeadAddress({ raw: '101 Shore Dr., Sarasota, FL 34236' }).line1).toBe('101 Shore Dr');
     expect(normalizeLeadAddress({ raw: '202 Oak Grove, Sarasota, FL 34236' }).line1).toBe('202 Oak Grv');
+    // Google's "Lp" abbreviation expands to the USPS-canonical LOOP
+    expect(normalizeLeadAddress({ raw: '14384 Skipping Stone Lp, Parrish, FL 34219' }).line1).toBe('14384 Skipping Stone Loop');
+    // …and the comma-free splitter treats it as a street/city boundary too (codex P1)
+    expect(normalizeLeadAddress({ raw: '14384 Skipping Stone Lp Parrish FL 34219' })).toMatchObject({
+      line1: '14384 Skipping Stone Loop',
+      city: 'Parrish',
+      zip: '34219',
+    });
   });
 
   test('normalizes ordinal street names without shouting the suffix', () => {
@@ -438,6 +446,11 @@ describe('parseRawAddress multi-part comma units (codex rd8)', () => {
 });
 
 describe('formatAddress', () => {
+  test('includes an apartment or unit line between the street and city', () => {
+    expect(formatAddress({ line1: '123 Main St', line2: 'Unit 4', city: 'Sarasota', state: 'FL', zip: '34231' }))
+      .toBe('123 Main St, Unit 4, Sarasota, FL 34231');
+  });
+
   test('joins a complete address', () => {
     expect(formatAddress({ line1: '123 Main St', city: 'Sarasota', state: 'FL', zip: '34231' }))
       .toBe('123 Main St, Sarasota, FL 34231');

@@ -22,6 +22,7 @@ const SONNET_BACKED = new Set([
   'run_price_lookup',
   'draft_sms_reply',
   'draft_review_reply',
+  'triage_lead', // spawns the lead-triage LLM call (ROUTES) — smoke must not spend model calls
 ]);
 
 function safeRequire(p) {
@@ -119,7 +120,7 @@ function buildRecord(tool, ctx) {
     execute: ctx.execute,
     manualContract: override || inlineContract,
     sideEffects: !!(override?.sideEffects || tool._sideEffects),
-    sonnetBacked: SONNET_BACKED.has(tool.name),
+    sonnetBacked: !!(override?.sonnetBacked || tool._sonnetBacked || SONNET_BACKED.has(tool.name)),
   };
 }
 

@@ -1,6 +1,9 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
+const { rateLimitKey } = require('../middleware/rate-limit-key');
+const { authenticate } = require('../middleware/auth');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
@@ -16,7 +19,7 @@ function parseJson(value, fallback) {
   if (typeof value === 'object') return value;
   try {
     return JSON.parse(value);
-  } catch (_err) {
+  } catch {
     return fallback;
   }
 }
@@ -82,37 +85,139 @@ function mapRouteFeedback(row) {
 // =========================================================================
 
 // POST /api/ai/chat — customer sends a message via portal chat
-router.post('/chat', async (req, res, next) => {
+router.post('/chat', authenticate, async (req, res, next) => {
   try {
-    const { message, sessionId } = req.body;
+    const message = String(req.body?.message || '').trim();
+    const sessionId = String(req.body?.sessionId || '').trim().slice(0, 120);
     if (!message) return res.status(400).json({ error: 'Message required' });
+    if (message.length > 4000) return res.status(400).json({ error: 'Message is too long' });
 
-    // Try to identify customer from auth token
-    let customerId = null;
-    let customerPhone = null;
-    try {
-      const jwt = require('jsonwebtoken');
-      const config = require('../config');
-      const token = req.headers.authorization?.replace('Bearer ', '');
-      if (token) {
-        const decoded = jwt.verify(token, config.jwt.secret);
-        if (decoded.customerId) {
-          customerId = decoded.customerId;
-          const customer = await db('customers').where('id', customerId).first();
-          customerPhone = customer?.phone;
-        }
-      }
-    } catch { /* unauthenticated chat is allowed */ }
+    // The authenticated middleware is the sole source of portal identity.
+    // Never trust a body claim or decode a second, optional token here: doing
+    // either lets a caller detach model tools from the property they actually
+    // authenticated as.
+    const customerId = req.customerId;
+    const customerPhone = req.customer.phone || null;
 
     const result = await WavesAssistant.processMessage({
       message,
       channel: 'portal_chat',
-      channelIdentifier: sessionId || customerId || `anon-${Date.now()}`,
+      channelIdentifier: sessionId || customerId,
       customerId,
       customerPhone,
     });
 
-    res.json(result);
+    // Only true model output is reportable — canned fallbacks and the
+    // deterministic escalation template are not AI-generated content. The
+    // affordance also needs the same auth state /chat/report requires, or an
+    // expired-token tab would render a Report link whose POST always 401s.
+    res.json({ ...result, canReport: aiContentReportEnabled() && result.generated === true });
+  } catch (err) { next(err); }
+});
+
+// Kill switch for the customer-facing "report AI content" affordance
+// (Microsoft Store policy 11.16 requires a live report mechanism, so the
+// gate defaults ON; set GATE_AI_CONTENT_REPORT=false to kill).
+function aiContentReportEnabled() {
+  return process.env.GATE_AI_CONTENT_REPORT !== 'false';
+}
+
+// The report endpoint is default-on and accepts unauthenticated traffic, and
+// every accepted body inserts a pending ai_escalations row — without its own
+// limiter a single client inside the broad global /api allowance could bury
+// real escalations under junk reports. Keyed like the global limiter (JWT
+// subject when authenticated, /64-collapsed IP otherwise).
+const chatReportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: rateLimitKey,
+  message: { error: 'Too many reports. Please try again later.' },
+});
+
+// While the gate is off the surface must read 404 even ahead of the limiter
+// and auth (same unobservable-when-dark contract as the payer-statement and
+// lawn-assessment surfaces in index.js).
+function requireAiContentReport(req, res, next) {
+  if (!aiContentReportEnabled()) return res.status(404).json({ error: 'Not found' });
+  next();
+}
+
+// POST /api/ai/chat/report — customer flags an AI reply as inappropriate.
+// Customer auth required (the chat UI lives behind ProtectedRoute and always
+// sends waves_token; an open write surface here would let any internet client
+// mint review-queue rows). Lands in the ai_escalations review queue and the
+// operator inbox so it surfaces on the admin agent hub.
+router.post('/chat/report', requireAiContentReport, chatReportLimiter, authenticate, async (req, res, next) => {
+  try {
+    const customerId = req.customerId;
+    const messageContent = String(req.body?.messageContent || '').trim().slice(0, 4000);
+    if (!messageContent) return res.status(400).json({ error: 'messageContent required' });
+    const sessionId = String(req.body?.sessionId || '').trim().slice(0, 120);
+
+    let conversation = null;
+    if (sessionId) {
+      conversation = await db('agent_sessions')
+        .where({
+          channel: 'portal_chat',
+          channel_identifier: sessionId,
+          customer_id: customerId,
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      // Keep a second check at the trust boundary even though the SQL is
+      // scoped; it protects against future query refactors and mock/adapter
+      // mistakes returning a row outside the predicate.
+      if (conversation && String(conversation.customer_id) !== String(customerId)) {
+        conversation = null;
+      }
+    }
+
+    const [escalation] = await db('ai_escalations').insert({
+      conversation_id: conversation?.id || null,
+      customer_id: customerId,
+      reason: 'reported_ai_content',
+      summary: 'Customer flagged an AI chat reply as inappropriate via the portal Report button.',
+      customer_message: `[Reported AI reply] ${messageContent}`,
+      ai_draft_response: null,
+      priority: 'normal',
+      status: 'pending',
+    }).returning('id');
+
+    // Best-effort mirror into the operator inbox — that's the queue the admin
+    // agent hub actually loads (ai_escalations has no admin UI consumer yet).
+    // A failure here must not fail the report itself.
+    try {
+      if (await tableExists('operator_inbox_items')) {
+        await db('operator_inbox_items').insert({
+          source: 'ai_report',
+          source_id: String(escalation?.id || escalation),
+          customer_id: customerId,
+          channel: 'portal_chat',
+          status: 'open',
+          priority: 'medium',
+          needs_reply: false,
+          occurred_at: new Date(),
+          title: 'Customer reported an AI chat reply',
+          // Full reported reply (already capped at 4000 chars) — the Agent Ops
+          // card renders this summary and nothing links the ai_escalations row,
+          // so truncation here could hide the objectionable part from review.
+          summary: messageContent,
+          metadata: JSON.stringify({
+            escalation_id: escalation?.id || escalation || null,
+            conversation_id: conversation?.id || null,
+            // Full reply for the Agent Ops disclosure — the card compacts
+            // summary to 220 chars, and nothing else links the full text.
+            reported_content: messageContent,
+          }),
+        }).onConflict(['source', 'source_id']).ignore();
+      }
+    } catch (inboxErr) {
+      logger.warn(`[ai-report] operator inbox mirror failed (report still filed): ${inboxErr.message}`);
+    }
+
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 

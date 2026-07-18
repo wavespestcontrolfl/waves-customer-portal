@@ -32,29 +32,58 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const estimateSlotAvailability = require('./estimate-slot-availability');
-const { etParts, etDateString } = require('../utils/datetime-et');
+const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
+const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
+const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
+
+// Business bounds shared with the slot generators (see the exporting module
+// for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
+// 90-day offer horizon.
+const {
+  SLOT_DAY_START_MINUTES,
+  SLOT_DAY_END_MINUTES,
+  MAX_SLOT_HORIZON_DAYS,
+} = estimateSlotAvailability;
 
 const DEFAULT_HOLD_MINUTES = 15;
 const DEFAULT_DURATION_MINUTES = 60;
 const MAX_SERVICE_TYPE_LENGTH = 100;
+// classifySlot's roundUpToHour can push a proven-feasible route slot's
+// DISPLAY window up to 59 minutes later than the gap find-time validated, so
+// a legitimately offered slot can end up to 59 minutes past the 17:00 day
+// close. Allow exactly that much on the end-of-day check and no more.
+const ROUND_UP_GRACE_MINUTES = 59;
 
 // Slot IDs come from PR A's getAvailableSlots:
 //   `${date}_${startTime.replace(':', '-')}_${techId || 'unassigned'}`
-// e.g. "2026-04-29_10-00_7d34c5e6-..."
+// with the signed-offer segments appended by signCustomerFacingSlots:
+//   `${base}.${exp}.${sig}`
+// e.g. "2026-04-29_10-00_7d34c5e6-....1767216000000.dGhl..."
 const SLOT_ID_RE = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_(.+)$/;
 
 function parseSlotId(slotId) {
   if (!slotId || typeof slotId !== 'string') return null;
-  const m = slotId.match(SLOT_ID_RE);
+  // Splitting is deliberately lenient here — ENFORCEMENT (presence, expiry,
+  // HMAC) lives in reserveSlot. Accept-time callers (estimate-public.js)
+  // re-parse the committed slotId only to locate the reservation row, and
+  // must keep working after the offer's exp has passed.
+  const signed = splitSignedSlotId(slotId);
+  const base = signed ? signed.baseSlotId : slotId;
+  const m = base.match(SLOT_ID_RE);
   if (!m) return null;
   const [, date, hh, mm, techRaw] = m;
   const h = Number(hh);
   const min = Number(mm);
   if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) return null;
+  // Round-trip the calendar day: the regex alone admits 2026-09-31, which
+  // survives every lexical bound check and only explodes inside Postgres.
+  if (!isRealCalendarDate(date)) return null;
   return {
     date,
     windowStart: `${hh}:${mm}:00`,
     techId: techRaw === 'unassigned' ? null : techRaw,
+    offerExp: signed ? signed.exp : null,
+    offerSig: signed ? signed.sig : null,
   };
 }
 
@@ -190,7 +219,39 @@ async function reserveSlot({
     err.code = 'INVALID_SLOT_ID';
     throw err;
   }
-  const { date, windowStart, techId } = parsed;
+  const { date, windowStart, techId, offerExp, offerSig } = parsed;
+
+  // Signed-offer gate (booking-audit round 2): every slot the generator
+  // returns carries `.exp.sig` inside its slotId — a bare/hand-crafted id
+  // (including a crafted `_unassigned` one) was never offered. Presence and
+  // expiry are checked here before any DB work; the HMAC itself is verified
+  // in-txn once the effective duration is known. Rejected with the same
+  // SLOT_UNAVAILABLE the client already recovers from by refreshing slots —
+  // which is also exactly what a customer holding a pre-deploy (unsigned)
+  // slot list needs: one 409, then the refreshed list is signed.
+  if (!offerSig || !Number.isFinite(offerExp) || Date.now() > offerExp) {
+    const err = new Error('slot offer is missing or expired');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
+  }
+
+  // Redemption re-check for owner blackout days: a signed offer minted
+  // moments before the admin blacked the date out must not stay bookable.
+  // Same SLOT_UNAVAILABLE the client already recovers from by refreshing —
+  // and the estimate's 5-min wrapper cache is invalidated FIRST, so that
+  // refresh recomputes instead of re-serving the stale pre-blackout list
+  // (and re-throwing forever). Helper fails open.
+  {
+    const { isBlackoutDate } = require('./scheduling/blackout-dates');
+    if (await isBlackoutDate(date)) {
+      try { estimateSlotAvailability.invalidateEstimate(estimateId); } catch { /* best-effort */ }
+      const err = new Error('that day is no longer available');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = slotId;
+      throw err;
+    }
+  }
 
   // Stale-slot guard: the slot list is generated minutes before the customer
   // taps it, and a page left open can hold windows the generator would no
@@ -217,6 +278,34 @@ async function reserveSlot({
       err.slotId = slotId;
       throw err;
     }
+  }
+
+  // Server-authoritative slot policy: parseSlotId validates FORMAT only — the
+  // date/time/tech in the slotId are client-supplied, so a crafted id could
+  // otherwise book 3 AM, any-horizon, or inactive-tech visits. Route-derived
+  // find-time slots are legitimately offered at minutes the day-grid generator
+  // wouldn't emit, so grid MEMBERSHIP can't be re-checked here; instead
+  // enforce the business bounds every legitimate offer satisfies: the 8a–5p
+  // working window (end checked in-txn once the duration is known), the offer
+  // horizon, and an active technician (checked in-txn). Lunch is deliberately
+  // NOT enforced: PREFERRED_WINDOWS skipping noon is a soft display rotation
+  // for synthetic ASAP slots only — route-derived slots keep their
+  // proven-feasible start, which can fall over lunch.
+  const [slotStartHour, slotStartMinute] = String(windowStart).split(':').map(Number);
+  const slotStartMinutes = slotStartHour * 60 + slotStartMinute;
+  if (slotStartMinutes < SLOT_DAY_START_MINUTES) {
+    const err = new Error('slot starts before the working day');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
+  }
+  // No offer surface produces slots beyond MAX_SLOT_HORIZON_DAYS (the public
+  // route clamps ?windowDays and the AI date search caps maxDaysOut there).
+  if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
+    const err = new Error('slot date is beyond the booking horizon');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = slotId;
+    throw err;
   }
 
   // Numeric coerce + bound the hold window so we can safely interpolate it
@@ -253,6 +342,77 @@ async function reserveSlot({
         throw err;
       }
 
+      const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
+        ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+          serviceMode,
+          selectedFrequency,
+          durationMinutes,
+        })
+        : null;
+      const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
+        ? Number(serviceProfile.durationMinutes)
+        : DEFAULT_DURATION_MINUTES;
+      const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
+
+      // Exact offer-membership proof: the HMAC binds surface, THIS estimate,
+      // date, start, technician (null = unassigned), the profile-resolved
+      // duration, and the expiry — signed by signCustomerFacingSlots on the
+      // very slots getAvailableSlots returned. A token holder can no longer
+      // reserve any tuple the generator never offered; a legitimately offered
+      // `_unassigned` slot verifies like any other, while an UNSIGNED
+      // unassigned id died at the presence gate above. Verified here (not
+      // pre-txn) because the duration needs the estimate's profile — the
+      // coarse policy checks below stay as defense-in-depth.
+      if (!verifySlotOffer({
+        surface: 'estimate',
+        scopeId: String(estimateId),
+        date,
+        startMinutes: slotStartMinutes,
+        technicianId: techId,
+        durationMinutes: effectiveDurationMinutes,
+        exp: offerExp,
+      }, offerSig)) {
+        const err = new Error('slot was not offered for this estimate');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+
+      // Working-day end: every legitimate offer ends by SLOT_DAY_END_MINUTES
+      // (find-time's dayClose / slotWindowFitsDay), plus the round-up grace —
+      // see ROUND_UP_GRACE_MINUTES. Needs the profile-resolved duration, so
+      // it lives in-txn with the signature check rather than with the pre-txn
+      // policy guards.
+      if (slotStartMinutes + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
+        const err = new Error('slot runs past the end of the working day');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = slotId;
+        throw err;
+      }
+      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
+      const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
+      const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+
+      // Active-technician check: find-time only generates slots for
+      // technicians where({ active: true }), so a slotId naming an inactive
+      // or unknown tech was never offered. A crafted non-uuid techId makes
+      // the lookup itself throw (22P02) — treat that the same as unknown
+      // (the txn rolls back on the throw below either way).
+      if (techId) {
+        let activeTech = null;
+        try {
+          activeTech = await trx('technicians').where({ id: techId, active: true }).first('id');
+        } catch (techErr) {
+          logger.warn(`[slot-reservation] technician lookup failed for slot ${slotId}: ${techErr.message}`);
+        }
+        if (!activeTech) {
+          const err = new Error('slot technician is not available');
+          err.code = 'SLOT_UNAVAILABLE';
+          err.slotId = slotId;
+          throw err;
+        }
+      }
+
       // The FOR UPDATE above only serializes THIS estimate — two different
       // customers' estimates reserving the same tech/date can both pass the
       // conflict check below concurrently and both insert. Serialize all
@@ -269,22 +429,13 @@ async function reserveSlot({
       // tech lock first, zone lock second.
       let reserveZone = null;
       try {
-        const zones = await trx('service_zones').select('id', 'cities', 'zone_name');
-        if (estimate.customer_id) {
-          const holder = await trx('customers').where({ id: estimate.customer_id }).first('city');
-          const holderCity = String(holder?.city || '').toLowerCase();
-          if (holderCity) {
-            reserveZone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity)) || null;
-          }
-        }
-        if (!reserveZone && estimate.address) {
-          // Unlinked/public estimates carry only a free-text address —
-          // match any zone city appearing in it so these reserves take
-          // the same zone lock the self-booking writers do instead of
-          // falling through to zone:unknown.
-          const addr = String(estimate.address).toLowerCase();
-          reserveZone = zones.find((z) => (z.cities || []).some((c) => c && addr.includes(String(c).toLowerCase()))) || null;
-        }
+        // Shared with the slot generator's colliding-slot filter (slot-zone.js)
+        // so the offer surface and this reserve gate resolve the SAME zone —
+        // a generator/reserve zone mismatch shows customers slots that every
+        // tap 409s. Unlinked/public estimates resolve via their free-text
+        // address so these reserves take the same zone lock the self-booking
+        // writers do instead of falling through to zone:unknown.
+        reserveZone = await resolveEstimateZone(trx, estimate);
       } catch (zoneErr) {
         logger.warn(`[slot-reservation] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
       }
@@ -293,20 +444,52 @@ async function reserveSlot({
         ['slot-reserve', `zone:${reserveZone?.id || 'unknown'}:${date}`],
       );
 
-      const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
-        ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
-          serviceMode,
-          selectedFrequency,
-          durationMinutes,
-        })
-        : null;
-      const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
-        ? Number(serviceProfile.durationMinutes)
-        : DEFAULT_DURATION_MINUTES;
-      const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
-      const serviceType = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
-      const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
-      const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+      // (service profile / duration / day-end / signature were all resolved
+      // and verified ABOVE, right after the estimate row's state checks.)
+
+      // Idempotent self-hold handling: the conflict checks below have no
+      // self-exclusion, so this estimate's OWN live hold would 409 the
+      // customer's retry (the client re-POSTs /reserve with the same slotId
+      // after "go back"). Re-reserving the SAME slot refreshes the existing
+      // hold's expiry and returns it; a live hold for a DIFFERENT slot is
+      // superseded — released inside this txn with the same narrow predicate
+      // releaseReservation uses (still-uncommitted rows only), which also
+      // removes it from both the tech- and zone-conflict queries below.
+      const liveHolds = await trx('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .whereNull('customer_id')
+        .whereNotNull('reservation_expires_at')
+        .whereRaw('reservation_expires_at > NOW()')
+        .forUpdate()
+        .select('*');
+      const sameSlotHold = (liveHolds || []).find((hold) => dateOnly(hold.scheduled_date) === date
+        && String(hold.window_start).slice(0, 5) === String(windowStart).slice(0, 5)
+        && (hold.technician_id || null) === (techId || null)
+        && Number(hold.estimated_duration_minutes) === effectiveDurationMinutes);
+      if (sameSlotHold) {
+        const staleIds = liveHolds.filter((hold) => hold.id !== sameSlotHold.id).map((hold) => hold.id);
+        if (staleIds.length) {
+          await trx('scheduled_services').whereIn('id', staleIds).del();
+        }
+        // Refresh expiry only — commitReservation recomputes service_type /
+        // notes / window_end from the accept-time profile, so the hold's
+        // stamped labels don't need to be rebuilt on a retry.
+        const [refreshed] = await trx('scheduled_services')
+          .where({ id: sameSlotHold.id })
+          .update({ reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`) })
+          .returning(['id', 'reservation_expires_at']);
+        const refreshedExpiresAt = refreshed?.reservation_expires_at || null;
+        logger.info('[slot-reservation] refreshed existing hold', {
+          estimateId,
+          slotId,
+          scheduledServiceId: sameSlotHold.id,
+          expiresAt: refreshedExpiresAt instanceof Date ? refreshedExpiresAt.toISOString() : refreshedExpiresAt,
+        });
+        return { scheduledServiceId: refreshed?.id || sameSlotHold.id, expiresAt: refreshedExpiresAt };
+      }
+      if ((liveHolds || []).length) {
+        await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
+      }
 
       // Conflict check + insert in the same txn so a concurrent reserve that
       // overlaps this tech/date window can't slip past us. Expired
@@ -337,7 +520,7 @@ async function reserveSlot({
       // same zone/time — availability treats the zone as one capacity
       // pool, so an estimate hold must not stack on top of one.
       if (reserveZone) {
-        const zoneSlug = reserveZone.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
+        const zoneSlug = zoneSlugOf(reserveZone);
         const zoneCities = reserveZone.cities || [];
         const zoneConflict = await trx('scheduled_services')
           .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -456,6 +639,19 @@ async function commitReservation({
       const err = new Error('reservation expired');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
+    }
+
+    // Owner blackout re-check at COMMIT: the admin may have blacked the day
+    // out between the customer's reserve and their accept — the hold must
+    // not graduate onto a day off. Same expired-reservation recovery path
+    // the accept flow already handles (customer re-picks a time).
+    {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(row.scheduled_date)) {
+        const err = new Error('that day is no longer available');
+        err.code = 'RESERVATION_EXPIRED';
+        throw err;
+      }
     }
 
     const serviceProfile = await resolveReservationServiceProfile(client, row, {

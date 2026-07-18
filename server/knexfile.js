@@ -26,7 +26,10 @@ if (!hasUsableDatabaseUrl(process.env.DATABASE_URL)) {
     || databaseUrlFromPgVars();
   if (resolvedDatabaseUrl) {
     process.env.DATABASE_URL = resolvedDatabaseUrl;
-    console.log('[knexfile] Resolved DATABASE_URL from Railway Postgres vars');
+    // Keep stdout available for machine-readable command output (for example,
+    // `audit:staff-rollout -- --json`). Connection diagnostics belong on
+    // stderr so piping stdout to a JSON parser remains safe.
+    console.error('[knexfile] Resolved DATABASE_URL from Railway Postgres vars');
   }
 }
 

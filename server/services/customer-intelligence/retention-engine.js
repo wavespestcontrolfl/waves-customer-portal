@@ -1,6 +1,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
+const { CUSTOMER_STAGES } = require('../customer-stages');
 const MODELS = require('../../config/models');
+const { isEnabled } = require('../../config/feature-gates');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
@@ -22,6 +24,12 @@ class RetentionEngine {
 
     const customer = await db('customers').where('id', customerId).first();
     if (!customer) return null;
+    // Churn requires having BEEN a customer. Health scores cover leads too,
+    // so without this gate a never-paying new_lead can be churn-alerted as
+    // "critical" (Copeman, 2026-07-11, 3 AM cron → 🚨 SMS to Adam) and burn
+    // an AI outreach draft nobody can act on. Leads, prospects, and
+    // soft-deleted rows never get retention outreach or churn alerts.
+    if (!CUSTOMER_STAGES.includes(customer.pipeline_stage) || customer.deleted_at) return null;
 
     // Don't bombard — check for recent outreach
     const recent = await db('retention_outreach')
@@ -113,11 +121,17 @@ ${recentSMS || 'None'}`
       status: 'pending_approval',
     }).returning('*');
 
-    // Alert Adam for critical customers
-    if (health.churn_risk === 'critical' && TwilioService && process.env.ADAM_PHONE) {
+    // Alert Adam for critical customers — gated: owner paused health
+    // notifications 2026-07-11 (GATE_CHURN_ALERT_SMS, fails closed)
+    if (isEnabled('churnAlertSms') && health.churn_risk === 'critical' && TwilioService && process.env.ADAM_PHONE) {
       try {
+        // Null-safe header: leads/one-time customers have no tier or monthly
+        // rate — the old interpolation rendered "Sam null (null $null/mo)".
+        const alertName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Customer';
+        const alertRate = customer.monthly_rate ? `$${customer.monthly_rate}/mo` : '';
+        const alertMeta = [customer.waveguard_tier, alertRate].filter(Boolean).join(' ');
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `🚨 CHURN ALERT: ${customer.first_name} ${customer.last_name} (${customer.waveguard_tier} $${customer.monthly_rate}/mo)\nHealth: ${health.overall_score}/100\nRisk: ${riskFactors[0]?.value || 'Multiple signals'}\nAction: ${outreach.outreach_type.toUpperCase()} — "${(outreach.message || '').substring(0, 100)}..."`,
+          `🚨 CHURN ALERT: ${alertName}${alertMeta ? ` (${alertMeta})` : ''}\nHealth: ${health.overall_score}/100\nRisk: ${riskFactors[0]?.value || 'Multiple signals'}\nAction: ${outreach.outreach_type.toUpperCase()} — "${(outreach.message || '').substring(0, 100)}..."`,
           { messageType: 'internal_alert' }
         );
       } catch (err) {

@@ -541,6 +541,9 @@ describe("TwilioService.sendServiceReminder", () => {
         // still passed (empty) so the template renders with clean copy
         // instead of an unresolved {reschedule_line} suppressing the SMS.
         reschedule_line: "",
+        // Same contract for the card-hold fee-policy clause (spec Phase 1):
+        // ONE_TIME_CARD_HOLD is unset in tests, so the clause is ''.
+        card_hold_policy_line: "",
       },
       { workflow: "twilio_reminder_24h", entity_type: "scheduled_service", entity_id: "svc-1" },
     );

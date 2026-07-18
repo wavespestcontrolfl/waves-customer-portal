@@ -8,10 +8,9 @@
 //   GET  /api/tech/services/:id/photos  -> presigned thumbnails
 //   POST /api/tech/services/:id/photos  -> multipart upload
 //
-// Schema constraint: service_photos.service_record_id is NOT NULL.
-// The completion route (POST /api/admin/dispatch/:serviceId/complete)
-// must have run first. Server replies 409 with a clear message if
-// not — surfaced inline here as "Complete the service first."
+// Photos taken before completion are staged against the scheduled visit.
+// The completion transaction promotes them into service_photos once the
+// immutable service_record exists, preserving true before/progress capture.
 //
 // PhotoType options come from VALID_PHOTO_TYPES in tech-track.js
 // (before / after / issue / progress). Keep this set in sync if the
@@ -87,6 +86,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       const fd = new FormData();
       fd.append('photo', file);
       fd.append('photoType', photoType);
+      fd.append('capturedAt', new Date(file.lastModified || Date.now()).toISOString());
       if (caption.trim()) fd.append('caption', caption.trim());
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
@@ -94,14 +94,13 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
       });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        // 409 = service not yet completed. Server message is already
-        // user-friendly ("Service must be completed before attaching
-        // photos") — surface verbatim so the tech knows what to do.
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      setStatusMsg('Photo uploaded');
+      setStatusMsg(data.photo?.staged
+        ? 'Photo saved — it will attach when the visit is completed'
+        : 'Photo uploaded');
       setCaption('');
       await load();
     } catch (err) {
@@ -257,7 +256,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
                   fontSize: 10, fontWeight: 700, padding: '2px 6px',
                   borderRadius: 4, textTransform: 'capitalize',
                 }}>
-                  {p.photo_type}
+                  {p.photo_type}{p.staged ? ' · staged' : ''}
                 </div>
                 {p.caption && (
                   <div style={{

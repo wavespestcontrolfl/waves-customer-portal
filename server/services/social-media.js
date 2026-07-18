@@ -1356,9 +1356,17 @@ const SocialMediaService = {
       // RSS backstop recover it once platforms come back.
       const existing = await trx('social_media_posts')
         .where('source_url', normalized)
-        .whereNotIn('status', ['dry_run', 'failed'])
+        // Same exclusions as the RSS path above: a REJECTED studio draft is
+        // an admin killing that copy, not vetoing the URL — nothing posted,
+        // so it must not block (or worse, park) an auto-share.
+        .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
         .first();
-      if (existing) return { skipped: 'already_posted' };
+      // blocking_status lets callers distinguish "definitively sent/queued"
+      // (published/scheduled — safe to stamp the source row as shared) from
+      // "an admin drafted studio copy for this URL" (draft/approved — blocks
+      // the auto-share by design until the admin publishes or rejects it,
+      // but nothing has gone out, so callers must NOT mark it shared).
+      if (existing) return { skipped: 'already_posted', blocking_status: existing.status || null };
       const result = await this.publishToAll({
         title, description, link: normalized, guid: normalized, source, noAiImage,
         // Autonomous blog-share lane: opt into every platform incl. Twitter
@@ -1552,7 +1560,7 @@ const SocialMediaService = {
         key: 'twitter',
         enabled: SOCIAL_FLAGS.twitterEnabled && twitterService.configured,
         reason: !SOCIAL_FLAGS.twitterEnabled ? 'Disabled'
-          : 'X credentials not configured (TWITTER_API_KEY/SECRET + TWITTER_ACCESS_TOKEN/SECRET)',
+          : 'X posting not configured (ZERNIO_API_KEY)',
       },
     ].filter((platform) => requestedPlatforms.has(platform.key));
 

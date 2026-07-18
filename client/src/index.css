@@ -1,5 +1,8 @@
 @import "@fontsource/inter/400.css";
 @import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/inter/800.css";
 /* Self-host Roboto (the admin's forced font) so it loads reliably on iPhone
    instead of falling back to the system font when Google Fonts is slow/blocked. */
 @import "@fontsource/roboto/400.css";
@@ -23,25 +26,23 @@ html {
 }
 
 /* iOS Safari/WKWebView auto-zooms the whole page in whenever a focused form
-   control has a font smaller than 16px, then leaves the customer stranded
-   zoomed-in (pinch-out is fiddly). The portal's inline styles size inputs at
-   14px, so force >=16px on touch devices to suppress the involuntary zoom.
+   control has a font smaller than 16px, then leaves the user stranded
+   zoomed-in with the fixed chrome (tab bar/header) clipped off-screen
+   (pinch-out is fiddly). Inline styles size inputs at 13-14px across every
+   surface, so force >=16px on touch devices to suppress the involuntary zoom.
    Pinch-zoom itself stays enabled (no user-scalable=no in the viewport tag).
 
    !important is required: the fields set font-size inline (style={{ fontSize:
-   14 }}), and author CSS without it loses to inline styles. Scoped to two
-   customer-only hooks so admin/tech surfaces are untouched:
-   - .portal-root  — the in-page customer portal tree
-   - [data-glass]  — glass-themed modals portaled to <body> (e.g. AutopayCard's
-     Modal via createPortal), which sit outside .portal-root. data-glass is
-     never used on admin surfaces (they're monochrome). */
+   14 }}), and author CSS without it loses to inline styles. Unscoped on
+   purpose: this was originally limited to the customer portal
+   (.portal-root / [data-glass]), and the admin schedule's WDO report form
+   then hit the exact same stuck-zoom bug on iPhone — admin/tech sheets
+   portal to <body>, so any container scope leaves holes. Desktop is
+   untouched (pointer: coarse only). */
 @media (pointer: coarse) {
-  .portal-root input,
-  .portal-root textarea,
-  .portal-root select,
-  [data-glass] input,
-  [data-glass] textarea,
-  [data-glass] select {
+  input,
+  textarea,
+  select {
     font-size: 16px !important;
   }
 }
@@ -227,6 +228,42 @@ button, input, select, textarea, optgroup {
   outline: 2px solid #009cde;
   outline-offset: 2px;
   border-radius: 4px;
+}
+
+/* Keyboard focus ring for customer-surface form controls whose inline
+   styles used to set outline:'none' (which killed every stylesheet ring —
+   inline styles win). The inline outline is removed at those sites and
+   this class supplies the replacement: no ring on plain :focus (pointer
+   aesthetics unchanged), a visible ring on :focus-visible only. Values
+   match the glass ring (glass-theme.css :focus-visible — 2px solid
+   rgba(--accent 10,126,194, .9), 3px offset). */
+.waves-focus-ring:focus {
+  outline: none;
+}
+.waves-focus-ring:focus-visible {
+  outline: 2px solid rgba(10, 126, 194, 0.9);
+  outline-offset: 3px;
+}
+
+/* Skip-to-content link (WavesShell + PortalPage shells). Parked above the
+   viewport until keyboard focus, then drops in as a navy pill over the
+   sticky header — the standard hidden-until-focus skip-link pattern. */
+.waves-skip-link {
+  position: fixed;
+  top: -100px;
+  left: 16px;
+  z-index: 2000;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: #04395E;
+  color: #FFFFFF;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+  box-shadow: 0 8px 26px rgba(4, 57, 94, 0.35);
+}
+.waves-skip-link:focus {
+  top: calc(12px + env(safe-area-inset-top, 0px));
 }
 
 /* Customer-facing portal cleanup. These classes intentionally sit outside

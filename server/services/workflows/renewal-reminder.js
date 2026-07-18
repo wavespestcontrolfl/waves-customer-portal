@@ -34,10 +34,27 @@ class RenewalReminder {
       logger.error(`Annual prepay payment reminder failed: ${err.message}`);
     }
 
+    // Daily catch-all reconcile for live covered terms: recovers
+    // pending-window settle/credit/reversal work whose one-shot
+    // payment/refund hook was lost to a transient error (idempotent — see
+    // reconcileCoveredTermsSweep). Independent try/catch: a sweep failure
+    // must not silence the reminders below.
+    try {
+      const prepay = annualPrepay || require('../annual-prepay-renewals');
+      if (prepay.reconcileCoveredTermsSweep) {
+        await prepay.reconcileCoveredTermsSweep();
+      }
+    } catch (err) {
+      logger.error(`Annual prepay covered-term sweep failed: ${err.message}`);
+    }
+
+    // OWNER RULING (2026-07-13): "renewal" language is reserved for termite
+    // bonds — the one service with a real fixed term. WaveGuard and mosquito
+    // are no-term recurring services, so their reminder legs are removed
+    // (their date columns remain for admin/reporting use). Price changes on
+    // no-term services use the price-change notice workflow instead.
     const renewalFields = [
       { column: 'termite_renewal_date', label: 'Termite Bond Renewal' },
-      { column: 'mosquito_season_start', label: 'Mosquito Season' },
-      { column: 'waveguard_renewal_date', label: 'WaveGuard Plan Renewal' },
     ];
 
     let totalSent = annualPrepaySent;
@@ -48,22 +65,19 @@ class RenewalReminder {
         targetDate.setDate(targetDate.getDate() + daysOut);
         const dateStr = targetDate.toISOString().split('T')[0];
 
+        // No phone requirement at the query level: the email leg (sequence
+        // enrollment below) must reach email-only customers too; the SMS
+        // branch guards on phone itself.
         const customers = await db('customers')
           .whereNotNull(field.column)
           .whereRaw(`DATE(${field.column}) = ?`, [dateStr])
-          .whereNull('deleted_at') // soft-deleted customers get no renewal SMS
-          .whereNotNull('phone')
+          .whereNull('deleted_at') // soft-deleted customers get no renewal outreach
           .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', field.column);
 
         for (const customer of customers) {
           try {
-            if (
-              field.column === 'waveguard_renewal_date'
-              && annualPrepay?.hasAnnualPrepayRenewal
-              && await annualPrepay.hasAnnualPrepayRenewal(customer.id, dateStr)
-            ) {
-              continue;
-            }
+            // SMS leg needs a phone; email-only customers stop here.
+            if (!customer.phone) continue;
 
             // Check cooldown — skip if renewal SMS sent in last 35 days
             const recent = await db('sms_log')

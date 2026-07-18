@@ -279,18 +279,235 @@ router.post('/templates/:key/test', async (req, res) => {
   }
 });
 
-// POST /api/admin/automations/templates/:key/trigger — enroll a specific customer
+// POST /api/admin/automations/templates/:key/trigger — manually enroll a
+// specific customer in this automation's sequence (the per-row "Send" button).
+// Enrollment is idempotent (an active enrollment is a no-op) and the runner
+// sends step 1 per its delay. Responds with an operator-facing message so the
+// UI can say exactly what happened instead of a bare success flag.
+function manualEnrollMessage(templateName, result) {
+  if (result.enrolled) return `${templateName} — enrolled. Step 1 sends on its configured delay.`;
+  switch (result.reason) {
+    case 'no email': return 'This customer has no email on file, so they can\'t receive this automation.';
+    case 'already enrolled': return 'This customer already has an active enrollment on this automation — nothing was re-sent.';
+    case 'template disabled': return 'This automation is disabled. Enable it first, then send.';
+    case 'no steps': return 'This automation has no enabled steps yet, so there is nothing to send.';
+    default: return `Couldn't enroll: ${result.reason || 'unknown reason'}.`;
+  }
+}
+
 router.post('/templates/:key/trigger', async (req, res) => {
   try {
     const { customerId } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
-    const customer = await db('customers').where({ id: customerId }).first();
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'customer not found' });
 
+    const template = await db('automation_templates').where({ key: req.params.key }).first();
+    if (!template) return res.status(404).json({ error: 'template not found' });
+
     const result = await AutomationRunner.enrollCustomer({ templateKey: req.params.key, customer });
-    res.json({ success: true, ...result });
+    const message = manualEnrollMessage(template.name, result);
+
+    if (result.enrolled) {
+      // Audit trail on the customer timeline, attributed to the operator who
+      // clicked Send (best-effort — an audit hiccup must not fail the send).
+      try {
+        await db('customer_interactions').insert({
+          customer_id: customer.id,
+          interaction_type: 'email_outbound',
+          admin_user_id: req.technicianId || null,
+          subject: `${template.name} automation sent (manual)`,
+          body: `Enrolled manually from the Automations page — sequence emails go to ${customer.email}.`,
+        });
+      } catch (auditErr) {
+        logger.warn(`[automations/trigger] audit log failed for customer ${customer.id}: ${auditErr.message}`);
+      }
+    }
+
+    res.json({ success: true, message, ...result });
   } catch (err) {
     logger.error(`[automations/trigger] failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Segment send ─────────────────────────────────────────────────
+// Bulk enrollment for announcement-style automations (e.g. Pricing Update):
+// preview a segment's live count, then enroll the whole segment on an explicit
+// operator confirm. Two-step by design — the send endpoint re-counts and
+// refuses if the segment drifted from the previewed count, so the operator
+// always confirms the number that actually sends.
+
+const { whereLiveCustomer } = require('../services/customer-stages');
+const { CITY_TO_LOCATION } = require('../config/locations');
+
+const SEGMENT_SCOPES = new Set(['customers', 'program']);
+const SEGMENT_LOCATIONS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
+const SEGMENT_SEND_CAP = 2000;
+
+// SQL mirror of the canonical hasMembership predicate
+// (routes/admin-customers.js): a NON-membership tier key excludes the row
+// outright (even with a positive rate), any other tier includes it, and only
+// tierless rows fall back to monthly_rate > 0. The key normalization
+// (lowercase, strip non-alphanumerics: 'One-Time' → 'onetime') and the
+// exclusion list must stay in lockstep with NON_MEMBERSHIP_TIER_KEYS there.
+const MEMBERSHIP_SQL = `
+  CASE
+    WHEN regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g')
+      IN ('none', 'onetime', 'na', 'no', 'notset', 'commercial') THEN false
+    WHEN regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g') <> '' THEN true
+    ELSE coalesce(monthly_rate, 0) > 0
+  END`;
+
+// Live customers with an email, per the canonical real-customer predicate
+// (customer-stages.js — pipeline_stage, NOT the always-true `active` flag
+// alone). scope 'program' = hasMembership (above).
+function segmentQuery({ scope, locationId }) {
+  let q = db('customers')
+    .modify(whereLiveCustomer)
+    .whereNotNull('email')
+    .whereRaw("TRIM(email) <> ''");
+  if (scope === 'program') q = q.whereRaw(MEMBERSHIP_SQL);
+  if (locationId) {
+    // nearest_location_id is nullable; the rest of the app falls back to
+    // city routing (config/locations resolveLocation), so a location-scoped
+    // send must too or null-location customers silently drop out. Mirror
+    // resolveLocation exactly: a mapped city routes to its office, and
+    // anything else — unmapped city, blank, or NULL — defaults to bradenton.
+    q = q.where(function locationMatch() {
+      this.where('nearest_location_id', locationId)
+        .orWhere(function cityFallback() {
+          this.whereNull('nearest_location_id');
+          if (locationId === 'bradenton') {
+            // Default bucket: exclude only cities mapped to OTHER offices.
+            const otherCities = Object.entries(CITY_TO_LOCATION)
+              .filter(([, locId]) => locId !== 'bradenton')
+              .map(([city]) => city);
+            this.whereRaw("LOWER(TRIM(COALESCE(city, ''))) <> ALL(?)", [otherCities]);
+          } else {
+            const ownCities = Object.entries(CITY_TO_LOCATION)
+              .filter(([, locId]) => locId === locationId)
+              .map(([city]) => city);
+            this.whereRaw("LOWER(TRIM(COALESCE(city, ''))) = ANY(?)", [ownCities]);
+          }
+        });
+    });
+  }
+  return q;
+}
+
+function parseSegment(body) {
+  const scope = String(body?.segment?.scope || '');
+  if (!SEGMENT_SCOPES.has(scope)) throw badRequest('segment.scope must be customers or program');
+  const locationId = body?.segment?.locationId ? String(body.segment.locationId) : null;
+  if (locationId && !SEGMENT_LOCATIONS.has(locationId)) throw badRequest('segment.locationId is not a known location');
+  return { scope, locationId };
+}
+
+// POST /api/admin/automations/templates/:key/segment-preview — count only
+router.post('/templates/:key/segment-preview', async (req, res) => {
+  try {
+    const segment = parseSegment(req.body);
+    const template = await db('automation_templates').where({ key: req.params.key }).first();
+    if (!template) return res.status(404).json({ error: 'template not found' });
+
+    const row = await segmentQuery(segment).count('* as count').first();
+    const count = Number(row?.count || 0);
+    res.json({ count, cap: SEGMENT_SEND_CAP, overCap: count > SEGMENT_SEND_CAP });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[automations/segment-preview] failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/automations/templates/:key/segment-send
+// Body: { segment: { scope, locationId? }, expectedCount }
+router.post('/templates/:key/segment-send', async (req, res) => {
+  try {
+    const segment = parseSegment(req.body);
+    const expectedCount = Number(req.body?.expectedCount);
+    if (!Number.isFinite(expectedCount) || expectedCount <= 0) {
+      return res.status(400).json({ error: 'expectedCount required — preview the segment first' });
+    }
+
+    const template = await db('automation_templates').where({ key: req.params.key }).first();
+    if (!template) return res.status(404).json({ error: 'template not found' });
+    if (!template.enabled) return res.status(400).json({ error: 'This automation is disabled. Enable it first, then send.' });
+    if (!(await AutomationRunner.hasLocalContent(req.params.key))) {
+      return res.status(400).json({ error: 'No enabled step has content yet — there is nothing to send.' });
+    }
+
+    // ONE statement defines both the confirmed count and the enrolled set —
+    // a separate count-then-select pair leaves a window where the row set can
+    // shift between the two while the request proceeds under the old number.
+    const customers = await segmentQuery(segment)
+      .select('id', 'email', 'first_name', 'last_name')
+      .orderBy('id', 'asc');
+    if (customers.length !== expectedCount) {
+      // Segment moved between preview and confirm — make the operator look at
+      // the real number before a mass send.
+      return res.status(409).json({ error: `Segment is now ${customers.length} customers (you previewed ${expectedCount}). Preview again to confirm the current count.`, count: customers.length });
+    }
+    if (customers.length > SEGMENT_SEND_CAP) {
+      return res.status(400).json({ error: `Segment (${customers.length}) exceeds the ${SEGMENT_SEND_CAP}-customer cap for one send.` });
+    }
+
+    // enrollCustomer per customer: idempotent (active enrollment = no-op),
+    // reactivates completed rows (a repeat announcement SHOULD reach past
+    // recipients), refreshes stale contact fields, and the runner applies
+    // ASM/suppression checks at send time. The scheduler drains 50/minute,
+    // so a full segment fans out over ~N/50 minutes rather than instantly.
+    // Enrollments run in bounded-concurrency batches: strictly sequential, a
+    // cap-sized send is thousands of serial Postgres round trips in one
+    // request; 10 in flight keeps a 2,000-customer confirm to a few seconds
+    // without stampeding the pool.
+    const ENROLL_CONCURRENCY = 10;
+    // `skipped` = enrollCustomer REFUSED (its own reasons: no email, template
+    // disabled mid-run…). `failed` = the call THREW (transient DB timeout,
+    // deadlock, constraint surprise) — operational failures the operator must
+    // see, not launder into skips. Re-running the send is the retry path:
+    // enrollCustomer is idempotent, so already-enrolled customers no-op.
+    const summary = { enrolled: 0, alreadyActive: 0, skipped: 0, failed: 0 };
+    for (let i = 0; i < customers.length; i += ENROLL_CONCURRENCY) {
+      const batch = customers.slice(i, i + ENROLL_CONCURRENCY);
+      await Promise.all(batch.map(async (customer) => {
+        try {
+          const result = await AutomationRunner.enrollCustomer({ templateKey: req.params.key, customer });
+          if (result.enrolled) summary.enrolled += 1;
+          else if (result.reason === 'already enrolled') summary.alreadyActive += 1;
+          else summary.skipped += 1;
+        } catch (err) {
+          summary.failed += 1;
+          logger.error(`[automations/segment-send] enroll THREW for customer ${customer.id}: ${err.message}`);
+        }
+      }));
+    }
+
+    // One audit row for the mass action (best-effort).
+    try {
+      await db('activity_log').insert({
+        admin_user_id: req.technicianId || null,
+        action: 'automation_segment_send',
+        description: `${template.name}: segment send to ${segment.scope}${segment.locationId ? ` @ ${segment.locationId}` : ''} — ${summary.enrolled} enrolled, ${summary.alreadyActive} already active, ${summary.skipped} skipped, ${summary.failed} failed.`,
+        metadata: JSON.stringify({ template_key: req.params.key, segment, summary }),
+      });
+    } catch (auditErr) {
+      logger.warn(`[automations/segment-send] audit log failed: ${auditErr.message}`);
+    }
+
+    logger.info(`[automations/segment-send] ${req.params.key} → ${segment.scope}${segment.locationId ? `@${segment.locationId}` : ''}: ${JSON.stringify(summary)}`);
+    const failureNote = summary.failed
+      ? ` ⚠️ ${summary.failed} FAILED (transient errors) — run this send again to retry them; customers already enrolled are skipped automatically.`
+      : '';
+    res.json({
+      success: summary.failed === 0,
+      ...summary,
+      message: `${template.name} — ${summary.enrolled} enrolled${summary.alreadyActive ? `, ${summary.alreadyActive} already active` : ''}${summary.skipped ? `, ${summary.skipped} skipped (no usable email / disabled)` : ''}. The runner sends ~50/minute.${failureNote}`,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[automations/segment-send] failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

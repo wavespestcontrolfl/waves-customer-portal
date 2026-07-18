@@ -57,7 +57,7 @@ export default function MobileServicePickerSheet({
     <div className={`fixed inset-0 z-[110] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
       <div
         className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
-        style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"
@@ -82,7 +82,7 @@ export default function MobileServicePickerSheet({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search All Services"
-            className="block w-full bg-white text-14 text-ink-primary border border-hairline border-zinc-200 rounded-sm h-12 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-zinc-900"
+            className="block w-full bg-white text-16 text-ink-primary border border-hairline border-zinc-200 rounded-sm h-12 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-zinc-900"
           />
         </div>
 
@@ -110,7 +110,7 @@ export default function MobileServicePickerSheet({
                     <img src="/waves-logo.png" alt="" className="w-10 h-10 object-contain" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-ink-primary truncate" style={{ fontSize: 15 }}>{s.name}</div>
+                    <div className="font-medium text-ink-primary truncate" style={{ fontSize: 15 }}>{s.name}</div>
                     {duration && (
                       <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>{duration}</div>
                     )}

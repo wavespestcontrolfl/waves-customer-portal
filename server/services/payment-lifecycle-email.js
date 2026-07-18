@@ -589,6 +589,34 @@ async function sendRefundIssued({
   });
 }
 
+// Combined cancellation-confirmed + deposit-refund notice for the admin
+// cancel-signup flow (customer-offboarding.js). Deposits have no payments
+// row, so this deliberately does NOT resolve a payment — the orchestrator
+// passes the ledger-verified refunded total. The template ships paused;
+// activating it in the template admin is the send switch.
+async function sendCancellationRefundIssued({
+  customerId,
+  refundAmount,
+  refundDate = new Date(),
+  planLabel = '',
+  idempotencyKey,
+} = {}) {
+  if (!(Number(refundAmount) > 0)) {
+    return { ok: false, skipped: true, reason: 'no_refund_amount' };
+  }
+  return sendLifecycleTemplate({
+    customerId,
+    templateKey: 'account.cancellation_refund',
+    eventType: 'account.cancellation_refund',
+    payload: {
+      refund_amount: money(refundAmount),
+      refund_date: displayDate(refundDate),
+      plan_label: clean(planLabel),
+    },
+    idempotencyKey: idempotencyKey || `account.cancellation_refund:${customerId}:${stableDateKey(refundDate)}`,
+  });
+}
+
 module.exports = {
   sendAutopayEnabled,
   sendPaymentMethodUpdated,
@@ -598,6 +626,7 @@ module.exports = {
   sendAchProcessing,
   sendPaymentPlanConfirmed,
   sendRefundIssued,
+  sendCancellationRefundIssued,
   _private: {
     methodParts,
     assignMethodPayload,

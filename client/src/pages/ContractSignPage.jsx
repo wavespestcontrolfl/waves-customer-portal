@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
+import DocumentActionBar from '../components/DocumentActionBar';
 import {
   WavesShell,
   BrandCard,
@@ -10,6 +10,8 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
+import { CUSTOMER_SURFACE } from '../theme-customer';
+import { DOC, DOC_COLUMN, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docInput } from '../theme-doc';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -22,9 +24,9 @@ function fmtDate(value) {
 
 function StatusPill({ tone = 'neutral', children }) {
   const tones = {
-    neutral: { bg: '#FAF8F3', color: 'var(--text)', border: '#E7E2D7' },
-    ready: { bg: 'var(--brand-soft)', color: 'var(--brand)', border: 'var(--brand-ring)' },
-    signed: { bg: '#F0FDF4', color: '#047857', border: '#BBF7D0' },
+    neutral: { bg: DOC.page, color: DOC.ink, border: CUSTOMER_SURFACE.border },
+    ready: { bg: 'var(--brand-soft)', color: DOC.brand, border: 'var(--brand-ring)' },
+    signed: { bg: DOC.successBg, color: DOC.success, border: DOC.successBorder },
   };
   const t = tones[tone] || tones.neutral;
   // Neutral is a flat warm wash — let the glass scene through. Ready/signed
@@ -36,13 +38,13 @@ function StatusPill({ tone = 'neutral', children }) {
       alignItems: 'center',
       gap: 6,
       minHeight: 28,
-      padding: '5px 9px',
-      borderRadius: 8,
+      padding: '4px 8px',
+      borderRadius: RADIUS.input,
       background: t.bg,
       border: `1px solid ${t.border}`,
       color: t.color,
-      fontSize: 12,
-      fontWeight: 850,
+      fontSize: FS.caption,
+      fontWeight: FW.heavy,
       textTransform: 'uppercase',
       whiteSpace: 'nowrap',
     }}>
@@ -53,9 +55,9 @@ function StatusPill({ tone = 'neutral', children }) {
 
 function Field({ label, value }) {
   return (
-    <div style={{ minWidth: 0, padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
-      <div style={{ fontSize: 12, textTransform: 'uppercase', fontWeight: 850, color: 'var(--text-muted)', marginBottom: 5 }}>{label}</div>
-      <div style={{ fontSize: 14, color: 'var(--text)', lineHeight: 1.45, fontWeight: 650 }}>{value || 'Not set'}</div>
+    <div style={{ minWidth: 0, padding: '12px 0', borderBottom: `1px solid ${DOC.border}` }}>
+      <div style={{ ...DOC_EYEBROW, marginBottom: SP.xxs }}>{label}</div>
+      <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.snug, fontWeight: FW.semibold }}>{value || 'Not set'}</div>
     </div>
   );
 }
@@ -63,11 +65,11 @@ function Field({ label, value }) {
 function ContractError({ title, message }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-contract-page waves-contract-single">
+      <div role="alert" className="waves-contract-page waves-contract-single" style={{ width: DOC_COLUMN }}>
         <BrandCard padding={28}>
           <StatusPill>Contract unavailable</StatusPill>
-          <SerifHeading style={{ marginTop: 14, marginBottom: 12 }}>{title}</SerifHeading>
-          <p style={{ margin: 0, color: 'var(--text)', lineHeight: 1.6 }}>
+          <SerifHeading style={{ marginTop: SP.md, marginBottom: SP.sm }}>{title}</SerifHeading>
+          <p style={{ margin: 0, color: DOC.ink, lineHeight: LH.body }}>
             {message} Give us a call and we can help - <HelpPhoneLink tone="dark" inline />.
           </p>
         </BrandCard>
@@ -80,37 +82,29 @@ function AgreementRow({ checked, onChange, children }) {
   return (
     <label style={{
       display: 'flex',
-      gap: 11,
+      gap: SP.sm,
       alignItems: 'flex-start',
       padding: '12px 0',
-      borderTop: '1px solid var(--border)',
-      color: 'var(--text)',
-      fontSize: 14,
-      lineHeight: 1.5,
+      borderTop: `1px solid ${DOC.border}`,
+      color: DOC.ink,
+      fontSize: FS.body,
+      lineHeight: LH.body,
       cursor: 'pointer',
     }}>
       <input
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        style={{ marginTop: 3, width: 16, height: 16, accentColor: 'var(--brand)' }}
+        style={{ marginTop: 3, width: 16, height: 16, accentColor: DOC.brand }}
       />
       <span>{children}</span>
     </label>
   );
 }
 
-const inputStyle = {
-  width: '100%',
-  height: 46,
-  borderRadius: 8,
-  border: '1px solid var(--border-strong)',
-  padding: '0 12px',
-  fontSize: 15,
-  color: 'var(--text)',
-  boxSizing: 'border-box',
-  outline: 'none',
-};
+// THE document input (theme-doc names the contract signing fields as the
+// reference) — minHeight 48 / 16px text (no iOS focus zoom).
+const inputStyle = docInput();
 
 export default function ContractSignPage() {
   const { token } = useParams();
@@ -202,9 +196,9 @@ export default function ContractSignPage() {
   if (loading) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div className="waves-contract-page waves-contract-single">
+        <div className="waves-contract-page waves-contract-single" style={{ width: DOC_COLUMN }}>
           <BrandCard padding={28}>
-            <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>Loading contract...</div>
+            <div style={{ padding: '40px 20px', textAlign: 'center', color: DOC.muted }}>Loading contract...</div>
           </BrandCard>
         </div>
       </WavesShell>
@@ -228,12 +222,12 @@ export default function ContractSignPage() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-contract-page">
+      <div className="waves-contract-page" style={{ width: DOC_COLUMN }}>
         <div className="waves-flow-header">
           <div>
             <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
-            <SerifHeading style={{ marginTop: 14, marginBottom: 8 }}>{documentTitle}</SerifHeading>
-            <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 16, lineHeight: 1.55, maxWidth: 660 }}>
+            <SerifHeading style={{ marginTop: SP.md, marginBottom: SP.xs }}>{documentTitle}</SerifHeading>
+            <p style={{ margin: 0, color: DOC.muted, fontSize: FS.lead, lineHeight: LH.body, maxWidth: 660 }}>
               {isAutopay
                 ? 'Review the saved-payment authorization, then sign electronically to keep AutoPay active for approved Waves services.'
                 : needsSignature
@@ -243,26 +237,26 @@ export default function ContractSignPage() {
           </div>
         </div>
 
+        {/* Unsigned render only: the customer-facing token is single-use and
+            BURNED after signing (contracts-public.js returns 410), so on the
+            signed-success state there is nothing valid to download OR share —
+            the whole bar hides rather than offering a dead link. */}
+        {!signed && (
+          <DocumentActionBar
+            pdfUrl={`${API_BASE}/contracts/${encodeURIComponent(token)}?format=pdf`}
+            pdfFileName="Waves_Agreement.pdf"
+            shareTitle="Waves service agreement"
+          />
+        )}
+
         <div className="waves-contract-grid">
           <BrandCard padding={28}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <span style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 8,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: 'var(--brand-soft)',
-                  color: 'var(--brand)',
-                }}>
-                  <Icon name="document" size={22} strokeWidth={2} />
-                </span>
-                <div>
-                  <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>{documentTitle}</div>
-                  <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Waves Pest Control</div>
-                </div>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: SP.md, marginBottom: SP.lg }}>
+              {/* Decorative document icon tile removed (owner 2026-07-09 —
+                  no decorative icons on customer document pages). */}
+              <div>
+                <div style={{ fontSize: FS.sub, fontWeight: FW.heavy, color: DOC.ink }}>{documentTitle}</div>
+                <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2 }}>Waves Pest Control</div>
               </div>
               <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
             </div>
@@ -284,112 +278,56 @@ export default function ContractSignPage() {
               )}
             </div>
 
-            <div style={{ marginTop: 24 }}>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase', marginBottom: 8 }}>{termsLabel}</div>
+            <div style={{ marginTop: SP.xl }}>
+              <div style={DOC_EYEBROW}>{termsLabel}</div>
               <div style={{
-                border: '1px solid var(--border)',
-                borderRadius: 8,
-                background: '#FFFFFF',
-                padding: 18,
+                border: `1px solid ${DOC.border}`,
+                borderRadius: RADIUS.input,
+                background: DOC.surface,
+                padding: SP.md,
                 maxHeight: 420,
                 overflow: 'auto',
                 whiteSpace: 'pre-line',
-                fontSize: 14,
-                lineHeight: 1.65,
-                color: 'var(--text)',
+                fontSize: FS.body,
+                lineHeight: LH.body,
+                color: DOC.ink,
               }}>
                 {contract.contractTextSnapshot}
               </div>
-              {!signed && (
-                <a
-                  href={`${API_BASE}/contracts/${encodeURIComponent(token)}?format=pdf`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    marginTop: 14,
-                    fontSize: 14,
-                    fontWeight: 750,
-                    color: 'var(--brand)',
-                    textDecoration: 'none',
-                  }}
-                >
-                  <Icon name="download" size={16} strokeWidth={2} />
-                  Download PDF
-                </a>
-              )}
+              {/* In-card Download link superseded by the DocumentActionBar
+                  at the top of the page (owner 2026-07-09). */}
             </div>
           </BrandCard>
 
           <BrandCard padding={24} style={{ position: 'sticky', top: 20 }}>
             {signed ? (
               <div>
-                <div style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 8,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: '#F0FDF4',
-                  color: '#047857',
-                  marginBottom: 14,
-                }}>
-                  <Icon name="checkCircle" size={24} strokeWidth={2} />
-                </div>
-                <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>{isAutopay ? 'Authorization' : 'Document'} signed</div>
-                <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.55 }}>
+                <div style={{ fontSize: FS.sub, fontWeight: FW.heavy, color: DOC.ink }}>{isAutopay ? 'Authorization' : 'Document'} signed</div>
+                <p style={{ margin: '8px 0 0', color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
                   Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature{isAutopay ? ' and authorization' : ''}.
                 </p>
               </div>
             ) : !needsSignature ? (
               <div>
-                <div style={{
-                  width: 44,
-                  height: 44,
-                  borderRadius: 8,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: 'var(--brand-soft)',
-                  color: 'var(--brand)',
-                  marginBottom: 14,
-                }}>
-                  <Icon name="document" size={24} strokeWidth={2} />
-                </div>
-                <div style={{ fontSize: 18, fontWeight: 850, color: 'var(--text)' }}>No signature required</div>
-                <p style={{ margin: '8px 0 0', color: 'var(--text-muted)', fontSize: 14, lineHeight: 1.55 }}>
+                <div style={{ fontSize: FS.sub, fontWeight: FW.heavy, color: DOC.ink }}>No signature required</div>
+                <p style={{ margin: '8px 0 0', color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
                   This Waves document is ready to view. You can save this link or reply to the message that sent it if you have questions.
                 </p>
-                <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                <div style={{ marginTop: SP.md, fontSize: FS.caption, color: DOC.muted, lineHeight: LH.snug }}>
                   Need help? <HelpPhoneLink tone="dark" inline />
                 </div>
               </div>
             ) : (
               <form onSubmit={submit}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                  <span style={{
-                    width: 38,
-                    height: 38,
-                    borderRadius: 8,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    background: 'var(--brand-soft)',
-                    color: 'var(--brand)',
-                  }}>
-                    <Icon name="pencil" size={18} strokeWidth={2} />
-                  </span>
+                <div style={{ marginBottom: SP.md }}>
                   <div>
-                    <div style={{ fontSize: 16, fontWeight: 850, color: 'var(--text)' }}>Sign {documentKind}</div>
-                    <div style={{ fontSize: 14, color: 'var(--text-muted)', marginTop: 2 }}>Both fields and agreements are required.</div>
+                    <div style={{ fontSize: FS.h4, fontWeight: FW.heavy, color: DOC.ink }}>Sign {documentKind}</div>
+                    <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2 }}>Both fields and agreements are required.</div>
                   </div>
                 </div>
 
-                <label style={{ display: 'block', marginBottom: 12 }}>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase', marginBottom: 7 }}>Initials</div>
+                <label style={{ display: 'block', marginBottom: SP.sm }}>
+                  <div style={DOC_EYEBROW}>Initials</div>
                   <input
                     name="initials"
                     value={form.initials}
@@ -400,8 +338,8 @@ export default function ContractSignPage() {
                   />
                 </label>
 
-                <label style={{ display: 'block', marginBottom: 16 }}>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 850, textTransform: 'uppercase', marginBottom: 7 }}>Typed Signature</div>
+                <label style={{ display: 'block', marginBottom: SP.md }}>
+                  <div style={DOC_EYEBROW}>Typed Signature</div>
                   <input
                     name="signedName"
                     value={form.signedName}
@@ -424,15 +362,15 @@ export default function ContractSignPage() {
                 </AgreementRow>
 
                 {error && (
-                  <div style={{ margin: '14px 0', color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, padding: 12, fontSize: 14 }}>
+                  <div role="alert" style={{ margin: '16px 0', color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: RADIUS.input, padding: SP.sm, fontSize: FS.body }}>
                     {error}
                   </div>
                 )}
 
-                <BrandButton type="submit" disabled={!canSubmit} fullWidth style={{ marginTop: 16 }}>
+                <BrandButton type="submit" disabled={!canSubmit} fullWidth style={{ marginTop: SP.md }}>
                   {submitting ? 'Signing...' : `Sign ${isAutopay ? 'Authorization' : 'Document'}`}
                 </BrandButton>
-                <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.45, textAlign: 'center' }}>
+                <div style={{ marginTop: SP.sm, fontSize: FS.caption, color: DOC.muted, lineHeight: LH.snug, textAlign: 'center' }}>
                   Need help before signing? <HelpPhoneLink tone="dark" inline />
                 </div>
               </form>
@@ -440,6 +378,8 @@ export default function ContractSignPage() {
           </BrandCard>
         </div>
 
+        {/* Newsletter signup lives only on the newsletter pages (owner
+            2026-07-09, supersedes same-day card ruling). */}
         <BrandFooter />
       </div>
     </WavesShell>

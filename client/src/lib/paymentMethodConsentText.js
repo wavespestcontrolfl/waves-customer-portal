@@ -2,16 +2,17 @@
 // Keep in sync — when the server version bumps, update this too.
 import { WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 
-export const CONSENT_VERSION = 'v8_2026-06-17';
+export const CONSENT_VERSION = 'v10_2026-07-13';
 
 export const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
   'this card and charge it for future service visits and invoices as',
-  'agreed, until I revoke authorization in writing or by calling',
-  `${WAVES_SUPPORT_PHONE_DISPLAY}. A credit card surcharge of up to 2.9% may apply;`,
-  'the exact surcharge and total will be shown before payment. Debit cards,',
-  'prepaid cards, and bank transfers have no added card surcharge.',
-  'I can manage or remove saved payment methods anytime in my customer portal.',
+  'agreed, until I revoke authorization. I can revoke anytime — email',
+  `billing@wavespestcontrol.com, call ${WAVES_SUPPORT_PHONE_DISPLAY}, or remove the`,
+  'card in the Waves app or my customer portal. A credit card surcharge',
+  'of up to 2.9% may apply; the exact surcharge and total will be shown',
+  'before payment. Debit cards, prepaid cards, and bank transfers have',
+  'no added card surcharge.',
 ].join(' ');
 
 export const ACH_CONSENT_TEXT = [
@@ -20,7 +21,7 @@ export const ACH_CONSENT_TEXT = [
   'above for each invoice in the amount of that invoice, on or after',
   'its due date (or on the Auto Pay billing day I have selected),',
   'until I revoke this authorization. I may revoke by writing to',
-  `contact@wavespestcontrol.com or calling ${WAVES_SUPPORT_PHONE_DISPLAY} at least`,
+  `billing@wavespestcontrol.com or calling ${WAVES_SUPPORT_PHONE_DISPLAY} at least`,
   '3 business days before the next scheduled debit. I may request a',
   'copy of this authorization at any time by contacting Waves at the',
   'email or phone above. I can manage or remove saved payment methods',

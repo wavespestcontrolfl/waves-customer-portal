@@ -14,15 +14,15 @@ import {
   PestStatusHero,
   PestProtectionMap,
   PestPrimaryMove,
-  PestReceipt,
-  PestBugFiles,
-  PestSeasonForecast,
 } from './PestReportV2';
 
 export default function PestReportV2Section({ data, print = false, token = null, mode = 'live' }) {
   if (!data) return null;
   return (
-    <div style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 24px' }}>
+    // No inset: cards align edge-to-edge with the report's .sr-section cards — the
+    // old maxWidth + side padding rendered this block 32px narrower than every other
+    // glass card on the page, with extra dead space at both seams (owner 2026-07-09).
+    <div style={{ marginTop: 20 }}>
       <PestStatusHero
         status={data.status}
         statusSummary={data.statusSummary}
@@ -35,9 +35,9 @@ export default function PestReportV2Section({ data, print = false, token = null,
           status so the report reads: how you're doing → where we treated → next. */}
       {data.defense ? <PestProtectionMap defense={data.defense} print={print} /> : null}
       {data.primaryMove ? <PestPrimaryMove primaryMove={data.primaryMove} /> : null}
-      {data.bugFiles?.length ? <PestBugFiles bugFiles={data.bugFiles} print={print} /> : null}
-      {data.forecast ? <PestSeasonForecast forecast={data.forecast} /> : null}
-      {data.pressureReceipt ? <PestReceipt receipt={data.pressureReceipt} /> : null}
+      {/* Bug files, seasonal outlook, and the WaveGuard receipt were removed from
+          the composed section (owner 2026-07-09) — the components remain exported
+          from PestReportV2 for any future re-mount. */}
     </div>
   );
 }

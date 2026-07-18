@@ -23,6 +23,7 @@ const { getIo } = require('../sockets');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
 const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require('./customer-tracking-eta');
 const { ensureCustomerGeocoded } = require('./geocoder');
+const { stampedAddressDiverges } = require('./stamped-address');
 const {
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
@@ -104,26 +105,50 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
 
 // Best-effort ETA for the en-route SMS. Mirrors track-public.js
 // buildVehicle: needs a fresh tech_status GPS ping AND a geocoded
-// customer address. Returns null on any missing-data or upstream
+// destination. Returns null on any missing-data or upstream
 // failure path so the SMS still fires (without the ETA line).
-async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
+// Destination resolution mirrors the public tracker: the visit's own
+// coords win; the customer's primary coords/geocode only stand in when
+// the visit's stamped address doesn't diverge from the primary —
+// otherwise the SMS would quote an ETA to the wrong house while the
+// tracker shows the rental (codex round-4 P1).
+async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId }) {
   if (!technicianId || !customerId) {
     logger.info(`[track-transitions] en-route ETA skipped: missing ids (tech=${!!technicianId} cust=${!!customerId})`);
     return null;
   }
   try {
-    const [ts, customer] = await Promise.all([
+    const [ts, dest] = await Promise.all([
       db('tech_status')
         .where({ tech_id: technicianId })
         .first('lat', 'lng', 'location_updated_at'),
-      db('customers')
-        .where({ id: customerId })
-        .first('latitude', 'longitude'),
+      serviceId
+        ? db('scheduled_services as s')
+          .leftJoin('customers as c', 's.customer_id', 'c.id')
+          .where('s.id', serviceId)
+          .first(
+            's.lat as service_lat',
+            's.lng as service_lng',
+            's.service_address_line1',
+            's.service_address_zip',
+            's.service_address_city',
+            'c.latitude',
+            'c.longitude',
+            'c.address_line1 as customer_address_line1',
+            'c.zip as customer_zip',
+            'c.city as customer_city'
+          )
+        : db('customers')
+          .where({ id: customerId })
+          .first('latitude', 'longitude'),
     ]);
     const techLat = finiteNumber(ts?.lat);
     const techLng = finiteNumber(ts?.lng);
-    let custLat = finiteNumber(customer?.latitude);
-    let custLng = finiteNumber(customer?.longitude);
+    // A divergent stamp makes the primary coords the WRONG destination —
+    // only the visit's own coords count for it.
+    const diverges = stampedAddressDiverges(dest || {});
+    let custLat = finiteNumber(dest?.service_lat) ?? (diverges ? null : finiteNumber(dest?.latitude));
+    let custLng = finiteNumber(dest?.service_lng) ?? (diverges ? null : finiteNumber(dest?.longitude));
     if (techLat == null || techLng == null) {
       logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no GPS in tech_status`);
       return null;
@@ -133,6 +158,10 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId }) {
       return null;
     }
     if (custLat == null || custLng == null) {
+      if (diverges) {
+        logger.info(`[track-transitions] en-route ETA skipped: visit ${serviceId} stamped a non-primary address with no coords`);
+        return null;
+      }
       const geocoded = await withTimeout(
         ensureCustomerGeocoded(customerId),
         EN_ROUTE_GEOCODE_TIMEOUT_MS,
@@ -301,6 +330,7 @@ async function markEnRoute(serviceId, opts = {}) {
       const etaMinutes = await resolveEnRouteEtaMinutes({
         technicianId: svc.technician_id,
         customerId: svc.customer_id,
+        serviceId: svc.id,
       });
 
       const result = await TwilioService.sendTechEnRoute(
@@ -635,38 +665,88 @@ async function cascadeCallFollowUpCancel(serviceId) {
  * can still see the cancelled state for a day.
  */
 async function cancel(serviceId, { reason, actorId } = {}) {
-  const svc = await loadService(serviceId);
+  let svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  if (svc.status === 'completed') return { ok: false, reason: 'cannot_cancel_complete' };
+  if (svc.status === 'skipped') return { ok: false, reason: 'cannot_cancel_skipped' };
+  if (svc.status === 'no_show') return { ok: false, reason: 'cannot_cancel_no_show' };
   if (svc.track_state === 'cancelled') {
-    await cascadeCallFollowUpCancel(serviceId);
-    emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
-    return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
+    // Continue below when an older writer advanced only track_state; the
+    // canonical status transition will repair it and append history.
+    if (svc.status === 'cancelled') {
+      await cascadeCallFollowUpCancel(serviceId);
+      emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
+      return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
+    }
   }
   if (svc.track_state === 'complete') {
     return { ok: false, reason: 'cannot_cancel_complete' };
   }
 
-  const now = new Date();
-  const expiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  const updated = await db('scheduled_services')
-    .where({ id: serviceId })
-    .whereIn('track_state', ['scheduled', 'en_route', 'on_property'])
-    .update({
+  const { transitionJobStatus } = require('./job-status');
+  const persistCancellation = async (current, now, expiry) => db.transaction(async (trx) => {
+    if (current.status !== 'cancelled') {
+      if (!['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'].includes(current.status)) {
+        const invalid = new Error(`cannot cancel service from operational status ${current.status}`);
+        invalid.code = 'INVALID_CANCEL_STATUS';
+        throw invalid;
+      }
+      await transitionJobStatus({
+        jobId: serviceId,
+        fromStatus: current.status,
+        toStatus: 'cancelled',
+        transitionedBy: actorId || null,
+        trx,
+      });
+    }
+    const update = trx('scheduled_services').where({ id: serviceId });
+    if (current.track_state !== 'cancelled') {
+      update.whereIn('track_state', ['scheduled', 'en_route', 'on_property']);
+    }
+    const updated = await update.update({
       track_state: 'cancelled',
-      cancelled_at: now,
-      cancellation_reason: reason || null,
+      cancelled_at: current.cancelled_at || now,
+      cancellation_reason: reason || current.cancellation_reason || null,
       track_token_expires_at: expiry,
       updated_at: now,
     });
-  if (updated === 0) {
-    // Lost the race to another cancel flow. Only cascade when the parent
-    // really ended cancelled — a concurrent COMPLETION must keep visit 2
-    // on the schedule.
-    const fresh = await loadService(serviceId);
-    if (!fresh || fresh.track_state === 'cancelled') {
-      await cascadeCallFollowUpCancel(serviceId);
+    if (updated === 0) {
+      const race = new Error('track cancellation lost a concurrent state transition');
+      race.code = 'TRACK_CANCEL_RACE';
+      throw race;
     }
-    return { ok: true, state: fresh?.track_state || 'cancelled', cancelledAt: fresh?.cancelled_at || null };
+  });
+
+  const now = new Date();
+  const expiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  try {
+    await persistCancellation(svc, now, expiry);
+  } catch (err) {
+    // Reconcile a racing canonical status/track writer once. A concurrent
+    // completion wins; a concurrent cancellation is idempotent; and a status
+    // writer that reached cancelled before its tracker sync can be safely
+    // finished from the freshly-read state.
+    const fresh = await loadService(serviceId);
+    if (fresh?.track_state === 'complete' || fresh?.status === 'completed') {
+      return { ok: true, state: 'complete', completedAt: fresh.completed_at || null };
+    }
+    if (fresh?.status === 'skipped') {
+      return { ok: true, state: fresh.track_state || 'scheduled', status: 'skipped' };
+    }
+    if (fresh?.track_state !== 'cancelled' && fresh?.status === 'cancelled') {
+      await persistCancellation(fresh, now, expiry);
+      svc = fresh;
+    } else if (fresh?.track_state === 'cancelled' && fresh?.status === 'cancelled') {
+      svc = fresh;
+    } else {
+      throw err;
+    }
+  }
+
+  if (svc.track_state === 'cancelled') {
+    await cascadeCallFollowUpCancel(serviceId);
+    emitCustomerTrackRefresh(svc, 'cancelled', svc.cancelled_at || new Date());
+    return { ok: true, state: 'cancelled', cancelledAt: svc.cancelled_at };
   }
   if (svc.technician_id) {
     try {

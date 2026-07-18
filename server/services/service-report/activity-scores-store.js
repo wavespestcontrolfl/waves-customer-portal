@@ -13,6 +13,51 @@ const { scoreLevelWord } = require('./activity-indicators');
 
 const HISTORY_LIMIT = 8;
 
+// Cumulative knockdown-progress summary (TYPED_PROGRESS_SUMMARY, dark).
+// Multi-visit knockdown protocols' story is baseline → today, not just
+// visit-over-visit: the ActivityCard trend sentence compares only to the
+// LAST visit, so a bed bug program that went 5 → 3 → 1 never states its
+// cumulative win. Scoped to the knockdown families (bed bug + the shared
+// roach indicator) and rendered ONLY when today improved on the recorded
+// baseline — flat/worse visits keep the existing trend wording, and the
+// summary states factual numbers only (no cleared/eliminated claims;
+// banned-copy rules stay owned by the typed report's own wording).
+const PROGRESS_SUMMARY_INDICATORS = new Set(['bed_bug_activity', 'roach_activity']);
+
+function progressSummaryEligible(indicatorKey) {
+  return process.env.TYPED_PROGRESS_SUMMARY === 'true'
+    && PROGRESS_SUMMARY_INDICATORS.has(indicatorKey);
+}
+
+// `baseline` is the customer's TRUE first score row for this indicator,
+// loaded separately by the caller — the chart's history series truncates at
+// HISTORY_LIMIT, so on long programs history[0] is only the oldest RETAINED
+// point and "at your first visit" would state the wrong score/date (codex
+// P2). A null baseline (lookup failed / no prior rows) suppresses the chip
+// rather than guessing.
+function buildActivityProgress({
+  indicatorKey,
+  history = [],
+  currentScore = null,
+  currentRecordId = null,
+  baseline = null,
+} = {}) {
+  if (!progressSummaryEligible(indicatorKey)) return null;
+  if (!Array.isArray(history) || history.length < 2) return null;
+  if (!baseline || !Number.isFinite(Number(baseline.score))) return null;
+  // The earliest row being THIS report means we're viewing the first visit.
+  if (baseline.serviceRecordId != null && String(baseline.serviceRecordId) === String(currentRecordId)) return null;
+  if (!Number.isFinite(Number(currentScore))) return null;
+  if (Number(currentScore) >= Number(baseline.score)) return null;
+  return {
+    baselineScore: Number(baseline.score),
+    baselineLevelWord: baseline.levelWord || scoreLevelWord(Number(baseline.score)),
+    baselineDate: baseline.serviceDate || null,
+    currentScore: Number(currentScore),
+    visits: history.length,
+  };
+}
+
 // pg DATE columns hydrate as Date objects, which JSON-serialize as full ISO
 // timestamps — the client chart parses `${serviceDate}T12:00:00` and would
 // drop every point. Always hand the client a bare YYYY-MM-DD string.
@@ -72,6 +117,37 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
     });
   }
 
+  // True first-visit baseline for the progress chip — loaded separately
+  // because `history` truncates at HISTORY_LIMIT (see buildActivityProgress).
+  // Queried only when the chip could render at all; fail-soft to null (the
+  // chip suppresses rather than guessing a wrong "first visit").
+  let progressBaseline = null;
+  if (progressSummaryEligible(activity.indicatorKey) && history.length >= 2) {
+    try {
+      const row = await knex('service_activity_scores')
+        .where({
+          customer_id: service.customer_id,
+          indicator_key: activity.indicatorKey,
+        })
+        .modify((query) => {
+          if (service.service_date) query.where('service_date', '<=', service.service_date);
+        })
+        .orderBy('service_date', 'asc')
+        .orderBy('created_at', 'asc')
+        .first('service_record_id', 'service_date', 'score');
+      if (row) {
+        progressBaseline = {
+          serviceRecordId: row.service_record_id,
+          serviceDate: toDateOnly(row.service_date),
+          score: Number(row.score),
+          levelWord: scoreLevelWord(Number(row.score)),
+        };
+      }
+    } catch {
+      progressBaseline = null;
+    }
+  }
+
   return {
     indicatorKey: activity.indicatorKey,
     label: activity.label,
@@ -83,7 +159,114 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
     trendWord: activity.trendWord || null,
     isBaseline: history.filter((point) => !point.isCurrent).length === 0,
     history,
+    progress: buildActivityProgress({
+      indicatorKey: activity.indicatorKey,
+      history,
+      currentScore: activity.score,
+      currentRecordId: service.id,
+      baseline: progressBaseline,
+    }),
   };
 }
 
-module.exports = { loadActivityCustomerView, HISTORY_LIMIT };
+function parseMaybeJson(value) {
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return null; }
+  }
+  return value && typeof value === 'object' ? value : null;
+}
+
+/**
+ * The headline a CUSTOMER may see for a prior visit on this indicator's
+ * trend line. The score row alone doesn't say which snapshot produced it —
+ * a bait check riding a quarterly pest visit stores its headline in
+ * companionReportSnapshots, not the top-level typedReportSnapshot — so
+ * match by indicatorKey. Visibility mirrors the shipped boundaries exactly:
+ * the primary artifact is suppressed when structured_notes.typedReportDelivery
+ * is set and not auto_send (reports-public.suppressedTypedReport — legacy
+ * rows without a mode were sent); companions froze their own delivery at
+ * completion and customers only ever receive auto_send entries
+ * (buildReportV1Data's companion filter). A suppressed visit's headline is
+ * customer copy that was never sent — withhold it; the level-word fallback
+ * matches what the gauge history already exposes for that visit.
+ */
+function visibleHeadlineForIndicator(row, indicatorKey) {
+  const data = parseMaybeJson(row.service_data);
+  if (!data) return null;
+
+  const primary = data.typedReportSnapshot;
+  if (primary?.activity?.indicatorKey === indicatorKey) {
+    const mode = parseMaybeJson(row.structured_notes)?.typedReportDelivery || null;
+    const headline = primary?.todaysResult?.headline;
+    if (headline && !(mode && mode !== 'auto_send')) return String(headline);
+  }
+
+  const companions = Array.isArray(data.companionReportSnapshots)
+    ? data.companionReportSnapshots
+    : [];
+  for (const companion of companions) {
+    if (companion?.activity?.indicatorKey !== indicatorKey) continue;
+    const headline = companion?.todaysResult?.headline;
+    if (headline && companion.delivery === 'auto_send') return String(headline);
+  }
+  return null;
+}
+
+/**
+ * D2 — cross-visit timeline for typed trend programs (trap checks, bait
+ * stations, roach knockdowns…). Reuses the activity view's already-bounded
+ * history series (same customer+indicator scoping, same same-day-sibling
+ * trim) and enriches each prior visit with that visit's own frozen
+ * Today's Result headline from the matching customer-visible snapshot.
+ * Returns null when there is nothing to narrate (fewer than 2 visits — a
+ * one-visit timeline is noise) so one-shot types and first visits render
+ * no timeline.
+ */
+async function buildTypedVisitTimeline(knex = db, { activityView = null, snapshot = null, service = {} } = {}) {
+  const history = Array.isArray(activityView?.history) ? activityView.history : [];
+  if (history.length < 2) return null;
+
+  const priorIds = history
+    .filter((point) => !point.isCurrent && point.serviceRecordId)
+    .map((point) => point.serviceRecordId);
+  const headlines = new Map();
+  if (priorIds.length) {
+    try {
+      const rows = await knex('service_records')
+        .whereIn('id', priorIds)
+        .select('id', 'service_data', 'structured_notes');
+      for (const row of rows) {
+        const headline = visibleHeadlineForIndicator(row, activityView.indicatorKey);
+        if (headline) headlines.set(row.id, headline);
+      }
+    } catch {
+      // Missing headlines degrade to the level word below — never fatal.
+    }
+  }
+
+  const fallbackFor = (point) => (point.levelWord
+    ? `${activityView.label}: ${point.levelWord}`
+    : null);
+  const visits = history.map((point) => ({
+    serviceRecordId: point.serviceRecordId,
+    serviceDate: point.serviceDate,
+    headline: (point.isCurrent
+      ? snapshot?.todaysResult?.headline
+      : headlines.get(point.serviceRecordId)) || fallbackFor(point),
+    levelWord: point.levelWord || null,
+    isCurrent: point.isCurrent === true,
+  }));
+
+  return {
+    indicatorKey: activityView.indicatorKey,
+    label: activityView.label,
+    visits,
+  };
+}
+
+module.exports = {
+  loadActivityCustomerView,
+  buildTypedVisitTimeline,
+  buildActivityProgress,
+  HISTORY_LIMIT,
+};

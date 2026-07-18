@@ -159,6 +159,52 @@ describe('assertEstimateSendable proposal exemption', () => {
   });
 });
 
+describe('assertEstimateSendable estimator-engine review gate', () => {
+  const engineDraftRow = (lane, extra = {}) => ({
+    status: 'draft',
+    token: 'tok-engine-test',
+    monthly_total: 87,
+    sent_at: null,
+    estimate_data: {
+      estimatorEngine: {
+        lane,
+        laneReasons: lane === 'yellow' ? ['home sqft from fallback source'] : [],
+      },
+    },
+    ...extra,
+  });
+
+  it('blocks the FIRST send of a yellow-lane draft without acknowledgment (409 + code)', () => {
+    let caught;
+    try {
+      assertEstimateSendable(engineDraftRow('yellow'));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeTruthy();
+    expect(caught.statusCode).toBe(409);
+    expect(caught.code).toBe('ENGINE_REVIEW_REQUIRED');
+    expect(caught.message).toMatch(/flagged for review/i);
+    expect(caught.message).toMatch(/home sqft from fallback source/);
+  });
+
+  it('sends a yellow-lane draft when the operator acknowledged the review', () => {
+    expect(() => assertEstimateSendable(engineDraftRow('yellow'), { engineReviewAcknowledged: true })).not.toThrow();
+  });
+
+  it('green-lane drafts stay one-click', () => {
+    expect(() => assertEstimateSendable(engineDraftRow('green'))).not.toThrow();
+  });
+
+  it('never re-prompts on resend — a delivered draft was already reviewed', () => {
+    expect(() => assertEstimateSendable(engineDraftRow('yellow', { status: 'sent', sent_at: '2026-07-17T12:00:00Z' }))).not.toThrow();
+  });
+
+  it('ordinary drafts without engine material are untouched', () => {
+    expect(() => assertEstimateSendable({ status: 'draft', token: 't', monthly_total: 50, estimate_data: {} })).not.toThrow();
+  });
+});
+
 describe('assertEstimateSendable commercial risk-type gate', () => {
   // A commercial pest/rodent estimate must have its business type classified
   // before it can be sent — the risk type drives the service cadence.

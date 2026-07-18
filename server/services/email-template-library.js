@@ -13,6 +13,7 @@ const {
 const { auditNotificationTemplateIssue } = require('./audit-log');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
+const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
@@ -229,6 +230,11 @@ function normalizeBlocks(blocks) {
     if (type === 'details') {
       return {
         type,
+        // variant survives admin edits: the prep page renders
+        // variant:'faq' details single-column (question over answer) —
+        // dropping it here would silently regress the FAQ layout after
+        // the next editor save.
+        ...(block.variant ? { variant: String(block.variant) } : {}),
         rows: Array.isArray(block.rows)
           ? block.rows.map((r) => ({ label: String(r.label || ''), value: String(r.value || '') }))
           : [],
@@ -479,6 +485,9 @@ async function alertBlockedOperationalSend({ template, suppressionGroupKey, to, 
     if (isMarketingSend(template, suppressionGroupKey)) return;
     const email = String(to || '').trim().toLowerCase();
     if (!email) return;
+    // Demo/App-review account: this path has no customer id for the central
+    // notification gate to check, so gate on the address itself.
+    if (isInternalTestEmail(email)) return;
     const dedupeKey = `email-send-blocked:${email}`;
     const existing = await db('notifications')
       .where({ recipient_type: 'admin' })

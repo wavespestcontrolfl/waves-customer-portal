@@ -9,6 +9,9 @@ const {
 const {
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
+  leadMatchesEstimateContact,
+  normalizeContactPhone,
+  normalizeContactEmail,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
@@ -73,6 +76,112 @@ function estimateResultRoot(estimateData) {
   return estimateData.result && typeof estimateData.result === 'object'
     ? estimateData.result
     : estimateData;
+}
+
+// Pest post-discount program floor is SERVER-authoritative. The deprecated
+// client fallback engine stamps floorPa/floorAnn/floorMo from its own
+// constants.js literal ($89) AND bakes an 89-based give-back into its
+// recurring totals — both ignore the DB-tuned pest_base.floor and the
+// enforce_floor_post_discount kill switch. On save this normalizes the
+// payload to the live synced constants:
+//   1. Rows carrying CLIENT-stamped metadata (the 89-literal basis values)
+//      are restamped from the live floor — or stripped when enforcement is
+//      off. Rows with no metadata get stamped. Rows with OTHER values are
+//      server-stamped (possibly a v2 cadence curve) and are left untouched.
+//   2. When the payload is a client-engine result (it carries the
+//      pestProgramFloorApplied flag), the baked 89-based lift is replaced in
+//      recurring/totals by the server-correct lift, so the persisted
+//      monthly_total / annual_total collect per the configured floor.
+// Runs before totals resolution; a successful server recompute replaces the
+// whole result afterward, making this a no-op for server-priced saves. The
+// client fallback prices on the v1 cadence curve, so the restamp mirrors it.
+// Manual discounts are warn-only and their computed amount is kept as-is.
+const PEST_APPS_TO_FREQUENCY = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
+// round(89 × v1 mult) per cadence — the exact values the client literal produces.
+const CLIENT_PEST_FLOOR_PA_LITERALS = new Set([89, 75.65, 62.30]);
+function pestFloorLiftForAnnual(pestAnn, discountPct, floorAnn) {
+  if (!(discountPct > 0) || !Number.isFinite(pestAnn) || pestAnn <= 0) return 0;
+  if (!Number.isFinite(floorAnn) || floorAnn <= 0) return 0;
+  const cappedFloor = Math.min(floorAnn, pestAnn);
+  return Math.max(0, roundMoney(pestAnn * discountPct - (pestAnn - cappedFloor)));
+}
+function normalizeClientPestFloorMetadata(estimateData) {
+  const root = estimateResultRoot(estimateData);
+  const results = root?.results;
+  if (!results || typeof results !== 'object') return;
+  const pestRow = results.pest && typeof results.pest === 'object' ? results.pest : null;
+  const rows = [
+    ...(Array.isArray(results.pestTiers) ? results.pestTiers : []),
+    ...(pestRow ? [pestRow] : []),
+  ];
+  if (!rows.length) return;
+  const { PEST } = pricingEngine.constants;
+
+  // Reconstruct the client-baked lift BEFORE mutating the metadata.
+  const recurring = root.recurring && typeof root.recurring === 'object' ? root.recurring : null;
+  const isClientEngineResult = !!recurring
+    && Object.prototype.hasOwnProperty.call(recurring, 'pestProgramFloorApplied');
+  const discountPct = Number(recurring?.discount) || 0;
+  const pestAnn = Number(pestRow?.ann);
+  const clientLift = isClientEngineResult && recurring.pestProgramFloorApplied === true
+    ? pestFloorLiftForAnnual(pestAnn, discountPct, Number(pestRow?.floorAnn))
+    : 0;
+
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const stampedPa = Number(row.floorPa);
+    const hasMetadata = Number.isFinite(stampedPa);
+    const isClientStamped = hasMetadata && CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa);
+    if (hasMetadata && !isClientStamped) continue; // server-stamped — snapshot, leave alone
+    // Metadata-less rows get stamped only on client-engine payloads, where the
+    // totals correction below applies the matching lift. Stamping a legacy
+    // no-flag payload would let the public reprice collect the floor while
+    // the persisted columns keep the old discounted amount — divergence.
+    if (!hasMetadata && !isClientEngineResult) continue;
+    delete row.floorPa;
+    delete row.floorAnn;
+    delete row.floorMo;
+    if (!PEST.enforceFloorPostDiscount) continue;
+    const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
+    if (!frequencyKey) continue;
+    const freqMult = (PEST.frequencyDiscounts?.v1 || {})[frequencyKey] || 1.0;
+    const floorAnn = pricingEngine.pestProgramFloorAnnual(freqMult, Number(row.apps ?? row.v));
+    if (floorAnn === null) continue;
+    row.floorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
+    row.floorAnn = floorAnn;
+    row.floorMo = Math.round((floorAnn / 12) * 100) / 100;
+  }
+
+  // Replace the client-baked lift with the server-correct one in the totals.
+  if (!isClientEngineResult) return;
+  const serverLift = pestFloorLiftForAnnual(pestAnn, discountPct, Number(pestRow?.floorAnn));
+  const delta = roundMoney(serverLift - clientLift);
+  recurring.pestProgramFloorApplied = serverLift > 0;
+  if (Math.abs(delta) < 0.005) return;
+  const adjust = (obj, key, d) => {
+    const v = Number(obj?.[key]);
+    if (Number.isFinite(v)) obj[key] = Math.max(0, roundMoney(v + d));
+  };
+  adjust(recurring, 'savings', -delta);
+  adjust(recurring, 'annualAfterDiscount', delta);
+  const newAnnualAfter = Number(recurring.annualAfterDiscount);
+  if (Number.isFinite(newAnnualAfter)) {
+    const oldMonthly = Number(recurring.monthlyTotal);
+    const newMonthly = roundMoney(newAnnualAfter / 12);
+    recurring.monthlyTotal = newMonthly;
+    if (Number.isFinite(oldMonthly)) {
+      adjust(recurring, 'grandTotal', roundMoney(newMonthly - oldMonthly));
+    }
+  }
+  const totals = root.totals && typeof root.totals === 'object' ? root.totals : null;
+  if (totals) {
+    adjust(totals, 'year2', delta);
+    const year2 = Number(totals.year2);
+    if (Number.isFinite(year2) && Number.isFinite(Number(totals.year2mo))) {
+      totals.year2mo = roundMoney(year2 / 12);
+    }
+    adjust(totals, 'year1', delta);
+  }
 }
 
 function sumPositiveAmounts(rows = [], fields = ['price']) {
@@ -378,7 +487,24 @@ function buildEstimatePersistenceFields(body, context = {}) {
     notes: body.notes,
   });
 
+  // Stamp the engine version that actually priced this estimate (varchar(80)
+  // since migration 20260713000020 — lawn mechanism tokens like
+  // LAWN_PRICING_V2_DENSE_35_FLOOR don't fit the original 10. Gated on the
+  // resolved pricing authority, NOT just the blob: on CLIENT_FALLBACK the
+  // blob is still the caller-supplied payload and may carry a stale
+  // engineVersion from an earlier server price — a row the server did not
+  // recompute must keep the column default rather than claim a version.
+  const pricingVersion = context.pricingAuthority === 'SERVER'
+    && typeof estimateData?.result?.engineVersion === 'string'
+    ? estimateData.result.engineVersion.slice(0, 80)
+    : null;
+
   return {
+    // Always emitted: a non-SERVER rewrite RESETS the column to its migration
+    // default, so a draft first stamped by a server price can't keep claiming
+    // that version after a CLIENT_FALLBACK/quote-required rewrite replaced
+    // its estimate_data (updates spread these fields over the existing row).
+    pricing_version: pricingVersion || 'v4.2',
     customer_id: body.customerId || null,
     estimate_data: estimateData ? JSON.stringify(estimateData) : null,
     address: body.address,
@@ -402,17 +528,33 @@ async function firstForUpdate(query) {
   return lockableQuery.first();
 }
 
-async function createOrReuseAdminEstimate({
+function parseStoredEstimateData(estimateData) {
+  if (!estimateData) return null;
+  if (typeof estimateData === 'string') {
+    try {
+      return JSON.parse(estimateData);
+    } catch {
+      return null;
+    }
+  }
+  return typeof estimateData === 'object' ? estimateData : null;
+}
+
+// The full save-time pricing pipeline shared by create and revise: trust-strip
+// the client payload, normalize the pest floor metadata, recompute the
+// server-authoritative price, freeze membership artifacts, and validate the
+// delivery options. Returns the estimates-table write fields (everything
+// except the identity/lifecycle columns the caller owns: id, token, status,
+// expires_at, created_by_technician_id).
+async function resolveEstimateWritePayload({
   database = db,
   body,
   technicianId,
   technician,
   now = () => new Date(),
-  randomBytes = crypto.randomBytes,
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
 }) {
   const {
-    leadId,
     showOneTimeOption,
     billByInvoice,
     estimateData,
@@ -422,6 +564,23 @@ async function createOrReuseAdminEstimate({
     technicianId,
     now,
   });
+  // Server-authoritative pest program floor: normalize client-stamped floor
+  // metadata AND the client-baked lift in the totals BEFORE resolving the
+  // billable preview, so CLIENT_FALLBACK persists collect per the live
+  // DB-synced floor/kill switch. Sync the pricing constants first —
+  // serverRecomputeFromEstimateData returns NO_INPUTS before any sync on
+  // fallback payloads, so without this the restamp could use a stale
+  // in-memory floor right after a pricing_config edit. Best-effort: a sync
+  // failure must not block the save (the restamp then uses the last-synced
+  // constants, same as every other pricing surface).
+  try {
+    if (pricingEngine.needsSync && pricingEngine.needsSync()) {
+      await pricingEngine.syncConstantsFromDB(database);
+    }
+  } catch (err) {
+    logger.warn(`[admin-estimate] pricing-config sync before floor normalize skipped: ${err.message}`);
+  }
+  normalizeClientPestFloorMetadata(trustedEstimateData);
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
@@ -489,7 +648,6 @@ async function createOrReuseAdminEstimate({
   const resolvedWaveguardTier = (repricedAtServer && priorQualifyingServices.length && membershipSnapshot?.tierLabel)
     ? membershipSnapshot.tierLabel
     : body.waveguardTier;
-  const linkedLeadId = normalizeLinkedLeadId(leadId);
   const deliveryError = validateEstimateDeliveryOptions({
     showOneTimeOption: !!showOneTimeOption,
     billByInvoice: !!billByInvoice,
@@ -500,14 +658,34 @@ async function createOrReuseAdminEstimate({
   });
   if (deliveryError) throw errorWithStatus(deliveryError, 400);
 
-  const expiresAt = estimateExpiresAt(now);
-  const writeFields = {
+  return {
     ...buildEstimatePersistenceFields(
       { ...body, waveguardTier: resolvedWaveguardTier, estimateData: trustedEstimateData },
-      { technician, technicianId, now },
+      { technician, technicianId, now, pricingAuthority: pricing.audit?.pricing_authority },
     ),
     ...pricing.audit,
   };
+}
+
+async function createOrReuseAdminEstimate({
+  database = db,
+  body,
+  technicianId,
+  technician,
+  now = () => new Date(),
+  randomBytes = crypto.randomBytes,
+  recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
+}) {
+  const linkedLeadId = normalizeLinkedLeadId(body.leadId);
+  const writeFields = await resolveEstimateWritePayload({
+    database,
+    body,
+    technicianId,
+    technician,
+    now,
+    recompute,
+  });
+  const expiresAt = estimateExpiresAt(now);
 
   return database.transaction(async (trx) => {
     let canReplaceLinkedEstimate = false;
@@ -580,12 +758,269 @@ async function createOrReuseAdminEstimate({
   });
 }
 
+// Statuses a revise can never touch. Acceptance locks the price and spins up
+// downstream records; declined/expired are closed; `sending` means a send is
+// mid-flight (editing under it would race the sender's pre-send read into a
+// stale-content send). draft / scheduled / sent / viewed / send_failed remain
+// editable — the whole point is fixing a quote the customer already has.
+const REVISE_BLOCKED_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
+
+// Single source of truth for "can this estimate be edited in place?" —
+// consumed by the revise write below and by GET /:id/edit-source so the
+// builder can explain a non-editable row instead of failing on save.
+// Returns null when editable, otherwise { message, statusCode }.
+function estimateReviseBlock(estimate, estimateData, now = new Date()) {
+  const parsed = estimateData === undefined
+    ? parseStoredEstimateData(estimate?.estimate_data)
+    : estimateData;
+  if (estimate?.archived_at) {
+    return { message: 'Estimate is archived. Unarchive it before editing.', statusCode: 400 };
+  }
+  if (parsed?.proposal?.enabled === true) {
+    return { message: 'This estimate is a commercial proposal — edit it with the Commercial proposal editor.', statusCode: 400 };
+  }
+  if (estimate?.price_locked_at) {
+    return { message: 'This estimate is price-locked (accepted) and can no longer be edited.', statusCode: 409 };
+  }
+  const status = String(estimate?.status || '');
+  if (status === 'sending') {
+    return { message: 'This estimate is being sent right now. Wait for the send to finish, then retry.', statusCode: 409 };
+  }
+  if (REVISE_BLOCKED_STATUSES.includes(status)) {
+    return { message: `A ${status} estimate can no longer be edited.`, statusCode: 409 };
+  }
+  // Date-expired rows the daily expiration worker hasn't flipped yet are
+  // expired all the same: the public route serves the expired page off the
+  // timestamp, so a revise would report saved while the customer's link keeps
+  // showing nothing new. Same verdict as status='expired'.
+  const expiresAt = estimate?.expires_at ? new Date(estimate.expires_at) : null;
+  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt <= now) {
+    return { message: 'This estimate has passed its expiration date and can no longer be edited. Extend it first, then edit.', statusCode: 409 };
+  }
+  return null;
+}
+
+// Row-level keys that live INSIDE estimate_data but are linkage, not quote
+// content: the lead_id mirror (lead rows with no leads.estimate_id FK rely on
+// it for send/view/acceptance advancement) and the schedule-stitch pointer
+// the pipeline list + booking flows resolve appointments through. A revise
+// replaces estimate_data wholesale, so these must be carried across.
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'scheduled_service_id'];
+
+// Revise an existing estimate in place: same body + pricing pipeline as
+// create, but the row keeps its id, token, status, expiry, creator, and
+// lead/customer linkage — so the link the customer already received simply
+// starts showing the updated quote. A later send/resend re-stamps the send
+// snapshot and expiry exactly like a first send.
+async function reviseAdminEstimate({
+  database = db,
+  estimateId,
+  body,
+  technicianId,
+  technician,
+  now = () => new Date(),
+  recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
+  // Run every guard and the full pricing pipeline but skip the write — the
+  // builder preflights an edit-mode save with this so the operator confirms a
+  // server-repriced total BEFORE it publishes to the customer's live link.
+  dryRun = false,
+}) {
+  const estimate = await database('estimates').where({ id: estimateId }).first();
+  if (!estimate) throw errorWithStatus('Estimate not found', 404);
+  const block = estimateReviseBlock(estimate, undefined, now());
+  if (block) throw errorWithStatus(block.message, block.statusCode);
+  // A revise is a full quote rewrite — without a payload it would null the
+  // stored blob (and silently orphan the linkage keys preserved below).
+  if (!body?.estimateData || typeof body.estimateData !== 'object') {
+    throw errorWithStatus('estimateData is required to revise an estimate.', 400);
+  }
+  // An in-place revision can never move the row to another account: the token
+  // already in the customer's hands would become a bearer link into someone
+  // else's quote and acceptance. A different explicit customerId (customer
+  // lookup picking another match in the builder) is a new-estimate job.
+  if (estimate.customer_id && body.customerId
+      && String(body.customerId) !== String(estimate.customer_id)) {
+    throw errorWithStatus(
+      'This estimate is linked to a customer and an in-place edit cannot move it to a different customer. Create a new estimate for the other customer.',
+      409,
+    );
+  }
+  const existingData = parseStoredEstimateData(estimate.estimate_data) || {};
+
+  // The satellite snapshot describes a PROPERTY, not the quote: it may only
+  // survive the revise while the address still matches. An address edit made
+  // without a fresh property lookup sends no replacement, and falling back to
+  // the row would pin the previous property's image to the revised quote.
+  const addressKey = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const sameAddress = addressKey(body.address) === addressKey(estimate.address);
+
+  // The builder may reopen an estimate whose contact/customer linkage it did
+  // not capture (auto-send or agent-drafted rows) — never let a blank field in
+  // the edit payload sever the row's existing linkage or satellite snapshot.
+  const writeFields = await resolveEstimateWritePayload({
+    database,
+    body: {
+      ...body,
+      customerId: body.customerId || estimate.customer_id || null,
+      satelliteUrl: body.satelliteUrl || (sameAddress ? estimate.satellite_url : null) || null,
+    },
+    technicianId,
+    technician,
+    now,
+    recompute,
+  });
+
+  // Carry the linkage keys across the wholesale estimate_data rewrite.
+  if (writeFields.estimate_data) {
+    let nextData = null;
+    try {
+      nextData = JSON.parse(writeFields.estimate_data);
+    } catch {
+      nextData = null;
+    }
+    if (nextData && typeof nextData === 'object') {
+      let preserved = false;
+      for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
+        if (existingData[key] !== undefined && nextData[key] === undefined) {
+          nextData[key] = existingData[key];
+          preserved = true;
+        }
+      }
+      if (preserved) writeFields.estimate_data = JSON.stringify(nextData);
+    }
+  }
+
+  // Lead-contact revalidation: the lead send/view/acceptance flows treat the
+  // linkage (leads.estimate_id FK, or the estimate_data.lead_id mirror) as
+  // authoritative and would advance/convert the ORIGINAL lead on the revised
+  // estimate's events. If the revise moves the estimate to a different
+  // contact, refuse — the operator should fix the lead or quote the other
+  // customer on a new estimate. Same contact-match rule as lead attach
+  // (normalized phone/email, so a pure reformat still passes). Gated on an
+  // actual contact change so a service-only edit on a row whose linkage was
+  // already imperfect never gets bricked by this check.
+  const contactChanged =
+    String(writeFields.customer_id ?? '') !== String(estimate.customer_id ?? '') ||
+    String(writeFields.customer_phone ?? '') !== String(estimate.customer_phone ?? '') ||
+    String(writeFields.customer_email ?? '') !== String(estimate.customer_email ?? '');
+  if (contactChanged) {
+    let linkedLead = await database('leads')
+      .where({ estimate_id: estimate.id })
+      .whereNull('deleted_at')
+      .first();
+    if (!linkedLead && existingData.lead_id) {
+      linkedLead = await database('leads')
+        .where({ id: existingData.lead_id })
+        .whereNull('deleted_at')
+        .first();
+    }
+    if (linkedLead && !leadMatchesEstimateContact(linkedLead, { ...estimate, ...writeFields })) {
+      throw errorWithStatus(
+        'This estimate is linked to a lead whose contact does not match the revised customer. Update the lead first, or create a new estimate for the other customer.',
+        409,
+      );
+    }
+
+    // Customer-linkage revalidation, same idea as the lead guard: public
+    // acceptance converts/schedules/invoices against estimate.customer_id
+    // (estimate-public accept flow), so a revise that moves the contact while
+    // the preserve above keeps the link would show one contact's quote and
+    // commit the accepted work to the previous customer's account. Match with
+    // the same normalized phone/email rule the lead guard uses; a preserved
+    // id pointing at a missing customer row fails the same way.
+    if (writeFields.customer_id) {
+      const linkedCustomer = await database('customers')
+        .where({ id: writeFields.customer_id })
+        .first();
+      const revised = { ...estimate, ...writeFields };
+      const customerPhone = normalizeContactPhone(linkedCustomer?.phone);
+      const revisedPhone = normalizeContactPhone(revised.customer_phone);
+      const customerEmail = normalizeContactEmail(linkedCustomer?.email);
+      const revisedEmail = normalizeContactEmail(revised.customer_email);
+      const matchesCustomer = !!linkedCustomer && (
+        (customerPhone && revisedPhone && customerPhone === revisedPhone)
+        || (customerEmail && revisedEmail && customerEmail === revisedEmail)
+      );
+      if (!matchesCustomer) {
+        throw errorWithStatus(
+          'This estimate is linked to a customer whose contact does not match the revised contact. Update the customer record first, or create a new estimate for the other customer.',
+          409,
+        );
+      }
+    }
+
+    // Token-only rows (no lead, no ORIGINAL customer link — attaching one in
+    // this same revise doesn't count, that's how an audience swap would dress
+    // itself up) have nothing to revalidate against, but the same-audience
+    // rule still holds: once the quote is delivered, the token in the
+    // recipient's hands is a bearer link, and a contact move would point it
+    // at another person's quote. Normalized compare so a pure reformat of
+    // the same phone/email still saves.
+    const delivered = !!(estimate.sent_at || estimate.viewed_at);
+    if (delivered && !linkedLead && !estimate.customer_id) {
+      const phoneMoved = normalizeContactPhone(writeFields.customer_phone)
+        !== normalizeContactPhone(estimate.customer_phone);
+      const emailMoved = normalizeContactEmail(writeFields.customer_email)
+        !== normalizeContactEmail(estimate.customer_email);
+      if (phoneMoved || emailMoved) {
+        throw errorWithStatus(
+          'This estimate was already sent and has no linked customer or lead to validate a contact change against. Create a new estimate for the other contact.',
+          409,
+        );
+      }
+    }
+  }
+
+  // Preflight stops here: same guards, same pricing pipeline, no write — the
+  // returned totals let the builder confirm a server reprice with the
+  // operator before anything reaches the customer's live link.
+  if (dryRun) {
+    return { estimate: { ...estimate, ...writeFields }, dryRun: true };
+  }
+
+  // Atomic revise guard: the editability check above ran on a pre-read, so
+  // scope the UPDATE to the same editable conditions — a customer accept or
+  // an in-flight send landing between SELECT and UPDATE must win, not be
+  // silently overwritten. The category predicate closes the proposal race:
+  // PUT /:id/proposal is the only writer that turns a row into a commercial
+  // proposal and it always stamps category='COMMERCIAL' in the same UPDATE,
+  // so a conversion landing after our pre-read can't be clobbered either.
+  // Replacing estimate_data wholesale also drops the prior send's pricing
+  // snapshot and any customer-picked preferences, which is intended: they
+  // described the PREVIOUS quote (the public view falls back to live pricing
+  // until the next send re-stamps a snapshot).
+  const [updated] = await database('estimates')
+    .where({ id: estimate.id })
+    .whereNull('price_locked_at')
+    .whereNull('archived_at')
+    .whereNotIn('status', REVISE_BLOCKED_STATUSES)
+    .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
+    // Mirrors the pre-read's date-expiry verdict: the payload resolution
+    // above (pricing recompute, DB lookups) leaves a window in which the
+    // row can pass its expires_at, and a commit after that would report
+    // saved while the public link already serves the expired page.
+    .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now()))
+    .update({
+      ...writeFields,
+      updated_at: now(),
+    })
+    .returning('*');
+  if (!updated) {
+    throw errorWithStatus('Estimate was accepted, locked, converted, or expired while you were editing. Refresh and retry.', 409);
+  }
+  clearEstimatePricingCache(estimate.id);
+  return { estimate: updated };
+}
+
 module.exports = {
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
   estimateViewUrl,
+  estimateReviseBlock,
+  normalizeClientPestFloorMetadata,
+  reviseAdminEstimate,
   serverRecomputeFromEstimateData,
   resolveServerAuthoritativePricing,
   compareClientToServer,

@@ -109,7 +109,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
       <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: 4 }}>
         Help us calibrate your Pest Pressure score
       </div>
-      <div style={{ fontSize: 13, fontWeight: 600, color: CUSTOMER_SURFACE.text, marginBottom: 8 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: CUSTOMER_SURFACE.text, marginBottom: 8 }}>
         {question}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8 }}>
@@ -123,7 +123,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
             style={{
               width: '100%', padding: '10px 0', borderRadius: 10,
               border: '1px solid #CFE7F5', background: '#F8FCFE',
-              color: '#0B3A66', fontSize: 15, fontWeight: 600, lineHeight: 1,
+              color: '#04395E', fontSize: 15, fontWeight: 600, lineHeight: 1,
               cursor: submitting ? 'wait' : 'pointer',
               fontFamily: "'JetBrains Mono', monospace",
             }}
@@ -147,7 +147,7 @@ function SubmittedRatingNote() {
     <div style={{
       marginTop: 12, padding: 10,
       background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8,
-      display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#15803D',
+      display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: '#15803D',
     }}>
       <CheckCircle2 size={14} aria-hidden="true" />
       <span>Thanks — your feedback helps us compare technician findings with what you are seeing at home.</span>
@@ -242,7 +242,7 @@ export default function PestPressureCard({ data, token }) {
 
       {effective.showComponentBreakdown && effective.components ? (
         <details style={{ marginTop: 8 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 13, color: '#0B3A66', fontWeight: 600 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 14, color: '#04395E', fontWeight: 600 }}>
             Component breakdown
           </summary>
           <ComponentsTable components={effective.components} />
@@ -251,10 +251,10 @@ export default function PestPressureCard({ data, token }) {
 
       {effective.howCalculated ? (
         <details style={{ marginTop: 8 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 13, color: '#0B3A66', fontWeight: 600 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 14, color: '#04395E', fontWeight: 600 }}>
             How we calculate Pest Pressure
           </summary>
-          <div style={{ marginTop: 8, fontSize: 13, lineHeight: 1.6, color: '#3F4A65', whiteSpace: 'pre-line' }}>
+          <div style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: '#3F4A65', whiteSpace: 'pre-line' }}>
             {effective.howCalculated}
           </div>
         </details>

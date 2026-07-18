@@ -1,15 +1,15 @@
 const pricingEngine = require('./pricing-engine');
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
 
 const RECURRING_SERVICE_ORDER = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub'];
-const TIER_SERVICE_KEYS = {
-  Bronze: ['pest_control'],
-  Silver: ['pest_control', 'lawn_care'],
-  Gold: ['pest_control', 'lawn_care', 'mosquito'],
-  Platinum: ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub'],
+const TIER_MIN_SERVICE_COUNT = {
+  Bronze: 1,
+  Silver: 2,
+  Gold: 3,
+  Platinum: 4,
 };
-const WAVEGUARD_TIERS = Object.keys(TIER_SERVICE_KEYS);
+const WAVEGUARD_TIERS = Object.keys(TIER_MIN_SERVICE_COUNT);
 
 const SERVICE_LABELS = {
   pest_control: 'Pest Control',
@@ -47,16 +47,6 @@ const LINE_SERVICE_KEYS = {
   one_time_mosquito: 'one_time_mosquito',
 };
 
-const INACTIVE_SCHEDULE_STATUSES = new Set([
-  'cancelled',
-  'canceled',
-  'completed',
-  'complete',
-  'skipped',
-  'rescheduled',
-  'no_show',
-]);
-
 function positiveNumber(...values) {
   for (const value of values) {
     const n = Number(value);
@@ -74,19 +64,9 @@ function toKeyLabel(key) {
   return SERVICE_LABELS[key] || String(key || '').replace(/_/g, ' ');
 }
 
-function tierServicesForCustomer(customer = {}) {
-  const tier = customer.waveguard_tier || customer.tier;
-  if (!tier || tier === 'One-Time') return [];
-  return TIER_SERVICE_KEYS[tier] || [];
-}
-
 function normalizeWaveGuardTier(value) {
   const raw = String(value || '').trim().toLowerCase();
   return WAVEGUARD_TIERS.find(tier => tier.toLowerCase() === raw) || null;
-}
-
-function tierRank(tier) {
-  return WAVEGUARD_TIERS.indexOf(tier);
 }
 
 function normalizeGrassType(value) {
@@ -190,33 +170,32 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
     return generic ? all.slice(0, 1) : all;
   }
   if (serviceKey === 'lawn_care') {
-    // 'basic' (lawnFreq 4) is now a sold tier and prices distinctly as the
-    // 4-application plan, so it is offered alongside Standard/Enhanced/Premium.
-    // Standard stays first so the portal panel (which auto-selects options[0])
-    // keeps defaulting to the 6-application plan, not the new 4-application one.
+    // 'basic' (lawnFreq 4) is RETIRED for new sales (owner directive
+    // 2026-07-09) — never offer or price it here. Standard stays first so
+    // the portal panel (which auto-selects options[0]) keeps defaulting to
+    // the 6-application plan.
     const all = [
       { id: 'lawn-standard', serviceKey, label: 'Lawn care — 6x applications/yr', tier: 'standard', lawnFreq: 6, cadence: '6 applications/yr' },
       { id: 'lawn-enhanced', serviceKey, label: 'Lawn care — 9x applications/yr', tier: 'enhanced', lawnFreq: 9, cadence: '9 applications/yr' },
       { id: 'lawn-premium', serviceKey, label: 'Lawn care — 12x applications/yr', tier: 'premium', lawnFreq: 12, cadence: '12 applications/yr' },
-      { id: 'lawn-basic', serviceKey, label: 'Lawn care — 4x applications/yr', tier: 'basic', lawnFreq: 4, cadence: '4 applications/yr' },
     ];
     if (generic) return all.filter(o => o.id === 'lawn-enhanced');
     // Tier-intent narrowing uses the tier name or application-count wording only.
     // The count form accepts an optional "x" so the "Nx applications/yr" labels
-    // a customer can copy from an option ("12x applications/yr", "9x", "4x") map
+    // a customer can copy from an option ("12x applications/yr", "9x") map
     // to the right tier; a bare "Nx" token counts too. 6x is Standard, which is
     // the default returned by the fallthrough below, so it needs no branch.
     // Bare cadence words ("quarterly"/"monthly") are NOT matched: in a prompt
     // like "I have quarterly pest and want lawn care" the cadence refers to the
     // existing pest plan, so matching it would wrongly hide the other lawn tiers.
+    // "basic"/"4x" prompts intentionally fall through to the full sold ladder —
+    // the retired 4-application plan must neither be advertised nor silently
+    // priced as a different tier under its old label.
     if (/\bpremium\b|\b12x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b12x\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-premium');
     }
     if (/\benhanced\b|\b9x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b9x\b/i.test(prompt)) {
       return all.filter(o => o.id === 'lawn-enhanced');
-    }
-    if (/\bbasic\b|\b4x?\s*(?:applications?|apps?|visits?|treatments?)\b|\b4x\b/i.test(prompt)) {
-      return all.filter(o => o.id === 'lawn-basic');
     }
     return all;
   }
@@ -275,25 +254,17 @@ async function safeSelect(db, table, buildQuery) {
 }
 
 async function loadCurrentServiceKeys(db, customer) {
-  const keys = new Set(tierServicesForCustomer(customer));
-  const customerId = customer.id;
-  const today = etDateString();
-
-  const scheduled = await safeSelect(db, 'scheduled_services', q => q
-    .where({ customer_id: customerId })
-    .where('scheduled_date', '>=', today)
-    .whereNotIn('status', Array.from(INACTIVE_SCHEDULE_STATUSES))
-    .select('service_type', 'status', 'scheduled_date')
-    .limit(200));
-  for (const row of scheduled) {
-    const status = String(row.status || '').toLowerCase();
-    const scheduledDate = String(row.scheduled_date || row.scheduledDate || '').slice(0, 10);
-    if (INACTIVE_SCHEDULE_STATUSES.has(status) || !scheduledDate || scheduledDate < today) continue;
-    const key = serviceKeyFromText(row.service_type);
-    if (key && !key.startsWith('one_time')) keys.add(key);
+  if (!db || !customer?.id) return [];
+  try {
+    // WaveGuard is count-based across the customer's actual active recurring
+    // qualifying services. A tier label alone never identifies which services
+    // the customer bought, so it must not seed a Pest/Lawn/Mosquito basket.
+    const keys = await loadExistingQualifyingServiceKeys(db, customer.id);
+    return keys.map(key => key === 'termite_bait' ? 'termite' : key);
+  } catch (err) {
+    logger.warn(`[customer-pricing-ai] active service lookup skipped: ${err.message}`);
+    return [];
   }
-
-  return Array.from(keys);
 }
 
 async function loadTurfProfile(db, customerId) {
@@ -433,7 +404,18 @@ function quoteAmountFromLine(line) {
   const annual = positiveNumber(line.annualAfterDiscount, line.finalAnnual, line.annual, line.monitoring?.annual);
   const oneTime = positiveNumber(line.priceAfterDiscount, line.totalAfterDiscount, line.price, line.total);
   const dueAtStart = positiveNumber(line.installation?.price);
-  const perVisit = positiveNumber(line.perApp, line.internalPerVisitRevenue, line.perVisit);
+  // Per-visit must reflect the DISCOUNTED price (codex 2642 r1: line.perApp
+  // is the list per-application rate; the discount pass only writes
+  // monthly/annualAfterDiscount). Derive it from the discounted annual and
+  // the visit count whenever both exist; the raw fields are only the
+  // fallback for lines with no visit cadence.
+  // line.visits covers mosquito's cadence field (codex 2642 r2); frequency
+  // is numeric on lawn shapes and a string ('quarterly') on pest shapes —
+  // positiveNumber ignores the string form.
+  const visits = positiveNumber(line.visitsPerYear, line.visits, line.frequency);
+  const perVisit = annual && visits
+    ? Math.round((annual / visits) * 100) / 100
+    : positiveNumber(line.perApp, line.internalPerVisitRevenue, line.perVisit);
   return { monthly, annual, oneTime, dueAtStart, perVisit };
 }
 
@@ -503,102 +485,6 @@ function buildQuoteOption({
   };
 }
 
-function confidenceForEstimate(estimate, propertyContext) {
-  if (propertyContext.source === 'property_lookup') return 'medium';
-  if (estimate?.fieldVerify?.length) return 'low';
-  return 'high';
-}
-
-function warningMessage(warning) {
-  if (!warning) return null;
-  if (typeof warning === 'string') return warning;
-  if (typeof warning === 'object') {
-    return warning.message || warning.warning || warning.reason || warning.code || null;
-  }
-  return null;
-}
-
-function tierReviewSummary(estimate) {
-  const lineItems = Array.isArray(estimate?.lineItems) ? estimate.lineItems : [];
-  const warnings = [];
-  let customQuote = false;
-  let requiresManualReview = false;
-
-  for (const line of lineItems) {
-    if (line?.customQuoteFlag) customQuote = true;
-    if (line?.requiresManualReview) requiresManualReview = true;
-    if (Array.isArray(line?.warnings)) {
-      warnings.push(...line.warnings.map(warningMessage).filter(Boolean));
-    }
-  }
-
-  return {
-    customQuote,
-    requiresManualReview,
-    warnings: [...new Set(warnings)],
-  };
-}
-
-function buildTierQuoteOption({
-  targetTier,
-  targetKeys,
-  currentServiceKeys,
-  estimate,
-  modeledCurrentMonthly,
-  billingModelMismatch,
-  propertyContext,
-}) {
-  const planMonthly = positiveNumber(estimate?.summary?.recurringMonthlyAfterDiscount);
-  const addedKeys = targetKeys.filter(key => !currentServiceKeys.includes(key));
-  const incrementalMonthly = modeledCurrentMonthly
-    ? Math.max(0, Math.round((planMonthly - modeledCurrentMonthly) * 100) / 100)
-    : null;
-  const review = tierReviewSummary(estimate);
-  const manualReview = !!(
-    review.customQuote ||
-    review.requiresManualReview ||
-    review.warnings.length ||
-    estimate?.fieldVerify?.length
-  );
-  const notes = [];
-  if (review.customQuote) notes.push('Field verification required before final pricing.');
-  if (review.requiresManualReview) notes.push('Manual review recommended for this property.');
-  if (review.warnings.length) notes.push(...review.warnings.slice(0, 3));
-  if (Array.isArray(estimate?.fieldVerify) && estimate.fieldVerify.length) {
-    notes.push('Property measurements should be verified on-site.');
-  }
-  if (billingModelMismatch) {
-    notes.push('Waves will confirm the final plan total because current billing differs from modeled pricing.');
-  }
-
-  return {
-    id: `waveguard-${targetTier.toLowerCase()}`,
-    serviceKey: 'waveguard_tier',
-    serviceName: `WaveGuard ${targetTier}`,
-    label: `WaveGuard ${targetTier}`,
-    cadence: `Includes ${targetKeys.map(toKeyLabel).join(', ')}`,
-    alreadyHasRelatedService: addedKeys.length === 0,
-    monthly: planMonthly || null,
-    annual: planMonthly ? Math.round(planMonthly * 12 * 100) / 100 : null,
-    oneTime: null,
-    dueAtStart: null,
-    perVisit: null,
-    estimatedPlanMonthly: billingModelMismatch ? null : planMonthly || null,
-    estimatedAdditionalMonthly: incrementalMonthly,
-    waveguardTier: normalizeWaveGuardTier(estimate?.waveGuard?.tier) || targetTier,
-    confidence: manualReview ? 'low' : confidenceForEstimate(estimate, propertyContext),
-    manualReview,
-    notes: [...new Set(notes)],
-    requestSubject: `Upgrade to WaveGuard ${targetTier}`,
-    requestDescription: [
-      `Customer priced WaveGuard ${targetTier} in the portal.`,
-      addedKeys.length ? `Adds: ${addedKeys.map(toKeyLabel).join(', ')}.` : 'No additional recurring services were identified.',
-      planMonthly ? `Estimated plan total: $${planMonthly}/mo.` : null,
-      incrementalMonthly != null ? `Estimated added monthly: $${incrementalMonthly}/mo.` : null,
-    ].filter(Boolean).join(' '),
-  };
-}
-
 async function maybeSyncPricingEngine(db) {
   if (!db || !db.schema || typeof db.schema.hasTable !== 'function') return;
   if (pricingEngine.needsSync && pricingEngine.needsSync()) {
@@ -611,32 +497,30 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
   const currentServiceKeys = await loadCurrentServiceKeys(db, customer);
   const currentSet = new Set(currentServiceKeys);
   const normalizedTargetTier = normalizeWaveGuardTier(targetTier);
-  const targetTierServiceKeys = normalizedTargetTier ? TIER_SERVICE_KEYS[normalizedTargetTier] : null;
-  const requestedServices = targetTierServiceKeys || inferRequestedServices(text, currentSet);
-  const currentWaveGuardTier = normalizeWaveGuardTier(customer.waveguard_tier || customer.tier);
-  const turfProfile = await loadTurfProfile(db, customer.id);
+  const requestedServices = inferRequestedServices(text, currentSet);
 
-  if (
-    normalizedTargetTier &&
-    currentWaveGuardTier &&
-    tierRank(normalizedTargetTier) <= tierRank(currentWaveGuardTier)
-  ) {
+  if (normalizedTargetTier) {
+    const requiredCount = TIER_MIN_SERVICE_COUNT[normalizedTargetTier];
+    const additionalCount = Math.max(0, requiredCount - currentServiceKeys.length);
     return {
       ok: false,
-      code: 'TARGET_TIER_NOT_UPGRADE',
+      code: additionalCount === 0 ? 'TARGET_TIER_ALREADY_EARNED' : 'SERVICES_REQUIRED_FOR_TIER',
       mode: 'waveguard_tier',
       targetTier: normalizedTargetTier,
-      currentTier: currentWaveGuardTier,
-      message: normalizedTargetTier === currentWaveGuardTier
-        ? `You're already on WaveGuard ${currentWaveGuardTier}.`
-        : `WaveGuard ${normalizedTargetTier} is below your current WaveGuard ${currentWaveGuardTier} plan, so Waves will review that change manually.`,
+      message: additionalCount === 0
+        ? `Your active services already meet the ${requiredCount}-service requirement for WaveGuard ${normalizedTargetTier}.`
+        : `WaveGuard ${normalizedTargetTier} is earned with ${requiredCount} active qualifying services. Choose the ${additionalCount} service${additionalCount === 1 ? '' : 's'} you want to add so I can price the actual plan.`,
       currentServices: currentServiceKeys.map(toKeyLabel),
-      requestedServices: targetTierServiceKeys.map(toKeyLabel),
-      alreadyIncluded: targetTierServiceKeys.filter(key => currentSet.has(key)).map(toKeyLabel),
+      requestedServices: [],
+      alreadyIncluded: currentServiceKeys.map(toKeyLabel),
+      requiredServiceCount: requiredCount,
+      additionalServiceCount: additionalCount,
       property: null,
       options: [],
     };
   }
+
+  const turfProfile = await loadTurfProfile(db, customer.id);
 
   let lookupFn = propertyLookup;
   if (!lookupFn) {
@@ -690,59 +574,6 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
   const billingModelMismatch = actualMonthly > 0 && (!modeledCurrentMonthly || Math.abs(actualMonthly - modeledCurrentMonthly) > 1);
   const currentMonthly = actualMonthly || modeledCurrentMonthly;
   const quoteBaselineMonthly = modeledCurrentMonthly || 0;
-
-  if (normalizedTargetTier) {
-    let quotedTier = normalizedTargetTier;
-    let quotedTierServiceKeys = targetTierServiceKeys;
-    let targetServices = {
-      ...currentServices,
-      ...currentServiceObjectsFor(quotedTierServiceKeys, context),
-    };
-    let targetEstimate = pricingEngine.generateEstimate({
-      ...propertyContext.propertyInput,
-      recurringCustomer: currentServiceKeys.length > 0,
-      services: targetServices,
-    });
-    const derivedTier = normalizeWaveGuardTier(targetEstimate?.waveGuard?.tier);
-    if (derivedTier && tierRank(derivedTier) > tierRank(quotedTier)) {
-      quotedTier = derivedTier;
-      quotedTierServiceKeys = TIER_SERVICE_KEYS[quotedTier];
-      targetServices = {
-        ...currentServices,
-        ...currentServiceObjectsFor(quotedTierServiceKeys, context),
-      };
-      targetEstimate = pricingEngine.generateEstimate({
-        ...propertyContext.propertyInput,
-        recurringCustomer: currentServiceKeys.length > 0,
-        services: targetServices,
-      });
-    }
-    const option = buildTierQuoteOption({
-      targetTier: quotedTier,
-      targetKeys: quotedTierServiceKeys,
-      currentServiceKeys,
-      estimate: targetEstimate,
-      modeledCurrentMonthly,
-      billingModelMismatch,
-      propertyContext,
-    });
-
-    return {
-      ok: true,
-      mode: 'waveguard_tier',
-      targetTier: quotedTier,
-      selectedTier: normalizedTargetTier,
-      message: quotedTier === normalizedTargetTier
-        ? `I priced WaveGuard ${quotedTier} using the property tied to your portal.`
-        : `Your existing recurring services qualify this as WaveGuard ${quotedTier}, so I priced that tier using the property tied to your portal.`,
-      currentServices: currentServiceKeys.map(toKeyLabel),
-      requestedServices: quotedTierServiceKeys.map(toKeyLabel),
-      alreadyIncluded: quotedTierServiceKeys.filter(key => currentSet.has(key)).map(toKeyLabel),
-      property: summarizeProperty(propertyContext),
-      currentMonthly: currentMonthly || null,
-      options: option.monthly ? [option] : [],
-    };
-  }
 
   const options = [];
   const generic = !text;
@@ -806,7 +637,6 @@ module.exports = {
   buildCustomerPricingResponse,
   inferRequestedServices,
   serviceKeyFromText,
-  tierServicesForCustomer,
   variantsForService,
   currentServiceObjectsFor,
   optionServices,

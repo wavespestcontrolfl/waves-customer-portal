@@ -29,7 +29,7 @@
 //   from a JSON payload. Watch for any unescaped HTML rendering on
 //   the preview side that could XSS the operator from a malformed
 //   template body.
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Badge, Button, Card, Switch, cn } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -52,6 +52,7 @@ export default function EmailAutomationsPanelV2() {
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedKey, setSelectedKey] = useState(null);
+  const [sendTemplate, setSendTemplate] = useState(null);
   const [toast, setToast] = useState("");
 
   const load = useCallback(() => {
@@ -174,8 +175,23 @@ export default function EmailAutomationsPanelV2() {
                         onChange={() => toggleEnabled(t)}
                       />{" "}
                     </td>{" "}
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
                       {" "}
+                      <Button
+                        variant="secondary"
+                        className="mr-2"
+                        disabled={!t.enabled || !t.has_local_content}
+                        title={
+                          !t.enabled
+                            ? "Enable this automation first"
+                            : !t.has_local_content
+                              ? "No enabled step has content yet — there is nothing to send"
+                              : undefined
+                        }
+                        onClick={() => setSendTemplate(t)}
+                      >
+                        Send
+                      </Button>{" "}
                       <Button
                         variant="secondary"
                         onClick={() => setSelectedKey(t.key)}
@@ -197,6 +213,394 @@ export default function EmailAutomationsPanelV2() {
           onSaved={load}
         />
       )}
+      {sendTemplate && (
+        <SendAutomationModal
+          template={sendTemplate}
+          onClose={() => setSendTemplate(null)}
+          onSent={load}
+        />
+      )}
+    </div>
+  );
+}
+
+const SEGMENT_SCOPE_OPTIONS = [
+  { value: "customers", label: "All active customers" },
+  { value: "program", label: "Program (WaveGuard) customers" },
+];
+const SEGMENT_LOCATION_OPTIONS = [
+  { value: "", label: "All locations" },
+  { value: "bradenton", label: "Bradenton / Lakewood Ranch" },
+  { value: "parrish", label: "Parrish" },
+  { value: "sarasota", label: "Sarasota" },
+  { value: "venice", label: "Venice" },
+];
+
+// ── Manual send modal — one customer (search by name) or a whole segment
+//    (preview count → explicit confirm; built for announcement automations
+//    like Pricing Update). The server responds with exactly what happened.
+function SendAutomationModal({ template, onClose, onSent }) {
+  const [mode, setMode] = useState("single");
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState(null);
+  // Segment mode
+  const [scope, setScope] = useState("customers");
+  const [locationId, setLocationId] = useState("");
+  const [preview, setPreview] = useState(null); // { count, overCap }
+  const [previewing, setPreviewing] = useState(false);
+  // Monotonic preview-request id: a segment change bumps it, so a preview
+  // response that resolves AFTER the operator switched scope/location is
+  // dropped instead of arming the confirm button against the wrong segment
+  // (the server's count check can't catch two segments with the same count).
+  const previewSeq = useRef(0);
+
+  // Any segment change invalidates the previewed count — the confirm button
+  // only arms against the number the operator just saw.
+  useEffect(() => {
+    previewSeq.current += 1;
+    setPreview(null);
+    setResult(null);
+    setPreviewing(false);
+  }, [scope, locationId, mode]);
+
+  const runPreview = async () => {
+    if (previewing) return;
+    const requestId = ++previewSeq.current;
+    setPreviewing(true);
+    setResult(null);
+    try {
+      const data = await adminFetch(
+        `/admin/automations/templates/${template.key}/segment-preview`,
+        {
+          method: "POST",
+          body: JSON.stringify({ segment: { scope, locationId: locationId || undefined } }),
+        },
+      );
+      // Snapshot the SEGMENT with the count: the confirm must send exactly
+      // what was previewed. Reading the live scope/locationId at send time
+      // leaves a one-render window (before the clearing useEffect commits)
+      // where a click could pair the new segment with the old count — and
+      // the server's drift check can't catch two segments sharing a count.
+      if (previewSeq.current === requestId) {
+        setPreview({ ...data, scope, locationId });
+      }
+    } catch (e) {
+      if (previewSeq.current === requestId) {
+        setResult({ ok: false, text: "Preview failed: " + e.message });
+      }
+    } finally {
+      if (previewSeq.current === requestId) setPreviewing(false);
+    }
+  };
+
+  const sendSegment = async () => {
+    if (!preview || preview.overCap || !preview.count || sending) return;
+    setSending(true);
+    setResult(null);
+    try {
+      const data = await adminFetch(
+        `/admin/automations/templates/${template.key}/segment-send`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            segment: { scope: preview.scope, locationId: preview.locationId || undefined },
+            expectedCount: preview.count,
+          }),
+        },
+      );
+      // success:false = some enrollments THREW (server keeps 200 with the
+      // summary) — render the message in the alert tone so the retry note
+      // is impossible to miss.
+      setResult({ ok: data.success !== false, text: data.message || "Segment enrolled." });
+      setPreview(null);
+      onSent?.();
+    } catch (e) {
+      setResult({ ok: false, text: e.message });
+      setPreview(null); // 409 drift or failure — force a fresh preview
+    } finally {
+      setSending(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selected) return undefined;
+    const q = search.trim();
+    if (q.length < 2) {
+      // Clearing back below 2 chars cancels any in-flight debounce; reset the
+      // spinner too, or it stays stuck on "Searching…" with an empty input.
+      setResults([]);
+      setSearching(false);
+      return undefined;
+    }
+    let cancelled = false;
+    // Drop results from the previous query so a stale row can't be clicked
+    // and enrolled under the new search text during the debounce window.
+    setResults([]);
+    setSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        const data = await adminFetch(
+          `/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        if (!cancelled) setResults(data?.customers || []);
+      } catch {
+        if (!cancelled) setResults([]);
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [search, selected]);
+
+  // GET /admin/customers maps rows to camelCase (firstName/lastName); accept
+  // snake_case too so a mapper change can't blank every result row.
+  const customerName = (c) =>
+    [c.firstName || c.first_name, c.lastName || c.last_name]
+      .filter(Boolean)
+      .join(" ") ||
+    c.email ||
+    "Unnamed customer";
+
+  const send = async () => {
+    if (!selected || sending) return;
+    setSending(true);
+    setResult(null);
+    try {
+      const data = await adminFetch(
+        `/admin/automations/templates/${template.key}/trigger`,
+        {
+          method: "POST",
+          body: JSON.stringify({ customerId: selected.id }),
+        },
+      );
+      setResult({
+        ok: !!data.enrolled,
+        text: data.message || (data.enrolled ? "Enrolled." : "Not enrolled."),
+      });
+      if (data.enrolled) onSent?.();
+    } catch (e) {
+      setResult({ ok: false, text: "Send failed: " + e.message });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-4"
+      onClick={onClose}
+    >
+      {" "}
+      <div
+        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-lg my-8"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {" "}
+        <div className="p-5 border-b border-hairline border-zinc-200 flex items-start justify-between gap-3">
+          {" "}
+          <div>
+            {" "}
+            <h3 className="text-16 font-medium text-zinc-900">
+              Send "{template.name}"
+            </h3>{" "}
+            <p className="text-12 text-ink-secondary mt-0.5">
+              Enrolls the customer in this sequence — step 1 sends on its
+              configured delay. Customers need an email on file.
+            </p>{" "}
+          </div>{" "}
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-ink-tertiary hover:text-zinc-900 text-14"
+          >
+            ×
+          </button>{" "}
+        </div>{" "}
+        <div className="p-5 space-y-3">
+          <div className="flex gap-2">
+            {[
+              { key: "single", label: "One customer" },
+              { key: "segment", label: "Segment" },
+            ].map((m) => {
+              const active = mode === m.key;
+              return (
+                <button
+                  key={m.key}
+                  type="button"
+                  onClick={() => setMode(m.key)}
+                  aria-current={active ? "page" : undefined}
+                  className={
+                    "h-8 px-3 rounded-sm border-hairline text-11 font-medium uppercase tracking-label u-focus-ring " +
+                    (active
+                      ? "bg-zinc-900 text-white border-zinc-900"
+                      : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50")
+                  }
+                >
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+          {mode === "segment" && (
+            <>
+              <div>
+                <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+                  Who
+                </label>
+                <select
+                  value={scope}
+                  onChange={(e) => setScope(e.target.value)}
+                  className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+                >
+                  {SEGMENT_SCOPE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+                  Location
+                </label>
+                <select
+                  value={locationId}
+                  onChange={(e) => setLocationId(e.target.value)}
+                  className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+                >
+                  {SEGMENT_LOCATION_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+              {preview && !preview.overCap && preview.count > 0 && (
+                <div className="text-13 text-zinc-900 border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
+                  <span className="u-nums font-medium">{preview.count}</span>{" "}
+                  customers will be enrolled. Emails drain at ~50/minute.
+                </div>
+              )}
+              {preview && !preview.overCap && preview.count === 0 && (
+                <div className="text-12 text-ink-secondary">
+                  No customers match this segment — nothing to send.
+                </div>
+              )}
+              {preview && preview.overCap && (
+                <div className="text-12 text-alert-fg">
+                  {preview.count} customers exceeds the {preview.cap}-customer
+                  cap for one send — narrow the segment.
+                </div>
+              )}
+            </>
+          )}
+          {mode === "single" && (selected ? (
+            <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
+              <div className="min-w-0">
+                <div className="text-14 font-medium text-zinc-900 truncate">
+                  {customerName(selected)}
+                </div>
+                <div className="text-12 text-ink-secondary truncate">
+                  {selected.email || "No email on file"}
+                </div>
+              </div>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setSelected(null);
+                  setResult(null);
+                }}
+              >
+                Change
+              </Button>
+            </div>
+          ) : (
+            <>
+              <input
+                type="text"
+                autoFocus
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search customer by name…"
+                className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+              />
+              {searching && (
+                <div className="text-12 text-ink-secondary">Searching…</div>
+              )}
+              {!searching &&
+                search.trim().length >= 2 &&
+                results.length === 0 && (
+                  <div className="text-12 text-ink-secondary">
+                    No customers found.
+                  </div>
+                )}
+              {results.length > 0 && (
+                <div className="border-hairline border-zinc-200 rounded-sm divide-y divide-zinc-100 max-h-60 overflow-y-auto">
+                  {results.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => {
+                        setSelected(c);
+                        setResults([]);
+                      }}
+                      className="w-full text-left px-3 py-2 hover:bg-zinc-50"
+                    >
+                      <div className="text-13 font-medium text-zinc-900">
+                        {customerName(c)}
+                      </div>
+                      <div className="text-12 text-ink-secondary">
+                        {c.email || "No email"}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ))}
+          {result && (
+            <div
+              className={cn(
+                "text-12",
+                result.ok ? "text-zinc-900" : "text-alert-fg",
+              )}
+            >
+              {result.text}
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2 pt-2 border-t border-hairline border-zinc-200">
+            <Button variant="secondary" onClick={onClose}>
+              Close
+            </Button>
+            {mode === "single" ? (
+              <Button
+                onClick={send}
+                disabled={!selected || !selected.email || sending}
+                title={
+                  selected && !selected.email
+                    ? "This customer has no email on file"
+                    : undefined
+                }
+              >
+                {sending ? "Sending…" : "Send"}
+              </Button>
+            ) : preview && !preview.overCap && preview.count > 0 ? (
+              <Button onClick={sendSegment} disabled={sending}>
+                {sending
+                  ? "Enrolling…"
+                  : `Send to ${preview.count} customers`}
+              </Button>
+            ) : (
+              <Button onClick={runPreview} disabled={previewing}>
+                {previewing ? "Counting…" : "Preview count"}
+              </Button>
+            )}
+          </div>
+        </div>{" "}
+      </div>{" "}
     </div>
   );
 }

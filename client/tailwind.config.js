@@ -17,6 +17,13 @@ export default {
           'red-light': '#FDECEA',
           gold: '#F0A500',
           'gold-light': '#FEF7E0',
+          // theme-doc.js document tokens (customer doc/marketing pages).
+          // 'blue-deeper' above already carries the canonical glass navy
+          // #04395E — reuse it, do not add a duplicate ink key.
+          page: '#FAF8F3', // DOC.page warm page wash
+          success: '#047857', // DOC.success
+          'success-bg': '#F0FDF4', // DOC.successBg
+          'success-border': '#BBF7D0', // DOC.successBorder
         },
         zinc: {
           50: '#FAFAFA',

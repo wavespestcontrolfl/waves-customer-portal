@@ -169,8 +169,9 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
     Boolean(service.customerId || service.customer_id);
   const showEnRoute = Boolean(onEnRoute) && canMarkEnRoute(service);
   const showNavigate = Boolean(service.address);
+  const canAssignTechnician = (technicians || []).length > 0 || Boolean(service.technicianId);
   const hasActions =
-    Boolean(techInitial) || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
+    canAssignTechnician || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
 
   const actionBtnClass =
     'inline-flex items-center justify-center h-9 flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
@@ -243,17 +244,21 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
         </button>
         {hasActions && (
           <div className="flex items-stretch gap-2 flex-wrap" style={{ marginTop: 10 }}>
-            {techInitial && (
+            {canAssignTechnician && (
               <div className="relative flex flex-1 min-w-0" ref={techBtnRef}>
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); setShowTechPicker(!showTechPicker); }}
                   className={primaryBtnClass}
                   style={{ fontSize: 13 }}
-                  title={`${service.technicianName} — tap to reassign`}
-                  aria-label={`Technician: ${service.technicianName}`}
+                  title={service.technicianName
+                    ? `${service.technicianName} — tap to reassign`
+                    : 'Assign technician'}
+                  aria-label={service.technicianName
+                    ? `Technician: ${service.technicianName}`
+                    : 'Assign technician'}
                 >
-                  {techInitial}
+                  {techInitial || 'Assign'}
                 </button>
                 {showTechPicker && (
                   <InlineTechPicker
@@ -417,6 +422,23 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
     // stop to another day) invalidates the cached week list.
   }, [mode, weekStart, refreshKey]);
 
+  const handleEnRoute = useCallback(async (service) => {
+    const succeeded = await onEnRoute?.(service);
+    if (mode !== 'week' || succeeded === false) return;
+    setWeekData((previous) => {
+      if (!previous) return previous;
+      return {
+        ...previous,
+        days: (previous.days || []).map((day) => ({
+          ...day,
+          services: (day.services || []).map((item) =>
+            item.id === service.id ? { ...item, status: 'en_route' } : item,
+          ),
+        })),
+      };
+    });
+  }, [mode, onEnRoute]);
+
   if (mode === 'day') {
     return (
       <div className="bg-white">
@@ -424,7 +446,7 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           dateStr={date}
           services={services || []}
           onEdit={onEdit}
-          onEnRoute={onEnRoute}
+          onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}
           onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}
@@ -458,7 +480,7 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           dateStr={d.date}
           services={d.services || []}
           onEdit={onEdit}
-          onEnRoute={onEnRoute}
+          onEnRoute={onEnRoute ? handleEnRoute : undefined}
           onProtocol={onProtocol}
           onTreatmentPlan={onTreatmentPlan}
           onViewAudit={onViewAudit}

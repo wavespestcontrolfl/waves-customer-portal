@@ -33,7 +33,22 @@
 //                          "Lawn Care · Monthly" / "Pest Control · Quarterly"
 //                          so nobody re-opens the estimate to answer "what
 //                          did they sign up for". Optional; omitted → hidden.
+//   estimateRef  string  — human-facing estimate number (estimate_slug,
+//                          "EST-2026-0254") shown in the header so the quote
+//                          can be referenced without opening it. Same number
+//                          the customer sees on the public quote page.
+//                          Optional; omitted/null → header shows no number.
+//   cardsOnFile  array   — useCustomerCards() rows (saved payment methods,
+//                          default first) so the tech knows a card is on
+//                          file before choosing how to collect. null /
+//                          undefined = unknown (loading, fetch failed, or
+//                          host doesn't fetch) → row hidden entirely; [] =
+//                          confirmed none → "None" row. The distinction
+//                          matters: a false "None" would send the tech
+//                          chasing cash from an autopay customer.
 //   style        object  — optional outer wrapper style (margins, etc.)
+
+import { cardOnFileTitle, chargeableCardOnFile, isCardExpired } from '../../hooks/useCustomerCards';
 
 const BLUE = { bg: '#F0F9FF', border: '#BAE6FD', ink: '#0369A1' };
 // Amber caution used for the "billed to a third party — don't collect from the
@@ -285,8 +300,32 @@ function depositRow(deposit) {
   return null;
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, style }) {
+// Card-on-file row: which saved payment method (if any) a charge would use.
+// Only renders on a RESOLVED cards array — null (unknown) shows nothing so a
+// failed fetch can't masquerade as "no card". Shows the first non-expired
+// method; if every method is expired, says so instead of claiming "None".
+function cardOnFileRow(cardsOnFile) {
+  if (!Array.isArray(cardsOnFile)) return null;
+  const card = chargeableCardOnFile(cardsOnFile);
+  if (!card) {
+    return { label: 'Card on file', value: 'None', sub: 'no saved payment method', tone: 'muted' };
+  }
+  const subParts = [];
+  if (isCardExpired(card)) subParts.push(`expired ${card.exp_month}/${card.exp_year}`);
+  if (card.is_default) subParts.push('default');
+  const others = cardsOnFile.length - 1;
+  if (others > 0) subParts.push(`+${others} more on file`);
+  return {
+    label: card.method_type === 'ach' ? 'Bank on file' : 'Card on file',
+    value: cardOnFileTitle(card),
+    sub: subParts.join(' · ') || null,
+    tone: 'muted',
+  };
+}
+
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, estimateRef, cardsOnFile, style }) {
   const quoted = Number(quotedTotal) || 0;
+  const refLabel = String(estimateRef || '').trim();
   const price = currentPrice != null ? Number(currentPrice) : null;
   // Accepted service mix — prefer the estimate's own wording (estimateLabel)
   // over the catalog-matched name so the card reads like the quote did.
@@ -299,6 +338,8 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   const rows = paymentRows(payment);
   const dep = depositRow(deposit);
   if (dep) rows.push(dep);
+  const cardRow = cardOnFileRow(cardsOnFile);
+  if (cardRow) rows.push(cardRow);
   // Whole-visit third-party billing: surfaced as its own prominent banner so a
   // tech scanning on a phone can't miss it and ask the homeowner for money.
   // Backed by summary.payerBilled (always resolved, gate-independent); fall back
@@ -318,13 +359,18 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   return (
     <div style={style}>
       <div style={{ background: BLUE.bg, border: `1px solid ${BLUE.border}`, borderRadius: 4, padding: '10px 12px' }}>
-        {/* Header: FROM ESTIMATE · Quoted $X */}
+        {/* Header: FROM ESTIMATE EST-2026-NNNN · Quoted $X */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: BLUE.ink }}>
+          <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: BLUE.ink, whiteSpace: 'nowrap' }}>
             From Estimate
           </span>
+          {refLabel && (
+            <span style={{ fontSize: 11, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {refLabel}
+            </span>
+          )}
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums' }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
             Quoted {money(quoted)}
           </span>
         </div>
@@ -356,7 +402,12 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
         )}
 
         {serviceLines.length > 0 && (
-          <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>
+          <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 6 }}>
+            {/* Micro-label so the rows read as the estimate's accepted service
+                mix, not this appointment's line items. */}
+            <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED }}>
+              Estimate includes
+            </div>
             {serviceLines.map((line, i) => (
               <div key={`${line.name}-${i}`} style={lineStyle}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: INK, minWidth: 0 }}>{line.name}</div>

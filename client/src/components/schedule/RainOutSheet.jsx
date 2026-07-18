@@ -194,13 +194,13 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   };
 
   const chipStyle = (active) => ({
-    padding: '7px 14px', borderRadius: 16, fontSize: 13, fontWeight: 600,
+    padding: '7px 14px', borderRadius: 16, fontSize: 13, fontWeight: 500,
     border: `1px solid ${active ? '#18181B' : '#D4D4D8'}`,
     background: active ? '#18181B' : '#FFFFFF',
     color: active ? '#FFFFFF' : '#18181B', cursor: 'pointer',
   });
 
-  const sectionLabel = { fontSize: 12, fontWeight: 700, color: '#71717A', letterSpacing: '0.04em', marginBottom: 8 };
+  const sectionLabel = { fontSize: 12, fontWeight: 500, color: '#71717A', letterSpacing: '0.04em', marginBottom: 8 };
 
   return createPortal(
     <div
@@ -211,7 +211,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 110,
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-        fontFamily: 'Roboto, system-ui, sans-serif', fontWeight: 700,
+        fontFamily: 'Roboto, system-ui, sans-serif',
       }}
     >
       <div
@@ -223,7 +223,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-          <div style={{ fontSize: 18, color: '#18181B' }}>⛈️ Weather reschedule</div>
+          <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B' }}>Weather reschedule</div>
           <button
             type="button"
             onClick={onClose}
@@ -276,21 +276,21 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     type="button"
                     onClick={() => setSelectedKey(key)}
                     style={{
-                      textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14, fontWeight: 600,
+                      textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14, fontWeight: 500,
                       border: `1px solid ${active ? '#18181B' : '#D4D4D8'}`,
                       background: active ? '#F4F4F5' : '#FFFFFF', color: '#18181B',
                       cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     }}
                   >
                     <span>
-                      {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
+                      {opt.display}
                       {opt.kind === 'same_day' && (
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
                     {opt.rainChance != null && (
-                      <span style={{ fontSize: 12, fontWeight: 700, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
-                        {opt.rainChance}% 🌧
+                      <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
+                        {opt.rainChance}% rain
                       </span>
                     )}
                   </button>
@@ -304,15 +304,15 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 type="button"
                 onClick={pickCustom}
                 style={{
-                  textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14, fontWeight: 600,
+                  textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14, fontWeight: 500,
                   border: `1px solid ${isCustom ? '#18181B' : '#D4D4D8'}`,
                   background: isCustom ? '#F4F4F5' : '#FFFFFF', color: '#18181B',
                   cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 }}
               >
-                <span>🕒 Custom time</span>
+                <span>Custom time</span>
                 {customOption && (
-                  <span style={{ fontSize: 12, fontWeight: 700, color: '#18181B' }}>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: '#18181B' }}>
                     {fmtDateLabel(customDate, todayStr)} · {fmtTime(customOption.window.start)}
                   </span>
                 )}
@@ -329,7 +329,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     min={todayStr}
                     onChange={(e) => setCustomDate(e.target.value)}
                     style={{
-                      width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 600,
+                      width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 500,
                       border: '1px solid #D4D4D8', background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit',
                     }}
                   />
@@ -350,7 +350,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                       setCustomStart(snapped ? snapped.start : '');
                     }}
                     style={{
-                      width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 600,
+                      width: '100%', padding: '10px 12px', borderRadius: 10, fontSize: 14, fontWeight: 500,
                       border: `1px solid ${customElapsed ? '#DC2626' : '#D4D4D8'}`, background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit',
                     }}
                   />
@@ -388,7 +388,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 type="button"
                 onClick={onClose}
                 style={{
-                  flex: 1, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 700,
+                  flex: 1, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
                   border: '1px solid #E4E4E7', background: '#FFFFFF', color: '#18181B', cursor: 'pointer',
                 }}
               >
@@ -399,7 +399,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 onClick={handleCommit}
                 disabled={!selected || busy}
                 style={{
-                  flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 700,
+                  flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
                   border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
                   cursor: !selected || busy ? 'default' : 'pointer', opacity: !selected || busy ? 0.5 : 1,
                 }}

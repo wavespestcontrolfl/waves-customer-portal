@@ -26,6 +26,7 @@
  *   'payment_failure'     |   // failed charge / retry / bank-verification action required
  *   'autopay'             |   // autopay pre-charge / card state notices
  *   'payment_link'        |   // tap-to-pay link
+ *   'card_request'        |   // secure-appointment card-on-file capture link
  *   'document_request'    |   // e-sign document request / reminder
  *   'estimate_followup'   |   // estimate sent / viewed / nudge
  *   'review_request'      |   // post-service review ask
@@ -86,6 +87,7 @@ const MESSAGE_PURPOSES = [
   'payment_failure',
   'autopay',
   'payment_link',
+  'card_request',
   'document_request',
   'estimate_followup',
   'booking_abandonment_followup',
@@ -310,6 +312,22 @@ const PURPOSE_POLICY = {
     prefsColumn: null,
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId', 'invoiceId'],
+  },
+  // Card-on-file capture link for a booked visit (appointment-card-request
+  // funnel). No invoice exists yet — nothing is charged from this message —
+  // so it is payment_link's pre-service sibling: same trust bar, customer
+  // id required, no invoice id. 3 segments, not 2: the link is the
+  // UNSHORTENED /secure/<64-hex> bearer URL (a 5-char short code is too
+  // weak a credential for a card-capture page), which alone runs ~100
+  // GSM characters.
+  card_request: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 3,
+    requireConsent: 'transactional',
+    prefsColumn: null,
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId'],
   },
   document_request: {
     allowEmoji: false,

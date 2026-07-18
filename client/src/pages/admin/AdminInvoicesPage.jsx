@@ -60,6 +60,7 @@
 // - alert-fg discipline: spec reserves red for overdue / failed /
 //   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   ExternalLink,
   FileText,
@@ -77,6 +78,7 @@ import { computeCardTotal } from "../../lib/cardSurcharge";
 import { invoiceDateOnly, formatInvoiceDate } from "../../lib/invoiceDates";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
+import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -91,11 +93,14 @@ const D = {
   red: "#991B1B",
   purple: "#18181B",
   blue: "#18181B",
-  text: "#000000",
-  muted: "#000000",
+  // V2 ink tokens (owner-requested normalization 2026-07-09): primary =
+  // zinc-900 like every other admin page; muted = ink-secondary so labels
+  // and captions read one step lighter than values again.
+  text: "#18181B",
+  muted: "#52525B",
   white: "#FFFFFF",
   input: "#FFFFFF",
-  heading: "#000000",
+  heading: "#18181B",
   inputBorder: "#D4D4D8",
 };
 
@@ -614,6 +619,7 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
   const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] = useState(null);
   const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
+  const [cardOnFileInvoice, setCardOnFileInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag("ff_invoice_send_receipt", true);
 
   const load = useCallback(
@@ -1291,6 +1297,18 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                               Charge in person
                             </button>
                           )}
+                          {/* Payer-billed invoices collect from the payer's AP
+                              inbox — the saved card belongs to the homeowner,
+                              so the charge endpoint rejects them. */}
+                          {canCollect && cardOnFile && !inv.payer_id && (
+                            <button
+                              onClick={() => setCardOnFileInvoice(inv)}
+                              style={sBtn(D.heading, D.white, isMobile)}
+                              title="Charge the customer's saved card or bank on file — collects now, no send needed"
+                            >
+                              Charge card on file
+                            </button>
+                          )}
                           {canCollect && (
                             <button
                               onClick={() => setPaymentModalInvoice(inv)}
@@ -1606,6 +1624,40 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
             onRefresh();
           }}
           onError={(msg) => showToast(msg)}
+        />
+      )}
+
+      {cardOnFileInvoice && (
+        <MobileCardOnFileSheet
+          desktopVisible
+          invoiceId={cardOnFileInvoice.id}
+          customerId={cardOnFileInvoice.customer_id}
+          customerName={
+            `${cardOnFileInvoice.first_name || ""} ${cardOnFileInvoice.last_name || ""}`.trim() ||
+            "Customer"
+          }
+          onClose={() => setCardOnFileInvoice(null)}
+          onChargeSuccess={(r) => {
+            setCardOnFileInvoice(null);
+            if (r?.covered_by_credit) {
+              showToast(
+                "Account credit covered it — invoice marked prepaid, card not charged",
+              );
+            } else if (r?.status === "processing") {
+              showToast(
+                "Bank payment started — invoice will mark paid when it settles",
+              );
+            } else {
+              const brand = r?.brand
+                ? r.brand.charAt(0).toUpperCase() + r.brand.slice(1).toLowerCase()
+                : "Card";
+              showToast(
+                `Charged $${Number(r?.amount || 0).toFixed(2)} to ${brand}${r?.last4 ? ` •${r.last4}` : ""} on file`,
+              );
+            }
+            load();
+            onRefresh();
+          }}
         />
       )}
     </div>
@@ -2223,7 +2275,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
     [invoice.first_name, invoice.last_name].filter(Boolean).join(" ").trim() ||
     "Customer";
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -2231,6 +2283,8 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -2245,13 +2299,16 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
           width: "100%",
           maxWidth: 540,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
         }}
       >
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -2354,7 +2411,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                     style={{
                       display: "block",
                       fontSize: 11,
-                      fontWeight: 700,
+                      fontWeight: 500,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: "0.04em",
@@ -2379,7 +2436,7 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                     style={{
                       display: "block",
                       fontSize: 11,
-                      fontWeight: 700,
+                      fontWeight: 500,
                       color: D.muted,
                       textTransform: "uppercase",
                       letterSpacing: "0.04em",
@@ -2469,7 +2526,8 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2551,7 +2609,7 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
     }
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -2559,6 +2617,8 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -2574,6 +2634,9 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           width: "100%",
           maxWidth: 440,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
         }}
       >
@@ -2581,7 +2644,7 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -2597,11 +2660,11 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             marginBottom: 6,
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Optional memo
@@ -2766,7 +2829,8 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           </button>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -2837,14 +2901,14 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
   const fieldLabel = {
     display: "block",
     fontSize: 12,
-    fontWeight: 600,
+    fontWeight: 500,
     color: D.text,
     marginBottom: 8,
     textTransform: "uppercase",
-    letterSpacing: "0.05em",
+    letterSpacing: "0.06em",
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -2852,6 +2916,8 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -2866,13 +2932,16 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
           width: "100%",
           maxWidth: 460,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
         }}
       >
         <div
-          style={{ fontSize: 20, fontWeight: 700, color: D.heading, marginBottom: 4 }}
+          style={{ fontSize: 20, fontWeight: 500, color: D.heading, marginBottom: 4 }}
         >
           Apply account credit
         </div>
@@ -2900,18 +2969,18 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
               }}
             >
               <div>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                   Available credit
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: balance > 0 ? D.heading : D.muted }}>
+                <div style={{ fontSize: 18, fontWeight: 500, color: balance > 0 ? D.heading : D.muted }}>
                   ${balance.toFixed(2)}
                 </div>
               </div>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                   Amount due
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+                <div style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
                   ${amountDue.toFixed(2)}
                 </div>
               </div>
@@ -3010,7 +3079,8 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3136,7 +3206,7 @@ function RecordPaymentModal({
         border: `1px solid ${method === key ? D.heading : D.border}`,
         borderRadius: 8,
         fontSize: 14,
-        fontWeight: 600,
+        fontWeight: 500,
         cursor: "pointer",
         textTransform: "uppercase",
         letterSpacing: "0.04em",
@@ -3147,7 +3217,7 @@ function RecordPaymentModal({
     </button>
   );
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -3155,6 +3225,8 @@ function RecordPaymentModal({
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -3170,6 +3242,9 @@ function RecordPaymentModal({
           width: "100%",
           maxWidth: 460,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
@@ -3179,7 +3254,7 @@ function RecordPaymentModal({
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -3195,11 +3270,11 @@ function RecordPaymentModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             marginBottom: 8,
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Payment method
@@ -3221,11 +3296,11 @@ function RecordPaymentModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             marginBottom: 6,
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           {referenceLabel}
@@ -3240,11 +3315,11 @@ function RecordPaymentModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             margin: "16px 0 6px",
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Note (optional)
@@ -3375,7 +3450,8 @@ function RecordPaymentModal({
           </button>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3555,14 +3631,14 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
   const labelStyle = {
     display: "block",
     fontSize: 12,
-    fontWeight: 600,
+    fontWeight: 500,
     color: D.text,
     margin: "16px 0 6px",
     textTransform: "uppercase",
-    letterSpacing: "0.05em",
+    letterSpacing: "0.06em",
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -3570,6 +3646,8 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -3584,6 +3662,9 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           width: "100%",
           maxWidth: 460,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
@@ -3592,7 +3673,7 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -3752,7 +3833,8 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3831,7 +3913,7 @@ function PaymentPlanModal({
         border: `1px solid ${paymentFrequency === key ? D.heading : D.border}`,
         borderRadius: 8,
         fontSize: 13,
-        fontWeight: 600,
+        fontWeight: 500,
         cursor: "pointer",
         textTransform: "uppercase",
         letterSpacing: "0.04em",
@@ -3842,7 +3924,7 @@ function PaymentPlanModal({
     </button>
   );
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -3850,6 +3932,8 @@ function PaymentPlanModal({
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 400,
+        fontFamily: "'Roboto', Arial, sans-serif",
+        color: D.text,
         display: "flex",
         alignItems: isMobile ? "flex-end" : "center",
         justifyContent: "center",
@@ -3864,6 +3948,9 @@ function PaymentPlanModal({
           width: "100%",
           maxWidth: 500,
           padding: isMobile ? "24px 20px 28px" : 28,
+          // Bottom sheet sits over the home indicator once portaled above the
+          // tab bar - keep the last controls above it.
+          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           maxHeight: "92vh",
           overflowY: "auto",
@@ -3872,7 +3959,7 @@ function PaymentPlanModal({
         <div
           style={{
             fontSize: 20,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 4,
           }}
@@ -3888,11 +3975,11 @@ function PaymentPlanModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             marginBottom: 6,
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Payment amount
@@ -3915,11 +4002,11 @@ function PaymentPlanModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             margin: "16px 0 8px",
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Frequency
@@ -3942,11 +4029,11 @@ function PaymentPlanModal({
               style={{
                 display: "block",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.text,
                 marginBottom: 6,
                 textTransform: "uppercase",
-                letterSpacing: "0.05em",
+                letterSpacing: "0.06em",
               }}
             >
               Start date
@@ -3963,11 +4050,11 @@ function PaymentPlanModal({
               style={{
                 display: "block",
                 fontSize: 12,
-                fontWeight: 600,
+                fontWeight: 500,
                 color: D.text,
                 marginBottom: 6,
                 textTransform: "uppercase",
-                letterSpacing: "0.05em",
+                letterSpacing: "0.06em",
               }}
             >
               Next payment
@@ -3985,11 +4072,11 @@ function PaymentPlanModal({
           style={{
             display: "block",
             fontSize: 12,
-            fontWeight: 600,
+            fontWeight: 500,
             color: D.text,
             margin: "16px 0 6px",
             textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            letterSpacing: "0.06em",
           }}
         >
           Note (optional)
@@ -4050,7 +4137,8 @@ function PaymentPlanModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

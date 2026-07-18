@@ -149,21 +149,41 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
 // its `frequency` is a string like 'quarterly') or numeric `frequency`
 // (lawn exposes apps/year there and has no visitsPerYear). Anything
 // underivable falls back to the annual caption client-side.
-function derivePerApplication(estimate) {
-  const recurring = (estimate?.lineItems || []).filter(
+// Recurring lines on a quote (shared by derivePerApplication and the
+// multi-service check — a quote with 2+ recurring lines has no single
+// per-application price, and its surfaces must not fall back to a combined
+// monthly total either; codex 2642 r3).
+function recurringQuoteLines(estimate) {
+  return (estimate?.lineItems || []).filter(
     (item) => Number(item?.monthlyAfterDiscount ?? item?.monthly) > 0
   );
+}
+
+function derivePerApplication(estimate) {
+  const recurring = recurringQuoteLines(estimate);
   if (recurring.length !== 1) return null;
   const line = recurring[0];
-  if (!(Number(line.perApp) > 0)) return null;
+  // Mosquito engine lines expose perVisit/visits, not perApp/visitsPerYear
+  // (codex 2642 r3) — accept both shapes.
+  const perAppRaw = Number(line.perApp) > 0
+    ? Number(line.perApp)
+    : (Number(line.perVisit) > 0 ? Number(line.perVisit) : 0);
+  if (!(perAppRaw > 0)) return null;
   const visits = Number(line.visitsPerYear) > 0
     ? Number(line.visitsPerYear)
-    : Number(line.frequency) > 0
-      ? Number(line.frequency)
-      : null;
+    : Number(line.visits) > 0
+      ? Number(line.visits)
+      : Number(line.frequency) > 0
+        ? Number(line.frequency)
+        : null;
   if (!visits) return null;
+  // Exact cents (codex 2642 r1: whole-dollar rounding drifted the headline
+  // from the monthly/annual math), preferring the DISCOUNTED annual over the
+  // list per-application rate.
+  const discountedAnnual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual) || 0;
+  const exact = discountedAnnual > 0 ? discountedAnnual / visits : perAppRaw;
   return {
-    amount: Math.round(Number(line.perApp)),
+    amount: Math.round(exact * 100) / 100,
     visitsPerYear: visits,
   };
 }
@@ -514,8 +534,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // sees a ±5% range (variance_low/high below) so AI misclassification has
     // headroom. Zero retroactive impact: no quote_wizard leads existed when
     // this landed.
-    // The confirm step seeds homeSqFt to a synthetic 2,000 default when the
-    // lookup didn't measure the building (QuotePage.jsx). Commercial PEST prices
+    // The website estimator's confirm step seeds homeSqFt to a synthetic 2,000 default when the
+    // lookup didn't measure the building. Commercial PEST prices
     // off the BUILDING footprint (not lot-derivable), so flag whether we have a
     // MEASURED building size — priceCommercialPest falls back to a manual quote
     // when false rather than auto-pricing off the synthetic default. (Residential
@@ -1073,6 +1093,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             price: item.priceAfterDiscount ?? item.price ?? null,
             total: item.totalAfterDiscount ?? item.total ?? null,
             perApp: item.perApp ?? null,
+            // Mosquito lines carry perVisit/visits instead of
+            // perApp/visitsPerYear (codex 2642 r4) — preserve both shapes so
+            // the mirrored estimate can render per-application pricing.
+            perVisit: item.perVisit ?? null,
+            visits: item.visits ?? null,
             frequency: item.frequency ?? item.visitsPerYear ?? null,
             // Recurring foam carries an operator-chosen cadence + tier labor
             // duration; keep them so the accept/render/booking paths present the
@@ -1271,11 +1296,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     }
 
+    // Per-application phrasing when the quote resolves to one (owner
+    // 2026-07-11: recurring emails lead per-application, never /mo where a
+    // per-application figure exists; every amount shows cents). Multi-service
+    // recurring quotes have no single per-application price AND must not
+    // fall back to a combined monthly total (codex 2642 r3) — they defer to
+    // the estimate the same way residential delivery emails do.
+    const emailPerApp = quoteRequired ? null : derivePerApplication(estimate);
+    const emailMultiRecurring = !quoteRequired && recurringQuoteLines(estimate).length > 1;
     const priceSummary = quoteRequired
       ? 'Manual review needed'
       : isOneTimeOnly
-        ? `$${Math.round(oneTimeTotal)} one-time`
-        : `$${monthly.toFixed(2)}/mo`;
+        ? `$${oneTimeTotal.toFixed(2)} one-time`
+        : emailPerApp
+          ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
+          : emailMultiRecurring
+            ? 'Priced per application — full breakdown inside'
+            : `$${monthly.toFixed(2)}/mo`;
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'
       : commercialDetected
@@ -1341,8 +1378,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }
 
-    // Newsletter enrollment — gated on explicit opt-in checkbox from the quote
-    // wizard (QuotePage.jsx). Public quote emails are user-provided and
+    // Newsletter enrollment — gated on explicit opt-in from a public quote
+    // client. Public quote emails are user-provided and
     // unverified, so they go through the same double-opt-in path as the
     // public newsletter form. The promotional new_lead automation is queued
     // only after the subscriber confirms.
@@ -1440,6 +1477,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       response.per_application = perApplication.amount;
       response.visits_per_year = perApplication.visitsPerYear;
     }
+    // Multi-service recurring quotes have no single per-application price;
+    // the result page uses this to avoid falling back to the combined
+    // monthly total (codex 2642 r3).
+    response.multi_recurring = recurringQuoteLines(estimate).length > 1;
     if (commercialDisclaimer) {
       response.estimated_pricing = true;
       response.disclaimer = commercialDisclaimer;
@@ -1465,8 +1506,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
   }
 });
 
-// Upsell labels: client sends IDs, server owns the copy that hits the lead row
-// and the admin SMS. Keep in sync with UPSELL_OPTIONS in QuotePage.jsx.
+// Upsell labels: legacy clients send IDs; the server owns the copy that hits
+// the lead row and admin SMS while already-open portal sessions age out.
 const UPSELL_LABELS = {
   mosquito: 'Mosquito & No-See-Um Control',
   lawn_care: 'Lawn Care',

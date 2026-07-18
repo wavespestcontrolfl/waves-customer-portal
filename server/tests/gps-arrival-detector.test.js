@@ -22,6 +22,7 @@ const detector = require('../services/gps-arrival-detector');
 
 const SAMPLE_TIME = new Date().toISOString();
 const EN_ROUTE_TIME = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+const originalMaintenanceMode = process.env.STAFF_MAINTENANCE_MODE;
 
 function serviceQueryMock(service) {
   return {
@@ -83,12 +84,37 @@ function basePoint(overrides = {}) {
 describe('gps-arrival-detector', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.STAFF_MAINTENANCE_MODE;
     detector._test.resetConfigCache();
     trackTransitions.markOnProperty.mockResolvedValue({
       ok: true,
       state: 'on_property',
       arrivedAt: new Date('2026-05-21T14:00:00.000Z'),
     });
+  });
+
+  afterAll(() => {
+    if (originalMaintenanceMode === undefined) delete process.env.STAFF_MAINTENANCE_MODE;
+    else process.env.STAFF_MAINTENANCE_MODE = originalMaintenanceMode;
+  });
+
+  test('suppresses automatic arrival before any lifecycle work during Staff maintenance', async () => {
+    process.env.STAFF_MAINTENANCE_MODE = 'true';
+
+    await expect(detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(),
+      point: basePoint(),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    })).resolves.toEqual({
+      ok: false,
+      reason: 'staff_maintenance',
+      code: 'STAFF_MAINTENANCE',
+    });
+
+    expect(db).not.toHaveBeenCalled();
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
   test('arrival decision requires proximity and avoids fast drive-bys', () => {
@@ -217,6 +243,51 @@ describe('gps-arrival-detector', () => {
         destination_source: 'customer_geocode',
       }),
     }));
+    expect(result.ok).toBe(true);
+  });
+
+  test('refuses primary-coord and geocode fallbacks when the stamped address diverges', async () => {
+    // A stamped secondary/rental booking with no property geocode: the tech
+    // idling at the customer's PRIMARY home must not auto-flip this job.
+    installServiceLookup(baseService({
+      service_lat: null,
+      service_lng: null,
+      service_address_line1: '456 Rental Ave',
+      customer_address_line1: '123 Primary St',
+      customer_latitude: 27.4386,
+      customer_longitude: -82.3719,
+    }));
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(),
+      point: basePoint({ speed_mph: 0, ignition: false }),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false });
+  });
+
+  test('still uses primary coords for a stamped booking AT the primary address', async () => {
+    // Every phone booking stamps — a stamp matching the primary address must
+    // keep arrival detection working for ordinary bookings (codex round-4 P1).
+    installServiceLookup(baseService({
+      service_lat: null,
+      service_lng: null,
+      service_address_line1: '123 Primary St',
+      customer_address_line1: '123 Primary St',
+      customer_latitude: 27.4386,
+      customer_longitude: -82.3719,
+    }));
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(),
+      point: basePoint({ speed_mph: 0, ignition: false }),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('svc-1', { actingTechId: 'tech-1' });
     expect(result.ok).toBe(true);
   });
 

@@ -1,0 +1,208 @@
+# First CI test run for the portal (2026-07-12 false-confidence test audit).
+# Before this workflow, tests only ran locally and via the Codex pre-push
+# hook — and the DB-gated suites never ran anywhere, because nothing set
+# DATABASE_URL.
+#
+# Two-step design (load-bearing — do not flatten into one step):
+#   1. The full jest suite runs WITHOUT DATABASE_URL. Several suites change
+#      semantics when it is set: the pricing golden masters
+#      (pricing-engine.regression, pricing-engine-v1-adapter.regression) sync
+#      live pricing_config and diff against a baseline captured from PROD's
+#      admin-edited rows — a fresh migration-seeded DB legitimately differs,
+#      so setting DATABASE_URL globally turns them red by design, not by bug.
+#   2. The self-skipping DB-gated suites then run WITH DATABASE_URL against
+#      the migrated database, serially (--runInBand: they share tables and
+#      clash under parallel workers). products-catalog-label-fields is
+#      excluded — like the golden masters it pins prod-parity data
+#      (admin-corrected EPA reg numbers), which a fresh seed cannot satisfy.
+#
+# Running every migration from an EMPTY database is itself a gate: a
+# migration that cannot build the schema from scratch fails here before it
+# can block a Railway deploy (verified locally: "Batch 1 run: 917 migrations").
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      JWT_SECRET: ci-only-test-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Migrate from an empty database
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx knex migrate:latest --knexfile server/knexfile.js
+      - name: Server tests (no DB — golden masters keep in-memory semantics)
+        working-directory: server
+        run: npx jest --ci --silent --maxWorkers=2
+      - name: Customer backend coverage floor
+        # A focused, measured threshold for customer-app auth, pricing,
+        # autopay, notification, and upload-validation logic. The broad suite
+        # above still runs every server test; this step adds the coverage gate.
+        working-directory: server
+        run: npm run test:customer-coverage
+      - name: DB-gated suites (serial, against the migrated database)
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        # --forceExit removed 2026-07-16: the open handle was the shared app
+        # pool (models/db) pulled at module scope by lawn-intelligence in
+        # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
+        # afterAll, and the full serial run exits cleanly on its own.
+        run: |
+          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
+            | grep -v products-catalog-label-fields \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand
+      - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
+        # Blocks on critical only (schema drift, missing tables/columns);
+        # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
+        # reported but never fail the job — same policy as the local runner.
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        working-directory: .
+        run: npm run test:contracts
+
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Client tests (vitest)
+        working-directory: client
+        run: npm run test:coverage
+      - name: Customer app production build
+        # Vite production compilation catches chunking, CSS/import, and
+        # service-worker asset failures that the jsdom test runtime cannot.
+        run: npm run build
+
+  native-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The bootstrap scripts suppress IDE launch only in CI mode.
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Generate and sync the pinned Android app
+        run: bash scripts/mobile/bootstrap-android.sh
+      - name: Compile Android debug app
+        working-directory: client/android
+        run: ./gradlew assembleDebug --no-daemon
+
+  native-ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      # macos-15 currently ships CocoaPods 1.16.2 and Xcode 16.4. Pin the
+      # selected Xcode so an image-default change cannot silently move builds.
+      CI: "true"
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Verify pinned iOS toolchain
+        run: |
+          xcodebuild -version
+          pod --version
+      - name: Generate and sync the pinned iOS app
+        run: bash scripts/mobile/bootstrap-ios.sh
+      - name: Compile iOS simulator app without signing
+        working-directory: client/ios/App
+        run: >-
+          xcodebuild
+          -workspace App.xcworkspace
+          -scheme App
+          -configuration Debug
+          -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO
+          build
+
+  # The prebuild gates + errors-only lint, moved off deploy-time/local-hook
+  # enforcement so a violation fails the PR instead of killing every Railway
+  # build (brand/domain/blog gates) or slipping through a bypassed pre-commit
+  # hook (lint — `git commit -n` is a documented escape hatch).
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the changed-files lint diffs against the PR base's
+          # merge-base, which a shallow clone doesn't have.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Blog schema vendor check
+        run: npm run verify:blog-schema
+      - name: Portal brand gate
+        run: npm run check:portal-brand
+      - name: Domain rules gate
+        run: npm run check:domain-rules
+      - name: Lint changed files (errors-only, same scope as the pre-commit hook)
+        # Changed-files-only is deliberate — the repo has no lint history and
+        # eslint.config.js encodes that decision. Full-repo lint would flag
+        # untouched legacy code. PR events only: a push to main already ran
+        # this on its PR.
+        if: github.event_name == 'pull_request'
+        run: |
+          files=$(git diff --name-only --diff-filter=ACMR \
+            "origin/${{ github.base_ref }}...HEAD" -- \
+            '*.js' '*.jsx' '*.cjs' '*.mjs')
+          if [ -n "$files" ]; then
+            echo "$files"
+            echo "$files" | xargs npx eslint --no-warn-ignored
+          else
+            echo "No JS/JSX changes to lint."
+          fi

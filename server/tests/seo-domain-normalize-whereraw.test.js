@@ -31,11 +31,28 @@ describe('seo target_domain normalization whereRaw', () => {
       .toThrow(/Expected 1 bindings, saw 2/);
   });
 
-  test('no SEO service file reintroduces the https? whereRaw pattern', () => {
+  test('the corrected fragment is still live in the three known call sites', () => {
+    // Anchors the compile test above to reality — without this, that test only
+    // proves the test file's own copy of the fragment compiles.
     const files = ['link-prospect-worker.js', 'signup-runner.js', 'link-prospect-verifier.js'];
     for (const f of files) {
       const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'seo', f), 'utf8');
+      expect(src).toContain("https{0,1}://");
       expect(src).not.toContain("'^https?://'");
     }
+  });
+
+  test('no file anywhere under services/seo reintroduces the https? whereRaw pattern', () => {
+    const seoRoot = path.join(__dirname, '..', 'services', 'seo');
+    const walk = (dir) =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) return walk(fullPath);
+        return entry.name.endsWith('.js') ? [fullPath] : [];
+      });
+    const offenders = walk(seoRoot).filter((f) =>
+      fs.readFileSync(f, 'utf8').includes("'^https?://'")
+    );
+    expect(offenders.map((f) => path.relative(seoRoot, f))).toEqual([]);
   });
 });

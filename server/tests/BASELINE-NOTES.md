@@ -8,6 +8,40 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-07-16 lawn post-discount 35% margin guard
+
+Recurring lawn now keeps its 35% fully loaded collected-margin floor after
+WaveGuard discounts. Previously the floor shaped list price, but bundle
+discounts could reduce collected revenue below it; only the $600 annual program
+minimum survived the discount pass. The engine now caps the lawn discount at
+the greater of that program minimum and `minimumCollectedAnnualPrice`, without
+ever raising a line above its pre-discount price.
+
+Local baselines were recaptured with `CAPTURE_BASELINE=1 LOCAL=1`. Only four
+core cases and three v1-adapter cases moved, all containing discounted lawn;
+non-lawn line items, tier selection, and pre-discount totals stayed unchanged.
+See `pricing_changelog` entry `codex-2026-07-16` and migration
+`20260716150001_lawn_post_discount_margin_floor_changelog`.
+## 2026-07-17 lawn spot-reserve fold
+
+Spot-treatment reserves folded into the lawn cost-floor material budgets
+(owner ruling 2026-07-16: herbicide spot = 1/8 broadcast cost, gated/curative
+fungicide + insecticide = 1/4, prorated to the sold cadence). See
+`pricing_changelog` entry via migration `20260717000001_lawn_spot_reserve_version`
+(`pricingVersion` → `LAWN_PRICING_V2_SPOT_RESERVE`) and
+`packages/lawn-cost-floor` for the folded budgets.
+
+Local baselines recaptured (`CAPTURE_BASELINE=1 LOCAL=1`) for both
+`pricing-engine.local-baseline.json` and
+`pricing-engine-v1-adapter.local-baseline.json`; the diff is confined to
+`lawn_care` line items / `results.lawn` and the dependent summary + bundle
+totals (verified via structural diff — no other service line moved). Floors
+rise where reserve-funded (e.g. St. Augustine enhanced golden master
+$621 → $648/yr; zoysia enhanced flips from market-table to floor-priced).
+Hardcoded lawn expectations in `pricing-commercial-safety-gate.test.js` and
+`lawn-pricing-followup.test.js` updated to the same effect. The DB baselines
+(`*.baseline.json`) are untouched pending post-deploy recapture.
+
 ## 2026-06-17 lawn 35% margin recalibration
 
 Recurring lawn repriced from a 45% to a 35% fully loaded margin floor (owner
@@ -479,3 +513,17 @@ Updated LOCAL baselines — only lawn-inclusive cases changed; **all non-lawn ca
 Lawn recurring totals moved **up** (cost floor exceeds the old low-sqft bracket prices) — e.g. the zone-D bahia lawn line $360→$675/yr, zone-A enhanced lawn $696→$837/yr.
 
 **Not done here:** the DB-synced prod baselines (`*.baseline.json`) carry the same stale lawn totals and should be recaptured against prod (`PROD_URL` + `ADMIN_TOKEN`, or `CAPTURE_BASELINE=1` with `syncConstantsFromDB`) once the deploy is confirmed — out of scope for this local-only refresh.
+
+---
+
+## 2026-07-16 — Retire pest tree-density and large-driveway modifiers
+
+Tree density and large-driveway size no longer affect recurring or one-time pest-control pricing. The fields remain property context for other services. See the `pricing_changelog` entry keyed by `codex-2026-07-16` / “Stop using tree density and large-driveway size in pest-control pricing.”
+
+The DB-authoritative delta was isolated by running the pre-change `origin/main` engine and the changed engine read-only against the same production `pricing_config` snapshot (64 rows). Only before/after differences attributable to these two modifiers were applied to the checked DB fixtures; unrelated existing lawn/tree-shrub baseline drift was deliberately left out of this change.
+
+- `pricing-engine.baseline.json`: `zone_b_monthly_pest_bermuda_premium`, `zone_d_quarterly_pest_bahia_basic`, and `edge_large_footprint_5500sf_platinum_bundle`.
+- `pricing-engine-v1-adapter.baseline.json`: `v1adapter_platinum_bundle_4_services_zone_a`.
+- The corresponding local fixtures changed for the same scenarios under in-memory constants.
+
+Migration `20260716140000_retire_pest_tree_driveway_modifiers` records the actual retired DB values in both `pricing_config_audit` and `pricing_changelog`; rollback restores those exact values rather than hardcoded defaults.

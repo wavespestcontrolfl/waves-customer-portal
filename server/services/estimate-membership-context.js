@@ -14,26 +14,35 @@
 //
 // The NEW-service member discount it shows is honored at the charged total
 // because the same combined tier (from the same shared waveguard-existing-
-// services loader) reprices the estimate at save. The existing-service
-// per-application figures remain informational (crediting them against existing
-// prepaid visits is a separate billing action).
+// services loader) reprices the estimate at save. Existing service prices are
+// context only and stay untouched; adding a service never reprices a customer's
+// current plan lines.
 //
 // The snapshot captures:
 //   1. The combined WaveGuard tier — existing qualifying services PLUS the
 //      new service(s) in this estimate.
 //   2. The tier-upgrade callout (e.g. Silver -> Gold).
-//   3. The per-application savings on EXISTING recurring services from a tier
-//      upgrade — per remaining visit, prepaid-aware.
-//   4. The member discount on the NEW service in this estimate.
+//   3. The customer's current service/spend snapshot for staff transparency.
+//   4. The member discount on the NEW service in this estimate only.
 //
 // Returns null for leads (no customer_id), inactive customers, or on ANY error
 // so neither save nor the public estimate endpoints ever break (CLAUDE.md r6).
 // ============================================================
 
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { sameStreetAddress } = require('./estimator-engine/address-compare');
+const {
+  parseRawAddress,
+  splitStreetLineUnit,
+  unitLineValueKey,
+} = require('../utils/address-normalizer');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
-const { toQualifyingKey, loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+const {
+  toQualifyingKey,
+  toQualifyingKeys,
+  loadActiveRecurringServiceRows,
+  loadExistingRecurringQualifyingRows,
+} = require('./waveguard-existing-services');
 
 const TIER_LABEL = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
 const SERVICE_LABEL = {
@@ -45,6 +54,78 @@ const SERVICE_LABEL = {
 };
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+
+// Precedence guards MIRRORED from waveguard-existing-services.toQualifyingKeys
+// (which follows detectServiceLine / the recurring-appointment-seeder): a
+// rodent-led name ("Rodent Pest Control", "Rodent Bait Stations") is the
+// rodent service, never pest coverage — only a pest-primary combined label
+// ("Pest & Rodent Control") keeps pest — and a palm token ("Palm Tree
+// Injections") names the palm service over tree/shrub wording. \bpalms?\b
+// never matches "palmetto", so palmetto-bug pest names pass through. Keep
+// these in lockstep with that file; an independent token scan here mis-keys
+// the component keys that feed the duplicate-service checks.
+function isRodentLedName(text) {
+  return /\b(rodent|rats?|mouse|mice)\b/.test(text) && !/\bpest\b.*\brodent\b/.test(text);
+}
+
+function isPalmName(text) {
+  return /\bpalms?\b/.test(text);
+}
+
+function accountServiceKey(raw) {
+  const qualifying = toQualifyingKey(raw);
+  if (qualifying) return qualifying;
+  // Canonical keys for the non-tier recurring programs. The estimate
+  // converter stores DISPLAY names on scheduled_services ("Rodent Bait
+  // Stations", "Commercial Turf Treatment Program"); a generic snake-case of
+  // those labels never matches the requested-service template keys, so
+  // duplicate checks would miss the active service. Commercial programs
+  // canonicalize to commercial_ + the residential TEMPLATE key, so stripping
+  // the prefix in the duplicate check yields exactly the requested key
+  // (turf → lawn_care, monitoring → termite_bait, stations → rodent_bait).
+  const s = String(raw || '').toLowerCase();
+  if (s.includes('commercial')) {
+    if (s.includes('pest') && !isRodentLedName(s)) return 'commercial_pest_control';
+    if (s.includes('lawn') || s.includes('turf')) return 'commercial_lawn_care';
+    if (!isPalmName(s) && (s.includes('tree') || s.includes('shrub'))) return 'commercial_tree_shrub';
+    if (s.includes('mosquito')) return 'commercial_mosquito';
+    if (s.includes('termite')) return 'commercial_termite_bait';
+    if (s.includes('rodent')) return 'commercial_rodent_bait';
+  } else {
+    if (isRodentLedName(s)) return 'rodent_bait';
+    if (isPalmName(s)) return 'palm_injection';
+  }
+  return String(raw || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
+
+function accountServiceKeys(raw) {
+  const text = String(raw || '').toLowerCase();
+  const commercial = text.includes('commercial');
+  const keys = new Set();
+  const add = (key) => keys.add(commercial ? `commercial_${key}` : key);
+  const rodentService = isRodentLedName(text);
+  const palmService = isPalmName(text);
+  if (text.includes('pest') && !rodentService) add('pest_control');
+  if (text.includes('lawn') || text.includes('turf')) add('lawn_care');
+  if (!palmService && (text.includes('tree') || text.includes('shrub'))) add('tree_shrub');
+  if (text.includes('mosquito')) add('mosquito');
+  if (text.includes('termite')) add('termite_bait');
+  if (rodentService) add('rodent_bait');
+  if (palmService) add('palm_injection');
+  if (!keys.size) keys.add(accountServiceKey(raw));
+  return [...keys].filter(Boolean);
+}
+
+function accountServiceLabel(key, raw) {
+  if (SERVICE_LABEL[key]) return SERVICE_LABEL[key];
+  return String(raw || key || 'Service')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 function parseEstimateData(estimate) {
   try {
@@ -226,8 +307,12 @@ function invoiceServiceAmount(row = {}) {
 // minted from the schedule carry service_type; standalone setup/prepay
 // invoices don't, so they never pollute this. Falls back to {} on any error
 // so the snapshot still renders from scheduled_services.estimated_price.
-async function loadLastPaidAmountsByKey(database, customerId) {
-  const amounts = {};
+// Keyed ACCOUNT-WIDE: invoices carry no property linkage here, so this newest
+// amount reflects only ONE contract. When a key spans multiple per-property
+// contracts, loadCurrentServiceSpendContext must not stamp it across all of
+// them — it aggregates the per-contract scheduled prices instead.
+async function loadLastPaidSpendByKey(database, customerId) {
+  const spend = {};
   try {
     const rows = await database('invoices')
       .where({ customer_id: customerId })
@@ -237,15 +322,205 @@ async function loadLastPaidAmountsByKey(database, customerId) {
       .limit(100)
       .select('service_type', 'total', 'line_items', 'paid_at');
     for (const row of rows) {
-      const key = toQualifyingKey(row.service_type);
-      if (!key || amounts[key] != null) continue;
+      const key = accountServiceKey(row.service_type);
+      if (!key || spend[key] != null) continue;
       const amount = invoiceServiceAmount(row);
-      if (amount != null) amounts[key] = amount;
+      if (amount != null) {
+        spend[key] = {
+          amount,
+          paidAt: row.paid_at || null,
+        };
+      }
     }
   } catch (err) {
     logger.warn(`[membership-context] last-paid lookup skipped for customer ${customerId}: ${err.message}`);
   }
-  return amounts;
+  return spend;
+}
+
+// Explicit unit identity of a stamped address (null when none), extracted
+// with the same primitives sameStreetAddress uses internally so the two can
+// never disagree about what counts as a unit.
+function stampedUnitKey(address) {
+  const line = parseRawAddress(String(address || '')).line1 || String(address || '').split(',')[0];
+  return unitLineValueKey(splitStreetLineUnit(line).unit) || null;
+}
+
+// Staff-facing account snapshot used before pricing an expansion estimate.
+// It says what the customer actively buys and what they currently spend per
+// application. Paid invoice history is authoritative; the scheduled-service
+// estimate is an explicit fallback, never presented as an actual payment.
+async function loadCurrentServiceSpendContext(database, customerId, { existingRows = null } = {}) {
+  if (!customerId) return {
+    existingServiceKeys: [],
+    currentServices: [],
+    currentSpendPerVisitTotal: 0,
+    currentTier: null,
+    currentTierLabel: null,
+    currentDiscountPct: 0,
+  };
+
+  const rows = Array.isArray(existingRows)
+    ? existingRows
+    : await loadActiveRecurringServiceRows(database, customerId);
+  const qualifyingRows = Array.isArray(existingRows)
+    ? existingRows
+    : await loadExistingRecurringQualifyingRows(database, customerId);
+  const existingServiceKeys = [...new Set(qualifyingRows
+    .flatMap((row) => accountServiceKeys(row.service_type))
+    .map((key) => toQualifyingKey(key))
+    .filter(Boolean))];
+  const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
+  const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
+  const byKey = new Map();
+  const componentKeysByKey = new Map();
+  const componentRowsByKey = new Map();
+  for (const row of rows) {
+    const key = accountServiceKey(row.service_type);
+    if (!key) continue;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(row);
+    const components = componentKeysByKey.get(key) || new Set();
+    const componentRows = componentRowsByKey.get(key) || new Map();
+    accountServiceKeys(row.service_type).forEach((component) => {
+      components.add(component);
+      if (!componentRows.has(component)) componentRows.set(component, []);
+      componentRows.get(component).push(row);
+    });
+    componentKeysByKey.set(key, components);
+    componentRowsByKey.set(key, componentRows);
+  }
+
+  const currentServices = [...byKey.entries()].map(([key, serviceRows]) => {
+    const lastPaid = lastPaidByKey[key] || null;
+    // Rows that share a stamped property address are successive visits of ONE
+    // contract (a single per-visit price); distinct addresses are SEPARATE
+    // per-property contracts that must EACH count toward spend — a
+    // multi-property customer's second pest contract is real recurring spend,
+    // not a duplicate visit row. Address grouping is only trusted when every
+    // row is stamped: a mixed known/unknown set could split one contract into
+    // two buckets and double-count it, so it collapses to the single-contract
+    // treatment.
+    const propertySplit = serviceRows.length > 0
+      && serviceRows.every((row) => !!row.effective_service_address);
+    // Clustered with the canonical street/unit comparator, never raw string
+    // equality — '123 Main Street' vs '123 Main St' (or a stamp corrected
+    // between generated visits) is formatting drift on ONE contract and must
+    // not add its price once per spelling, while two explicit different
+    // units at the same street are separate contracts. Deterministic in two
+    // phases regardless of DB row order (the source query has none): rows
+    // are processed in a canonical sort and explicit-unit rows cluster FIRST
+    // on exact street+unit identity, then unitless rows attach.
+    // sameStreetAddress treats a missing unit as matching any unit, so a
+    // unitless stamp seen first would otherwise swallow Unit 101 AND Unit
+    // 102 into one group — proven-distinct units must never merge. A
+    // unitless row matching explicit-unit groups folds into the first
+    // (canonical-order) match: an ambiguous stamp is treated as a sloppy
+    // stamp of an EXISTING unit contract, never minted as an extra contract,
+    // so spend is never double-counted; the residual understatement (it
+    // could be a genuine additional contract) is deterministic and
+    // conservative. Each group keeps its first row's raw stamp for display.
+    let contractGroups;
+    if (propertySplit) {
+      const orderedRows = [...serviceRows].sort((a, b) => (
+        String(a.effective_service_address).localeCompare(String(b.effective_service_address))
+        || String(a.id).localeCompare(String(b.id))
+      ));
+      const unitGroups = [];
+      const unitlessRows = [];
+      for (const row of orderedRows) {
+        if (!stampedUnitKey(row.effective_service_address)) {
+          unitlessRows.push(row);
+          continue;
+        }
+        const group = unitGroups.find((candidate) => sameStreetAddress(candidate.address, row.effective_service_address));
+        if (group) group.rows.push(row);
+        else unitGroups.push({ address: row.effective_service_address, rows: [row] });
+      }
+      const unitlessGroups = [];
+      for (const row of unitlessRows) {
+        const unitMatch = unitGroups.find((candidate) => sameStreetAddress(candidate.address, row.effective_service_address));
+        if (unitMatch) {
+          unitMatch.rows.push(row);
+          continue;
+        }
+        const group = unitlessGroups.find((candidate) => sameStreetAddress(candidate.address, row.effective_service_address));
+        if (group) group.rows.push(row);
+        else unitlessGroups.push({ address: row.effective_service_address, rows: [row] });
+      }
+      contractGroups = [...unitGroups, ...unitlessGroups];
+    } else {
+      contractGroups = [{ address: null, rows: serviceRows }];
+    }
+    const contracts = contractGroups.map(({ address, rows: contractRows }) => {
+      const scheduled = contractRows.find((row) => Number(row.estimated_price) > 0);
+      return {
+        serviceAddress: address,
+        scheduledPerVisit: scheduled ? round2(scheduled.estimated_price) : null,
+        activeScheduledVisits: contractRows.length,
+      };
+    });
+    // The account-wide last-paid amount reflects ONE contract (no property
+    // linkage on invoices), so the invoice basis only applies to a
+    // single-contract key; per-property contracts each use their own
+    // scheduled price rather than one contract's invoice standing in for all.
+    const usableLastPaid = contracts.length === 1 ? lastPaid : null;
+    const scheduledPerVisit = contracts.some((contract) => contract.scheduledPerVisit != null)
+      ? round2(contracts.reduce((sum, contract) => sum + (Number(contract.scheduledPerVisit) || 0), 0))
+      : null;
+    const currentPerVisit = usableLastPaid?.amount ?? scheduledPerVisit;
+    const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
+    const componentServiceAddresses = {};
+    const componentServiceAddressesComplete = {};
+    for (const [componentKey, componentRows] of componentRowsByKey.get(key) || []) {
+      componentServiceAddresses[componentKey] = [...new Set(
+        componentRows.map((row) => row.effective_service_address).filter(Boolean),
+      )];
+      componentServiceAddressesComplete[componentKey] = componentRows.length > 0
+        && componentRows.every((row) => !!row.effective_service_address);
+    }
+    return {
+      key,
+      keys: [...(componentKeysByKey.get(key) || new Set([key]))],
+      label: accountServiceLabel(key, serviceRows[0]?.service_type),
+      qualifiesForWaveGuard: existingServiceKeys.includes(key),
+      // Every property this service is active at — lets duplicate checks
+      // scope to the quoted property instead of blocking account-wide.
+      serviceAddresses: [...new Set(serviceRows.map((row) => row.effective_service_address).filter(Boolean))],
+      // False when ANY active row's property is unknown: the unknown row
+      // could cover the quoted street, so the duplicate check must fall back
+      // to the account-wide block rather than trust the known-address subset.
+      serviceAddressesComplete: serviceRows.length > 0
+        && serviceRows.every((row) => !!row.effective_service_address),
+      // A combined row contributes its address only to the components it
+      // actually contains. Keeping this map separate prevents a pest-only
+      // row at property B from making the lawn component of a Pest + Lawn
+      // row at property A appear active at both properties.
+      componentServiceAddresses,
+      componentServiceAddressesComplete,
+      currentPerVisit: currentPerVisit ?? null,
+      spendSource: usableLastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
+      lastPaidAt: usableLastPaid?.paidAt || null,
+      scheduledPerVisit,
+      // One entry per active per-property contract (a single entry when the
+      // rows aren't property-split) so multi-property spend stays itemized.
+      contracts,
+      activeScheduledVisits: serviceRows.length,
+      nextScheduledDate: scheduledDates[0] || null,
+    };
+  });
+
+  return {
+    existingServiceKeys,
+    currentServices,
+    currentSpendPerVisitTotal: round2(currentServices.reduce(
+      (sum, service) => sum + (Number(service.currentPerVisit) || 0),
+      0,
+    )),
+    currentTier: currentTier?.tier || null,
+    currentTierLabel: currentTier ? (TIER_LABEL[currentTier.tier] || currentTier.tier) : null,
+    currentDiscountPct: currentTier ? Math.round(currentTier.discount * 100) : 0,
+  };
 }
 
 // The discount rate ACTUALLY applied to the estimate's recurring services,
@@ -283,10 +558,15 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
 
     const existingByKey = new Map();
     for (const row of existingRows) {
-      const key = toQualifyingKey(row.service_type);
-      if (!key) continue;
-      if (!existingByKey.has(key)) existingByKey.set(key, []);
-      existingByKey.get(key).push(row);
+      // Combined scheduled-service labels represent every component for
+      // membership and cross-sell purposes. A scalar toQualifyingKey call
+      // keeps only the first match (for example pest from "Pest + Lawn"),
+      // which makes the frozen snapshot disagree with Agent pricing.
+      const componentKeys = toQualifyingKeys(row.service_type);
+      for (const key of componentKeys) {
+        if (!existingByKey.has(key)) existingByKey.set(key, []);
+        existingByKey.get(key).push(row);
+      }
     }
     const existingKeys = [...existingByKey.keys()];
 
@@ -305,61 +585,14 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     const delta = combinedTier.discount - oldTier.discount;
     const deltaPct = Math.round(delta * 100);
 
-    // ── Active prepaid term (drives prepaid-aware copy) ────────
-    // Only a genuinely active term counts as prepaid. 'payment_pending' means
-    // the customer selected annual prepay but hasn't paid yet, so it must not
-    // render "remaining prepaid" savings (mirrors ACTIVE_STATUSES in
-    // annual-prepay-renewals.js).
-    let prepaidTerm = null;
-    try {
-      prepaidTerm = await database('annual_prepay_terms')
-        .where({ customer_id: customerId })
-        .whereIn('status', ['active', 'renewal_pending'])
-        .andWhere('term_end', '>=', database.fn.now())
-        .orderBy('term_end', 'desc')
-        .first();
-    } catch { prepaidTerm = null; }
-
-    // Compare against today's date in the business timezone (ET). Using a UTC
-    // ISO date would roll over after ~8pm ET and treat a visit still scheduled
-    // for today as past, undercounting remaining per-visit savings.
-    const today = etDateString();
-    const isFuture = (d) => {
-      if (!d) return false;
-      const iso = typeof d === 'string'
-        ? d.slice(0, 10)
-        : (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10);
-      return iso >= today;
-    };
-
-    // ── Existing-service per-application savings from the tier delta ──
-    // Only meaningful when the new service upgrades the tier. The per-visit
-    // basis is what the customer actually LAST PAID for that service (most
-    // recent paid visit invoice), falling back to the scheduled
-    // estimated_price when there's no paid history yet.
-    const lastPaidByKey = upgraded ? await loadLastPaidAmountsByKey(database, customerId) : {};
+    // Existing service prices remain exactly as contracted. Their current
+    // spend is retained for staff context, but the new combined tier applies
+    // only to services priced in this estimate. Do NOT pass existingRows here:
+    // those are the QUALIFYING rows only, and reusing them would drop non-tier
+    // recurring work (rodent bait, palm injection) from the frozen snapshot
+    // and underreport currentSpendPerVisitTotal.
+    const currentSpend = await loadCurrentServiceSpendContext(database, customerId);
     const existingServices = [];
-    if (upgraded) {
-      for (const key of existingKeys) {
-        const rows = existingByKey.get(key) || [];
-        const priced = rows.find((r) => Number(r.estimated_price) > 0);
-        const perVisitPrice = lastPaidByKey[key]
-          ?? (priced ? round2(priced.estimated_price) : null);
-        const perVisitSavings = perVisitPrice ? round2(perVisitPrice * delta) : null;
-        const remainingVisits = rows.filter((r) => isFuture(r.scheduled_date)).length;
-        existingServices.push({
-          key,
-          label: SERVICE_LABEL[key] || key,
-          extraDiscountPct: deltaPct,
-          perVisitSavings,
-          remainingVisits,
-          totalRemainingSavings: (perVisitSavings && remainingVisits)
-            ? round2(perVisitSavings * remainingVisits)
-            : null,
-          prepaid: !!prepaidTerm,
-        });
-      }
-    }
 
     // ── New-service member discount ────────────────────────────
     // Use the rate actually applied to the recurring total (margin-guard caps
@@ -403,6 +636,9 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
       // pick a cross-sell the customer doesn't already have (existingServices
       // above is only populated on a tier upgrade).
       existingServiceKeys: existingKeys,
+      discountAppliesTo: 'new_services_only',
+      currentServices: currentSpend.currentServices,
+      currentSpendPerVisitTotal: currentSpend.currentSpendPerVisitTotal,
       existingServices,
       newServices,
     };
@@ -410,6 +646,59 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     logger.warn(`[membership-context] compute skipped for customer ${customerId}: ${err.message}`);
     return null;
   }
+}
+
+// Public (unauthenticated estimate-link) projection of the membership
+// snapshot. The stored snapshot keeps the full staff context — currentServices
+// with per-property addresses, per-contract prices, last-payment dates,
+// upcoming visit dates, currentSpendPerVisitTotal — for admin surfaces and
+// accept-time logic, but anyone holding or forwarded the token link can read
+// the public route's JSON, so it gets ONLY the fields the customer page
+// actually renders (EstimateViewPage MembershipCard / estimateAddServiceOffer
+// and the SSR membership block). WHITELIST, never blacklist: an additive
+// snapshot field defaults to staff-only unless it is projected here.
+function publicMembershipView(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  return {
+    isExistingCustomer: snapshot.isExistingCustomer === true,
+    firstName: snapshot.firstName ?? null,
+    tier: snapshot.tier ?? null,
+    tierLabel: snapshot.tierLabel ?? null,
+    tierDiscountPct: snapshot.tierDiscountPct ?? null,
+    discountAppliesTo: snapshot.discountAppliesTo ?? null,
+    // Keys only — the cross-sell picker needs what the account already has,
+    // never where or for how much.
+    existingServiceKeys: Array.isArray(snapshot.existingServiceKeys)
+      ? snapshot.existingServiceKeys.filter(Boolean)
+      : [],
+    upgrade: snapshot.upgrade
+      ? {
+        fromLabel: snapshot.upgrade.fromLabel ?? null,
+        toLabel: snapshot.upgrade.toLabel ?? null,
+        deltaPct: snapshot.upgrade.deltaPct ?? null,
+        addedServiceLabels: Array.isArray(snapshot.upgrade.addedServiceLabels)
+          ? snapshot.upgrade.addedServiceLabels.filter(Boolean)
+          : [],
+      }
+      : null,
+    existingServices: (Array.isArray(snapshot.existingServices) ? snapshot.existingServices : [])
+      .map((service) => ({
+        key: service?.key ?? null,
+        label: service?.label ?? null,
+        extraDiscountPct: service?.extraDiscountPct ?? null,
+        perVisitSavings: service?.perVisitSavings ?? null,
+        remainingVisits: service?.remainingVisits ?? null,
+        prepaid: service?.prepaid ?? null,
+      })),
+    newServices: (Array.isArray(snapshot.newServices) ? snapshot.newServices : [])
+      .map((service) => ({
+        key: service?.key ?? null,
+        label: service?.label ?? null,
+        discountPct: service?.discountPct ?? null,
+        monthlySavings: service?.monthlySavings ?? null,
+        perApplicationSavings: service?.perApplicationSavings ?? null,
+      })),
+  };
 }
 
 // View-time accessor. Returns the membership snapshot that was frozen onto the
@@ -428,4 +717,9 @@ function buildEstimateMembershipContext(estimate) {
   }
 }
 
-module.exports = { buildEstimateMembershipContext, computeMembershipContext };
+module.exports = {
+  buildEstimateMembershipContext,
+  computeMembershipContext,
+  loadCurrentServiceSpendContext,
+  publicMembershipView,
+};

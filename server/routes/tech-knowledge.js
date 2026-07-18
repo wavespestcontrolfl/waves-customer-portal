@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
+const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const WikiQA = require('../services/knowledge/wiki-qa');
 
-// Tech field Q&A — simpler auth, mobile-optimized responses
+// Tech field Q&A — Staff-authenticated, mobile-optimized responses.
+router.use(adminAuthenticate, requireTechOrAdmin);
 
 // POST /api/tech/knowledge/query
 router.post('/query', async (req, res, next) => {

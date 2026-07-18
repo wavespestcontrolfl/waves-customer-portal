@@ -66,6 +66,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { CustomerActionBar } from "./StickyActionBar";
+import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import { formatAddress } from "../../utils/format-address";
 import {
   Card,
@@ -83,7 +84,8 @@ import {
 } from "../ui";
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
-import { ZoneMarkingStep } from "../../pages/admin/SchedulePage";
+import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
+import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
@@ -2408,7 +2410,6 @@ function PropertyZonesPanel({ customerId }) {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, customerId, loadNonce]);
 
   const zones = map?.zones || [];
@@ -2663,6 +2664,314 @@ function PropertyZonesPanel({ customerId }) {
   );
 }
 
+// Flag gate — the stations panel stays dark until station-map-v1 is on for
+// this operator (DB-backed user_feature_flags, fails closed).
+function TermiteStationsGate({ customerId }) {
+  const { enabled, ready } = useFeatureFlagReady("station-map-v1");
+  if (!ready || !enabled) return null;
+  return <TermiteStationsPanel customerId={customerId} />;
+}
+
+// ─── Termite bait stations panel (station-map-v1) ────────────────
+// Office desk flow for the bait station map: drop/move/retire the
+// property's station pins on the satellite view outside a completion.
+// This is the takeover path — an account inherited from another company
+// gets its stations mapped from the office before our first visit, and
+// the tech confirms positions in the field. Positions only: statuses are
+// per-visit data and belong to the completion flow.
+function TermiteStationsPanel({ customerId }) {
+  const [open, setOpen] = useState(false);
+  const [map, setMap] = useState(null); // property-map payload
+  const [loading, setLoading] = useState(false);
+  // program picks which registry slice (termite in-ground vs rodent
+  // exterior) the panel edits — pins, numbering, and saves are all scoped
+  const [program, setProgram] = useState("termite");
+  const [allStations, setAllStations] = useState([]); // both programs, tagged
+  const [newPins, setNewPins] = useState([]); // [{ key, number, shape }]
+  const [moves, setMoves] = useState({}); // id → shape
+  const [retired, setRetired] = useState([]); // ids retired this session
+  const [numberBases, setNumberBases] = useState({ termite: 1, rodent: 1, trapping: 1 });
+  const newSeqRef = useRef(0);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [loadNonce, setLoadNonce] = useState(0);
+
+  // The 360 sheet swaps customers in place — drop all per-property state on
+  // a switch, same rules as PropertyZonesPanel above.
+  const customerRef = useRef(customerId);
+  useEffect(() => {
+    customerRef.current = customerId;
+    setOpen(false);
+    setMap(null);
+    setProgram("termite");
+    setAllStations([]);
+    setNewPins([]);
+    setMoves({});
+    setRetired([]);
+    setNumberBases({ termite: 1, rodent: 1, trapping: 1 });
+    setErr("");
+    setMsg("");
+    setSaving(false);
+  }, [customerId]);
+
+  useEffect(() => {
+    if (!open || map) return undefined;
+    let cancelled = false;
+    setLoading(true);
+    setErr("");
+    adminFetch(`/admin/dispatch/customers/${customerId}/property-map`)
+      .then((res) => {
+        if (cancelled) return;
+        setMap(res || { available: false, reason: "empty_response" });
+        setAllStations((Array.isArray(res?.stations) ? res.stations : []).map((station) => ({
+          id: String(station.id),
+          number: station.number,
+          program: station.program || "termite",
+          label: station.label || null,
+          shape: station.geometryImage && station.geometryImage.type === "circle"
+            ? station.geometryImage
+            : null,
+          stale: Boolean(station.staleMark),
+        })));
+        setNumberBases({
+          termite: Number(res?.nextStationNumberByProgram?.termite) || Number(res?.nextStationNumber) || 1,
+          rodent: Number(res?.nextStationNumberByProgram?.rodent) || 1,
+          trapping: Number(res?.nextStationNumberByProgram?.trapping) || 1,
+        });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErr(e.message || "Failed to load the property map");
+        setMap({ available: false, reason: "load_failed" });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, customerId, loadNonce]);
+
+  const preloads = allStations.filter((station) => station.program === program);
+  const display = [
+    ...preloads
+      .filter((station) => !retired.includes(station.id))
+      .map((station) => ({
+        key: station.id,
+        id: station.id,
+        number: station.number,
+        label: station.label,
+        shape: moves[station.id] || station.shape,
+        stale: station.stale && !moves[station.id],
+      })),
+    ...newPins.map((station) => ({
+      key: station.key,
+      id: null,
+      number: station.number,
+      label: null,
+      shape: station.shape,
+      stale: false,
+    })),
+  ];
+  const dirtyCount = newPins.length + Object.keys(moves).length + retired.length;
+  // Unsaved edits belong to the CURRENT program's registry slice — switching
+  // mid-edit would save termite pins into the rodent slice (or vice versa),
+  // so the toggle locks until the operator saves or the panel reloads.
+  const switchProgram = (next) => {
+    if (saving || next === program || dirtyCount > 0) return;
+    setProgram(next);
+    setMsg("");
+    setErr("");
+  };
+
+  const addPin = (pt) => {
+    if (saving) return;
+    newSeqRef.current += 1;
+    setNewPins((prev) => {
+      const base = Math.max(
+        Number(numberBases[program]) || 1,
+        ...prev.map((station) => (Number(station.number) || 0) + 1),
+      );
+      return [
+        ...prev,
+        {
+          key: `new-${newSeqRef.current}`,
+          number: base,
+          shape: { type: "circle", cx: pt.cx, cy: pt.cy, r: 0.035 },
+        },
+      ];
+    });
+  };
+  const movePin = (key, pt) => {
+    if (saving) return;
+    const shape = { type: "circle", cx: pt.cx, cy: pt.cy, r: 0.035 };
+    if (newPins.some((station) => station.key === key)) {
+      setNewPins((prev) => prev.map((station) => (station.key === key ? { ...station, shape } : station)));
+    } else {
+      setMoves((prev) => ({ ...prev, [key]: shape }));
+    }
+  };
+  const removePin = (key) => {
+    if (saving) return;
+    if (newPins.some((station) => station.key === key)) {
+      setNewPins((prev) => prev.filter((station) => station.key !== key));
+    } else {
+      // A pending move for this id must not survive the retire — the save
+      // payload would carry BOTH a retire and a shape entry for one station,
+      // which the server rejects as a duplicate id and Save dead-ends.
+      setMoves((prev) => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setRetired((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    }
+  };
+
+  const save = async () => {
+    if (!dirtyCount || saving || !map?.available) return;
+    setSaving(true);
+    setErr("");
+    setMsg("");
+    try {
+      const image = map.image || {};
+      const ref = {
+        lat: image.center?.lat,
+        lng: image.center?.lng,
+        zoom: image.zoom,
+        width: image.width || 640,
+        height: image.height || 340,
+        capturedAt: new Date().toISOString(),
+      };
+      const entries = [
+        ...retired.map((id) => ({ id, retire: true })),
+        // belt to removePin's suspenders: one final state per station id
+        ...Object.entries(moves)
+          .filter(([id]) => !retired.includes(id))
+          .map(([id, shape]) => ({ id, shape: { ...shape, ref } })),
+        ...newPins.map((station) => ({ shape: { ...station.shape, ref } })),
+      ];
+      const res = await adminFetch(
+        `/admin/dispatch/customers/${customerId}/termite-stations`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ stations: entries, program }),
+        },
+      );
+      if (customerRef.current !== customerId) return;
+      const s = res?.summary || {};
+      setMsg(
+        `Saved — ${s.created || 0} added${s.moved ? `, ${s.moved} moved` : ""}${s.retired ? `, ${s.retired} retired` : ""}`,
+      );
+      // Refetch so pins show their REAL persisted numbers (the server
+      // allocates; provisional numbers were a preview) and edit state
+      // starts clean.
+      setNewPins([]);
+      setMoves({});
+      setRetired([]);
+      setMap(null);
+      setLoadNonce((n) => n + 1);
+    } catch (e) {
+      if (customerRef.current === customerId) setErr(e.message || "Save failed");
+    } finally {
+      if (customerRef.current === customerId) setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
+      <div className="flex items-center justify-between gap-2">
+        <SectionTitle className="mb-0">Bait Stations</SectionTitle>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? "Hide" : "Mark stations"}
+        </Button>
+      </div>
+      {open && (
+        <div className="mt-3">
+          {loading && (
+            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+          )}
+          {!loading && map && !map.available && (
+            <div className="flex items-center gap-3">
+              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+                {map.reason === "load_failed"
+                  ? err || "Failed to load the property map"
+                  : `Satellite view unavailable (${map.reason || "unknown"}).`}
+              </span>
+              {map.reason === "load_failed" && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setMap(null);
+                    setErr("");
+                    setLoadNonce((n) => n + 1);
+                  }}
+                >
+                  Retry
+                </Button>
+              )}
+            </div>
+          )}
+          {!loading && map?.available && (
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-12 text-ink-secondary">Program</span>
+                {["termite", "rodent", "trapping"].map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    disabled={saving || (dirtyCount > 0 && opt !== program)}
+                    title={dirtyCount > 0 && opt !== program ? "Save or discard this program's edits first" : undefined}
+                    onClick={() => switchProgram(opt)}
+                    className={cn(
+                      "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                      opt === program
+                        ? "border-zinc-900 bg-zinc-900 text-white"
+                        : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
+                      dirtyCount > 0 && opt !== program ? "opacity-50" : "",
+                    )}
+                  >
+                    {opt === "termite" ? "Termite" : opt === "rodent" ? "Rodent" : "Traps"}
+                  </button>
+                ))}
+              </div>
+              <StationMarkingStep
+                map={map}
+                stations={display}
+                statuses={{}}
+                onAddStation={addPin}
+                onMoveStation={movePin}
+                onSetStatus={() => {}}
+                onRemoveStation={removePin}
+                showStatuses={false}
+                maxStations={Number(map?.stationCap) || 80}
+                program={program}
+                disabled={saving}
+              />
+              <div className="flex items-center gap-3 mt-2">
+                <Button size="sm" onClick={save} disabled={!dirtyCount || saving}>
+                  {saving ? "Saving…" : "Save stations"}
+                </Button>
+                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {err && map && (
+                  <span className="text-12 text-alert-fg">{err}</span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Autopay panel ───────────────────────────────────────────────
 function AdminAutopayPanelV2({
   customerId,
@@ -2865,7 +3174,6 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
     setLoadError(false);
     setOpen(false);
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerId]);
 
   // Only treat the ledger as known once a fetch has succeeded AND the latest
@@ -3460,6 +3768,21 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   const [amountTouched, setAmountTouched] = useState(false);
   const cadenceTouchedRef = useRef(false);
   const visitCountTouchedRef = useRef(false);
+  // Open estimate-deposit credit on file (e.g. restored by voiding a prior
+  // prepay invoice). The server auto-applies it to the minted invoice, so the
+  // operator enters the FULL plan amount and the invoice bills the
+  // difference. Preview-only read — the authoritative ledger read re-runs
+  // inside the mint transaction.
+  const [depositCredit, setDepositCredit] = useState(null);
+  const [applyCredit, setApplyCredit] = useState(true);
+  useEffect(() => {
+    if (!customer?.id) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/customers/${customer.id}/deposit-credit`)
+      .then((r) => { if (!cancelled) setDepositCredit(r?.credit || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [customer?.id]);
 
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ").trim() || "Customer";
   const count = Number.parseInt(visitCount, 10);
@@ -3554,6 +3877,15 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termEnd,
           dueDate,
           note: note.trim() || undefined,
+          // Only apply when the banner actually RENDERED (preview loaded, not
+          // payer-billed): a slow/failed preview must not silently subtract a
+          // credit the operator never saw — they may have hand-netted it. The
+          // estimate id echoes back so the server consumes exactly the ledger
+          // the banner named — the server 409s on a mismatch.
+          applyDepositCredit: !!(depositCredit && !depositCredit.payerBilled && applyCredit),
+          ...(depositCredit && !depositCredit.payerBilled && applyCredit
+            ? { depositCreditEstimateId: depositCredit.estimateId, depositCreditAmount: depositCredit.amount }
+            : {}),
         }),
       });
       if (result?.delivery && result.delivery.ok === false) {
@@ -3589,9 +3921,21 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termEnd,
           dueDate,
           note: note.trim() || undefined,
+          // Same visible-banner gate + estimate echo as the send path — never
+          // apply a credit the operator didn't see.
+          applyDepositCredit: !!(depositCredit && !depositCredit.payerBilled && applyCredit),
+          ...(depositCredit && !depositCredit.payerBilled && applyCredit
+            ? { depositCreditEstimateId: depositCredit.estimateId, depositCreditAmount: depositCredit.amount }
+            : {}),
           chargeInPerson: true,
         }),
       });
+      // Credit covered the whole invoice — it's already settled server-side,
+      // so there's nothing for the payment sheet to collect.
+      if (result?.settledByDepositCredit) {
+        await onSaved?.(result);
+        return;
+      }
       onChargeInPerson?.(result.invoice);
     } catch (err) {
       setError(err.message || "Couldn't start the charge");
@@ -3625,6 +3969,34 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           {activeTermEnd && (
             <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
+            </div>
+          )}
+          {depositCredit && depositCredit.payerBilled && (
+            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+              ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
+              {depositCredit.estimateSlug ? ` (estimate ${depositCredit.estimateSlug})` : ""} — NOT
+              applied here: this customer's invoices bill to a third party, and the homeowner's
+              deposit never credits a payer's bill. The credit stays on the ledger.
+            </div>
+          )}
+          {depositCredit && !depositCredit.payerBilled && (
+            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={applyCredit}
+                  onChange={(e) => setApplyCredit(e.target.checked)}
+                  className="mt-0.5 u-focus-ring"
+                />
+                <span>
+                  Apply ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
+                  {depositCredit.estimateSlug ? ` from estimate ${depositCredit.estimateSlug}` : ""}.
+                  Enter the full plan amount — the credit comes off the invoice automatically
+                  {applyCredit && Number(amount) > 0
+                    ? ` (customer pays $${Math.max(0, estTaxInclusiveTotal - Number(depositCredit.amount)).toFixed(2)})`
+                    : ""}.
+                </span>
+              </label>
             </div>
           )}
           <label className="block sm:col-span-2">
@@ -3762,6 +4134,180 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
 }
 
 // ============================================================================
+// CANCEL SIGNUP & REFUND DEPOSIT
+// Deposit-stage offboarding: previews exactly what the server will do (void
+// the unpaid signup invoice, cancel remaining visits, clear the tier, refund
+// the deposit at face value, email the customer), or explains why the run is
+// blocked. The server re-checks eligibility on confirm.
+// ============================================================================
+export function CancelSignupModal({ customer, onClose, onDone }) {
+  const [preview, setPreview] = useState(null);
+  const [loadErr, setLoadErr] = useState("");
+  const [running, setRunning] = useState(false);
+  const [runErr, setRunErr] = useState("");
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch(`/admin/customers/${customer.id}/cancel-signup`)
+      .then((r) => { if (!cancelled) setPreview(r); })
+      .catch((e) => { if (!cancelled) setLoadErr(e.message || "Preview failed"); });
+    return () => { cancelled = true; };
+  }, [customer.id]);
+
+  const confirm = async () => {
+    setRunning(true);
+    setRunErr("");
+    try {
+      const r = await adminFetch(`/admin/customers/${customer.id}/cancel-signup`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "requested_by_customer" }),
+      });
+      setResult(r);
+      try {
+        await onDone?.();
+      } catch (refreshError) {
+        setRunErr(
+          `Cancellation succeeded, but the customer profile could not refresh: ${refreshError.message || "Refresh failed"}`,
+        );
+      }
+    } catch (e) {
+      setRunErr(e.message || "Cancellation failed");
+    }
+    setRunning(false);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      onClick={() => !running && onClose()}
+    >
+      <div
+        className="bg-white w-full max-w-[560px] rounded-sm border-hairline border-zinc-300 my-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
+          <div className="text-15 font-medium text-zinc-900">
+            Cancel signup &amp; refund deposit
+          </div>
+          <button
+            onClick={() => !running && onClose()}
+            aria-label="Close"
+            className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-4 text-13 text-zinc-900">
+          {!preview && !loadErr && (
+            <div className="text-ink-secondary">Checking eligibility…</div>
+          )}
+          {loadErr && (
+            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{loadErr}</div>
+          )}
+          {preview && !preview.eligible && !result && (
+            <div>
+              <div className="mb-2">This customer can’t be cancelled through this flow:</div>
+              <ul className="list-disc pl-5 text-ink-secondary">
+                {preview.blockers.map((b, i) => (<li key={i}>{b}</li>))}
+              </ul>
+            </div>
+          )}
+          {preview && preview.eligible && !result && (
+            <div>
+              {/* First-run lesson (2026-07-15): the preview reads "done"
+                  enough that the owner closed it here thinking the run had
+                  fired. State the not-yet-ness explicitly. */}
+              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-13 text-zinc-900">
+                <span className="font-medium">Preview only — nothing has happened yet.</span>{" "}
+                <span className="text-ink-secondary">
+                  No refund is issued and nothing is cancelled until you press the red button below.
+                </span>
+              </div>
+              <div className="mb-3">Pressing it will, in order:</div>
+              <ul className="list-disc pl-5 mb-3">
+                {preview.invoices.length > 0 && (
+                  <li>
+                    Void {preview.invoices.map((inv) => `${inv.invoiceNumber || "invoice"} (${fmtCurrency(inv.total)})`).join(", ")}
+                    {preview.terms.length > 0 ? " — cancelling the annual prepay term" : ""}
+                  </li>
+                )}
+                <li>
+                  Cancel {preview.visits.length} scheduled visit{preview.visits.length === 1 ? "" : "s"}
+                  {preview.visits.length > 0 && (
+                    <span className="text-ink-secondary">
+                      {" "}({preview.visits.slice(0, 4).map((v) => fmtDate(v.serviceDate)).join(", ")}{preview.visits.length > 4 ? "…" : ""})
+                    </span>
+                  )}
+                </li>
+                <li>Set the plan to <span className="font-medium">No Plan</span> (record stays active)</li>
+                <li>Refund the <span className="font-medium u-nums">{fmtCurrency(preview.refundTotal)}</span> deposit to the original payment method</li>
+                <li>Email the customer a cancellation + refund confirmation</li>
+              </ul>
+              <div className="text-12 text-ink-secondary">
+                The refund is issued through Stripe and typically lands in 5–10 business days.
+              </div>
+            </div>
+          )}
+          {result && (
+            <div>
+              <div className="mb-2 font-medium">
+                {result.refundSkipped || result.refundIncomplete
+                  ? "Partially done — check the notes below."
+                  : "Done."}
+              </div>
+              <ul className="list-disc pl-5">
+                <li>Invoices voided: {result.invoicesVoided.length ? result.invoicesVoided.join(", ") : "none"}</li>
+                <li>Visits cancelled: {result.visitsCancelled}</li>
+                <li>Refunded: <span className="u-nums">{fmtCurrency(result.refunded)}</span></li>
+                <li>
+                  Email: {result.email?.ok
+                    ? "sent"
+                    : `not sent (${result.email?.reason || result.email?.error || "see logs"})`}
+                </li>
+              </ul>
+              {result.refundSkipped && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {result.refundSkipped}
+                </div>
+              )}
+              {result.refundIncomplete && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {result.refundIncomplete}
+                </div>
+              )}
+              {result.visitFailures?.length > 0 && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {result.visitFailures.length} visit(s) could not be cancelled — handle them on the Schedule page.
+                </div>
+              )}
+              {result.unresolvedInvoices?.length > 0 && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  Open visit invoice(s) could not be voided: {result.unresolvedInvoices.join(", ")} — resolve on the Invoices page.
+                </div>
+              )}
+            </div>
+          )}
+          {runErr && (
+            <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{runErr}</div>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
+          <Button variant="secondary" onClick={onClose} disabled={running}>
+            {result ? "Close" : "Close without cancelling"}
+          </Button>
+          {preview?.eligible && !result && (
+            <Button variant="danger" onClick={confirm} disabled={running}>
+              {running ? "Working…" : `Cancel & refund ${fmtCurrency(preview.refundTotal)} now`}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // MAIN COMPONENT
 // ============================================================================
 export default function Customer360ProfileV2({
@@ -3774,6 +4320,9 @@ export default function Customer360ProfileV2({
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [profileLoadError, setProfileLoadError] = useState("");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
+  const [profileActionErr, setProfileActionErr] = useState("");
   const [activeTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [timeline, setTimeline] = useState([]);
@@ -3788,6 +4337,7 @@ export default function Customer360ProfileV2({
   const [editOpen, setEditOpen] = useState(false);
   const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
   const [annualPrepayInvoiceOpen, setAnnualPrepayInvoiceOpen] = useState(false);
+  const [cancelSignupOpen, setCancelSignupOpen] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [editErr, setEditErr] = useState("");
@@ -3800,16 +4350,28 @@ export default function Customer360ProfileV2({
   const [deletingCustomer, setDeletingCustomer] = useState(false);
   const [payers, setPayers] = useState([]);
   const [payerSaving, setPayerSaving] = useState(false);
+  // Inline "New payer" quick-add for the default Bill-To select.
+  const [showNewPayer, setShowNewPayer] = useState(false);
+  const [newPayer, setNewPayer] = useState({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+  const [newPayerSaving, setNewPayerSaving] = useState(false);
+  const [newPayerError, setNewPayerError] = useState("");
+  const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
   const menuRef = useRef(null);
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
+  const profileSeqRef = useRef(0);
+  const profileAbortRef = useRef(null);
+  const customerIdRef = useRef(customerId);
+  customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
 
   const reloadCustomer = () =>
     adminFetch(`/admin/customers/${customerId}`)
-      .then(setData)
-      .catch(() => {});
+      .then((detail) => {
+        if (String(customerIdRef.current) === String(customerId)) setData(detail);
+        return detail;
+      });
 
   useEffect(() => {
     adminFetch("/admin/payers")
@@ -3819,31 +4381,118 @@ export default function Customer360ProfileV2({
 
   const savePayer = async (payerId) => {
     setPayerSaving(true);
+    setProfileActionErr("");
     try {
       await adminFetch(`/admin/customers/${customerId}`, {
         method: "PUT",
         body: JSON.stringify({ payerId: payerId || "" }),
       });
       await reloadCustomer();
-    } catch {
-      /* reload reflects truth */
+    } catch (err) {
+      setProfileActionErr(err.message || "Bill-To failed to save");
     } finally {
       setPayerSaving(false);
     }
   };
 
+  const handlePayerSelect = (value) => {
+    if (!isAdmin) {
+      setProfileActionErr("Admin access is required to change Bill-To.");
+      return;
+    }
+    if (value === "__new__") {
+      setNewPayerError("");
+      setNewPayerNotice("");
+      setShowNewPayer(true);
+      return;
+    }
+    savePayer(value);
+  };
+
+  const saveNewPayer = async () => {
+    const displayName = newPayer.displayName.trim();
+    if (!displayName) {
+      setNewPayerError("Payer name is required");
+      return;
+    }
+    const apEmail = newPayer.apEmail.trim().toLowerCase();
+    setNewPayerSaving(true);
+    setNewPayerError("");
+    try {
+      // dedupeByEmail: the SERVER checks the AP email against every payer
+      // (the loaded list is capped) and returns the existing active payer
+      // with deduped:true instead of minting a duplicate — AR must not split
+      // across payer rows.
+      const r = await adminFetch("/admin/payers", {
+        method: "POST",
+        body: JSON.stringify({
+          displayName,
+          companyName: newPayer.companyName.trim() || undefined,
+          apEmail: apEmail || undefined,
+          apPhone: newPayer.apPhone.trim() || undefined,
+          dedupeByEmail: true,
+        }),
+      });
+      const created = r?.payer;
+      if (created?.id) {
+        setPayers((list) =>
+          (list.some((p) => String(p.id) === String(created.id))
+            ? list
+            : [...list, created]
+          ).sort((a, b) =>
+            String(a.display_name || "").localeCompare(String(b.display_name || "")),
+          ),
+        );
+        setShowNewPayer(false);
+        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+        setNewPayerNotice(
+          r?.deduped
+            ? `Matched existing payer "${created.display_name}" by AP email — selected it instead.`
+            : "",
+        );
+        await savePayer(String(created.id));
+      } else {
+        setNewPayerError("Unexpected response — payer not created");
+      }
+    } catch (e) {
+      setNewPayerError(e.message || "Failed to create payer");
+    }
+    setNewPayerSaving(false);
+  };
+
   useEffect(() => {
     commsSeqRef.current += 1;
     if (commsAbortRef.current) commsAbortRef.current.abort();
+    const seq = profileSeqRef.current + 1;
+    profileSeqRef.current = seq;
+    if (profileAbortRef.current) profileAbortRef.current.abort();
+    const ctrl = new AbortController();
+    profileAbortRef.current = ctrl;
     setLoading(true);
+    setData(null);
+    setProfileLoadError("");
+    setProfileActionErr("");
     setCommsLoading(false);
+    setMenuOpen(false);
+    setEditOpen(false);
+    setEditForm({});
+    setEditErr("");
+    setSavingEdit(false);
+    setDeletingCustomer(false);
+    setAnnualPrepayOpen(false);
+    setAnnualPrepayInvoiceOpen(false);
+    setCancelSignupOpen(false);
     Promise.all([
-      adminFetch(`/admin/customers/${customerId}`),
-      adminFetch(`/admin/customers/${customerId}/timeline`).catch(() => ({
-        timeline: [],
-      })),
+      adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
+      adminFetch(`/admin/customers/${customerId}/timeline`, {
+        signal: ctrl.signal,
+      }).catch((err) => {
+        if (err.name === "AbortError") throw err;
+        return { timeline: [] };
+      }),
     ])
       .then(([detail, tl]) => {
+        if (seq !== profileSeqRef.current) return;
         setData(detail);
         setTimeline(tl.timeline || []);
         setComms([]);
@@ -3851,8 +4500,13 @@ export default function Customer360ProfileV2({
         setCommsErr("");
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, [customerId]);
+      .catch((err) => {
+        if (err.name === "AbortError" || seq !== profileSeqRef.current) return;
+        setProfileLoadError(err.message || "Failed to load customer");
+        setLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [customerId, profileReloadKey]);
 
   useEffect(() => {
     if (activeTab !== "comms" || commsLoaded || commsLoading) return;
@@ -3882,6 +4536,7 @@ export default function Customer360ProfileV2({
   useEffect(
     () => () => {
       if (commsAbortRef.current) commsAbortRef.current.abort();
+      if (profileAbortRef.current) profileAbortRef.current.abort();
     },
     [],
   );
@@ -3921,7 +4576,10 @@ export default function Customer360ProfileV2({
     data?.notificationPrefs?.billing_email,
   ]);
 
-  if (loading)
+  const loadedCustomerMatches = data?.customer
+    && String(data.customer.id) === String(customerId);
+
+  if (loading || (data?.customer && !loadedCustomerMatches))
     return (
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
@@ -3952,8 +4610,21 @@ export default function Customer360ProfileV2({
           onClick={(e) => e.stopPropagation()}
         >
           {" "}
-          <div className="text-alert-fg text-center py-16 text-13">
-            Failed to load customer
+          <div className="flex-1 flex items-center justify-center p-6">
+            <div className="text-center max-w-sm">
+              <div className="text-alert-fg text-14 mb-2">
+                Failed to load customer
+              </div>
+              <div className="text-14 text-ink-secondary mb-5">
+                {profileLoadError || "The customer profile could not be loaded."}
+              </div>
+              <div className="flex items-center justify-center gap-2">
+                <Button variant="secondary" onClick={onClose}>Close</Button>
+                <Button onClick={() => setProfileReloadKey((key) => key + 1)}>
+                  Retry
+                </Button>
+              </div>
+            </div>
           </div>{" "}
         </div>{" "}
       </div>
@@ -4000,6 +4671,10 @@ export default function Customer360ProfileV2({
     || null;
 
   const updateNotificationPrefs = async (patch) => {
+    if (!isAdmin) {
+      setProfileActionErr("Admin access is required to change notification routing.");
+      return;
+    }
     const previous = data.notificationPrefs || {};
     const patchKeys = Object.keys(patch);
     setData((prev) =>
@@ -4014,6 +4689,7 @@ export default function Customer360ProfileV2({
         : prev,
     );
     try {
+      setProfileActionErr("");
       const response = await adminFetch(
         `/admin/customers/${customerId}/notification-prefs`,
         {
@@ -4026,7 +4702,7 @@ export default function Customer360ProfileV2({
           prev ? { ...prev, notificationPrefs: response.notificationPrefs } : prev,
         );
       }
-    } catch {
+    } catch (err) {
       setData((prev) => {
         if (!prev) return prev;
         const notificationPrefs = { ...(prev.notificationPrefs || {}) };
@@ -4039,10 +4715,15 @@ export default function Customer360ProfileV2({
         });
         return { ...prev, notificationPrefs };
       });
+      setProfileActionErr(err.message || "Notification preference failed to save");
     }
   };
 
   const saveRecipientPrefs = async () => {
+    if (!isAdmin) {
+      setRecipientPrefsErr("Admin access is required to change recipients");
+      return;
+    }
     setRecipientPrefsSaving(true);
     setRecipientPrefsErr("");
     try {
@@ -4391,6 +5072,7 @@ export default function Customer360ProfileV2({
               {(() => {
                 const parts = [
                   c.address?.line1,
+                  c.address?.line2,
                   c.address?.city,
                   c.address?.state,
                   c.address?.zip,
@@ -4484,6 +5166,7 @@ export default function Customer360ProfileV2({
                       phone: c.phone || "",
                       profileLabel: c.profileLabel || "",
                       addressLine1: c.address?.line1 || "",
+                      addressLine2: c.address?.line2 || "",
                       city: c.address?.city || "",
                       state: c.address?.state || "",
                       zip: c.address?.zip || "",
@@ -4518,6 +5201,7 @@ export default function Customer360ProfileV2({
               (() => {
                 const parts = [
                   c.address?.line1,
+                  c.address?.line2,
                   c.address?.city,
                   c.address?.state,
                   c.address?.zip,
@@ -4641,6 +5325,11 @@ export default function Customer360ProfileV2({
         </div>
         {/* TAB CONTENT */}
         <div className="p-6 flex-1">
+          {profileActionErr && (
+            <div role="alert" className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm">
+              {profileActionErr}
+            </div>
+          )}
           {/* OVERVIEW */}
           {activeTab === "overview" && (
             <div>
@@ -4648,6 +5337,7 @@ export default function Customer360ProfileV2({
               {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
               {isAdmin && <PropertyZonesPanel customerId={customerId} />}
+              {isAdmin && <TermiteStationsGate customerId={customerId} />}
               {accountProperties.length > 0 && (
                 <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
                   {" "}
@@ -4658,6 +5348,7 @@ export default function Customer360ProfileV2({
                     {accountProperties.map((p) => {
                       const addr = [
                         p.address?.line1,
+                        p.address?.line2,
                         p.address?.city,
                         p.address?.state,
                         p.address?.zip,
@@ -4725,6 +5416,7 @@ export default function Customer360ProfileV2({
                 <Switch
                   id="has-left-review-v2"
                   checked={!!c.hasLeftGoogleReview}
+                  disabled={!isAdmin}
                   onChange={async (val) => {
                     const previousHasLeftGoogleReview = !!c.hasLeftGoogleReview;
                     const previousReviewMarkedAt = c.reviewMarkedAt || null;
@@ -4747,7 +5439,7 @@ export default function Customer360ProfileV2({
                         method: "PUT",
                         body: JSON.stringify({ hasLeftGoogleReview: val }),
                       });
-                    } catch {
+                    } catch (err) {
                       setData((prev) =>
                         prev
                           ? {
@@ -4760,6 +5452,7 @@ export default function Customer360ProfileV2({
                             }
                           : prev,
                       );
+                      setProfileActionErr(err.message || "Review status failed to save");
                     }
                   }}
                 />{" "}
@@ -5324,6 +6017,22 @@ export default function Customer360ProfileV2({
                   ))}
                 </div>
               )}
+              {isAdmin && (
+                <div className="mt-5 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
+                  {" "}
+                  <div className="text-12 text-ink-secondary">
+                    Customer cancelling at the deposit stage? This voids the
+                    signup invoice, cancels visits, and refunds the deposit.
+                  </div>{" "}
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() => setCancelSignupOpen(true)}
+                  >
+                    Cancel signup…
+                  </Button>{" "}
+                </div>
+              )}
             </div>
           )}
 
@@ -5418,10 +6127,9 @@ export default function Customer360ProfileV2({
                           {summary}
                         </div>
                       )}
-                      {rec?.url && rec?.sid && (
-                        <audio
-                          controls
-                          src={`${API_BASE}/admin/call-recordings/audio/${rec.sid}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
+                      {(rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid) && (
+                        <AuthenticatedCallAudio
+                          recordingId={rec?.sid || m.recordingSid}
                           className="mt-1.5 w-full h-8"
                         />
                       )}
@@ -5486,8 +6194,8 @@ export default function Customer360ProfileV2({
                   <div className="flex items-center gap-2 flex-wrap">
                     <select
                       value={c.payerId ? String(c.payerId) : ""}
-                      disabled={payerSaving}
-                      onChange={(e) => savePayer(e.target.value)}
+                      disabled={payerSaving || !isAdmin}
+                      onChange={(e) => handlePayerSelect(e.target.value)}
                       className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
                     >
                       <option value="">Customer pays (self)</option>
@@ -5499,11 +6207,97 @@ export default function Customer360ProfileV2({
                             : ""}
                         </option>
                       ))}
+                      {isAdmin && <option value="__new__">＋ New payer…</option>}
                     </select>
                     {payerSaving && (
                       <span className="text-12 text-ink-tertiary">Saving…</span>
                     )}
                   </div>
+                  {showNewPayer && isAdmin && (
+                    <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
+                      <div className="text-12 font-medium text-zinc-900 mb-2">
+                        New payer
+                      </div>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Payer name *
+                        </span>
+                        <input
+                          type="text"
+                          value={newPayer.displayName}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
+                          placeholder="e.g. tenant, builder, or property manager name"
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Company (optional)
+                        </span>
+                        <input
+                          type="text"
+                          value={newPayer.companyName}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <label className="block mb-1">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Invoice email (AP)
+                        </span>
+                        <input
+                          type="email"
+                          value={newPayer.apEmail}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
+                          placeholder="Where this payer's invoices are emailed"
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <div className="text-12 text-ink-secondary mb-2">
+                        Without an email, invoices to this payer can’t be
+                        delivered until one is added in Finance → Payers.
+                      </div>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Phone (optional)
+                        </span>
+                        <input
+                          type="tel"
+                          value={newPayer.apPhone}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      {newPayerError && (
+                        <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={saveNewPayer}
+                          disabled={newPayerSaving || !newPayer.displayName.trim()}
+                          className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
+                        >
+                          {newPayerSaving ? "Saving…" : "Create & select"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowNewPayer(false);
+                            setNewPayerError("");
+                          }}
+                          className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {newPayerNotice && (
+                    <div className="text-12 text-ink-secondary mt-1.5">
+                      {newPayerNotice}
+                    </div>
+                  )}
                   <div className="text-12 text-ink-secondary mt-1.5">
                     Routes every invoice for this account to a builder /
                     property manager instead of the customer. A single job can
@@ -5560,6 +6354,7 @@ export default function Customer360ProfileV2({
                       id="c360-billing-contact-name"
                       name="billingContactName"
                       value={recipientPrefsDraft.billingContactName}
+                      disabled={!isAdmin}
                       onChange={(e) =>
                         setRecipientPrefsDraft((prev) => ({
                           ...prev,
@@ -5578,6 +6373,7 @@ export default function Customer360ProfileV2({
                       id="c360-billing-recipient-email"
                       name="billingEmail"
                       value={recipientPrefsDraft.billingEmail}
+                      disabled={!isAdmin}
                       onChange={(e) =>
                         setRecipientPrefsDraft((prev) => ({
                           ...prev,
@@ -5598,7 +6394,7 @@ export default function Customer360ProfileV2({
                   </div>
                   <Button
                     onClick={saveRecipientPrefs}
-                    disabled={recipientPrefsSaving}
+                    disabled={recipientPrefsSaving || !isAdmin}
                     className="shrink-0"
                   >
                     {recipientPrefsSaving ? "Saving..." : "Save Recipients"}
@@ -5615,6 +6411,7 @@ export default function Customer360ProfileV2({
                     id="c360-appointment-notify-primary"
                     name="appointmentNotifyPrimary"
                     type="checkbox"
+                    disabled={!isAdmin}
                     className="mt-0.5"
                     checked={notificationPrefs.appointment_notify_primary === true}
                     onChange={(e) =>
@@ -5642,6 +6439,7 @@ export default function Customer360ProfileV2({
                     id="c360-service-report-notify-primary"
                     name="serviceReportNotifyPrimary"
                     type="checkbox"
+                    disabled={!isAdmin}
                     className="mt-0.5"
                     checked={notificationPrefs.service_report_notify_primary === true}
                     onChange={(e) =>
@@ -5665,9 +6463,38 @@ export default function Customer360ProfileV2({
                 <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
                   {" "}
                   <input
+                    id="c360-service-report-notify-billing"
+                    name="serviceReportNotifyBilling"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={notificationPrefs.service_report_notify_billing === true}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        serviceReportNotifyBilling: e.target.checked,
+                        service_report_notify_billing: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also email service reports to the billing recipient
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      Copies the billing recipient email (landlord, AP contact)
+                      on post-service reports. Requires a billing recipient
+                      email above; invoices are unaffected.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
                     id="c360-auto-flip-en-route"
                     name="autoFlipEnRoute"
                     type="checkbox"
+                    disabled={!isAdmin}
                     className="mt-0.5"
                     checked={
                       notificationPrefs.auto_flip_en_route !== false
@@ -6160,6 +6987,7 @@ export default function Customer360ProfileV2({
                         email: c.email || "",
                         phone: c.phone || "",
                         addressLine1: c.address?.line1 || "",
+                        addressLine2: c.address?.line2 || "",
                         city: c.address?.city || "",
                         state: c.address?.state || "",
                         zip: c.address?.zip || "",
@@ -6210,16 +7038,18 @@ export default function Customer360ProfileV2({
                 >
                   Add note
                 </button>{" "}
-                <button
-                  role="menuitem"
-                  onClick={() => {
-                    onAddProperty?.(c);
-                    setMenuOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                >
-                  Add property
-                </button>{" "}
+                {isAdmin && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      onAddProperty?.(c);
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Add property
+                  </button>
+                )}{" "}
               </div>
             )}
           </div>{" "}
@@ -6233,7 +7063,7 @@ export default function Customer360ProfileV2({
           firstName: c.firstName,
           lastName: c.lastName,
           address: c.address
-            ? [c.address.line1, c.address.city, c.address.state, c.address.zip]
+            ? [c.address.line1, c.address.line2, c.address.city, c.address.state, c.address.zip]
                 .filter(Boolean)
                 .join(", ")
             : "",
@@ -6258,6 +7088,13 @@ export default function Customer360ProfileV2({
           annualPrepayTerms={data.annualPrepayTerms || []}
           onClose={() => setAnnualPrepayInvoiceOpen(false)}
           onSaved={handleAnnualPrepaySaved}
+        />
+      )}
+      {cancelSignupOpen && (
+        <CancelSignupModal
+          customer={c}
+          onClose={() => setCancelSignupOpen(false)}
+          onDone={reloadCustomer}
         />
       )}
       {editOpen && (
@@ -6292,6 +7129,7 @@ export default function Customer360ProfileV2({
                 { key: "phone", label: "Phone", type: "tel" },
                 { key: "profileLabel", label: "Property label", full: true },
                 { key: "addressLine1", label: "Address", full: true },
+                { key: "addressLine2", label: "Address line 2", full: true },
                 { key: "city", label: "City" },
                 { key: "state", label: "State" },
                 { key: "zip", label: "ZIP" },

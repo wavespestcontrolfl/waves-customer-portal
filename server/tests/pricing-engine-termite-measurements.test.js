@@ -472,6 +472,72 @@ describe('termite measurement overrides and safeguards', () => {
     expect(sameTripAddOn.price).not.toBe(600);
   });
 
+  test('Pre-Slab Termiticide steps price with usage every 100 sqft (hybrid: contextual floors kept)', () => {
+    // 82 sqft prices as a full 100-sqft bucket. Termidor's stepped cost-plus
+    // ($198) clears the $191 floor; the cheap bifenthrins stay floored.
+    const termidorSmall = pricePreSlabTermiticide(82, { productKey: 'termidor_sc', labelConfirmed: true });
+    expect(termidorSmall.usageStepSqFt).toBe(100);
+    expect(termidorSmall.usageStepPricedSqFt).toBe(100);
+    expect(termidorSmall.price).toBe(198);
+    // Reported quantities stay actual-usage, not the bucket.
+    expect(termidorSmall.productOz).toBe(6.56);
+
+    const talstarSmall = pricePreSlabTermiticide(82, { productKey: 'talstar_p', labelConfirmed: true });
+    expect(talstarSmall.usageStepPricedSqFt).toBe(100);
+    expect(talstarSmall.price).toBe(191);
+
+    // The two real estimates that triggered the change (85 and 175 sqft,
+    // Talstar, both $191) stay at $191 — the hybrid never prices below the
+    // old schedule.
+    expect(pricePreSlabTermiticide(85, { productKey: 'talstar_p', labelConfirmed: true }).price).toBe(191);
+    expect(pricePreSlabTermiticide(175, { productKey: 'talstar_p', labelConfirmed: true }).price).toBe(191);
+
+    // 191 sqft now steps: Termidor prices the 200-sqft bucket, and Taurus
+    // separates from the bifenthrins instead of all collapsing to the floor.
+    expect(pricePreSlabTermiticide(191, { productKey: 'termidor_sc', labelConfirmed: true }).price).toBe(231);
+    expect(pricePreSlabTermiticide(191, { productKey: 'taurus_sc', labelConfirmed: true }).price).toBe(201);
+    expect(pricePreSlabTermiticide(191, { productKey: 'talstar_p', labelConfirmed: true }).price).toBe(191);
+
+    // Contextual floor still wins where the stepped cost-plus is below it.
+    const talstarMid = pricePreSlabTermiticide(750, { productKey: 'talstar_p', labelConfirmed: true });
+    expect(talstarMid.usageStepPricedSqFt).toBe(800);
+    expect(talstarMid.price).toBe(276);
+
+    // An exact bucket edge is not rounded up.
+    const exact = pricePreSlabTermiticide(200, { productKey: 'termidor_sc', labelConfirmed: true });
+    expect(exact.usageStepPricedSqFt).toBe(200);
+    expect(exact.usageStepPrice).toBe(exact.rawPrice);
+
+    // No table cap: steps keep working at 10,000 sqft (labor capped at 5 hrs).
+    const huge = pricePreSlabTermiticide(9950, { productKey: 'talstar_p', labelConfirmed: true });
+    expect(huge.usageStepPricedSqFt).toBe(10000);
+    expect(huge.laborHrs).toBe(5);
+    expect(huge.price).toBe(1004);
+
+    // Volume discounts apply to the stepped price (10plus implies the
+    // builder-batch context: no drive cost, $128 floor at this size).
+    const volume = pricePreSlabTermiticide(191, {
+      productKey: 'termidor_sc',
+      volumeDiscount: '10plus',
+      labelConfirmed: true,
+    });
+    expect(volume.priceBeforeVolumeDiscount).toBe(209);
+    expect(volume.price).toBe(178);
+
+    // Kill switch: usageStepSqFt = 0 restores the flat pre-step behavior.
+    const cfg = require('../services/pricing-engine/constants').SPECIALTY.preSlabTermiticide;
+    const savedStep = cfg.usageStepSqFt;
+    try {
+      cfg.usageStepSqFt = 0;
+      const flat = pricePreSlabTermiticide(82, { productKey: 'termidor_sc', labelConfirmed: true });
+      expect(flat.usageStepSqFt).toBe(0);
+      expect(flat.usageStepPricedSqFt).toBeNull();
+      expect(flat.price).toBe(191);
+    } finally {
+      cfg.usageStepSqFt = savedStep;
+    }
+  });
+
   test('Pre-Slab Termiticide applies volume floors, warranty metadata, and measurement guards', () => {
     const termidorTenPlus = pricePreSlabTermiticide(1800, {
       productKey: 'termidor_sc',

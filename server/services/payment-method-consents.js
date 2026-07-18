@@ -14,7 +14,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
 
-const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold']);
+const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request']);
 
 // methodType selects which authorization copy to snapshot. Omitted/
 // unknown values default to the card variant via getConsentText().
@@ -49,6 +49,86 @@ async function recordConsent({
 
   logger.info(`[consent] Recorded ${source} consent for customer ${customerId}, pm ${stripePaymentMethodId} (${CONSENT_VERSION}, methodType=${methodType})`);
   return row;
+}
+
+// Only consent copy from v8 on authorizes charging the method "for future
+// service visits and invoices as agreed" — earlier versions were plain
+// card-on-file copy and the backfill's v0_implicit_pre_consent rows are
+// explicitly NOT evidence of informed authorization (Codex #2507 P1
+// round-3). Version strings are 'v<major>_<date>'.
+const MIN_ENROLLMENT_CONSENT_MAJOR = 8;
+function consentVersionQualifiesForEnrollment(version) {
+  const m = /^v(\d+)(?:[_-]|$)/.exec(String(version || ''));
+  return !!m && Number(m[1]) >= MIN_ENROLLMENT_CONSENT_MAJOR;
+}
+
+/**
+ * Does an ENROLLMENT-QUALIFYING consent row exist for this customer +
+ * Stripe pm? The autopay-enrollment gate (Codex #2507 P1): enrollment
+ * happens only when the audit artifact exists — PI metadata alone is a
+ * signal that the box was ticked, but the snapshot row is the
+ * authorization of record — and only when that row's copy version
+ * actually authorizes recurring charges (v8+; legacy/implicit rows are
+ * audit anchors, not authority).
+ */
+async function hasConsentFor(customerId, stripePaymentMethodId) {
+  if (!customerId || !stripePaymentMethodId) return false;
+  const rows = await db('payment_method_consents')
+    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId })
+    .select('consent_text_version');
+  return rows.some((r) => consentVersionQualifiesForEnrollment(r.consent_text_version));
+}
+
+/**
+ * The customer's best already-saved CARD carrying an enrollment-qualifying
+ * (v8+) consent — the auto-satisfy source for card-on-file bookings (spec
+ * §3.2: existing customers with a saved card are never re-asked). Card-only
+ * by design (booking is card-only; ACH stays a portal action), default
+ * first, newest first. Returns the payment_methods row or null; lookup
+ * errors bubble so callers keep their own fail direction.
+ *
+ * SCOPE (Codex #2680 r5 P1): a consent's VERSION is not its AUTHORITY —
+ * the card-hold capture UI only authorizes the specific visit's completion
+ * charge + no-show fee, so its 'estimate_card_hold' rows must never
+ * auto-satisfy a lane that ends in Auto Pay enrollment (or a hold-only
+ * card from last year's one-time visit would silently start auto-charging
+ * every future visit). Every other source presented the full
+ * save-and-charge card consent text.
+ */
+const NON_ENROLLMENT_CONSENT_SOURCES = new Set(['estimate_card_hold']);
+
+async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId) {
+  if (!customerId || !stripePaymentMethodId) return false;
+  const rows = await db('payment_method_consents')
+    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId })
+    .select('consent_text_version', 'source');
+  return rows.some((r) => consentVersionQualifiesForEnrollment(r.consent_text_version)
+    && !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source));
+}
+
+async function findConsentedChargeableCard(customerId) {
+  if (!customerId) return null;
+  // A prior Auto Pay OPT-OUT is sacred (Codex #2681 r6 P1): disabling
+  // keeps the saved card rows, and an old consent row must not silently
+  // re-enroll the customer with no fresh checkbox. The discriminator is
+  // the LATEST enable/disable toggle in autopay_log — never-enrolled
+  // customers have no toggle history and still auto-satisfy. Lookup
+  // errors bubble: every caller fails toward asking for the card.
+  const lastToggle = await db('autopay_log')
+    .where({ customer_id: customerId })
+    .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
+    .orderBy('created_at', 'desc')
+    .first('event_type');
+  if (lastToggle?.event_type === 'autopay_disabled') return null;
+  const rows = await db('payment_methods')
+    .where({ customer_id: customerId, processor: 'stripe', method_type: 'card' })
+    .whereNotNull('stripe_payment_method_id')
+    .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }]);
+  for (const pm of rows) {
+     
+    if (await hasEnrollmentScopedConsent(customerId, pm.stripe_payment_method_id)) return pm;
+  }
+  return null;
 }
 
 /**
@@ -108,7 +188,12 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
 
 module.exports = {
   recordConsent,
+  hasConsentFor,
+  hasEnrollmentScopedConsent,
+  consentVersionQualifiesForEnrollment,
+  findConsentedChargeableCard,
   linkPaymentMethodId,
   sweepOrphanConsents,
   VALID_SOURCES: Array.from(VALID_SOURCES),
+  NON_ENROLLMENT_CONSENT_SOURCES,
 };

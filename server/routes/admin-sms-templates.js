@@ -302,6 +302,7 @@ const MSG_TYPE_TO_TEMPLATE = {
   en_route: 'tech_en_route',
   service_complete: 'service_complete',
   service_complete_prepaid: 'service_complete_prepaid',
+  service_complete_annual_prepay: 'service_complete_annual_prepay',
   service_complete_with_invoice: 'service_complete_with_invoice',
   missed_call_followup: 'missed_call',
   invoice: 'invoice_sent',
@@ -366,7 +367,13 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
     const variant = await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
     let body = variant?.body || t.body;
     for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {
-      body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), val == null ? '' : String(val));
+      // Function-form replacement: a STRING replacement treats `$$`/`$&`
+      // (and `$n` when the pattern captures) as substitution tokens, so a
+      // variable carrying a dollar amount (the card-hold fee disclosure —
+      // Codex #2677 round-2) could be mangled. The function form inserts
+      // the value verbatim, always.
+      const replacement = val == null ? '' : String(val);
+      body = body.replace(new RegExp(`\\{${key}\\}`, 'g'), () => replacement);
     }
     const unresolved = extractTemplatePlaceholders(body);
     if (unresolved.length) {

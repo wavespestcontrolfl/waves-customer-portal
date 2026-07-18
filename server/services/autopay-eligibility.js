@@ -11,12 +11,24 @@ function isPaused(customer, now = new Date()) {
   return /^\d{4}-\d{2}-\d{2}$/.test(pausedUntil) && pausedUntil >= etDateString(now);
 }
 
-function isChargeableAutopayMethod(method) {
+function isExpiredCardMethod(method, now = new Date()) {
+  if (!method || isBankMethodType(method.method_type)) return false;
+  const expMonth = Number(method.exp_month);
+  const expYear = Number(method.exp_year);
+  if (!Number.isInteger(expMonth) || expMonth < 1 || expMonth > 12 || !Number.isInteger(expYear)) {
+    return true;
+  }
+  const [currentYear, currentMonth] = etDateString(now).split('-').map(Number);
+  return expYear < currentYear || (expYear === currentYear && expMonth < currentMonth);
+}
+
+function isChargeableAutopayMethod(method, now = new Date()) {
   return !!method
     && method.processor === 'stripe'
     && method.is_default === true
     && method.autopay_enabled === true
-    && !!method.stripe_payment_method_id;
+    && !!method.stripe_payment_method_id
+    && !isExpiredCardMethod(method, now);
 }
 
 async function getChargeableAutopayMethod(customer, knex) {
@@ -30,7 +42,10 @@ async function getChargeableAutopayMethod(customer, knex) {
         is_default: true,
         autopay_enabled: true,
       })
-      .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled');
+      .first(
+        'id', 'processor', 'method_type', 'stripe_payment_method_id',
+        'is_default', 'autopay_enabled', 'exp_month', 'exp_year'
+      );
   } catch {
     return null;
   }
@@ -43,7 +58,7 @@ async function customerOnAutopay(customer, options = {}) {
   if (isPaused(customer, options.now)) return false;
 
   const paymentMethod = await getChargeableAutopayMethod(customer, knex);
-  if (!isChargeableAutopayMethod(paymentMethod)) return false;
+  if (!isChargeableAutopayMethod(paymentMethod, options.now)) return false;
 
   if (customer.ach_status && customer.ach_status !== 'active') {
     return paymentMethod.method_type === 'card';
@@ -58,31 +73,64 @@ async function customerOnAutopay(customer, options = {}) {
 // payment_methods row exists — with the ACH-not-active → card-only fallback, where
 // a NULL/'' ach_status is treated as "no ACH block" (matching the JS, where '' is
 // falsy). Requires the customers table to be aliased `c` in the caller's query.
-// The single `?` binds today's ET date. Returns { sql, binding } so callers can
-// also NOT() it.
-function autopayActivePredicate() {
-  const sql = `(
-    c.autopay_enabled IS NOT FALSE
-    AND NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= ?::date)
-    AND EXISTS (
-      SELECT 1 FROM payment_methods pm
-      WHERE pm.customer_id = c.id
+// The single `?` binds today's ET date once; pause and card-expiry checks both
+// read that same value so a UTC month rollover cannot split their definition of
+// "today". Returns { sql, binding } so callers can also NOT() it.
+function autopayActivePredicate(now = new Date()) {
+  const sql = `EXISTS (
+    SELECT 1
+    FROM (VALUES (?::date)) AS et(today)
+    WHERE c.autopay_enabled IS NOT FALSE
+      AND NOT (c.autopay_paused_until IS NOT NULL AND c.autopay_paused_until >= et.today)
+      AND EXISTS (
+        SELECT 1 FROM payment_methods pm
+        WHERE pm.customer_id = c.id
         AND pm.processor = 'stripe'
         AND pm.is_default = true
         AND pm.autopay_enabled = true
         AND pm.stripe_payment_method_id IS NOT NULL
         AND (
+          pm.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+          OR CASE
+            WHEN NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'
+              AND NULLIF(BTRIM(pm.exp_year), '') ~ '^[0-9]{4}$'
+            THEN (
+              NULLIF(BTRIM(pm.exp_month), '')::integer BETWEEN 1 AND 12
+              AND (
+                NULLIF(BTRIM(pm.exp_year), '')::integer > EXTRACT(YEAR FROM et.today)
+                OR (
+                  NULLIF(BTRIM(pm.exp_year), '')::integer = EXTRACT(YEAR FROM et.today)
+                  AND NULLIF(BTRIM(pm.exp_month), '')::integer >= EXTRACT(MONTH FROM et.today)
+                )
+              )
+            )
+            ELSE FALSE
+          END
+        )
+        AND (
           c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active'
           OR pm.method_type = 'card'
         )
-    )
+      )
   )`;
-  return { sql, binding: etDateString() };
+  return { sql, binding: etDateString(now) };
+}
+
+// Bank rows appear under BOTH aliases — savePaymentMethod writes 'ach',
+// other paths have written Stripe's 'us_bank_account' (the same pair
+// enrollConsentedMethod's BANK_ALIASES handles). Every bank guard must
+// accept both or alias rows slip past it (Codex #2706 r5).
+function isBankMethodType(methodType) {
+  const t = String(methodType || '').toLowerCase();
+  return t === 'ach' || t === 'us_bank_account';
 }
 
 module.exports = {
   customerOnAutopay,
+  getChargeableAutopayMethod,
   isChargeableAutopayMethod,
+  isBankMethodType,
+  isExpiredCardMethod,
   isPaused,
   autopayActivePredicate,
 };

@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -133,11 +133,104 @@ describe('ServiceSection', () => {
       />,
     );
 
-    expect(screen.getByText('$72')).toBeInTheDocument();
+    expect(screen.getByText('$72.00')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
     // The "Service visits: …" cadence line was removed per owner directive.
     expect(screen.queryByText(/Service visits:/)).not.toBeInTheDocument();
     expect(screen.queryByText('/bi-monthly')).not.toBeInTheDocument();
+  });
+
+  it('leads with the per-application price on a lawn section (every service bills per application)', () => {
+    // Shaped like a server lawn-ladder entry: monthlyBase is the pre-discount
+    // anchor, perTreatment/displayPrice the net per-application price.
+    render(
+      <ServiceSection
+        section={{
+          key: 'lawn_care',
+          label: 'Lawn Care',
+          isRecurring: true,
+          isPest: false,
+          frequencies: [{
+            key: 'premium',
+            label: 'Monthly',
+            serviceCategory: 'lawn_care',
+            monthlyBase: 79,
+            monthly: 71.1,
+            annual: 853.2,
+            perTreatment: 71.1,
+            visitsPerYear: 12,
+            billingFrequencyKey: 'monthly',
+            included: [{ key: 'lawn_care_premium', label: 'Monthly lawn care program' }],
+            perServiceTreatments: [{
+              service: 'lawn_care',
+              label: 'Lawn Care',
+              perTreatment: 71.1,
+              displayPrice: 71.1,
+              visitsPerYear: 12,
+            }],
+          }],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="premium"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      />,
+    );
+
+    // Net per-application headline with the struck pre-discount anchor —
+    // never a /mo rate. (The treatment row restates the price, hence AllBy.)
+    expect(screen.getAllByText('$71.10').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('$79.00 / application')).toBeInTheDocument();
+    expect(screen.queryByText('/mo')).not.toBeInTheDocument();
+    expect(screen.getByText(/12 applications per year included/)).toBeInTheDocument();
+  });
+
+  it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {
+    // Synthetic unsplittable bundle (pest + lawn) whose legacy snapshot
+    // itemizes only the pest slice as a treatment row. The card must lead with
+    // the combined recurring total ($130.00/mo), NOT the lone pest per-application
+    // price ($94.00) — accept/billing charges the bundle total.
+    render(
+      <ServiceSection
+        section={{
+          key: 'bundle',
+          label: 'Recurring services',
+          isRecurring: true,
+          isPest: true,
+          memberKeys: ['pest_control', 'lawn_care'],
+          frequencies: [{
+            key: 'monthly',
+            label: 'Monthly',
+            monthly: 130,
+            annual: 1560,
+            perServiceTreatments: [{
+              service: 'pest_control',
+              label: 'Pest Control',
+              perTreatment: 94,
+              displayPrice: 94,
+              visitsPerYear: 6,
+            }],
+            included: [{ key: 'bundle', label: 'Recurring services' }],
+          }],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="monthly"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      />,
+    );
+
+    // Combined cadence total leads with a standalone "/mo" suffix. Were the
+    // bundle wrongly treated per-application, the headline would be the lone
+    // pest price ("/ application" suffix) plus a "Billed $130.00/mo, spread across
+    // the year" note — so the note's absence is the real discriminator.
+    expect(screen.getByText('$130.00')).toBeInTheDocument();
+    expect(screen.getByText('/mo')).toBeInTheDocument();
+    expect(screen.queryByText(/spread across the year/)).not.toBeInTheDocument();
   });
 
   it('shows the selected quote-required frequency reason', () => {
@@ -206,7 +299,7 @@ describe('OneTimeBreakdownCard', () => {
       />,
     );
 
-    expect(screen.getByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).toBeInTheDocument();
+    expect(screen.getByText((_, el) => el?.textContent === '$99.00*' && el?.children.length === 0)).toBeInTheDocument();
     expect(screen.getByText(/waived when you pay the year in full/i)).toBeInTheDocument();
   });
 
@@ -235,9 +328,53 @@ describe('OneTimeBreakdownCard', () => {
     );
 
     expect(screen.queryByText(/waived/i)).not.toBeInTheDocument();
-    // Both the row amount and the one-time total render plain $99 — no asterisk.
-    expect(screen.getAllByText('$99').length).toBe(2);
-    expect(screen.queryByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).not.toBeInTheDocument();
+    // Both the row amount and the one-time total render plain $99.00 — no asterisk.
+    expect(screen.getAllByText('$99.00').length).toBe(2);
+    expect(screen.queryByText((_, el) => el?.textContent === '$99.00*' && el?.children.length === 0)).not.toBeInTheDocument();
+  });
+
+  it('excludes serviceless embedded rows by identity key so they never total twice', () => {
+    // Older termite install rows carry no `service` — they normalize into the
+    // termite section by LABEL and render embedded there. The standalone card
+    // must drop them via oneTimeRowIdentityKey, not a truthy `service` match.
+    const legacyInstall = { label: 'Advance Installation', amount: 639, detail: '23 stations' };
+    const { container } = render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 639, items: [legacyInstall] }}
+        excludeServices={[oneTimeRowIdentityKey(legacyInstall)]}
+      />,
+    );
+    // Nothing left to show — the card renders null instead of re-totaling.
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('still excludes service-keyed embedded rows passed as identity keys', () => {
+    const keyedRow = { service: 'termite_bait_installation', label: 'Advance Installation', amount: 639 };
+    const { container } = render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 639, items: [keyedRow] }}
+        excludeServices={[oneTimeRowIdentityKey(keyedRow)]}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('keeps a quote-required sibling that shares a service with an embedded priced row', () => {
+    // Same `service` on both rows: the priced one renders embedded (and is
+    // excluded here); the quote-required one never embeds and MUST stay in
+    // this card with its Quote Required row — a service-only identity would
+    // drop both.
+    const pricedEmbedded = { service: 'flea_package', label: 'Flea Treatment', amount: 250 };
+    const quoteSibling = { service: 'flea_package', label: 'Flea Treatment — Detached Guest House', amount: null, kind: 'quote_required', quoteRequired: true };
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 250, items: [pricedEmbedded, quoteSibling] }}
+        excludeServices={[oneTimeRowIdentityKey(pricedEmbedded)]}
+      />,
+    );
+    expect(screen.getByText('Flea Treatment — Detached Guest House')).toBeInTheDocument();
+    expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
+    expect(screen.queryByText((_, el) => el?.textContent === '$250.00' && el?.children.length === 0)).not.toBeInTheDocument();
   });
 });
 
@@ -260,6 +397,66 @@ describe('oneTimePriceCopy', () => {
   it('keeps the default pest callback copy for a generic one-time pest visit', () => {
     const copy = oneTimePriceCopy({ total: 250, items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 250 }] });
     expect(copy).toMatch(/30-day callback period if pests return/);
+  });
+
+  it('lawn-only one-time gets turf copy without the pest callback line', () => {
+    const copy = oneTimePriceCopy({ total: 174, items: [{ service: 'one_time_lawn', label: 'One-Time Lawn', amount: 174 }] });
+    expect(copy).toMatch(/lawn treatment for the measured turf/i);
+    expect(copy).not.toMatch(/if pests return/);
+  });
+
+  it('lawn specialty rows (top-dressing / dethatching) classify as lawn', () => {
+    const copy = oneTimePriceCopy({ total: 420, items: [{ service: 'top_dressing', label: 'Top Dressing', amount: 420 }] });
+    expect(copy).toMatch(/lawn treatment for the measured turf/i);
+  });
+
+  it('rodent entry-point plugging is exclusion work, never lawn copy (codex P2)', () => {
+    const copy = oneTimePriceCopy({ total: 350, items: [{ service: 'rodent_plugging', label: 'Rodent Entry-Point Plugging', amount: 350 }] });
+    expect(copy).not.toMatch(/lawn treatment for the measured turf/i);
+  });
+
+  it('turf-curative labels (chinch, fungicide, weed) get lawn copy even without a lawn key (codex r2)', () => {
+    expect(oneTimePriceCopy({ total: 174, items: [{ service: 'lawn_pest_curative', label: 'Chinch Bug Curative', amount: 174 }] }))
+      .toMatch(/lawn treatment for the measured turf/i);
+    expect(oneTimePriceCopy({ total: 210, items: [{ label: 'Fungicide Treatment', amount: 210 }] }))
+      .toMatch(/lawn treatment for the measured turf/i);
+    expect(oneTimePriceCopy({ total: 160, items: [{ label: 'Weed Control Treatment', amount: 160 }] }))
+      .toMatch(/lawn treatment for the measured turf/i);
+    // fungus GNATS stay a pest
+    expect(oneTimePriceCopy({ total: 120, items: [{ label: 'Fungus Gnat Treatment', amount: 120 }] }))
+      .not.toMatch(/lawn treatment for the measured turf/i);
+  });
+
+  it('a mixed lawn + pest one-time set keeps the default pest callback copy', () => {
+    const copy = oneTimePriceCopy({
+      total: 458,
+      items: [
+        { service: 'one_time_lawn', label: 'One-Time Lawn', amount: 174 },
+        { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 284 },
+      ],
+    });
+    expect(copy).toMatch(/30-day callback period if pests return/);
+  });
+});
+
+describe('OneTimeModeToggle labels', () => {
+  it('lawn_care estimates get lawn wording, never pest', () => {
+    render(<OneTimeModeToggle mode="recurring" oneTimePrice={174} onChange={() => {}} serviceCategory="lawn_care" />);
+    expect(screen.getByRole('button', { name: 'Recurring Lawn Program' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'One-Time Lawn Treatment' })).toBeInTheDocument();
+  });
+
+  it('pest / bundle / unknown categories keep the legacy pest wording', () => {
+    expect(oneTimeToggleLabels('pest_control')).toEqual({ recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' });
+    expect(oneTimeToggleLabels('bundle')).toEqual({ recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' });
+    expect(oneTimeToggleLabels(undefined)).toEqual({ recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' });
+    render(<OneTimeModeToggle mode="recurring" oneTimePrice={284} onChange={() => {}} />);
+    expect(screen.getByRole('button', { name: 'One-Time Pest Control' })).toBeInTheDocument();
+  });
+
+  it('mosquito and tree & shrub map to their own wording', () => {
+    expect(oneTimeToggleLabels('mosquito').oneTime).toBe('One-Time Mosquito Treatment');
+    expect(oneTimeToggleLabels('tree_shrub').oneTime).toBe('One-Time Tree & Shrub Visit');
   });
 
   it('keeps Bora-Care-only copy when the only other row is a non-billable discount', () => {
@@ -331,6 +528,55 @@ describe('estimateAddServiceOffer', () => {
       serviceKey: 'mosquito',
       label: 'Mosquito',
     }));
+  });
+});
+
+describe('reportShowcaseVariantForServices', () => {
+  it('shows the lawn report on a lawn-only estimate', () => {
+    expect(reportShowcaseVariantForServices([
+      { key: 'lawn_care', label: 'Lawn Care', isRecurring: true },
+    ])).toBe('lawn');
+  });
+
+  it('ignores "pest" in lawn marketing copy — included lines never flip the variant', () => {
+    // Real lawn payloads include "Chinch, sod webworm & turf pest response";
+    // only structural identity (key/memberKeys/isPest/serviceCategory) may
+    // decide the variant, never copy text.
+    expect(reportShowcaseVariantForServices([{
+      key: 'lawn_care',
+      label: 'Lawn Care',
+      isRecurring: true,
+      isPest: false,
+      frequencies: [{
+        key: 'standard',
+        serviceCategory: 'lawn_care',
+        included: [
+          { key: 'fert', label: 'Fertilization + weed control' },
+          { key: 'pests', label: 'Chinch, sod webworm & turf pest response' },
+        ],
+      }],
+    }])).toBe('lawn');
+  });
+
+  it('keeps the pest report when pest control is in the mix', () => {
+    expect(reportShowcaseVariantForServices([{
+      key: 'bundle',
+      label: 'Recurring services',
+      isRecurring: true,
+      memberKeys: ['pest_control', 'lawn_care'],
+      frequencies: [],
+    }])).toBe('pest');
+  });
+
+  it('keeps the pest report for lawn + mosquito', () => {
+    expect(reportShowcaseVariantForServices([
+      { key: 'lawn_care', label: 'Lawn Care', isRecurring: true },
+      { key: 'mosquito', label: 'Mosquito', isRecurring: true },
+    ])).toBe('pest');
+  });
+
+  it('defaults to the pest report with no services', () => {
+    expect(reportShowcaseVariantForServices([])).toBe('pest');
   });
 });
 
@@ -520,7 +766,7 @@ describe('getServiceLabel', () => {
 });
 
 describe('CombinedRecurringPriceCard — low-confidence range tracks the SELECTED cadence', () => {
-  // The uncertain LOW dollars are fixed ($400 × 20% = ±$80) while the exact part
+  // The uncertain LOW dollars are fixed ($400.00 × 20% = ±$80.00) while the exact part
   // moves with the selection — the band must NOT grow with the displayed total.
   const combined = {
     monthlySubtotal: 500,
@@ -531,29 +777,317 @@ describe('CombinedRecurringPriceCard — low-confidence range tracks the SELECTE
   };
 
   it('bands only the LOW dollars when another cadence changes the displayed total', () => {
-    // Selected combined cadence $600/mo: ±$80 → $520–$680 (NOT the stale
-    // fraction's 600×0.8×0.2 = ±$96 → $504–$696).
+    // Selected combined cadence $600.00/mo: ±$80.00 → $520.00–$680.00 (NOT the stale
+    // fraction's 600×0.8×0.2 = ±$96.00 → $504.00–$696.00).
     render(
       <CombinedRecurringPriceCard
         combined={combined}
         selectedFrequency={{ key: 'alt', monthly: 600, annual: 7200 }}
       />,
     );
-    expect(screen.getByText(/\$520–\$680/)).toBeInTheDocument();
-    expect(screen.queryByText(/\$504–\$696/)).not.toBeInTheDocument();
+    expect(screen.getByText(/\$520.00–\$680.00/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$504.00–\$696.00/)).not.toBeInTheDocument();
   });
 
   it('default selection still bands the LOW share of the subtotal', () => {
     render(<CombinedRecurringPriceCard combined={combined} selectedFrequency={null} />);
-    // $500/mo, ±$80 → $420–$580
-    expect(screen.getByText(/\$420–\$580/)).toBeInTheDocument();
+    // $500.00/mo, ±$80.00 → $420.00–$580.00
+    expect(screen.getByText(/\$420.00–\$580.00/)).toBeInTheDocument();
   });
 
   it('falls back to the stamped fraction when raw LOW dollars are absent (older payloads)', () => {
     const { lowConfidenceMonthly, ...withoutRaw } = combined;
     render(<CombinedRecurringPriceCard combined={withoutRaw} selectedFrequency={{ key: 'alt', monthly: 600 }} />);
-    // stamped 0.8 against $600 → ±$96 → $504–$696
-    expect(screen.getByText(/\$504–\$696/)).toBeInTheDocument();
+    // stamped 0.8 against $600.00 → ±$96.00 → $504.00–$696.00
+    expect(screen.getByText(/\$504.00–\$696.00/)).toBeInTheDocument();
+  });
+});
+
+describe('PlanTotalSummary — plan-level referral credit + net', () => {
+  const combined = {
+    monthlySubtotal: 82,
+    annualSubtotal: 984,
+    waveGuardTierLabel: 'Silver',
+    manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+  };
+
+  it('renders the credit as the per-service-sum minus the net — and no combined totals', () => {
+    // Per-service cards sum to $84.08/mo (pre-credit); combined net is $82.00/mo →
+    // the credit shown is the exact difference ($2.08). The combined monthly and
+    // annual totals themselves never render (owner directive 2026-07-11).
+    const { container } = render(<PlanTotalSummary combined={combined} preCreditMonthly={84.08} />);
+    const text = container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/); // fmtMoneySigned uses a Unicode minus
+    expect(text).toContain('Applied to your plan when you book.');
+    expect(text).not.toContain('Plan subtotal');
+    expect(text).not.toContain('Your price');
+    expect(text).not.toContain('$84.08');
+    expect(text).not.toContain('/ year');
+  });
+
+  it('renders nothing when there is no credit to itemize (unchanged no-referral plans)', () => {
+    const { container } = render(<PlanTotalSummary combined={{ monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' }} preCreditMonthly={84.08} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders nothing without a combined payload', () => {
+    const { container } = render(<PlanTotalSummary combined={null} preCreditMonthly={84.08} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('tracks the SELECTED cadence — the credit prices from the selection, no totals shown', () => {
+    // Switched to a pricier cadence: per-service sum $112.08, net $110.00/mo. The
+    // credit is the selection's difference ($2.08); the totals themselves stay off.
+    const { container } = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }} preCreditMonthly={112.08} />,
+    );
+    const text = container.textContent;
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('$112.08');
+    expect(text).not.toContain('$110.00');
+    expect(text).not.toContain('$1,320.00 / year');
+  });
+
+  it('shows the ACTUAL (capped) credit by construction, not a stale default amount', () => {
+    // The selected cadence caps the credit so the net is higher ($83.50, only
+    // $0.58 off the $84.08 sum). The difference shows the real $0.58 — never the
+    // default $2.08 — so the on-screen math always reconciles.
+    const text = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 83.50, annual: 1002 }} preCreditMonthly={84.08} />,
+    ).container.textContent;
+    expect(text).toMatch(/[−-]\$0\.58/);
+    expect(text).not.toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('$83.50');
+  });
+
+  it('renders nothing when the per-service sum is missing or does not exceed the net', () => {
+    // No reliable pre-credit basis → nothing to itemize (not ranged/quote-required).
+    expect(render(<PlanTotalSummary combined={combined} />).container).toBeEmptyDOMElement();
+    expect(render(<PlanTotalSummary combined={combined} preCreditMonthly={82} />).container).toBeEmptyDOMElement();
+  });
+
+  it('on a ranged low-confidence plan keeps the credit visible but no exact net', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const text = render(<PlanTotalSummary combined={ranged} preCreditMonthly={84.08} />).container.textContent;
+    expect(text).toContain('Referral Credit'); // credit stays visible…
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Your price'); // …but no exact subtotal/net
+    expect(text).not.toContain('Plan subtotal');
+    // Same when the range rides on the selected frequency.
+    const text2 = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
+    ).container.textContent;
+    expect(text2).toContain('Referral Credit');
+    expect(text2).not.toContain('Your price');
+  });
+
+  it('ranged credit uses the selected-cadence difference, not the stale default', () => {
+    // Selected cadence caps the credit (net $111.50 vs $112.08 sum → $0.58), so
+    // even the ranged credit-only line shows $0.58, never the default $2.08.
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const text = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 111.50, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
+    ).container.textContent;
+    expect(text).toMatch(/[−-]\$0\.58/);
+    expect(text).not.toMatch(/[−-]\$2\.08/);
+  });
+
+  it('suppresses for a quote-required selection (page hides exact dollars)', () => {
+    const { container } = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', quoteRequired: true }} preCreditMonthly={84.08} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders the credit for a fully-comped plan (net $0,.00 corroborated)', () => {
+    // The credit covers the whole plan: net is $0.00 and the credit line still
+    // renders — but no subtotal/"Your price $0.00" restatement (owner 2026-07-11).
+    const comped = {
+      monthlySubtotal: 0,
+      annualSubtotal: 0,
+      waveGuardTierLabel: 'Silver',
+      manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 },
+    };
+    const text = render(<PlanTotalSummary combined={comped} preCreditMonthly={84.08} />).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).not.toContain('Plan subtotal');
+    expect(text).not.toContain('Your price');
+  });
+
+  it('does not treat a zeroed/missing subtotal as a full comp when the credit cannot cover it', () => {
+    // Legacy payloads can stamp monthlySubtotal 0 when no total resolved; a
+    // $2.08 credit obviously doesn't comp an $84.08 plan, so nothing renders.
+    const broken = {
+      monthlySubtotal: 0,
+      annualSubtotal: 0,
+      manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+    };
+    expect(render(<PlanTotalSummary combined={broken} preCreditMonthly={84.08} />).container).toBeEmptyDOMElement();
+  });
+
+  it('ranged plan: no fallback credit when the sum exists but the selected cadence has no reduction', () => {
+    // The selected cadence fully caps/suppresses the credit (net equals the
+    // per-service sum). Falling back to the default $2.08 would advertise a
+    // credit accept won't apply, so nothing renders.
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 112.08, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('ranged plan with no per-service sum still falls back to the plan credit amount', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const text = render(<PlanTotalSummary combined={ranged} />).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Plan subtotal');
+  });
+
+  it('ranged plan with no per-service sum: no fallback when the selected row suppresses the credit', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2, manualDiscountSuppressed: true }} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders from the SELECTED row's credit when the default cadence suppresses it", () => {
+    // The server nulls combined.manualDiscount when the DEFAULT cadence
+    // floor-suppresses the credit — but the selected cadence still carries it,
+    // and its reduction is real, so the summary must not vanish.
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{
+          key: 'alt',
+          monthly: 110,
+          annual: 1320,
+          manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+        }}
+        preCreditMonthly={112.08}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Plan subtotal');
+    expect(text).not.toContain('$110.00');
+  });
+
+  it('gates in on the suppressed flag when a combo-selected credit is live (combo rows carry no discount fields)', () => {
+    // Default cadence suppresses the credit (combined.manualDiscount nulled) and
+    // the base row carries only manualDiscountSuppressed — but the selected
+    // COMBO's net still applies the credit. The overlay keeps the base row's
+    // flag, which proves the plan has a credit; the diff prices it.
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984 };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320, manualDiscountSuppressed: true }}
+        preCreditMonthly={112.08}
+      />,
+    ).container.textContent;
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Discount');
+    expect(text).not.toContain('Plan subtotal');
+    expect(text).not.toContain('$110.00');
+  });
+
+  it('uses the payload-level planDiscount for the gate and label when row fields are unavailable', () => {
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984 };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }}
+        preCreditMonthly={112.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('$110.00');
+  });
+
+  it('never conjures a discount line from reconciliation drift on a creditless plan', () => {
+    // Positive subtotal−net difference but NO credit signal anywhere (no live
+    // object, no suppressed flag, no planDiscount) → nothing renders.
+    const { container } = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{ key: 'alt', monthly: 82, annual: 984 }}
+        preCreditMonthly={84.08}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('ranged plan with no per-service sum prices the fallback from planDiscount when row objects are absent', () => {
+    // Gate passes via planDiscount (combo overlay dropped row-level fields);
+    // the credit-only line must price from the same evidence, not vanish.
+    const ranged = { monthlySubtotal: 82, annualSubtotal: 984, lowConfidenceRangePct: 0.2 };
+    const text = render(
+      <PlanTotalSummary
+        combined={ranged}
+        selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Plan subtotal');
+  });
+
+  it('ranged no-sum fallback: the suppressed flag still vetoes a planDiscount', () => {
+    const ranged = { monthlySubtotal: 82, annualSubtotal: 984, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary
+        combined={ranged}
+        selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2, manualDiscountSuppressed: true }}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('a base-row credit capped smaller does not shadow a planDiscount that comps the combo to $0.00', () => {
+    // The base row still carries a small capped object, but the selected combo
+    // is fully comped by the plan credit — corroboration takes the largest
+    // candidate, so "Your price $0.00" renders.
+    const text = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{
+          key: 'alt',
+          monthly: 0,
+          annual: 0,
+          manualDiscount: { label: 'Referral Credit', type: 'FIXED', amount: 18, recurringAmount: 18, monthlyAmount: 1.50, capped: true },
+        }}
+        preCreditMonthly={84.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).not.toContain('Your price');
+  });
+
+  it('corroborates a $0.00 net against the planDiscount when row-level objects are absent', () => {
+    // Comped via a combo selection: no row-level discount object survives the
+    // overlay, but the payload-level credit covers the whole subtotal.
+    const text = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{ key: 'alt', monthly: 0, annual: 0, manualDiscountSuppressed: true }}
+        preCreditMonthly={84.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).not.toContain('Your price');
   });
 });
 
@@ -667,6 +1201,80 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
   });
 });
 
+describe('SuccessCard — already-accepted retry', () => {
+  it('does not promise a confirmation text when the accept was a retry of an already-accepted estimate', () => {
+    // Server returns the full success payload with alreadyAccepted: true; with
+    // no nextStep resolving, the generic card must not promise a text that
+    // may never re-send.
+    render(<SuccessCard acceptResult={{ success: true, alreadyAccepted: true }} />);
+
+    expect(screen.getByText(/already accepted — you're all set/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check your phone for the confirmation text/)).not.toBeInTheDocument();
+  });
+
+  it('fresh accept shows the pared-down booked card (owner 2026-07-12): no check-your-phone copy', () => {
+    render(<SuccessCard acceptResult={{ success: true }} appointmentLabel="Tue, Jul 14 · 9:00 AM" recurring />);
+
+    expect(screen.getByText("You're booked!")).toBeInTheDocument();
+    // Date/time rendered WITHOUT the "First visit:" prefix (owner ask).
+    expect(screen.getByText('Tue, Jul 14 · 9:00 AM')).toBeInTheDocument();
+    expect(screen.queryByText(/First visit:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Check your phone/)).not.toBeInTheDocument();
+    // Recurring accepts get the app line + both store badges.
+    expect(screen.getByText(/Download the Waves app/)).toBeInTheDocument();
+    // Anchor + its SVG each carry the label — assert at least the link.
+    expect(screen.getAllByLabelText('Download on the App Store').length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText('Get it on Google Play').length).toBeGreaterThan(0);
+  });
+
+  it('does not promise a booking-link text for an already-accepted one-time retry, but keeps the booking button', () => {
+    // An already-accepted unbooked one-time retry returns book_one_time plus
+    // a FRESH booking URL without re-sending the SMS — the on-screen button
+    // is the real path, so the copy must not claim a text was sent.
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true,
+          alreadyAccepted: true,
+          nextStep: 'book_one_time',
+          bookingUrl: 'https://book.example/one-time',
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/Check your phone/)).not.toBeInTheDocument();
+    expect(screen.getByText(/already accepted — pick your appointment now/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick appointment' })).toHaveAttribute('href', 'https://book.example/one-time');
+  });
+
+  it('keeps the booking-link text for a fresh one-time accept', () => {
+    render(
+      <SuccessCard
+        acceptResult={{ success: true, nextStep: 'book_one_time', bookingUrl: 'https://book.example/one-time' }}
+      />,
+    );
+
+    expect(screen.getByText(/Check your phone for the booking link/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick appointment' })).toHaveAttribute('href', 'https://book.example/one-time');
+  });
+
+  it('routes an already-accepted retry to its nextStep card when one resolves', () => {
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true,
+          alreadyAccepted: true,
+          nextStep: 'pay_invoice',
+          invoicePayUrl: 'https://pay.example/inv',
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/Payment is optional right now/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Pay now and save card/ })).toHaveAttribute('href', 'https://pay.example/inv');
+  });
+});
+
 describe('oneTimeExtrasForPaymentNote', () => {
   const pricing = {
     oneTimeBreakdown: {
@@ -718,5 +1326,63 @@ describe('oneTimeExtrasForPaymentNote', () => {
       },
     };
     expect(oneTimeExtrasForPaymentNote(noSetup, {}, 'recurring')).toBe(249);
+  });
+});
+
+describe('ServiceSection — details-packet preview parity', () => {
+  const lawnSection = {
+    key: 'lawn_care',
+    label: 'Lawn Care',
+    isRecurring: true,
+    isPest: false,
+    frequencies: [{
+      key: 'standard',
+      label: 'Monthly',
+      serviceCategory: 'lawn_care',
+      monthly: 50,
+      annual: 600,
+      included: [{ key: 'lawn_care_standard', label: 'Monthly lawn care program' }],
+    }],
+    copy: { priceWording: {} },
+  };
+
+  const renderRow = (preview) => render(
+    <ServiceSection
+      section={lawnSection}
+      selectedFrequencyKey="standard"
+      selectedAddOns={new Set()}
+      onFrequencyChange={vi.fn()}
+      onAddOnToggle={vi.fn()}
+      renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      serviceDetailsRequest={{
+        token: 'tok-123',
+        customerEmail: 'a@b.com',
+        customerPhone: '+19415551234',
+        disabled: false,
+        preview,
+      }}
+    />,
+  );
+
+  it('links View the PDF and shows no preview caption on a live estimate', () => {
+    renderRow(false);
+    // Icon-only pill (owner 2026-07-11): the action name lives in aria-label.
+    const link = screen.getByLabelText('View the PDF').closest('a');
+    expect(link.getAttribute('href')).toContain('/estimates/tok-123/service-details/lawn_care/pdf');
+    expect(screen.queryByText(/Preview only\./)).not.toBeInTheDocument();
+  });
+
+  it('renders the row inert with a preview caption in the staff draft preview', () => {
+    renderRow(true);
+    // View the PDF renders for customer-view parity but carries no href — a
+    // draft has no public PDF, so the link must not be able to navigate to a
+    // 404.
+    const link = screen.getByLabelText('View the PDF').closest('a');
+    expect(link.getAttribute('href')).toBeNull();
+    // The send buttons still render (parity) but the caption makes clear they
+    // are inert until the estimate is sent.
+    expect(screen.getByRole('button', { name: /Email me the PDF/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Text me the link/ })).toBeInTheDocument();
+    expect(screen.getByText(/Preview only\./)).toBeInTheDocument();
   });
 });

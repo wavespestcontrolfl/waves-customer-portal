@@ -83,14 +83,14 @@ describe('pest-control pricing hardening', () => {
 
     expect(pest).toEqual(expect.objectContaining({
       footprintAdj: 7,
-      additionalAdj: 24,
-      basePrice: 148,
+      additionalAdj: 18,
+      basePrice: 142,
       roachAddOn: 0,
       freqMult: 0.70,
       visitsPerYear: 12,
-      perApp: 103.60,
-      annual: 1243.20,
-      monthly: 103.60,
+      perApp: 99.40,
+      annual: 1192.80,
+      monthly: 99.40,
       roachType: 'german',
     }));
     expect(roach).toEqual(expect.objectContaining({
@@ -154,6 +154,56 @@ describe('pest-control pricing hardening', () => {
     expect(clamped.pestAgeAdjWarnings).toContain('pest_age_adjustment_clamped');
     expect(pricePestControl(base, { modifiers: { pestAgeAdj: 'old' } }).pestAgeAdjWarnings)
       .toContain('invalid_pest_age_adjustment_defaulted_to_zero');
+  });
+
+  test('tree density and large driveway are context-only for pest-control pricing', () => {
+    const base = {
+      footprint: 3000,
+      propertyType: 'single_family',
+      features: { shrubs: 'moderate', complexity: 'moderate' },
+    };
+    const legacyKeys = ['trees_light', 'trees_moderate', 'trees_heavy', 'largeDriveway'];
+    const previous = Object.fromEntries(legacyKeys.map((key) => [
+      key,
+      {
+        exists: Object.prototype.hasOwnProperty.call(constants.PEST.additionalAdjustments, key),
+        value: constants.PEST.additionalAdjustments[key],
+      },
+    ]));
+
+    try {
+      // Even a stale DB/config overlay must not make the retired observations
+      // price-bearing again.
+      Object.assign(constants.PEST.additionalAdjustments, {
+        trees_light: -50,
+        trees_moderate: 25,
+        trees_heavy: 75,
+        largeDriveway: 100,
+      });
+      const neutral = pricePestControl(base);
+
+      for (const features of [
+        { trees: 'light', largeDriveway: false },
+        { trees: 'moderate', largeDriveway: true },
+        { trees: 'heavy', largeDriveway: true },
+      ]) {
+        expect(pricePestControl({
+          ...base,
+          features: { ...base.features, ...features },
+        })).toEqual(expect.objectContaining({
+          additionalAdj: neutral.additionalAdj,
+          basePrice: neutral.basePrice,
+          perApp: neutral.perApp,
+          annual: neutral.annual,
+          monthly: neutral.monthly,
+        }));
+      }
+    } finally {
+      for (const key of legacyKeys) {
+        if (previous[key].exists) constants.PEST.additionalAdjustments[key] = previous[key].value;
+        else delete constants.PEST.additionalAdjustments[key];
+      }
+    }
   });
 
   test('initial roach knockdown preserves scale brackets and fallback metadata', () => {
@@ -334,12 +384,11 @@ describe('pest-control pricing hardening', () => {
       visits: 4,
     }));
 
-    expect(priceWDO({ footprint: 2500 }).price).toBe(175);
-    expect(priceWDO({ footprint: 2501 }).price).toBe(200);
-    expect(priceWDO({ footprint: 3500 }).price).toBe(200);
-    expect(priceWDO({ footprint: 3501 }).price).toBe(225);
+    // $250 flat regardless of footprint (owner decision 2026-07-12, Q8).
+    expect(priceWDO({ footprint: 2500 }).price).toBe(250);
+    expect(priceWDO({ footprint: 3501 }).price).toBe(250);
     const fallback = priceWDO({});
-    expect(fallback.price).toBe(175);
+    expect(fallback.price).toBe(250);
     expect(fallback.requiresManualReview).toBe(true);
   });
 

@@ -2,7 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
+import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import useIsMobile from "../../hooks/useIsMobile";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -129,6 +131,37 @@ function leadEstimateParams(lead) {
   if (lead.service_interest)
     params.set("serviceInterest", lead.service_interest);
   return params;
+}
+
+// leads.extracted_data arrives as jsonb (object) or a JSON string depending on
+// which pipeline wrote it — parse defensively, never crash the row on bad data.
+function parseLeadExtractedData(raw) {
+  if (!raw) return {};
+  try {
+    const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+// preferred_date_time is an ET wall-clock string with NO timezone
+// ("2026-04-20T14:00" — the call extraction stores Eastern local time).
+// Don't route it through new Date(): a non-Eastern browser would reinterpret
+// the zone. Format the stated wall clock directly and label it ET.
+function fmtPreferredDateTime(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(value));
+  if (!m) return String(value);
+  const [, y, mo, d, h, min] = m;
+  const hour = Number(h);
+  const h12 = hour % 12 || 12;
+  const ampm = hour >= 12 ? "PM" : "AM";
+  return `${Number(mo)}/${Number(d)}/${y}, ${h12}:${min} ${ampm} ET`;
+}
+
+function fmtCallDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
 function Badge({ label, color, style }) {
@@ -622,6 +655,7 @@ export function LeadsSection() {
   const navigate = useNavigate();
   const [, setSearchParams] = useSearchParams();
   const isMobile = useIsMobile();
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const [tab, setTab] = useState("pipeline");
   const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
@@ -649,6 +683,7 @@ export function LeadsSection() {
   const [leadActivities, setLeadActivities] = useState([]);
   const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
+  const [leadCalls, setLeadCalls] = useState([]);
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
   const [filters, setFilters] = useState(() => {
@@ -842,6 +877,7 @@ export function LeadsSection() {
       const requestedLeadId = String(leadId);
       if (!silent) {
         setLeadActivities([]);
+        setLeadCalls([]);
         setLeadActivitiesError(null);
         setLeadActivitiesLoading(true);
       }
@@ -849,12 +885,14 @@ export function LeadsSection() {
         const data = await adminFetch(`/admin/leads/${leadId}`);
         if (String(expandedLeadRef.current || "") !== requestedLeadId) return;
         setLeadActivities(data.activities || []);
+        setLeadCalls(data.calls || []);
         if (!silent) setLeadActivitiesError(null);
       } catch (e) {
         console.error("loadLeadActivities", e);
         if (String(expandedLeadRef.current || "") !== requestedLeadId) return;
         if (!silent) {
           setLeadActivities([]);
+          setLeadCalls([]);
           setLeadActivitiesError(e);
         }
       } finally {
@@ -1447,6 +1485,11 @@ export function LeadsSection() {
                             >
                               {lead.phone || lead.email || "--"}
                             </div>{" "}
+                            {isMobile && lead.service_interest && (
+                              <div style={{ color: C.text, fontSize: 12 }}>
+                                {lead.service_interest}
+                              </div>
+                            )}{" "}
                           </td>{" "}
                           {!isMobile && (
                             <>
@@ -1633,6 +1676,17 @@ export function LeadsSection() {
                                     >
                                       {" "}
                                       <div>
+                                        Service:{" "}
+                                        <span
+                                          style={{
+                                            color: C.heading,
+                                            fontWeight: 600,
+                                          }}
+                                        >
+                                          {lead.service_interest || "--"}
+                                        </span>
+                                      </div>{" "}
+                                      <div>
                                         Email:{" "}
                                         <span style={{ color: C.text }}>
                                           {lead.email || "--"}
@@ -1681,7 +1735,139 @@ export function LeadsSection() {
                                           </span>
                                         </div>
                                       )}
+                                      {(() => {
+                                        const ex = parseLeadExtractedData(
+                                          lead.extracted_data,
+                                        );
+                                        const quoteFlags = [
+                                          ex.quote_requested &&
+                                            "Quote requested on call",
+                                          ex.quote_promised &&
+                                            "Quote promised to caller",
+                                        ].filter(Boolean);
+                                        if (
+                                          !ex.pain_points &&
+                                          !ex.preferred_date_time &&
+                                          quoteFlags.length === 0
+                                        )
+                                          return null;
+                                        return (
+                                          <>
+                                            {ex.pain_points && (
+                                              <div>
+                                                Concerns:{" "}
+                                                <span
+                                                  style={{ color: C.text }}
+                                                >
+                                                  {ex.pain_points}
+                                                </span>
+                                              </div>
+                                            )}
+                                            {ex.preferred_date_time && (
+                                              <div>
+                                                Preferred Time:{" "}
+                                                <span
+                                                  style={{ color: C.text }}
+                                                >
+                                                  {fmtPreferredDateTime(
+                                                    ex.preferred_date_time,
+                                                  )}
+                                                </span>
+                                              </div>
+                                            )}
+                                            {quoteFlags.length > 0 && (
+                                              <div style={{ marginTop: 4 }}>
+                                                {quoteFlags.map((f) => (
+                                                  <Badge
+                                                    key={f}
+                                                    label={f}
+                                                    color={C.amber}
+                                                    style={{
+                                                      marginRight: 6,
+                                                    }}
+                                                  />
+                                                ))}
+                                              </div>
+                                            )}
+                                          </>
+                                        );
+                                      })()}
                                     </div>{" "}
+                                    {leadCalls.length > 0 && (
+                                      <div style={{ marginTop: 12 }}>
+                                        <h4
+                                          style={{
+                                            margin: "0 0 8px",
+                                            color: C.heading,
+                                            fontSize: 14,
+                                          }}
+                                        >
+                                          Calls
+                                        </h4>
+                                        {leadCalls.map((call) => (
+                                          <div
+                                            key={call.id}
+                                            style={{
+                                              border: `1px solid ${C.border}`,
+                                              borderRadius: 8,
+                                              padding: 10,
+                                              marginBottom: 8,
+                                              fontSize: 12,
+                                              color: C.muted,
+                                            }}
+                                          >
+                                            <div style={{ marginBottom: 6 }}>
+                                              {new Date(
+                                                call.created_at,
+                                              ).toLocaleString()}
+                                              {call.duration_seconds
+                                                ? ` — ${fmtCallDuration(call.duration_seconds)}`
+                                                : ""}
+                                              {call.direction === "outbound"
+                                                ? " (outbound)"
+                                                : ""}
+                                            </div>
+                                            {call.has_recording && (
+                                              <AuthenticatedCallAudio
+                                                recordingId={
+                                                  call.recording_sid || call.id
+                                                }
+                                                style={{
+                                                  marginBottom: 6,
+                                                  color: C.text,
+                                                }}
+                                              />
+                                            )}
+                                            {call.transcription && (
+                                              <details>
+                                                <summary
+                                                  style={{
+                                                    cursor: "pointer",
+                                                    color: C.teal,
+                                                    fontSize: 12,
+                                                  }}
+                                                >
+                                                  View transcript
+                                                </summary>
+                                                <div
+                                                  style={{
+                                                    marginTop: 6,
+                                                    maxHeight: 180,
+                                                    overflowY: "auto",
+                                                    whiteSpace: "pre-wrap",
+                                                    color: C.text,
+                                                    fontSize: 12,
+                                                    lineHeight: 1.5,
+                                                  }}
+                                                >
+                                                  {call.transcription}
+                                                </div>
+                                              </details>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
                                   </div>{" "}
                                   <div style={{ flex: "1 1 300px" }}>
                                     {" "}
@@ -1757,6 +1943,36 @@ export function LeadsSection() {
                                           <span style={{ color: C.text }}>
                                             {a.description}
                                           </span>{" "}
+                                          {(() => {
+                                            if (
+                                              a.activity_type !== "ai_triage" ||
+                                              !a.metadata
+                                            )
+                                              return null;
+                                            let meta = {};
+                                            try {
+                                              meta =
+                                                typeof a.metadata === "string"
+                                                  ? JSON.parse(a.metadata)
+                                                  : a.metadata;
+                                            } catch (e) {}
+                                            const lines = [
+                                              meta.call_summary,
+                                              meta.pain_points &&
+                                                `Concerns: ${meta.pain_points}`,
+                                            ].filter(Boolean);
+                                            if (!lines.length) return null;
+                                            return (
+                                              <div
+                                                style={{
+                                                  marginTop: 2,
+                                                  color: C.text,
+                                                }}
+                                              >
+                                                {lines.join(" — ")}
+                                              </div>
+                                            );
+                                          })()}
                                           <div
                                             style={{
                                               fontSize: 10,
@@ -1917,6 +2133,15 @@ export function LeadsSection() {
                                   >
                                     Create Estimate
                                   </Btn>{" "}
+                                  {agentEstimateEnabled && OPEN_FILTER_STATUSES.includes(lead.status) && (
+                                    <Btn
+                                      small
+                                      color={C.purple}
+                                      onClick={() => navigate(`/admin/agent-estimate?leadId=${encodeURIComponent(lead.id)}`)}
+                                    >
+                                      Agent Estimate
+                                    </Btn>
+                                  )}{" "}
                                   <Btn
                                     small
                                     color={C.amber}
@@ -1935,30 +2160,102 @@ export function LeadsSection() {
                                     small
                                     color={C.green}
                                     onClick={() => {
-                                      const interest = (
-                                        lead.service_interest || ""
-                                      )
-                                        .trim()
-                                        .toLowerCase();
-                                      const match = interest
-                                        ? services.find((s) =>
-                                            [s.name, s.short_name, s.service_key]
-                                              .filter(Boolean)
-                                              .some((v) =>
-                                                v
-                                                  .toLowerCase()
-                                                  .includes(interest),
-                                              ),
-                                          )
-                                        : null;
+                                      // Multi-service call leads persist a
+                                      // composed label ("A + B + C") whose
+                                      // PRIMARY may itself be a catalog row
+                                      // containing " + " ("Lawn + Tree &
+                                      // Shrub"). Try the longest prefix
+                                      // first, shedding one " + " segment at
+                                      // a time, so a plus-named combo row
+                                      // still matches before falling back to
+                                      // the bare first segment.
+                                      const segs = (lead.service_interest || "")
+                                        .split(" + ")
+                                        .map((s) => s.trim())
+                                        .filter(Boolean);
+                                      const candidates = segs.map((_, i) =>
+                                        segs
+                                          .slice(0, segs.length - i)
+                                          .join(" + ")
+                                          .toLowerCase(),
+                                      );
+                                      let match = null;
+                                      for (const cand of candidates) {
+                                        match = services.find((s) =>
+                                          [s.name, s.short_name, s.service_key]
+                                            .filter(Boolean)
+                                            .some((v) => {
+                                              const name = v.toLowerCase();
+                                              // Two-way containment: stored
+                                              // labels can be LONGER than the
+                                              // catalog row ("Bee / Wasp Nest
+                                              // Removal Service" vs seeded
+                                              // "Bee / Wasp Nest Removal") —
+                                              // but reverse containment only
+                                              // on SINGLE-segment candidates,
+                                              // or a composite would match a
+                                              // secondary's row before the
+                                              // loop sheds to the primary.
+                                              return (
+                                                name.includes(cand) ||
+                                                (!cand.includes(" + ") &&
+                                                  name.length >= 8 &&
+                                                  cand.includes(name))
+                                              );
+                                            }),
+                                        );
+                                        if (match) break;
+                                      }
                                       setApptForm({
                                         leadId: lead.id,
                                         date: "",
                                         time: "",
                                         serviceId: match ? match.id : "",
+                                        // No catalog match: prefill the
+                                        // primary by stripping only KNOWN
+                                        // composed tails (mirror of
+                                        // primaryServiceInterest in
+                                        // server/utils/lead-service-interest)
+                                        // — a bare " + " split would chop a
+                                        // plus-named primary like "Lawn +
+                                        // Tree & Shrub" down to "Lawn".
                                         serviceType: match
                                           ? match.name
-                                          : lead.service_interest || "",
+                                          : (() => {
+                                              const tails = new Set([
+                                                "pest control service",
+                                                "lawn care service",
+                                                "tree & shrub care service",
+                                                "mosquito control service",
+                                                "termite service",
+                                                "termite inspection",
+                                                "rodent control service",
+                                                "wildlife control service",
+                                                "wdo inspection service",
+                                                "bed bug treatment",
+                                                "palm injection",
+                                                "bee / wasp nest removal service",
+                                                "rodent exclusion",
+                                                "flea control service",
+                                              ]);
+                                              let label = (
+                                                lead.service_interest || ""
+                                              ).trim();
+                                              for (;;) {
+                                                const at =
+                                                  label.lastIndexOf(" + ");
+                                                if (at === -1) break;
+                                                const tail = label
+                                                  .slice(at + 3)
+                                                  .trim()
+                                                  .toLowerCase();
+                                                if (!tails.has(tail)) break;
+                                                label = label
+                                                  .slice(0, at)
+                                                  .trim();
+                                              }
+                                              return label;
+                                            })(),
                                         technicianId: "",
                                         notes: "",
                                       });

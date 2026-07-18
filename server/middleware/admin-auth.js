@@ -1,6 +1,27 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
+const { installStaffCallRecordingPrivacy } = require('./staff-call-recording-privacy');
+
+function isStaffAccessToken(decoded) {
+  return decoded?.type === 'access'
+    && Number.isInteger(decoded.tokenVersion)
+    && decoded.tokenVersion >= 1;
+}
+
+function staffTokenVersionMatches(decoded, tech) {
+  if (!isStaffAccessToken(decoded)) return false;
+  const currentVersion = Number(tech?.auth_token_version);
+  return Number.isInteger(currentVersion)
+    && currentVersion >= 1
+    && decoded.tokenVersion === currentVersion;
+}
+
+function passwordChangeRouteAllowed(req) {
+  const routePath = `${req.baseUrl || ''}${req.path || ''}`.replace(/\/+$/, '');
+  return routePath === '/api/admin/auth/me'
+    || routePath === '/api/admin/auth/change-password';
+}
 
 async function adminAuthenticate(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -10,15 +31,30 @@ async function adminAuthenticate(req, res, next) {
 
   try {
     const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    if (!isStaffAccessToken(decoded)) return res.status(401).json({ error: 'Invalid token type' });
     if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid admin token' });
     if (decoded.scope === 'terminal') return res.status(401).json({ error: 'Terminal-scoped token not accepted here' });
 
     const tech = await db('technicians').where({ id: decoded.technicianId }).first();
     if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
+    if (!['admin', 'technician'].includes(tech.role)) {
+      return res.status(401).json({ error: 'Account not found or inactive' });
+    }
+    if (!staffTokenVersionMatches(decoded, tech)) {
+      return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    }
+    if (tech.must_change_password && !passwordChangeRouteAllowed(req)) {
+      return res.status(403).json({
+        error: 'Password change required',
+        code: 'PASSWORD_CHANGE_REQUIRED',
+      });
+    }
 
     req.technician = tech;
     req.technicianId = tech.id;
     req.techRole = tech.role;
+    req.staffToken = decoded;
+    installStaffCallRecordingPrivacy(res);
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
@@ -43,11 +79,14 @@ async function verifyStaffBearer(req) {
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   try {
     const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    if (!isStaffAccessToken(decoded)) return null;
     if (!decoded.technicianId) return null;
     if (decoded.scope === 'terminal') return null;
     const tech = await db('technicians').where({ id: decoded.technicianId }).first();
     if (!tech || !tech.active) return null;
     if (!['admin', 'technician'].includes(tech.role)) return null;
+    if (!staffTokenVersionMatches(decoded, tech)) return null;
+    if (tech.must_change_password) return null;
     return tech;
   } catch {
     return null;
@@ -59,4 +98,11 @@ function requireTechOrAdmin(req, res, next) {
   next();
 }
 
-module.exports = { adminAuthenticate, requireAdmin, requireTechOrAdmin, verifyStaffBearer };
+module.exports = {
+  adminAuthenticate,
+  isStaffAccessToken,
+  requireAdmin,
+  requireTechOrAdmin,
+  staffTokenVersionMatches,
+  verifyStaffBearer,
+};

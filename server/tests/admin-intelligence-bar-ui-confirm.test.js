@@ -95,7 +95,10 @@ function appServer() {
   app.use(express.json({ limit: '10mb' }));
   app.use('/admin/intelligence-bar', intelligenceRouter);
   app.use((err, _req, res, _next) => {
-    res.status(err.status || 500).json({ error: err.message });
+    // Stack rides on the response so an unexpected 500 names its cause in the
+    // assertion output — this suite's 500s are otherwise invisible (the route
+    // logs through the mocked logger).
+    res.status(err.status || 500).json({ error: err.message, stack: err.stack });
   });
   const server = app.listen(0);
   return { server, baseUrl: `http://127.0.0.1:${server.address().port}` };
@@ -255,9 +258,11 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(mockMessagesCreate).toHaveBeenCalledTimes(2);
 
     for (const [call] of mockMessagesCreate.mock.calls) {
-      // system: single text block carrying the ephemeral breakpoint, no pageData.
+      // system: single text block carrying the 1h-TTL breakpoint (operator
+      // queries arrive >5 min apart, so the default TTL expired between
+      // queries and every one paid a cache write with no read), no pageData.
       expect(call.system).toHaveLength(1);
-      expect(call.system[0].cache_control).toEqual({ type: 'ephemeral' });
+      expect(call.system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
       expect(call.system[0].text).not.toContain('CURRENT PAGE STATE');
 
       // messages: exactly one breakpoint, on the last block of the last message.
@@ -309,7 +314,7 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
         ],
       });
 
-      expect(status).toBe(200);
+      expect({ status, error: body.error, stack: body.stack }).toEqual({ status: 200, error: undefined, stack: undefined });
       const firstCallMessages = mockMessagesCreate.mock.calls[0][0].messages;
       const userTurn = firstCallMessages[firstCallMessages.length - 1];
       expect(userTurn.content).toEqual([
@@ -350,7 +355,7 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
         conversationHistory: taintedHistory,
       });
 
-      expect(status).toBe(200);
+      expect({ status, error: body.error, stack: body.stack }).toEqual({ status: 200, error: undefined, stack: undefined });
       const firstCallMessages = mockMessagesCreate.mock.calls[0][0].messages;
       expect(JSON.stringify(firstCallMessages)).not.toContain('[Image attachment context may contain PII]');
       expect(body.conversationHistory.at(-2).content).toBe(

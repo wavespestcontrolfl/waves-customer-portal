@@ -99,6 +99,13 @@ const OPENAI_BEST          = OPENAI_BALANCED;
 const OPENAI_REPORT_WRITER = process.env.MODEL_OPENAI_REPORT_WRITER || 'gpt-5.6-sol';
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || 'gemini-3.5-flash';
 
+// Gemini vision FALLBACK — the prior GA model the customer vision services
+// (pest-identification.js, lawn-assessment.js) retry when GEMINI_VISION_BEST
+// misses, so a live-model entitlement/availability issue never costs the
+// Gemini scorer. Lives here (not in the services) so every model ID stays
+// discoverable in the central registry.
+const GEMINI_VISION_FALLBACK = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
+
 // SMS reply-drafting split (owner directive 2026-07-05):
 //   default auto-reply draft              → GPT-5.6 Luna (high-volume lane)
 //   tone rewrite + save-the-sale replies  → Claude Sonnet 5 (warm customer voice)
@@ -202,6 +209,7 @@ module.exports = {
   OPENAI_SMS_DRAFT,
   SMS_SONNET,
   GEMINI_VISION_BEST,
+  GEMINI_VISION_FALLBACK,
   GEMINI_IMAGE_BEST,
   GEMINI_IMAGE_STABLE,
   GEMINI_VIDEO_FAST,

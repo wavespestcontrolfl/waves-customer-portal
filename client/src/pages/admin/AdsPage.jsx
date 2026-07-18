@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   BarChart3,
   CalendarRange,
@@ -1037,24 +1037,107 @@ function AdvisorTab() {
       .catch(() => setLoading(false));
   }, []);
 
+  // Apply state belongs to ONE report: regenerating replaces the rec list, so
+  // stale positional state (or a late response from the old report's apply)
+  // must never mark the new report's recommendations as applied. The counter
+  // invalidates in-flight applies; the reset clears rendered state.
+  const reportGenRef = useRef(0);
+
   const handleGenerate = async () => {
     setGenerating(true);
-    const r = await adminPost("/admin/ads/advisor/generate", {});
-    setReport({
-      report_data: r.report,
-      date: etDateString(),
-      grade: r.report?.grade,
-    });
-    setGenerating(false);
+    // Invalidate the OLD report's apply state when generation STARTS, not
+    // when it finishes — the AI request is slow, and an apply clicked during
+    // it would capture a token that's still current, executing a live budget
+    // change whose feedback the incoming report then silently discards.
+    // (Apply buttons are also disabled while generating.)
+    reportGenRef.current += 1;
+    setApplied({});
+    try {
+      const r = await adminPost("/admin/ads/advisor/generate", {});
+      setReport({
+        report_data: r.report,
+        date: etDateString(),
+        grade: r.report?.grade,
+      });
+    } finally {
+      // A failed generation must not leave every Apply button disabled until
+      // a page reload — generating gates them while true.
+      setGenerating(false);
+    }
   };
 
   const handleApply = async (rec, idx) => {
-    const result = await adminPost("/admin/ads/advisor/apply", {
-      action: rec.apply_action,
-      campaignName: rec.campaign,
-      reason: rec.action,
-    });
-    setApplied((prev) => ({ ...prev, [idx]: new Date().toLocaleTimeString() }));
+    if (generating) return; // stale report — a new one is being generated
+    // The button label shows the parsed value, and this confirm repeats it —
+    // the server applies rec.apply_value, not whatever number the rec's prose
+    // mentions, so the admin must see the actual amount before it goes live.
+    const summary =
+      rec.apply_action === "change_mode"
+        ? `Set "${rec.campaign}" budget mode to "${rec.apply_value}"?`
+        : `Set "${rec.campaign}" daily budget to $${Number(rec.apply_value)}/day?`;
+    if (!window.confirm(summary)) return;
+    const gen = reportGenRef.current;
+    const setAppliedIfCurrent = (updater) => {
+      if (reportGenRef.current === gen) setApplied(updater);
+    };
+    setAppliedIfCurrent((prev) => ({ ...prev, [idx]: { status: "pending" } }));
+    try {
+      const res = await fetch(`${API_BASE}/admin/ads/advisor/apply`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: rec.apply_action,
+          campaignId: rec.campaign_id,
+          campaignName: rec.campaign,
+          value: rec.apply_value,
+          reason: rec.action,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      // Only show "Applied" when the server actually applied the change — a
+      // 4xx/5xx, or an honest applied:false (couldn't resolve the campaign, no
+      // concrete value, or a manual-only action), surfaces as an error instead.
+      if (!res.ok || body.applied !== true) {
+        setAppliedIfCurrent((prev) => ({
+          ...prev,
+          [idx]: {
+            status: "error",
+            message:
+              body.error ||
+              body.note ||
+              "Couldn't apply automatically — adjust it manually.",
+          },
+        }));
+        return;
+      }
+      setAppliedIfCurrent((prev) => ({
+        ...prev,
+        [idx]: { status: "applied", at: new Date().toLocaleTimeString() },
+      }));
+    } catch {
+      setAppliedIfCurrent((prev) => ({
+        ...prev,
+        [idx]: { status: "error", message: "Network error — not applied." },
+      }));
+    }
+  };
+
+  // Only these advisor actions map to an automated change (setBudget/setMode);
+  // everything else (add_negative, SEO/GBP/bid/keyword actions) is advisory and
+  // must be done by hand — so it never gets an Apply button that could imply it
+  // was executed. An auto action without a concrete value (stale pre-apply_value
+  // reports, a fallback rec with no known budget) is equally un-executable —
+  // its Apply click could only ever 422 — so it renders as manual too.
+  const AUTO_APPLY_ACTIONS = ["increase_budget", "decrease_budget", "change_mode"];
+  const canAutoApply = (rec) => {
+    if (!AUTO_APPLY_ACTIONS.includes(rec.apply_action)) return false;
+    if (rec.apply_action === "change_mode")
+      return ["base", "spent", "stop"].includes(rec.apply_value);
+    const n = Number(rec.apply_value);
+    return Number.isFinite(n) && n > 0;
   };
 
   if (loading)
@@ -1216,7 +1299,10 @@ function AdvisorTab() {
                         {priority} Priority
                       </div>
                       {recs.map((rec, idx) => {
-                        const globalIdx = `${priority}-${idx}`;
+                        // Identity-carrying key: positional state from a prior
+                        // report must not attach to an unrelated rec that
+                        // happens to land in the same slot.
+                        const globalIdx = `${priority}-${idx}-${rec.campaign || ""}-${rec.apply_action || ""}`;
                         return (
                           <div
                             key={idx}
@@ -1266,30 +1352,57 @@ function AdvisorTab() {
                                 Est. impact: {rec.estimated_impact}
                               </div>
                             )}
-                            {rec.apply_action && (
-                              <button
-                                onClick={() => handleApply(rec, globalIdx)}
-                                disabled={!!applied[globalIdx]}
-                                style={{
-                                  padding: "6px 14px",
-                                  borderRadius: 6,
-                                  border: "none",
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                  background: applied[globalIdx]
-                                    ? D.green + "22"
-                                    : D.teal,
-                                  color: applied[globalIdx]
-                                    ? D.green
-                                    : D.heading,
-                                }}
-                              >
-                                {applied[globalIdx]
-                                  ? `Applied at ${applied[globalIdx]}`
-                                  : `Apply: ${rec.apply_action.replace(/_/g, " ")}`}
-                              </button>
-                            )}
+                            {(rec.apply_action || rec.manual_action) &&
+                              (rec.apply_action && canAutoApply(rec) ? (
+                                (() => {
+                                  const st = applied[globalIdx];
+                                  const done = st?.status === "applied";
+                                  const pending = st?.status === "pending";
+                                  return (
+                                    <div>
+                                      <button
+                                        onClick={() => handleApply(rec, globalIdx)}
+                                        disabled={done || pending || generating}
+                                        style={{
+                                          padding: "6px 14px",
+                                          borderRadius: 6,
+                                          border: "none",
+                                          fontSize: 12,
+                                          fontWeight: 600,
+                                          cursor:
+                                            done || pending || generating ? "default" : "pointer",
+                                          background: done ? D.green + "22" : D.teal,
+                                          color: done ? D.green : D.heading,
+                                          opacity: pending || generating ? 0.6 : 1,
+                                        }}
+                                      >
+                                        {done
+                                          ? `Applied at ${st.at}`
+                                          : pending
+                                            ? "Applying…"
+                                            : rec.apply_action === "change_mode"
+                                              ? `Apply: set mode to ${rec.apply_value}`
+                                              : `Apply: ${rec.apply_action.replace(/_/g, " ")} to $${Number(rec.apply_value)}/day`}
+                                      </button>
+                                      {st?.status === "error" && (
+                                        <div
+                                          style={{
+                                            fontSize: 11,
+                                            color: D.red,
+                                            marginTop: 6,
+                                          }}
+                                        >
+                                          {st.message}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()
+                              ) : (
+                                <div style={{ fontSize: 11, color: D.muted }}>
+                                  Manual action: {(rec.apply_action || rec.manual_action).replace(/_/g, " ")}
+                                </div>
+                              ))}
                           </div>
                         );
                       })}

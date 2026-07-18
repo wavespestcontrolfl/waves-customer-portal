@@ -32,11 +32,11 @@ export default function WavesAIScheduleSearch({
   onSearch,
 }) {
   const t = {
-    accent: '#1B2C5B',
+    accent: '#04395E',
     accentText: '#FFFFFF',
     surface: '#FFFFFF',
     inputBg: '#F8FCFE',
-    text: '#1B2C5B',
+    text: '#04395E',
     muted: '#64748B',
     border: '#CFE7F5',
     ...theme,

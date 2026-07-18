@@ -33,6 +33,7 @@ function flatView(extraction) {
     phone: caller.phone_e164 || null,
 
     address_line1: addr.street_line_1 || null,
+    address_line2: addr.street_line_2 || null,
     city: addr.city || null,
     state: addr.state || null,
     zip: addr.postal_code || null,
@@ -44,6 +45,8 @@ function flatView(extraction) {
     quote_requested: svc.quote_requested === true,
     quote_promised: svc.quote_promised === true,
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
+    secondary_contact: mapSecondaryContactToLegacy(extraction.secondary_contact),
+    secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
@@ -82,6 +85,43 @@ function mapAdditionalPropertiesToLegacy(entries) {
     }));
 }
 
+// V2 secondary_contact → the legacy flat shape the processor's secondary-
+// contact persistence expects (same keys as the V1 extraction's
+// secondary_contact). An entry with no name, phone, or email is dropped —
+// there is nothing to persist or review without one.
+function mapSecondaryContactToLegacy(contact) {
+  if (!contact || typeof contact !== 'object') return null;
+  // A V2 contact can arrive with only name_full populated ("Joseph Haught"
+  // unsplit) — derive first/last from it so the name survives the flat
+  // mapping instead of producing an unnamed (or dropped) contact.
+  let firstName = contact.first_name || null;
+  let lastName = contact.last_name || null;
+  if (!firstName && !lastName && String(contact.name_full || '').trim()) {
+    const parts = String(contact.name_full).trim().split(/\s+/);
+    firstName = parts[0];
+    lastName = parts.slice(1).join(' ') || null;
+  }
+  const mapped = {
+    first_name: firstName,
+    last_name: lastName,
+    phone: contact.phone_e164 || null,
+    email: contact.email || null,
+    role: contact.role || 'unknown',
+    wants_notifications: contact.wants_notifications === true,
+    is_billing_party: contact.is_billing_party === true,
+    notes: contact.notes || null,
+  };
+  if (!mapped.first_name && !mapped.last_name && !mapped.phone && !mapped.email) return null;
+  return mapped;
+}
+
+// 1.4.0 array — every entry through the same single-contact mapper; empty
+// shells drop; hard cap 3 (the slot budget).
+function mapSecondaryContactsToLegacy(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(mapSecondaryContactToLegacy).filter(Boolean).slice(0, 3);
+}
+
 function mapServiceCategoryToLegacy(category) {
   if (!category) return null;
   const map = {
@@ -92,6 +132,8 @@ function mapServiceCategoryToLegacy(category) {
     stinging_insect: null,
     lawn_care: 'Lawn Care',
     palm_injection: 'Tree & Shrub Care',
+    bed_bug: 'Bed Bug Treatment',
+    wdo: 'WDO Inspection',
     exclusion: 'Rodent Control',
     inspection_only: null,
     bundled_waveguard: 'General Pest Control',
@@ -117,7 +159,9 @@ function mapLeadQualityToLegacy(quality) {
 module.exports = {
   isV2Extraction,
   flatView,
+  mapSecondaryContactsToLegacy,
   mapServiceCategoryToLegacy,
   mapLeadQualityToLegacy,
   mapAdditionalPropertiesToLegacy,
+  mapSecondaryContactToLegacy,
 };

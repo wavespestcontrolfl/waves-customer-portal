@@ -1,8 +1,14 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { isNativeApp, hasSessionToken } from '../native/platform';
 import { authenticateBiometric } from '../native/biometric';
 import { COLORS, FONTS } from '../theme-brand';
 import '../glass/glass-theme.css';
+
+export const BiometricLockContext = createContext(false);
+
+export function useBiometricLock() {
+  return useContext(BiometricLockContext);
+}
 
 // The lock overlay is a liquid-glass surface, but it deliberately does NOT call
 // useGlassSurface: the shared scene mounts BEHIND #root, and a privacy overlay
@@ -192,7 +198,7 @@ export default function BiometricGate({ children }) {
   // The container is made inert while locked (see effect above) so the hidden
   // content is non-interactive and invisible to assistive tech, not just covered.
   return (
-    <>
+    <BiometricLockContext.Provider value={locked}>
       <div ref={contentRef} aria-hidden={locked ? true : undefined}>
         {children}
       </div>
@@ -222,16 +228,13 @@ export default function BiometricGate({ children }) {
               }}
             />
           ))}
+          {/* layout-only wrapper — no data-glass surface, no box chrome: the logo
+              floats directly on the scene (owner request: no card around the logo) */}
           <div
             className="waves-lock-anim"
-            data-glass="modal"
             style={{
               position: 'relative',
               width: 'min(340px, 100%)',
-              padding: '36px 28px 32px',
-              borderRadius: 24,
-              background: 'rgba(255,255,255,0.5)',
-              border: '1px solid rgba(255,255,255,0.75)',
               display: 'flex', flexDirection: 'column', alignItems: 'center',
               animation: 'wavesLockLogoIn 0.5s ease-out both',
             }}
@@ -266,7 +269,7 @@ export default function BiometricGate({ children }) {
                   borderRadius: 999, border: 'none', cursor: 'pointer',
                   fontFamily: FONTS.ui, fontSize: 17, fontWeight: 600,
                   // fallbacks only — the data-glass-accent rules repaint these
-                  background: COLORS.yellow, color: COLORS.blueDeeper,
+                  background: COLORS.yellow, color: COLORS.glassNavy,
                   opacity: checking ? 0.65 : 1,
                 }}
               >
@@ -276,6 +279,6 @@ export default function BiometricGate({ children }) {
           </div>
         </div>
       )}
-    </>
+    </BiometricLockContext.Provider>
   );
 }

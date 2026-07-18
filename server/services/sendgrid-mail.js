@@ -104,7 +104,7 @@ function asmBlockFor(groupId) {
  * Send one email. Used for test sends and one-off transactional. Returns
  * { messageId } where messageId is read from the X-Message-Id response header.
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const payload = {
@@ -126,11 +126,11 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
     attachments: Array.isArray(attachments) && attachments.length ? attachments : undefined,
-    // Disable SendGrid's own tracking pixels by default — we use our own
-    // open/click events via webhooks. Operator can re-enable via env later.
+    // Standard sends keep the existing provider tracking behavior. Security
+    // emails opt out so one-time credentials never enter click/open metadata.
     tracking_settings: {
-      click_tracking: { enable: true, enable_text: false },
-      open_tracking: { enable: true },
+      click_tracking: { enable: !disableTracking, enable_text: false },
+      open_tracking: { enable: !disableTracking },
       subscription_tracking: { enable: false },  // we own the unsubscribe path
     },
   };
@@ -158,6 +158,23 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
     throw err;
   }
   return { messageId: res.headers.get('x-message-id') || null };
+}
+
+// A SendGrid "blocked" event adds the recipient to the provider's Blocks
+// suppression list even when the mailbox is healthy and our sending IP/content
+// caused the rejection. Remove only that provider-block entry before a bounded
+// retry; this endpoint cannot clear bounces, spam reports, or unsubscribes.
+async function clearBlockedAddress(email) {
+  if (!email) throw new Error('clearBlockedAddress: email required');
+  const res = await fetch(`${API_BASE}/suppression/blocks/${encodeURIComponent(email)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (res.ok || res.status === 404) return { cleared: res.ok };
+  const text = await res.text();
+  const err = new Error(`SendGrid block removal ${res.status}: ${text}`);
+  err.status = res.status;
+  throw err;
 }
 
 /**
@@ -317,6 +334,7 @@ async function sendBroadcast(args) {
 module.exports = {
   isConfigured,
   sendOne,
+  clearBlockedAddress,
   sendBatch,
   sendTemplated,
   sendBroadcast,

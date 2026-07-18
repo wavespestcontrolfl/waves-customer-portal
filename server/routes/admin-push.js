@@ -18,7 +18,12 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { listTriggers } = require('../services/notification-triggers');
 const PushService = require('../services/push-notifications');
-const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
+const {
+  adminAuthenticate,
+  requireAdmin,
+  requireTechOrAdmin,
+  staffTokenVersionMatches,
+} = require('../middleware/admin-auth');
 
 // VAPID public key is public by design (browsers need it to subscribe).
 // Keep this endpoint UNAUTHENTICATED so an expired admin token can't
@@ -49,13 +54,19 @@ router.get('/diagnostics', adminAuthenticate, requireAdmin, (req, res) => {
 // Subscription and preference operations require a signed-in admin portal user.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-router.post('/subscribe', async (req, res, next) => {
+async function subscribe(req, res, next) {
   try {
     const { subscription, deviceInfo } = req.body;
     if (!subscription?.endpoint) return res.status(400).json({ error: 'subscription required' });
 
     const adminUserId = req.technicianId;
     const subData = JSON.stringify(subscription);
+    const userAgent = typeof req.headers['user-agent'] === 'string'
+      ? req.headers['user-agent'].slice(0, 100)
+      : null;
+    const safeDeviceInfo = typeof deviceInfo === 'string' && deviceInfo
+      ? deviceInfo.slice(0, 100)
+      : userAgent;
 
     // Match the existing row by ENDPOINT, not the full subscription JSON.
     // The push service can rotate the encryption keys while keeping the
@@ -66,38 +77,74 @@ router.post('/subscribe', async (req, res, next) => {
     // full-JSON-match era) are deactivated here — the senders push to
     // EVERY active row, so leaving them active means failed attempts or
     // duplicate notifications to the same device.
-    const existingRows = await db('push_subscriptions')
-      .where({ admin_user_id: adminUserId })
-      .whereRaw("subscription_data::jsonb->>'endpoint' = ?", [subscription.endpoint])
-      .orderBy('created_at', 'asc')
-      .catch(() => []);
-
-    if (existingRows.length) {
-      const [keep, ...dupes] = existingRows;
-      await db('push_subscriptions').where({ id: keep.id }).update({
-        subscription_data: subData,
-        active: true,
-        device_info: deviceInfo || keep.device_info,
-      });
-      if (dupes.length) {
-        await db('push_subscriptions')
-          .whereIn('id', dupes.map((r) => r.id))
-          .update({ active: false });
+    const outcome = await db.transaction(async (trx) => {
+      // Revalidate under the staff row lock. Credential mutations either
+      // commit first and reject this stale request, or wait and deactivate the
+      // newly registered subscription after this transaction commits.
+      const technician = await trx('technicians')
+        .where({ id: adminUserId })
+        .forUpdate()
+        .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+      if (
+        !technician
+        || !technician.active
+        || !['admin', 'technician'].includes(technician.role)
+        || technician.must_change_password
+        || !staffTokenVersionMatches(req.staffToken, technician)
+      ) {
+        return { revoked: true };
       }
-      return res.json({ ok: true, id: keep.id, reactivated: true });
+      const staffTokenVersion = Number(technician.auth_token_version);
+
+      const existingRows = await trx('push_subscriptions')
+        .where({ admin_user_id: adminUserId })
+        .whereRaw("subscription_data::jsonb->>'endpoint' = ?", [subscription.endpoint])
+        .orderBy('created_at', 'asc')
+        .catch(() => []);
+
+      if (existingRows.length) {
+        const [keep, ...dupes] = existingRows;
+        await trx('push_subscriptions').where({ id: keep.id }).update({
+          subscription_data: subData,
+          active: true,
+          device_info: safeDeviceInfo || keep.device_info,
+          role: technician.role,
+          staff_token_version: staffTokenVersion,
+        });
+        if (dupes.length) {
+          await trx('push_subscriptions')
+            .whereIn('id', dupes.map((row) => row.id))
+            .update({ active: false });
+        }
+        return { id: keep.id, reactivated: true };
+      }
+
+      const [row] = await trx('push_subscriptions').insert({
+        admin_user_id: adminUserId,
+        role: technician.role,
+        subscription_data: subData,
+        device_info: safeDeviceInfo,
+        active: true,
+        staff_token_version: staffTokenVersion,
+      }).returning('*');
+      return { id: row.id, reactivated: false };
+    });
+
+    if (outcome.revoked) {
+      return res.status(401).json({
+        error: 'Session has been revoked',
+        code: 'TOKEN_REVOKED',
+      });
     }
-
-    const [row] = await db('push_subscriptions').insert({
-      admin_user_id: adminUserId,
-      role: req.techRole === 'technician' ? 'technician' : 'admin',
-      subscription_data: subData,
-      device_info: deviceInfo || req.headers['user-agent']?.slice(0, 100) || null,
-      active: true,
-    }).returning('*');
-
-    res.json({ ok: true, id: row.id });
+    return res.json({
+      ok: true,
+      id: outcome.id,
+      ...(outcome.reactivated ? { reactivated: true } : {}),
+    });
   } catch (err) { next(err); }
-});
+}
+
+router.post('/subscribe', subscribe);
 
 router.post('/unsubscribe', async (req, res, next) => {
   try {
@@ -228,3 +275,4 @@ router.post('/test', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._handlers = { subscribe };

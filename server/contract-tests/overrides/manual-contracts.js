@@ -33,4 +33,14 @@ module.exports = {
     },
     reason: 'Tables/columns referenced inside try/catch best-effort blocks. Absence is tolerated at runtime.',
   },
+
+  // Lead-response agent write tools — they insert lead_activities /
+  // estimates / lead_agent_responses rows and send SMS via Twilio. Smoke
+  // execution must never fire them (the nil-UUID probe got as far as an
+  // estimates INSERT before the FK stopped it — that was luck, not safety).
+  flag_for_estimate:  { sideEffects: true, reason: 'inserts estimates + lead_activities rows' },
+  send_lead_response: { sideEffects: true, reason: 'sends SMS via Twilio, inserts lead_activities' },
+  update_lead_pipeline: { sideEffects: true, reason: 'updates leads.pipeline stage, inserts lead_activities' },
+  queue_for_adam:     { sideEffects: true, reason: 'inserts lead_agent_responses queue rows' },
+  save_lead_response_report: { sideEffects: true, reason: 'inserts lead_agent_responses report rows (write path swallowed its own failure during smoke)' },
 };

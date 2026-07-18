@@ -53,8 +53,8 @@ finding and warns on P1. Reviewers must return JSON matching
   `server/services/stripe-pricing.js` (the pure, unit-tested surcharge module
   imported by `stripe.js` — `computeChargeAmount`, `isCardMethodType`,
   `CARD_SURCHARGE_RATE`) is the single source of truth for the card surcharge —
-  currently **3%** (`CONFIGURED_COST_BPS = 300`, capped at the `NETWORK_CAP_BPS`
-  3% Visa/MC cap; consent text says "up to 3%"). `CARD_SURCHARGE_RATE = 0.03` is
+  currently **2.9%** (`CONFIGURED_COST_BPS = 290` since PR #1836, capped at the
+  `NETWORK_CAP_BPS` 3% Visa/MC cap; consent text v8 says "up to 2.9%"). `CARD_SURCHARGE_RATE = 0.03` is
   a deprecated legacy mirror — prefer the cents/bps API. The dollar amount displayed to the customer, the
   `amountCents` sent to Stripe (`Math.round(total * 100)`), and the
   `card_surcharge` recorded on the `payments` row must all derive from the
@@ -203,6 +203,49 @@ finding and warns on P1. Reviewers must return JSON matching
 - **Twilio `From`/`MessagingServiceSid` hardcoded.** Numbers per GBP
   location come from config; hardcoded `+1…` literals in route code drift
   when numbers move.
+- **Permission-allowlist entries must account for npm lifecycle hooks,
+  wildcard sweep, and destructive flag variants.** `.claude/settings.json`
+  `permissions.allow` (and command-frontmatter `allowed-tools`) entries
+  auto-approve every variant the pattern matches. Flag any addition of:
+  (a) an npm wrapper script whose `pre`/`post` hooks (check `package.json`)
+  write to the DB, call external APIs, or spend money — root `predev` runs
+  `db:migrate`, so `npm run dev` auto-approves a DB write;
+  (b) a wildcard over a script family that mixes safe and spending
+  commands — `npm run check:*` swept in `check:lawn-models`, which POSTs
+  live prompts to three LLM providers;
+  (c) a prefix rule over a command with destructive flags or subcommands —
+  `git branch:*` includes `-D`/`-M`, `git push:*` includes
+  `--no-verify`/`-f`/`-d` (bypasses the Codex pre-push gate),
+  `git fetch:*` accepts ref-moving refspecs, `gh api:*` can POST.
+  Prefer exact command forms (`dev:client` not `dev`; `check:portal-brand`
+  not `check:*`; `git branch --show-current` not `git branch:*`).
+  Syntax trap: a trailing `:*` (equivalent to ` *`) enforces a word
+  boundary — `npm run test:*` matches `npm run test -x` but NOT
+  `npm run test:contracts`; colon-named scripts need exact entries.
+  Known sharp edges already ruled on: `git ls-remote:*` allows
+  `--upload-pack=<exec>` (arbitrary code execution), `gh pr create` can
+  itself push an unpushed branch, `gh pr comment:*` includes
+  `--delete-last`, and `npm run dev:server` boots `initScheduledJobs()`
+  with `cronJobs` defaulting ON outside prod; `npm ci` executes dependency
+  lifecycle scripts (`hasInstallScript` packages = remote code on a
+  lockfile change); `npm run models:check` sends `ANTHROPIC_API_KEY` to
+  api.anthropic.com; `npm run test:contracts` runs `execute-smoke` by
+  default, calling IB ops tools that make authenticated
+  Stripe/Twilio/GitHub/Cloudflare requests when secrets are loaded
+  (`test:contracts:list` is the safe variant) — none of these may be
+  pre-approved.
+  *Accepted residual risk (owner ruling 2026-07-16, PR #2768):*
+  high-frequency LOCAL read/stage commands stay as prefix rules
+  (`git status/diff/log/show/add/commit:*`) despite write-capable flags
+  (`--output`, `-A`, `--amend`) — damage is local, reversible, and
+  visible in `git status`/`git diff` before push, and the containment
+  boundary is the always-prompting `git push`. Do not re-flag these
+  specific prefix rules; DO flag any new prefix rule whose abuse is
+  remote, irreversible, or invisible.
+- **`ops/agents/` convention violations.** Scripts in that folder must
+  declare READ-ONLY or MUTATES in their header, default to dry-run when
+  they mutate (write only under `--execute`), and contain no secrets,
+  tokens, customer names, or invoice numbers. See `ops/agents/README.md`.
 
 ### Out of scope (do not flag)
 
@@ -224,12 +267,16 @@ finding and warns on P1. Reviewers must return JSON matching
   Pages/Workers (separate repo concern).
 - **Three portal surfaces.** `/admin/*` (owner/CSR), `/` (customer PWA),
   `/tech/*` (field tech).
+- **Operator/agent tooling.** Recurring prod-ops scripts (token pulls,
+  Railway var hygiene, audit purges) live in `ops/agents/` — not imported
+  by app code, invoked manually from the repo root. Index and conventions:
+  `ops/agents/README.md`.
 - **Server timezone.** Railway runs `TZ=UTC`; the business runs in
   America/New_York. Always use `server/utils/datetime-et.js` helpers for
   ET-wall-clock fields. `node-cron` schedules pass
   `timezone: 'America/New_York'` explicitly.
 - **Payment processor.** Stripe only — Payment Element (card / Apple Pay
-  / Google Pay / ACH). Card-family pays a surcharge (up to 3%); ACH pays the base.
+  / Google Pay / ACH). Card-family pays a surcharge (up to 2.9%); ACH pays the base.
   Surcharge math is centralized in `server/services/stripe.js`
   (`computeChargeAmount`, `isCardMethodType`). Square is fully phased out
   and must not be reintroduced.
@@ -284,6 +331,18 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/public/prep/:token` (read-only, 32-hex token format gate,
   60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
   filters email-only blocks, server-side interpolation, generic 404),
+  `/api/public/prep/:token/pdf` (downloadable PDF twin of the prep page —
+  action-bar Download parity with service reports; same 32-hex token format
+  gate, same 60 req/min limiter, same privacy headers, generic 404; payload
+  is the SAME interpolated guide blocks plus customer name + service
+  address + technician first name/name — never email or phone (owner PII
+  ruling 2026-07-13); filename sanitized server-side before
+  Content-Disposition; no view-analytics writes on this route),
+  `/api/public/price-change/:token` (price-change notice page data;
+  32-hex token format gate, 60 req/min rate limit, privacy headers
+  `no-store`/`noindex`/`no-referrer`, generic 404; payload is first name +
+  the price change only — no address/email/PII; view counted for the
+  delivery record),
   `/api/public/products` (read-only export; returns only active +
   customer_visibility=public + content_status=approved_for_public products;
   excludes pricing, vendor, SKU, dilution, MOA, inventory fields),
@@ -298,6 +357,18 @@ finding and warns on P1. Reviewers must return JSON matching
   policies, PaymentIntent idempotent per estimate+amount with
   metadata-pinned purpose/estimate id; dark behind
   ESTIMATE_DEPOSIT_REQUIRED).
+  `/api/public/estimates/:token/deposit-quote` + `/deposit-finalize`
+  (deposit card surcharge, owner ruling 2026-07-13 reversing the 2026-06-12
+  exemption: manual card entry prices via computeChargeAmount — credit
+  funding only — behind a 10-min HMAC quote token, finalize re-derives from
+  the live PM and confirms server-side; wallets pay through Express
+  Checkout at FACE value, Phase-1 parity with pay-v2. The PI mints at face
+  value and the ledger credits face value (metadata.base_amount) — the fee
+  rides estimate_deposits.card_surcharge, never the credit. Both routes:
+  token format gate, generic 404, deposit rate limit, terminal/expired
+  rejection; trust re-derives from the PI's own purpose/estimate_id pin.
+  Commercial prepay keeps its separate exemption — owner ruling 2026-07-05,
+  expressly not reversed).
   `/api/public/estimates/:token/card-hold-intent` (one-time card-on-file
   hold; estimate token format gate, generic 404, 10 req/min limit,
   terminal/expired rejection, mirrors the accept-time quote + one-time
@@ -305,6 +376,75 @@ finding and warns on P1. Reviewers must return JSON matching
   with metadata-pinned purpose/estimate id, NO money captured at booking —
   the saved card is charged on completion and a flat no-show fee only;
   dark behind ONE_TIME_CARD_HOLD).
+  `/api/public/estimates/:token/recurring-card-intent` (recurring-accept
+  Auto Pay card per docs/card-on-file-booking-build-spec.md — card to book,
+  deposit retired, charge on completion only; estimate token format gate,
+  generic 404, 10 req/min limit, terminal/expired rejection, mirrors the
+  accept-time quote gate, 409 for exempt policies — one-time / invoice-mode
+  / prepay-annual / existing plan member / payer-billed / already-on-Auto-
+  Pay / saved consented card (auto-satisfy: existing customers are never
+  re-asked) — customerless SetupIntent with metadata-pinned purpose
+  `estimate_recurring_card`, NO money captured at booking; accept-time
+  enrollment (consent row + enrollConsentedMethod) turns on Auto Pay so
+  completed applications auto-charge, capped at the accepted per-visit
+  amount (above-quote invoices route to office review instead of
+  auto-charging); dark behind RECURRING_CARD_ON_FILE, and
+  ESTIMATE_DEPOSIT_REQUIRED is unset only AFTER this lights).
+  `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
+  per-service details-packet PDF for the estimate view's "full details"
+  buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
+  404 when off; estimate
+  token format gate, generic 404, isEstimateCustomerViewable gate identical
+  to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
+  draft can never produce a customer-facing document), serviceKey must be
+  BOTH a known guide key and a recurring service actually on this estimate,
+  60 req/min limit, `no-store`/`no-referrer` headers; the PDF contains the
+  service guide plus PUBLIC product-registry fields only — active
+  ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,
+  dilution, or inventory data).
+  `/api/estimates/:token/service-details/send` (write; emails or texts that
+  same packet to the contact info ALREADY ON the estimate — the destination
+  is NEVER caller-supplied (body carries only `service` + `channel`), so
+  the token cannot be used to spray documents at arbitrary addresses; same
+  gate-404 + token format gate + customer-viewable + service-on-estimate
+  checks as the GET, 6 req/hour limit, email sends idempotent per
+  estimate+service+day, suppression-blocked addresses return 409 with no
+  send, generic errors — no PII in responses or logs).
+  `/api/estimates/:token/extension-request` (POST; one-click "my link
+  expired, I still want this" from the React estimate page's expired/
+  not-found screen. Estimate token format gate (same slug-or-64-hex regex as
+  the slots router), generic 404 — unknown token, malformed token, ineligible
+  row, and gate-off are indistinguishable — 5 req/hr per-IP limit, dark
+  behind GATE_ESTIMATE_EXTENSION_REQUEST (the rate limiter `skip`s while the
+  gate is off so a dark probe sees only generic 404s, never a revealing 429,
+  and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
+  requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
+  sweep flips never-sent drafts to 'expired' too, and those must never
+  qualify) that is past expires_at or sweep-expired, not
+  accepted/declined/archived. Concurrency: the 24h dedupe stamp and the
+  lifetime auto-grant burn live in DEDICATED estimates columns
+  (`extension_requested_at` / `extension_auto_granted_at`, migration
+  20260711000001 — never estimate_data, whose full-blob writers could erase
+  jsonb stamps and un-burn the cap), claimed by one atomic conditional
+  UPDATE so concurrent POSTs can't fan out duplicates. First request per
+  estimate AUTO-GRANTS a 7-day extension via the shared
+  services/estimate-extension.js core (same expiry anchoring, status
+  revival, `estimate_extended` SMS, and `estimate.extended` email as the
+  admin extend route — consent/opt-out/Twilio-gate enforcement inside
+  sendCustomerMessage, suppression/dedupe inside the email template
+  library; post-write SMS/email plumbing never throws; the write is guarded on the
+  snapshot's status/archived_at and never moves an expiry backwards, 409 on
+  conflict; LIVE 'sending' claims are refused — only date-expired stale
+  ones extend), burned ATOMICALLY in the same claim UPDATE before any
+  mutation. Failure handling is fail-closed: provably pre-write errors
+  (400/409) release both stamps; ambiguous errors keep the BURN but release
+  the dedupe stamp so a retry reaches the notify-office path instead of a
+  false alreadyRequested. Repeat requests fall back to notify-office-only.
+  Every path raises an in-app admin notification (the auto-grant alert
+  retries once and error-logs on double failure; the notify-only path
+  treats the notification as the deliverable and releases its claim + 500s
+  when it can't persist); response carries only
+  success/autoExtended/expiresAt/smsSent/emailSent — no PII),
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
@@ -330,6 +470,28 @@ finding and warns on P1. Reviewers must return JSON matching
   32-hex claim token. The full report payload never leaves the server before
   claim. Prospect free-text note is stored for admin view only — never fed to
   models or customer copy. Privacy headers on all responses.)
+  `/api/card/:token` (read-only digital business card payload; 64-hex
+  `customer_cards.share_token` format gate, generic 404 for unknown/malformed
+  tokens and archived/merged customers, 60 req/min per-IP read limit on top of
+  the global /api limiter, `Cache-Control: private, no-store`; payload is a
+  strict whitelist — customer FIRST NAME + member-since year +
+  has_left_google_review flag only, tech name + presigned photo, office
+  phone, the tracked /l review short-link, and the customer's referral link
+  (share never exposes the card token) — no address, email, or phone PII;
+  the SPA shell `/card/:token` carries the same noindex/no-referrer/no-store
+  headers via sensitive-spa-headers.js),
+  `/api/card/:token/contact.vcf` (read-only Save-contact vCard; same 64-hex
+  token gate + archived-customer 404 + rate limit + `no-store`; contents are
+  COMPANY-ONLY — tech name/title, office line, company email/site/address,
+  license line — never customer data),
+  `/api/card/:token/wallet.pkpass` (read-only signed Apple Wallet pass; same
+  64-hex token gate + archived-customer 404 + per-route rate limit +
+  `no-store`; 404s whenever the PASS_* signing env vars are unset (config
+  self-gate — the card payload's walletAvailable mirrors it so the button
+  never renders a dead tap); pass carries customer FIRST NAME + member-since
+  year only — NO home coordinates, NO next-visit date (static pass, no
+  update plumbing), review QR falls back to the card link for
+  has_left_google_review customers).
   `/api/public/lawn-assessment/:id/claim` (write; contact capture that unlocks
   the full report — same gate-404 + honeypot + privacy headers, 10 req/min
   limit, UUID + 32-hex claim-token format gates with generic 404 so tokens
@@ -496,19 +658,37 @@ finding and warns on P1. Reviewers must return JSON matching
   to the report / receipt / rate surfaces. Treat the track token and any change
   to its payload, in any state, as security-critical).
   `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
-  customer self-serve single-visit reschedule linked from appointment
+  customer self-serve reschedule linked from appointment
   confirmation/72h/24h texts + reminder emails.
   `scheduled_services.reschedule_token` (64-hex, `TOKEN_RE` format gate)
   is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
   GET returns the appointment summary (customer first name, service type,
-  current date/window, recurring flag) + live open slots from the /book
-  availability engine. POST is a WRITE: it moves the single visit — never the
-  recurring series, never live/terminal visits (409) — and only to a slot the
-  availability engine still offers for that day (route feasibility, lunch
-  reserve, self-book day caps re-checked server-side); the commit goes through
-  `SmartRebooker.reschedule` (advisory lock + tech-route overlap conflict
-  check + `reschedule_log` audit as `customer_self_serve` + escalation
-  flagging). Generic 404 for bad/unknown tokens.
+  current date/window, recurring flag, `missed` flag, and — series visits
+  only — the `reanchorPullForwardDays` threshold) + live open slots from the
+  /book availability engine. POST is a WRITE with two owner-authorized
+  scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
+  to the token's own customer/visit and never live/terminal visits (409),
+  and only to a slot the availability engine still offers for that day
+  (route feasibility, lunch reserve, self-book day caps re-checked
+  server-side):
+    - default: moves the single visit via `SmartRebooker.reschedule`
+      (advisory lock + tech-route overlap conflict check + `reschedule_log`
+      audit as `customer_self_serve` + escalation flagging);
+    - series re-anchor: a genuinely recurring visit (`is_recurring` only —
+      booster extras never qualify or move) pulled forward by
+      `RESCHEDULE_REANCHOR_PULLFORWARD_DAYS`+ (env, default 14) commits via
+      `SmartRebooker.rescheduleSeries` — every later cadence occurrence
+      re-anchors to the new date. Consent is explicit: the page swaps the
+      "only this visit moves" note for the series-shift warning before
+      Confirm (the GET's threshold drives it; the POST decides
+      authoritatively). The anchor keeps the offered tech under the same
+      advisory-lock overlap guard; shifted siblings that would double-book
+      a route are committed UNASSIGNED inside the trx and parked as a
+      `schedule_conflict` admin notification. Treat any widening of this
+      scope (other customers' rows, live visits, non-cadence rows) as P0.
+  A pending/confirmed visit whose time already passed is MISSED (rebookable
+  via the same link — eligibility `missed:true`); terminal/live/no_show
+  still 409. Generic 404 for bad/unknown tokens.
   `POST /:token/find-slots` is the Waves AI date/time search for this page:
   model-backed (free-text "when" → date window via `parseWhen`, the same
   parser the /book and estimate searches use) and READ-ONLY — it returns
@@ -544,6 +724,19 @@ finding and warns on P1. Reviewers must return JSON matching
   the already-emailed archived filing streamed from private S3 — never
   live/unsigned content — and returns a generic 404 for non-WDO projects, reports
   with no archived filing, or malformed tokens).
+  `/api/reports/project/:token/ask` (POST; Waves AI on project reports — owner
+  ruling 2026-07-16. Deterministic keyword-routed template answers built ONLY
+  from the project's own findings/recommendations/follow-up — data the sibling
+  `/data` viewer already serves this token; internal finding keys
+  (`inspection_fee` class) are excluded server-side; no LLM, so nothing new can
+  leak or be injected. Same long-lived report token + format gate as the
+  `/data` viewer (`extractProjectReportTokenLookup`), inherits the router-level
+  20 req/min `reportLimiter`, question length capped at 500 chars. The WDO
+  payment hold 402s BEFORE any content-derived answer; the paper compliance
+  documents (wdo_inspection, pre_treatment_termite_certificate) return a
+  generic 404 — their pages never mount the ask bar. Only write: an
+  `activity_log` analytics row recording question length, never answer
+  content).
   `/api/webhooks/voice-agent/lead` (POST; machine-to-machine webhook — the
   bilingual AI voice agent (ElevenLabs) posts a captured lead when an AI-handled
   call ends. NOT browser-facing. Fail-closed shared-secret auth in the route
@@ -570,6 +763,27 @@ finding and warns on P1. Reviewers must return JSON matching
   exact `/ws/voice-agent` path; `ws://localhost` for dev) — so the WS secret is
   never appended to a foreign host. Any change to this endpoint, its auth, or its
   frame handling is security-critical).
+  `/api/public/secure-card/:token` (+ `/:token/complete`) (GET + POST;
+  "secure your appointment" card-on-file capture page for the
+  appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`
+  AND the `secure_appointment_card` SMS template are both enabled, and
+  unreachable until the funnel mints links. 64-hex bearer token
+  (`appointment_card_requests.token`) with format gate + generic 404 (no
+  existence oracle); its own 60 req/min limiter on top of the global /api
+  limiter; `private, no-store` / `Referrer-Policy: no-referrer` /
+  `X-Robots-Tag: noindex` on EVERY outcome including 404s (the SPA shell
+  for `/secure/:token` carries the same headers via
+  `sensitive-spa-headers.js`). NO money moves on this surface — the GET
+  mints/replays a card-only off-session SetupIntent (request-pinned
+  metadata, deterministic idempotency key) after re-checking visit
+  liveness AND payer exemption; the POST live-verifies the SetupIntent
+  against Stripe (status + purpose + request id — never the client's
+  word), re-checks visit/payer again, and runs the idempotent
+  save → consent → enroll sequence under a pending → completing claim
+  with a 10-min stale-claim lease (page POST and the
+  `setup_intent.succeeded` webhook backstop are mutually exclusive;
+  failures revert and stay retryable). Treat the token, the verification
+  gates, and the claim mechanics as security-critical).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

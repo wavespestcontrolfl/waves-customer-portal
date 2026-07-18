@@ -1,18 +1,19 @@
 const express = require('express');
 const router = express.Router();
-const path = require('path');
-const fs = require('fs');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
+const { answerProjectReportQuestion } = require('../services/project-report-assistant');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
@@ -30,14 +31,38 @@ function suppressedTypedReport(record) {
   return Boolean(mode) && mode !== 'auto_send';
 }
 
+// Seasonal pest forecast for the V2 report dashboards (pest + mosquito).
+// Best-effort with a hard 4s cap — a forecast/network hiccup must never
+// block or slow a report render.
+async function fetchSeasonalForecastSafe(zip) {
+  try {
+    const { getForecast } = require('../services/pest-forecast/forecast');
+    const timer = new Promise((resolve) => {
+      const t = setTimeout(() => resolve(null), 4000);
+      if (t.unref) t.unref();
+    });
+    return await Promise.race([getForecast({ zip }), timer]);
+  } catch {
+    return null;
+  }
+}
+
 async function staffCanViewSuppressed(req) {
   try {
     const header = String(req.headers.authorization || '');
     if (!header.startsWith('Bearer ')) return false;
     const decoded = jwt.verify(header.slice(7), config.jwt.secret);
-    if (!decoded.technicianId || decoded.scope === 'terminal') return false;
-    const tech = await db('technicians').where({ id: decoded.technicianId }).first('id', 'active');
-    return Boolean(tech && tech.active);
+    if (!isStaffAccessToken(decoded) || !decoded.technicianId || decoded.scope === 'terminal') return false;
+    const tech = await db('technicians')
+      .where({ id: decoded.technicianId })
+      .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+    return Boolean(
+      tech
+      && tech.active
+      && ['admin', 'technician'].includes(tech.role)
+      && !tech.must_change_password
+      && staffTokenVersionMatches(decoded, tech)
+    );
   } catch {
     return false;
   }
@@ -90,6 +115,13 @@ const {
   putReportPdf,
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
+const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const {
+  mosquitoReportV2PdfSignature,
+  buildMosquitoReportV2,
+  isRecurringMosquitoServiceType,
+} = require('../services/service-report/mosquito-report-v2');
+const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -223,6 +255,13 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // leave a stale appointment time fossilized in the downloadable document.
   if (mode !== 'live') delete data.nextAppointment;
 
+  // The tech photo card is LIVE-VIEW ONLY for the same reason (Codex P2 on
+  // #2614): the PDF cache key doesn't vary on GATE_REPORT_TECH_PHOTO, so a
+  // gate flip would leave already-rendered PDFs stale in either direction.
+  // PDFs keep the plain-text Technician cell, matching the pest-narrative
+  // precedent of PDFs keeping the plain recap.
+  if (mode !== 'live') data.techVisitCard = false;
+
   // buildPestPressureCustomerView returns null only when Pest Pressure
   // is hidden from the customer (feature disabled, showOnCustomerReport
   // off, service_line outside allow list, or requireRecurringFrequency
@@ -284,22 +323,60 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   ) {
     try {
       const { buildPestReportV2 } = require('../services/service-report/pest-report-v2');
-      let forecast = null;
-      try {
-        const { getForecast } = require('../services/pest-forecast/forecast');
-        const timer = new Promise((resolve) => {
-          const t = setTimeout(() => resolve(null), 4000);
-          if (t.unref) t.unref();
-        });
-        forecast = await Promise.race([getForecast({ zip: service.zip }), timer]);
-      } catch { forecast = null; }
+      const forecast = await fetchSeasonalForecastSafe(service.zip);
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
-        activity: data.activity,
+        // Typed pest reports render the FULL ActivityCard (gauge + score
+        // history + progress chip) ALONGSIDE the dashboard (owner ruling
+        // 2026-07-14 — the dashboard used to suppress the card, which
+        // silently hid the chart and the knockdown progress chip on exactly
+        // the bed bug / roach reports they target). Withholding activity
+        // here drops the hero's compact pill on typed visits so the reading
+        // shows once; recurring reports keep the hero metric as before.
+        activity: data.typedReport ? null : data.activity,
         forecast,
+        // Tech-reviewed AI report copy. Typed reports are gated out here —
+        // their Today's Result card already renders the same copy, so the
+        // hero showing it too would print the text twice on one page.
+        technicianReport: !data.typedReport && data.summarySource === 'technician_report'
+          ? data.summary
+          : null,
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
+    } catch { /* best-effort — never block the report */ }
+  }
+
+  // Mosquito Report V2 — yard-usability dashboard for RECURRING mosquito visits
+  // (flag-gated), same family as Pest V2 but with habitat semantics instead of
+  // entry points (mosquito-report-v2.js explains the reframe). Mutually
+  // exclusive with pestReportV2 by service line. One-time reports are
+  // excluded two ways (codex P2 ×2): typed snapshots (mosquito_event) own
+  // the purpose-built activity gauge the dashboard would suppress, and
+  // legacy pre-typed-cutover one-time labels must not get recurring
+  // "between visits" copy. Best-effort, never blocks.
+  if (
+    process.env.MOSQUITO_REPORT_V2 === 'true'
+    && data.serviceLine === 'mosquito'
+    && !data.typedReport
+    && isRecurringMosquitoServiceType(service.service_type)
+    && dynamicContext.premiumExperience
+  ) {
+    try {
+      const forecast = await fetchSeasonalForecastSafe(service.zip);
+      const mosquitoReportV2 = buildMosquitoReportV2({
+        premiumExperience: dynamicContext.premiumExperience,
+        pestPressure: data.pestPressure,
+        activity: data.activity,
+        findings: data.findings || [],
+        applications: data.applications || [],
+        forecast,
+        // Same typed-report double-print guard as the pest hero.
+        technicianReport: !data.typedReport && data.summarySource === 'technician_report'
+          ? data.summary
+          : null,
+      });
+      if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
     } catch { /* best-effort — never block the report */ }
   }
 
@@ -318,6 +395,7 @@ async function findProjectByReportSegment(segment) {
     .select(
       'p.*',
       'c.first_name', 'c.last_name', 'c.email as customer_email', 'c.phone as customer_phone',
+      'c.has_left_google_review',
       'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
       't.name as technician_name',
     );
@@ -328,6 +406,52 @@ async function findProjectByReportSegment(segment) {
   return rows.length === 1 ? rows[0] : null;
 }
 
+// WDO report payment hold: while a report is held ('held'/'releasing'), its
+// public token serves a 402 payment-required payload instead of any report
+// content. The token itself is not proof of entitlement here — the hold flow
+// never emails the report link, but admin previews, the portal, or a
+// forwarded pay page could surface the URL early. payUrl rides along so the
+// viewer can render a "pay to receive your report" card; exposing it to a
+// token holder is intended — they are the party the pay link was sent to.
+async function heldReportPaymentContext(project) {
+  if (!['held', 'releasing'].includes(String(project?.report_hold_status || ''))) return null;
+  let payUrl = null;
+  let invoiceNumber = null;
+  let paymentProcessing = false;
+  let payerBilled = false;
+  if (project.invoice_id) {
+    const invoice = await db('invoices')
+      .where({ id: project.invoice_id })
+      .first('id', 'token', 'invoice_number', 'status', 'payer_id')
+      .catch(() => null);
+    const invoiceStatus = String(invoice?.status || '').toLowerCase();
+    // Third-party Bill-To isolation (Codex P1 on #2753): a payer-billed
+    // invoice's pay link belongs to the payer's AP inbox ONLY — the send
+    // paths never hand it to the homeowner, and this token page is opened by
+    // homeowners AND the third parties a WDO link is forwarded to. No pay
+    // CTA, no billing metadata; just "billed to the requesting party".
+    payerBilled = Boolean(invoice?.payer_id);
+    // ACH clearing window: pay-v2 rejects 'processing' invoices (an in-flight
+    // bank payment), so a pay CTA here would dead-end — tell the customer the
+    // payment is processing instead of asking them to pay again.
+    paymentProcessing = !payerBilled && invoiceStatus === 'processing';
+    // Only offer the pay CTA while the invoice is actually collectible:
+    // settled-but-not-yet-swept rows still 402 (the sweep delivers within a
+    // minute), and non-collectible statuses (void/refunded/cancelled — pay-v2
+    // rejects them all) must not render a button that errors on the pay page.
+    if (
+      !payerBilled
+      && invoice?.token
+      && !['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled', 'sending'].includes(invoiceStatus)
+    ) {
+      const { publicPortalUrl } = require('../utils/portal-url');
+      payUrl = `${publicPortalUrl()}/pay/${invoice.token}`;
+    }
+    invoiceNumber = payerBilled ? null : (invoice?.invoice_number || null);
+  }
+  return { payUrl, invoiceNumber, paymentProcessing, payerBilled };
+}
+
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
   if (!extractProjectReportTokenLookup(req.params.token || '')) {
@@ -336,6 +460,21 @@ router.get('/project/:token/data', async (req, res, next) => {
   try {
     const project = await findProjectByReportSegment(req.params.token);
     if (!project) return res.status(404).json({ error: 'Report not found' });
+
+    const heldContext = await heldReportPaymentContext(project);
+    if (heldContext) {
+      const typeCfg = require('../services/project-types').getProjectType(project.project_type);
+      return res.status(402).json({
+        error: 'Report pending payment',
+        code: 'report_payment_required',
+        projectType: project.project_type,
+        reportTypeLabel: typeCfg?.label || 'Inspection',
+        payUrl: heldContext.payUrl,
+        invoiceNumber: heldContext.invoiceNumber,
+        paymentProcessing: heldContext.paymentProcessing,
+        payerBilled: heldContext.payerBilled,
+      });
+    }
 
     if (!project.report_viewed_at) {
       await db('projects').where({ id: project.id }).update({ report_viewed_at: db.fn.now() });
@@ -372,11 +511,12 @@ router.get('/project/:token/data', async (req, res, next) => {
         ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
         : undefined,
     });
+    const { CUSTOMER_DWELL_TTL_SECONDS } = require('../services/photos');
     const photosWithUrls = await Promise.all(photos.map(async (ph) => {
       let url = null;
       if (config.s3?.bucket && ph.s3_key) {
         try {
-          url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: 3600 });
+          url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: CUSTOMER_DWELL_TTL_SECONDS });
         } catch { /* fall through — photo will render as missing */ }
       }
       return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
@@ -425,13 +565,17 @@ router.get('/project/:token/data', async (req, res, next) => {
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
       // Customer email/phone for the hero contact lines — the report hero
       // mirrors the customer estimate, which prints the recipient's own
-      // contact block under the headline. NEVER on a WDO: sendWdoReportCopies
-      // emails this same public link to the third parties named on the FDACS
-      // form (realtor/title company), and a link the system itself hands to
-      // outsiders must not carry the homeowner's direct contact details.
-      // Every other project type's link is sent to the customer only.
-      customerEmail: project.project_type === 'wdo_inspection' ? null : (project.customer_email || null),
-      customerPhone: project.project_type === 'wdo_inspection' ? null : (project.customer_phone || null),
+      // contact block under the headline. Owner EXPLICIT ruling 2026-07-16:
+      // every report shows name/email/phone/address, WDO included — decided
+      // with the trade-off in view (sendWdoReportCopies emails this link to
+      // the realtor/title company on the FDACS form, so those third parties
+      // can now see the homeowner's contact lines). Supersedes the earlier
+      // WDO-only withholding.
+      customerEmail: project.customer_email || null,
+      customerPhone: project.customer_phone || null,
+      // gates the "How did today's visit go?" ask (owner 2026-07-16) — same
+      // self-suppression as the service report once a review is recorded
+      hasLeftGoogleReview: !!project.has_left_google_review,
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
       // Full service address for the hero — the report page mirrors the
       // customer estimate, which shows the street address under the headline.
@@ -466,6 +610,59 @@ router.get('/project/:token/data', async (req, res, next) => {
 // emailed (same source the /data viewer reads its as-sent snapshot from), so
 // the downloadable form can never diverge from what was filed. The token gates
 // access; the S3 object itself is private and streamed through the server.
+// POST /api/reports/project/:token/ask — deterministic Waves AI for project
+// reports (owner ask 2026-07-16). Paper compliance documents (WDO +
+// pre-construction certificate) are exempt and 404 here — their pages never
+// mount the bar. The payment hold gates BEFORE any content-derived answer.
+router.post('/project/:token/ask', async (req, res, next) => {
+  if (!extractProjectReportTokenLookup(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    const question = String(req.body?.question || '').trim();
+    if (!question) return res.status(400).json({ error: 'question_required' });
+    if (question.length > 500) return res.status(400).json({ error: 'question_too_long' });
+
+    const project = await findProjectByReportSegment(req.params.token);
+    if (!project) return res.status(404).json({ error: 'Report not found' });
+    if (project.project_type === 'wdo_inspection' || project.project_type === 'pre_treatment_termite_certificate') {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    const heldContext = await heldReportPaymentContext(project);
+    if (heldContext) {
+      return res.status(402).json({ error: 'Report pending payment', code: 'report_payment_required' });
+    }
+
+    const upcomingAppointment = await findReportFollowupAppointment({
+      customerId: project.customer_id,
+      scheduledServiceId: project.scheduled_service_id,
+    }).catch(() => null);
+
+    const answer = answerProjectReportQuestion({
+      question,
+      project,
+      payload: {
+        upcomingAppointment: upcomingAppointment
+          ? { serviceType: upcomingAppointment.service_type, scheduledDate: upcomingAppointment.scheduled_date }
+          : null,
+        followupDate: project.followup_date || null,
+        followupCompletedAt: project.followup_completed_at || null,
+      },
+    });
+    try {
+      await db('activity_log').insert({
+        customer_id: project.customer_id,
+        action: 'project_report_question_asked',
+        description: `Project report question asked (${project.project_type})`,
+        metadata: { project_id: project.id, project_type: project.project_type, question_length: question.length },
+      });
+    } catch (err) {
+      logger.warn(`[reports-public] project ask activity_log insert failed: ${err.message}`);
+    }
+    return res.json({ answer });
+  } catch (err) { next(err); }
+});
+
 router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
   if (!extractProjectReportTokenLookup(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
@@ -474,6 +671,12 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     const project = await findProjectByReportSegment(req.params.token);
     if (!project || project.project_type !== 'wdo_inspection') {
       return res.status(404).json({ error: 'Report not found' });
+    }
+    // Payment-held report: no filing has been emailed yet (the natural state
+    // is an empty filings index), but belt-and-braces 402 here too so a prior
+    // filing can never leak through a held resend edge case.
+    if (await heldReportPaymentContext(project)) {
+      return res.status(402).json({ error: 'Report pending payment', code: 'report_payment_required' });
     }
     let filings = project.wdo_sent_filings;
     if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
@@ -733,6 +936,11 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
           serviceLine: resolvedServiceLine || null,
           limit: 8,
           beforeOrOnServiceDate: service.service_date || null,
+          // Same-day trim, same as buildReportV1Data: without it this
+          // response replaces the page's trimmed history client-side and
+          // leaks a later same-day sibling the moment a rating is submitted
+          // (codex P2 #2824 r2).
+          currentServiceRecordId: service.id || null,
         }).catch(() => [])
       : [];
 
@@ -760,12 +968,22 @@ router.post('/:token/ask', async (req, res, next) => {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        'customers.address_line1', 'customers.address_line2',
-        'customers.city', 'customers.state', 'customers.zip',
+        // Report address = the visit's stamped service address when present
+        // (a phone-booked rental completes at the rental, not the primary
+        // home); the customer mirror is the fallback (codex round-9 P2).
+        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
         'customers.has_left_google_review',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Map center follows the treated parcel: stamped visit coords first,
+        // the primary home only for non-divergent stamps (codex round-9 P2).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -859,11 +1077,21 @@ router.get('/:token', async (req, res, next) => {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
+        // Stamped-address precedence — see the /:token/data handler note
+        // (codex round-9 P2).
+        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
         'customers.has_left_google_review',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Map center follows the treated parcel: stamped visit coords first,
+        // the primary home only for non-divergent stamps (codex round-9 P2).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -886,7 +1114,22 @@ router.get('/:token', async (req, res, next) => {
       // the new visibility decision applied.
       let pestPressureConfig = await loadActiveConfig(db).catch(() => null);
       let visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
-      const expectedPdfStorageKey = reportPdfStorageKey(service.id, { visibilitySignature });
+      // Summary-copy key component: when the technician-report copy drives
+      // the rendered summary, the suffix changes the expected key so a PDF
+      // cached before this feature (generic summary) re-renders instead of
+      // being served stale. Recap-driven records keep their old keys — no
+      // mass cache bust. Derived from the immutable record, so no re-check
+      // is needed in the render race loop below.
+      const summarySignature = summaryCopySignature(service);
+      // Mosquito V2 gate flips must invalidate cached mosquito-report PDFs
+      // (key change → cache miss → re-render with the dashboard).
+      const mosquitoV2Signature = mosquitoReportV2PdfSignature(service);
+      // PEST_REPORT_V2 predates this key component — pest PDFs cached before
+      // the pest V2 flip re-render once on next view.
+      const pestV2Signature = pestReportV2PdfSignature(service);
+      const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
+      });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
         : null;
@@ -938,7 +1181,9 @@ router.get('/:token', async (req, res, next) => {
         });
       }
       try {
-        const key = await putReportPdf(service.id, pdf, { visibilitySignature });
+        const key = await putReportPdf(service.id, pdf, {
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
+        });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {
         logger.warn(`[reports-public] PDF storage skipped for ${service.id}: ${storageErr.message}`);
@@ -950,16 +1195,11 @@ router.get('/:token', async (req, res, next) => {
       return res.send(pdf);
     }
 
-    // Check if pre-generated PDF exists
-    if (service.report_pdf_path) {
-      const fullPath = path.join(__dirname, '..', '..', service.report_pdf_path);
-      if (fs.existsSync(fullPath)) {
-        await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
-        return fs.createReadStream(fullPath).pipe(res);
-      }
-    }
+    // Legacy pre-generated PDF files (report_pdf_path) are deliberately NOT
+    // served anymore: they were written with raw technician_notes (gate
+    // codes, billing notes) before the 2026-07-16 owner ruling and a stored
+    // file can't be sanitized in place — regenerate on the fly instead, which
+    // routes notes through technicianReportCustomerCopy (codex P1 #2797).
 
     // Generate PDF on-the-fly
     const products = await db('service_products').where({ service_record_id: service.id });
@@ -982,12 +1222,22 @@ router.get('/:token/map.svg', async (req, res, next) => {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        'customers.address_line1', 'customers.address_line2',
-        'customers.city', 'customers.state', 'customers.zip',
+        // Report address = the visit's stamped service address when present
+        // (a phone-booked rental completes at the rental, not the primary
+        // home); the customer mirror is the fallback (codex round-9 P2).
+        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
         'customers.has_left_google_review',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Map center follows the treated parcel: stamped visit coords first,
+        // the primary home only for non-divergent stamps (codex round-9 P2).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -1020,13 +1270,23 @@ router.get('/:token/data', async (req, res, next) => {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        'customers.address_line1', 'customers.address_line2',
-        'customers.city', 'customers.state', 'customers.zip',
+        // Report address = the visit's stamped service address when present
+        // (a phone-booked rental completes at the rental, not the primary
+        // home); the customer mirror is the fallback (codex round-9 P2).
+        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
         'customers.has_left_google_review',
         'customers.waveguard_tier',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Map center follows the treated parcel: stamped visit coords first,
+        // the primary home only for non-divergent stamps (codex round-9 P2).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -1055,10 +1315,13 @@ router.get('/:token/data', async (req, res, next) => {
     if (service.report_template_version === 'service_report_v1') {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
-      // report (owner ask 2026-07-05; previously SMS-only via /recap/:token).
-      // Live views only: the player streams /reports/:token/recap/video, which
-      // is meaningless in pdf/static renders. Best-effort — never blocks.
-      if (mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly) {
+      // report (owner ask 2026-07-05; the standalone /recap/:token player was
+      // retired 2026-07-09 — the report is now the only surface). Pest reports
+      // only, and only when an approved rendered video actually exists (owner
+      // 2026-07-09). Live views only: the player streams
+      // /reports/:token/recap/video, meaningless in pdf/static renders.
+      // Best-effort — never blocks.
+      if (mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly && v1Data.serviceLine === 'pest') {
         try {
           const { getRecap } = require('../services/service-report/recap-pipeline');
           const recap = await getRecap(service.scheduled_service_id);
@@ -1082,7 +1345,9 @@ router.get('/:token/data', async (req, res, next) => {
       technicianName: service.technician_name,
       customerName: `${service.first_name} ${service.last_name}`,
       cityState: `${service.city || ''}${service.state ? ', ' + service.state : ''}`.trim().replace(/^,\s*/, ''),
-      notes: service.technician_notes,
+      // technician_notes is internal (owner ruling 2026-07-16): only the
+      // reviewed WHAT WE DID / WHAT WE FOUND parse may reach the customer.
+      notes: technicianReportCustomerCopy(service.technician_notes)?.body || '',
       products: products.map(p => ({
         name: p.product_name, category: p.product_category,
         activeIngredient: p.active_ingredient, moaGroup: p.moa_group,
@@ -1148,11 +1413,13 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
     doc.moveDown(1);
   }
 
-  // Tech notes
-  if (service.technician_notes) {
+  // Tech notes — raw technician_notes is internal (owner ruling 2026-07-16);
+  // print only the reviewed WHAT WE DID / WHAT WE FOUND parse, or nothing.
+  const reviewedNotes = technicianReportCustomerCopy(service.technician_notes)?.body;
+  if (reviewedNotes) {
     doc.fontSize(11).font('Helvetica-Bold').fillColor(PDF_NAVY).text('TECHNICIAN NOTES');
     doc.moveDown(0.3);
-    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(service.technician_notes, { width: 512, lineGap: 3 });
+    doc.fontSize(10).font('Helvetica').fillColor(PDF_BODY).text(reviewedNotes, { width: 512, lineGap: 3 });
     doc.moveDown(1);
   }
 

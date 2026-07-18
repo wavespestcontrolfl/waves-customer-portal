@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const PushService = require('./push-notifications');
+const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const PHONE_CANDIDATE_RE = /\+?\d[\d\s().-]{6,}\d/g;
@@ -435,6 +436,39 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=compose&autopilotType=pest-insider-monthly',
     }),
   },
+  newsletter_proof_sent: {
+    label: 'Newsletter proof emailed for approval',
+    category: 'newsletter',
+    priority: 'normal',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Newsletter proof sent — reply APPROVED to send',
+      body: `Proof of "${p.subject || 'Untitled'}" emailed to ${p.recipient || 'the owner inbox'}. Reply APPROVED to that email and it sends to ${p.recipientCount ?? '?'} active subscribers; any other reply (or none) leaves it a draft.`,
+      link: '/admin/newsletter?tab=compose',
+    }),
+  },
+  newsletter_proof_approved: {
+    label: 'Newsletter approved via email reply',
+    category: 'newsletter',
+    priority: 'high',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Newsletter approved — sending to the list',
+      body: `"${p.subject || 'Untitled'}" was approved by ${p.approvedBy || 'the owner'} via email reply. Sending to ${p.recipientCount ?? '?'} active subscribers now.`,
+      link: '/admin/newsletter?tab=history',
+    }),
+  },
+  newsletter_proof_blocked: {
+    label: 'Newsletter proof/approval blocked by validation',
+    category: 'newsletter',
+    priority: 'high',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Newsletter proof blocked',
+      body: `"${p.subject || 'Untitled'}" did not pass the send gate: ${(Array.isArray(p.errors) ? p.errors : []).join('; ') || 'validation failed'}. Fix the draft in the composer — nothing was sent.`,
+      link: '/admin/newsletter?tab=compose',
+    }),
+  },
   event_sources_unhealthy: {
     label: 'Event ingestion sources unhealthy',
     category: 'newsletter',
@@ -500,6 +534,16 @@ async function triggerNotification(triggerKey, payload = {}) {
     if (!trigger) {
       logger.warn(`[notification-triggers] Unknown trigger: ${triggerKey}`);
       return;
+    }
+
+    // Demo/internal test accounts must not reach admins via bell OR push —
+    // push dispatch happens below, outside NotificationService's own gate,
+    // so suppress here before either channel. sms_reply carries the customer
+    // id as threadId.
+    const demoCid = payload?.customerId || payload?.customer_id || payload?.threadId;
+    if (isInternalTestCustomerId(demoCid)) {
+      logger.info(`[notification-triggers] Suppressed '${triggerKey}' for internal test customer`);
+      return { bellWritten: false, push: null, suppressed: true };
     }
 
     const built = sanitizeBuiltNotification(trigger.build(payload));

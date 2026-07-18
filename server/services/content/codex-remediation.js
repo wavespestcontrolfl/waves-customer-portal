@@ -24,7 +24,12 @@
  *   - Bounded by CODEX_REMEDIATION_MAX_ROUNDS (default 3). After that — or if a
  *     fix produces no change (usually a false-positive finding) — the PR is
  *     parked (status='parked'; scheduler lane also disarms its publishing claim
- *     so the row leaves the auto-merge loop for human review).
+ *     so the row leaves the auto-merge loop for human review). Every park
+ *     persists its reason + the PR head it was rendered against
+ *     (park_reason / parked_head_sha), and a park auto-re-arms with fresh
+ *     rounds when the branch later receives a NEW head — a park is a verdict
+ *     on a specific head, so a human/agent fix push resumes the loop instead
+ *     of stranding the PR.
  *   - A round is only spent when Codex has left fresh findings for the current
  *     head. If Codex hasn't re-reviewed the latest push yet it no-ops (and
  *     re-posts the "@codex review" request if a prior post failed), so it never
@@ -127,7 +132,7 @@ const FIX_SYSTEM = [
   'You fix Waves Pest Control blog post markdown files in response to automated code-review (Codex) findings.',
   'Rules:',
   '- Apply ONLY the minimal changes needed to resolve the findings. Preserve everything else exactly: document structure and the author voice.',
-  '- NEVER change the YAML frontmatter — reproduce every key and value byte-for-byte. All fixes go in the Markdown body. If a finding can only be resolved by changing frontmatter, leave that part unchanged (it will be routed to a human).',
+  '- YAML frontmatter is immutable — reproduce every key and value byte-for-byte — with EXACTLY two exceptions, and only when a finding targets them: (1) you may rewrite the `meta_description` VALUE (a complete sentence, 115–160 characters — it renders as the search snippet and the visible hero intro); (2) you may rewrite the `hero_image.alt` VALUE (describe the actual image, at most 255 characters). Never touch any other frontmatter key — not the hero/og image paths, not slug/canonical/title/dates/domains. If a finding can only be resolved by changing other frontmatter, leave that part unchanged (it will be routed to a human).',
   '- Never invent facts, statistics, reviews, or prices. Pricing phrases link to /pest-control-calculator/ — never a hardcoded number.',
   '- Do not add "near me" phrasing. Do not name competitors.',
   '- Keep every link pointing at a route that actually exists for this post\'s domain.',
@@ -188,6 +193,12 @@ async function generateFix(markdown, findings, deps = {}) {
  *   frontmatter omits `tag`, so the scheduler lane passes the real topic (like
  *   astro-publisher ~787) so FAQ-blocked-service etc. fire on Rodents/Bed Bugs.
  * opts.factContext — { title, city, keyword, tag } for the fact-check gate.
+ * opts.operatorFaqException — the publish path's NARROW operator-FAQ opt-out
+ *   (owner directive 2026-06-11: FAQPage on every intercept post). An intercept
+ *   post on a FAQ-blocked service (e.g. termite) legitimately ships WITH a FAQ,
+ *   so without this flag the gate P0s on the PRE-EXISTING body and every fix
+ *   parks (PR #368). Manifest-derived by the caller, never from generated
+ *   content; defaults false (strict).
  */
 async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
   let parsed;
@@ -206,7 +217,12 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
   const service = (Array.isArray(opts.service) && opts.service.some(Boolean)) ? opts.service : [data.category, data.tag];
   const guardrails = contentGuardrails.evaluate(
     { body, frontmatter: data },
-    { domains, service, primaryKeyword: data.primary_keyword || null },
+    {
+      domains,
+      service,
+      primaryKeyword: data.primary_keyword || null,
+      operatorFaqException: opts.operatorFaqException === true,
+    },
   );
   if (!guardrails.pass) {
     const blocking = (guardrails.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
@@ -257,21 +273,153 @@ function canonValue(v) {
 }
 
 /**
- * The ENTIRE frontmatter is immutable during remediation — fixes are body-only.
- * slug/canonical/domains would mark a different Astro route published than the
- * portal recorded, and everything else (title, description, hero/og images,
- * author/reviewer, dates) feeds merge stamps and portal columns that were
- * written BEFORE the fix and are never restamped — a frontmatter delta both
- * diverges from that source of truth and can smuggle changes past gates that
- * only scanned the original. Returns true if ANY key was added, removed, or
- * altered (parse failure counts as changed — fail closed).
+ * Frontmatter is immutable during remediation — with a narrow, validated
+ * whitelist. slug/canonical/domains would mark a different Astro route
+ * published than the portal recorded, and most other keys (title, hero/og
+ * image PATHS, author/reviewer, dates) feed merge stamps and portal columns
+ * that were written BEFORE the fix and are never restamped — a frontmatter
+ * delta there both diverges from that source of truth and can smuggle
+ * changes past gates that only scanned the original.
+ *
+ * Two fields are exempt because Codex keeps flagging them, they key NOTHING
+ * (no routing, no merge-target resolution), and every park they caused
+ * needed a trivial human push (4th occurrence 2026-07-15, astro PR #376;
+ * heroAlt class on #372/#377 before it):
+ *   - `meta_description` — must stay inside the blog schema's hard
+ *     115–160-char bound (it feeds the page meta/OG description and the
+ *     visible hero intro).
+ *   - `hero_image.alt` — non-empty, ≤255 chars (the scheduler-lane mirror
+ *     column blog_posts.hero_image_alt is varchar(255) — a longer value
+ *     would push the branch and then park on the row sync); the hero PATH
+ *     (src) and og_image stay frozen (they reference committed bytes).
+ * A whitelisted delta is additionally accepted ONLY when one of the round's
+ * Codex findings actually targets that field — otherwise an LLM that
+ * spontaneously rewrote SERP/hero copy while fixing a body-only finding
+ * would smuggle the change past the frontmatter freeze.
+ * Callers mirror both into the portal row / draft payload after the push so
+ * a later republish or social share can't resurrect the flagged value, and
+ * the autonomous lane re-runs its SEO/quality gates on the REWRITTEN
+ * metadata (validateAutonomousRunGates swaps the fixed values into the
+ * draft before evaluating).
+ *
+ * Returns { violation: string|null, changed: { meta_description?, hero_alt? } }.
+ * Any other added/removed/altered key — or an invalid or un-targeted
+ * whitelisted value — is a violation (parse failure fails closed).
  */
-function immutableFrontmatterChanged(originalMd, fixedMd) {
+const META_DESCRIPTION_MIN = 115;
+const META_DESCRIPTION_MAX = 160;
+// blog_posts.hero_image_alt is a Knex string() → varchar(255); the whitelist
+// bound must not exceed what the mirror column can store.
+const HERO_ALT_MAX = 255;
+const META_FINDING_RE = /meta[\s_-]?description/i;
+// Alt-SPECIFIC wording only: a finding about the hero IMAGE or its path
+// ("replace the misleading hero image", "use accurate hero art") must NOT
+// authorize an alt rewrite — the image problem stays for a human while the
+// LLM would happily "fix" the alt and mirror it. `\balt\b` covers "alt",
+// "alt text", "hero alt"; `hero_?alt` covers heroAlt / hero_alt casings.
+const HERO_ALT_FINDING_RE = /\balt\b|hero_?alt/i;
+
+function frontmatterFixViolation(originalMd, fixedMd, findings = []) {
   let a; let b;
-  try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) { return true; }
+  try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) {
+    return { violation: 'frontmatter unparseable after fix', changed: {} };
+  }
+  const findingBodies = (Array.isArray(findings) ? findings : []).map((f) => String((f && f.body) || ''));
+  const metaTargeted = findingBodies.some((t) => META_FINDING_RE.test(t));
+  const altTargeted = findingBodies.some((t) => HERO_ALT_FINDING_RE.test(t));
+  const changed = {};
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k of keys) { if (canonValue(a[k]) !== canonValue(b[k])) return true; }
-  return false;
+  for (const k of keys) {
+    if (canonValue(a[k]) === canonValue(b[k])) continue;
+    if (k === 'meta_description') {
+      if (!metaTargeted) {
+        return { violation: 'meta_description changed but no finding in this round targets it', changed: {} };
+      }
+      const v = b.meta_description;
+      const len = typeof v === 'string' ? v.trim().length : 0;
+      if (len < META_DESCRIPTION_MIN || len > META_DESCRIPTION_MAX) {
+        return { violation: `meta_description rewrite is ${len} chars (schema bound ${META_DESCRIPTION_MIN}–${META_DESCRIPTION_MAX})`, changed: {} };
+      }
+      changed.meta_description = v;
+      continue;
+    }
+    if (k === 'hero_image') {
+      const av = (a.hero_image && typeof a.hero_image === 'object') ? a.hero_image : {};
+      const bv = (b.hero_image && typeof b.hero_image === 'object') ? b.hero_image : {};
+      const subKeys = new Set([...Object.keys(av), ...Object.keys(bv)]);
+      for (const sk of subKeys) {
+        if (sk !== 'alt' && canonValue(av[sk]) !== canonValue(bv[sk])) {
+          return { violation: `hero_image.${sk} changed (only hero_image.alt is fixable — the path references committed bytes)`, changed: {} };
+        }
+      }
+      if (!altTargeted) {
+        return { violation: 'hero_image.alt changed but no finding in this round targets it', changed: {} };
+      }
+      const alt = bv.alt;
+      if (typeof alt !== 'string' || !alt.trim() || alt.trim().length > HERO_ALT_MAX) {
+        return { violation: `hero_image.alt rewrite invalid (empty or >${HERO_ALT_MAX} chars)`, changed: {} };
+      }
+      changed.hero_alt = alt;
+      continue;
+    }
+    return { violation: `frontmatter key "${k}" changed (immutable during remediation; fixable: meta_description, hero_image.alt)`, changed: {} };
+  }
+  return { violation: null, changed };
+}
+
+/**
+ * Metadata quality re-check for a rewritten meta_description on the
+ * SCHEDULER lane. The autonomous lane re-runs the full quality gate on the
+ * rewritten metadata (validateAutonomousRunGates swaps it into the draft),
+ * but the scheduler lane's only gate is validateFixedBlogFile, which never
+ * invokes content-quality-gate — so a 115–160-char rewrite carrying PII or
+ * title/meta spam would ship and mirror into blog_posts unchecked. Re-run
+ * exactly the two checks the publish-time gate applies to SEO fields, on
+ * the REWRITTEN text only (the legacy body is deliberately NOT re-scanned —
+ * it predates the fix, and grading old content with a stricter-than-publish
+ * gate parks every fix on legacy posts, the PR #368 lesson).
+ */
+function validateRewrittenMeta(metaDescription, factContext = null, deps = {}) {
+  try {
+    // The title is deliberately OMITTED from both checks below: the
+    // whitelist can never change it, and evaluateTitleMetaSpam hard-fails
+    // titles with pre-existing issues (near-me, >90 chars, term repeats) —
+    // passing the unchanged legacy title would park a clean meta rewrite
+    // over content this fix didn't touch. An empty title skips every
+    // title check (inspectTitle early-returns) while the meta inspection
+    // still runs in full.
+    const spamGate = deps.titleMetaSpamGate || require('./title-meta-spam-gate');
+    const spam = spamGate.evaluateTitleMetaSpam({
+      title: '',
+      meta_description: metaDescription,
+      city: factContext ? factContext.city : undefined,
+      service: factContext ? factContext.tag : undefined,
+      target_keyword: factContext ? factContext.keyword : undefined,
+    });
+    if (!spam || spam.ok !== true) {
+      const reasons = ((spam && spam.hard_failures) || []).map((f) => f.reason || f.code).join(',');
+      return { ok: false, reason: `title/meta spam: ${reasons || 'no result'}` };
+    }
+    // PII: reuse the quality gate's own redaction evaluator, scoped to the
+    // REWRITTEN text only (body = the meta gets the same prose-style scan
+    // the gate applies to meta fields). The unchanged title is deliberately
+    // NOT passed: it predates the fix, and the gate's Title-Case
+    // heading-pair heuristic would park legitimate meta fixes on legacy
+    // posts whose titles were never graded by this gate at publish time.
+    const qualityGate = deps.contentQualityGate || require('./content-quality-gate');
+    const pii = qualityGate._internals.checkRedactionPassed({
+      body: metaDescription,
+      title: '',
+      meta_description: metaDescription,
+      frontmatter: {},
+    });
+    if (!pii || pii.ok !== true) {
+      return { ok: false, reason: `pii: ${(pii && pii.reason) || 'no result'}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: `metadata quality re-check threw: ${e.message}` };
+  }
 }
 
 // ── Deterministic date-restamp carve-out ──────────────────────────────────
@@ -415,6 +563,28 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
     const draft = { ...draft0, body: String((parsed && parsed.content) || '').trim() };
     if (!draft.body) return { ok: false, reason: 'fixed body is empty' };
+    // The fix may carry whitelisted frontmatter rewrites (meta_description /
+    // hero alt). The stored payload predates them, so swap the FIXED values
+    // into the draft before evaluating — otherwise the SEO/quality gates
+    // below re-validate the STALE metadata and a rewritten meta_description
+    // reaches the branch (and the draft_payload mirror) ungated.
+    const fixedData = (parsed && parsed.data) || {};
+    if (typeof fixedData.meta_description === 'string' && fixedData.meta_description.trim()) {
+      draft.meta_description = fixedData.meta_description;
+      if (draft.frontmatter && typeof draft.frontmatter === 'object') {
+        draft.frontmatter = { ...draft.frontmatter, meta_description: fixedData.meta_description };
+      }
+    }
+    const fixedAlt = (fixedData.hero_image && typeof fixedData.hero_image === 'object') ? fixedData.hero_image.alt : undefined;
+    if (typeof fixedAlt === 'string' && fixedAlt.trim() && draft.frontmatter && typeof draft.frontmatter === 'object') {
+      draft.frontmatter = {
+        ...draft.frontmatter,
+        hero_image: {
+          ...(draft.frontmatter.hero_image && typeof draft.frontmatter.hero_image === 'object' ? draft.frontmatter.hero_image : {}),
+          alt: fixedAlt,
+        },
+      };
+    }
 
     // 0a. Claims-ledger validation for facts-gated runs (runner step 3b): the
     //     run's claims_ledger_result was rendered against the ORIGINAL body,
@@ -557,12 +727,63 @@ async function getState(db, prNumber) {
   return row || { pr_number: prNumber, rounds: 0, status: 'active' };
 }
 
+const TERMINAL_REMEDIATION_STATES = ['merged', 'closed'];
+
 async function saveState(db, prNumber, patch) {
-  const existing = await db('codex_remediation_state').where({ pr_number: prNumber }).first();
-  if (existing) {
-    await db('codex_remediation_state').where({ pr_number: prNumber }).update({ ...patch, updated_at: new Date() });
-  } else {
-    await db('codex_remediation_state').insert({ pr_number: prNumber, ...patch, created_at: new Date(), updated_at: new Date() });
+  // Insert-or-guarded-update, safe against a concurrent markPrTerminal in
+  // EVERY interleaving: terminal rows are immutable (a round that began
+  // while the PR was open can finish after the terminal stamp — its write
+  // must not flip status back to remediating/parked), and a blind insert
+  // could recreate a live row right after a tombstone check. onConflict
+  // ignore + status-guarded update makes the stamp win; callers get false
+  // when it did and must stop the round.
+  await db('codex_remediation_state')
+    .insert({ pr_number: prNumber, ...patch, created_at: new Date(), updated_at: new Date() })
+    .onConflict('pr_number')
+    .ignore();
+  const updated = await db('codex_remediation_state')
+    .where({ pr_number: prNumber })
+    .whereNotIn('status', TERMINAL_REMEDIATION_STATES)
+    .update({ ...patch, updated_at: new Date() });
+  return updated > 0;
+}
+
+/**
+ * Stamp a PR's remediation row terminal ('merged' | 'closed') once the PR
+ * leaves the open state. Nothing transitioned these rows before, so merged
+ * PRs stayed at 'parked'/'remediating'/'active' forever — dead rows that
+ * read as live park telemetry to anyone sweeping park_reason. Bookkeeping
+ * only and fail-soft. When no row exists yet a terminal TOMBSTONE is
+ * created: an in-flight round whose first saveState hasn't landed would
+ * otherwise insert a live 'remediating' row after the PR already left the
+ * open state (saveState's guarded update then loses to nothing).
+ */
+async function markPrTerminal(prNumber, status, injectedDb = null) {
+  const dbc = injectedDb || dbDefault;
+  try {
+    const n = Number(prNumber);
+    if (!Number.isInteger(n) || !TERMINAL_REMEDIATION_STATES.includes(status)) return { updated: 0 };
+    // ONE atomic statement: tombstone a missing row, flip a live one, leave
+    // a terminal one untouched. A separate update-then-insert had a window
+    // where a racing round's first saveState could land a live row (and pass
+    // its pre-push guard) between the two — with the upsert, whichever of
+    // the stamp and the first save commits first wins, and saveState's
+    // status-guarded update then sees the terminal row and aborts the round.
+    // 'merged' is permanent (merges are irreversible); 'closed' may only be
+    // UPGRADED to 'merged' (a closed PR can be reopened and later merged).
+    const res = await dbc.raw(
+      `INSERT INTO codex_remediation_state (pr_number, status, rounds, created_at, updated_at)
+       VALUES (?, ?, 0, NOW(), NOW())
+       ON CONFLICT (pr_number) DO UPDATE
+         SET status = EXCLUDED.status, updated_at = NOW()
+       WHERE codex_remediation_state.status <> 'merged'
+         AND (codex_remediation_state.status <> 'closed' OR EXCLUDED.status = 'merged')`,
+      [n, status],
+    );
+    return { updated: res?.rowCount ?? 0 };
+  } catch (err) {
+    logger.warn(`[codex-remediation] terminal stamp failed for PR #${prNumber}: ${err.message}`);
+    return { updated: 0, error: err.message };
   }
 }
 
@@ -574,8 +795,22 @@ function reviewRequestedForHead(issueComments = [], headSha = null) {
   });
 }
 
-async function park(db, prNumber, reason, onPark) {
-  await saveState(db, prNumber, { status: 'parked' });
+async function park(db, prNumber, reason, onPark, headSha = null) {
+  // Persist the reason and the head the verdict applied to — the reason used
+  // to live only in logs (short retention: three parked autonomous PRs were
+  // undiagnosable after the fact), and the head is what lets a later push
+  // re-arm the loop (a park is a verdict on a specific head, not on the PR).
+  const wrote = await saveState(db, prNumber, {
+    status: 'parked',
+    park_reason: String(reason || '').slice(0, 1000),
+    parked_head_sha: headSha ? String(headSha).trim().toLowerCase() : null,
+  });
+  if (!wrote) {
+    // The PR merged/closed while this round ran — the row is terminal and a
+    // park (plus its run-notes annotation) would be stale noise.
+    logger.info(`[codex-remediation] park skipped for PR #${prNumber}: row already terminal (${reason})`);
+    return { parked: false, skipped: true, reason };
+  }
   if (typeof onPark === 'function') {
     try { await onPark(reason); } catch (e) { logger.warn(`[codex-remediation] onPark failed for PR #${prNumber}: ${e.message}`); }
   }
@@ -594,16 +829,71 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const gh = deps.gh || ghDefault;
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
+    operatorFaqException = false,
     onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
   const state = await getState(db, prNumber);
-  if (state.status === 'parked') return { skipped: true, reason: 'parked' };
 
   const pr = await gh.getPr(prNumber);
   if (!pr || pr.state !== 'open') return { skipped: true, reason: `PR ${pr && pr.state ? pr.state : 'missing'}` };
   const headSha = pr.head && pr.head.sha ? pr.head.sha : null;
+
+  if (state.status === 'closed') {
+    // A 'closed' tombstone can go stale: PRs can be REOPENED, and this code
+    // only ever runs for a merge-blocked OPEN PR — so the observation in
+    // hand contradicts the tombstone. Re-arm with a direct CAS ('merged'
+    // stays permanent; saveState's terminal guard is deliberately bypassed
+    // here because this is the one sanctioned closed→live transition).
+    await db('codex_remediation_state')
+      .where({ pr_number: prNumber, status: 'closed' })
+      .update({ status: 'active', rounds: 0, park_reason: null, parked_head_sha: null, updated_at: new Date() });
+    state.status = 'active';
+    state.rounds = 0;
+    logger.info(`[codex-remediation] re-armed closed-tombstoned PR #${prNumber}: PR observed open again (reopened)`);
+  }
+
+  if (state.status === 'parked') {
+    // A park is a verdict on the head it was rendered against. If the branch
+    // has since received a NEW head (a human or agent pushed a fix), the
+    // verdict is stale — re-arm with fresh rounds so the loop can carry that
+    // push the rest of the way. Same head (or no head to compare) stays
+    // parked. Legacy rows parked before parked_head_sha existed re-arm once:
+    // the round either succeeds or re-parks stamping reason + head, so this
+    // converges instead of looping.
+    const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
+    const currentHead = String(headSha || '').trim().toLowerCase();
+    // A 'moved past' park claims ANOTHER push superseded ours mid-round. If
+    // the live head IS the push we parked against, that claim was a stale
+    // getPr read-after-write (PR #383) — and because such parks stamp OUR
+    // pushed head, the head-advanced re-arm below can never fire (the stamp
+    // equals the real head). The premise is contradicted by the observation
+    // in hand, so re-arm on it. Other same-head parks (sync failures, gate
+    // failures) keep holding for a human as designed.
+    let staleMovedPastPark = Boolean(parkedHead) && parkedHead === currentHead
+      && /^pr head moved past the remediation push/.test(String(state.park_reason || ''));
+    if (staleMovedPastPark) {
+      // The same-head observation could ITSELF be a stale getPr read of a
+      // genuine parallel push (park correctly recorded our push B, a real C
+      // landed, and getPr still serves B). Only the branch ref agreeing that
+      // the parked push IS the tip proves the park's premise false. Ref
+      // disagrees (or is unreadable) → stay parked; the next tick observes
+      // the true head and the ordinary head-advance re-arm carries it.
+      let refHead = null;
+      try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+      if (refHead !== currentHead) staleMovedPastPark = false;
+    }
+    if (!currentHead || (parkedHead && parkedHead === currentHead && !staleMovedPastPark)) {
+      return { skipped: true, reason: 'parked' };
+    }
+    await saveState(db, prNumber, { status: 'active', rounds: 0, park_reason: null, parked_head_sha: null });
+    state.status = 'active';
+    state.rounds = 0;
+    logger.info(staleMovedPastPark
+      ? `[codex-remediation] re-armed parked PR #${prNumber}: 'moved past' park contradicted — the branch head IS the parked push ${currentHead.slice(0, 7)} (stale read at park time)`
+      : `[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
+  }
 
   const reviewComments = await gh.listPrReviewComments(prNumber);
   const findings = parseCodexFindings(reviewComments, headSha);
@@ -637,14 +927,14 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
 
   // Fresh findings on the current head.
   if (atRoundLimit(state.rounds)) {
-    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark);
+    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark, headSha);
   }
 
   const targetPath = pickTargetPath(findings, slug);
-  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark);
+  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark, headSha);
 
   const file = await gh.getFile(targetPath, branch);
-  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark);
+  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark, headSha);
 
   // Deterministic date-restamp carve-out: resolve date-stamp findings in code
   // (today ET), and only send the REMAINING findings to the body-only LLM fix.
@@ -675,21 +965,31 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // round limit so the PR reaches human review instead of looping.
     const attempt = (state.rounds || 0) + 1;
     await saveState(db, prNumber, { branch, rounds: attempt });
-    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark);
+    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark, headSha);
     return { skipped: true, reason: 'no valid LLM fix (will retry)' };
   }
   if (fixed.trim() === String(file.content).trim()) {
-    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark);
+    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha);
   }
-  // Frontmatter is immutable during remediation (fixes are body-only) — any
-  // added/removed/altered key parks: routing keys would mark a different URL
-  // published than the portal recorded, and the rest feed merge stamps and
-  // portal columns written before the fix that nothing restamps. Compared
-  // against the restamped baseline, so the deterministic date restamp above is
-  // the ONLY frontmatter delta that can ever pass — the LLM still can't touch
-  // frontmatter at all.
-  if (immutableFrontmatterChanged(baseline, fixed)) {
-    return park(db, prNumber, 'fix changed frontmatter (immutable during remediation — fixes are body-only)', onPark);
+  // Frontmatter is immutable during remediation outside the validated
+  // meta_description / hero_image.alt whitelist — any other added/removed/
+  // altered key parks: routing keys would mark a different URL published
+  // than the portal recorded, and the rest feed merge stamps and portal
+  // columns written before the fix that nothing restamps. Compared against
+  // the restamped baseline, so the deterministic date restamp above plus the
+  // whitelist are the ONLY frontmatter deltas that can ever pass.
+  const fmDelta = frontmatterFixViolation(baseline, fixed, findings);
+  if (fmDelta.violation) {
+    return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha);
+  }
+  // Scheduler-lane metadata quality re-check (the autonomous lane covers
+  // this inside revalidateFix — validateAutonomousRunGates swaps the
+  // rewritten metadata into the draft before its quality gate runs).
+  if (typeof revalidateFix !== 'function' && fmDelta.changed.meta_description !== undefined) {
+    const metaVerdict = validateRewrittenMeta(fmDelta.changed.meta_description, factContext, deps);
+    if (!metaVerdict.ok) {
+      return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha);
+    }
   }
   // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
   // derived from the body at publish (FAQPage iff a visible FAQ exists), so a
@@ -697,7 +997,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // content that isn't there. Park — restamping schema is a human call.
   const schemaChanged = deps.schemaShapeChanged || schemaShapeChanged;
   if (schemaChanged(file.content, fixed, deps)) {
-    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark);
+    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark, headSha);
   }
   // An un-interpolated {{token}} in an .mdx body crashes the MDX compile —
   // publishOrUpdatePage blocks these before opening a PR (astro-publisher
@@ -708,22 +1008,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     if (!tokenOf) {
       try { tokenOf = require('../content-astro/astro-publisher')._internals.mdxBreakingToken; } catch (_) { tokenOf = null; }
     }
-    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark);
+    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark, headSha);
     let token = null;
-    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark); }
-    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark);
+    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark, headSha); }
+    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark, headSha);
   }
 
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
-  const gate = await validate(fixed, { service, factContext }, deps);
-  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark);
+  const gate = await validate(fixed, { service, factContext, operatorFaqException }, deps);
+  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha);
   // A passing fix that INTRODUCES a named-competitor comparison still needs a
   // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
   // / named_competitor_review) predate the fix and are never restamped here.
   if (gate.requiresHumanReview === true) {
-    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark);
+    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark, headSha);
   }
 
   // Lane-specific gate re-run (autonomous lane: uniqueness / quality /
@@ -732,7 +1032,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     let recheck;
     try { recheck = await revalidateFix(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
     if (!recheck || recheck.ok !== true) {
-      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark);
+      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha);
     }
   }
 
@@ -751,7 +1051,11 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const round = (state.rounds || 0) + 1;
   // Mark 'remediating' BEFORE the push so a later save/comment failure can't
   // strand the fix — the recovery branch keys off status='remediating'.
-  await saveState(db, prNumber, { branch, status: 'remediating' });
+  // A false return means markPrTerminal won (the PR merged/closed while
+  // this round was in flight) — stop BEFORE gh.putFile so we never push
+  // fixes to a branch whose PR already left the open state.
+  const armed = await saveState(db, prNumber, { branch, status: 'remediating' });
+  if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
   const commit = await gh.putFile({
     path: targetPath,
@@ -764,6 +1068,77 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
 
+  // Post-push revalidation: the PR can merge/close in the window between the
+  // pre-push saveState and gh.putFile. The push itself is then inert (the
+  // commit sits on a branch main never took), but the sync below would
+  // mirror content into portal state that was NEVER included in main — so
+  // verify the PR is still open and our commit is actually its head before
+  // any post-commit synchronization. Best-effort on transient GitHub errors
+  // (the recovery branch re-drives an interrupted round next tick).
+  try {
+    const fresh = await gh.getPr(prNumber);
+    if (!fresh || fresh.merged || fresh.merged_at || fresh.state !== 'open') {
+      const terminal = fresh && (fresh.merged || fresh.merged_at) ? 'merged' : 'closed';
+      await markPrTerminal(prNumber, terminal, db);
+      logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} not in main)`);
+      return { skipped: true, reason: 'pr left the open state during remediation (post-push check)' };
+    }
+    if (fresh.head?.sha && newHead
+      && String(fresh.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
+      // Ambiguous mismatch: either a parallel push landed mid-round, or getPr
+      // served a stale read-after-write snapshot behind our OWN putFile (PR
+      // #383 — the "moved past" head was the parent of our commit, and the
+      // park below then wedged forever because it stamps the real head). The
+      // branch ref is authoritative for putFile's own write; consult it
+      // before withholding the sync. A getBranchSha failure falls through to
+      // the park (fail closed — the parked-branch contradiction re-arm
+      // recovers it if the read was stale).
+      let refHead = null;
+      try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+      if (refHead !== String(newHead).trim().toLowerCase()) {
+        // A parallel push (usually a human) landed mid-round: our fix is no
+        // longer the head, so syncing it would mirror content the merge won't
+        // take. Park like the other withheld-sync paths — and stamp OUR
+        // pushed head, so the parked row re-arms on the very next blocked
+        // tick (branch head ≠ parked head) and remediation re-evaluates the
+        // newer content with fresh rounds instead of going silent.
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(refHead || fresh.head.sha)}); sync withheld`, onPark, newHead);
+      }
+      // The ref confirms our push IS the branch head — but the snapshot that
+      // misreported the head may misreport PR state too (a close landing
+      // right behind the push). Re-fetch and re-run the terminal-state check
+      // on the fresher read before any post-commit sync; a throw here lands
+      // in the outer catch (park, sync withheld — fail closed).
+      const recheck = await gh.getPr(prNumber);
+      if (!recheck || recheck.merged || recheck.merged_at || recheck.state !== 'open') {
+        const terminal = recheck && (recheck.merged || recheck.merged_at) ? 'merged' : 'closed';
+        await markPrTerminal(prNumber, terminal, db);
+        logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} not in main)`);
+        return { skipped: true, reason: 'pr left the open state during remediation (post-push check)' };
+      }
+      // The re-read must ALSO agree our push is the head: a concurrent push C
+      // can land between the ref confirmation and this read, and proceeding
+      // would sync content the merge won't take. Park on any disagreement —
+      // stamped with OUR push, both cases converge: a real C re-arms via
+      // head-advance next tick; a still-stale read re-arms via the
+      // contradiction check (the ref will again confirm our push is the tip).
+      if (!recheck.head?.sha
+        || String(recheck.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead);
+      }
+      // Open AND at our head on the re-read → proceed with the round.
+    }
+  } catch (e) {
+    // Fail CLOSED: proceeding could mirror a fix into portal state that
+    // never reached main (if the PR merged during the push and this fetch
+    // failed), and completing the round would record it so nothing ever
+    // re-checks. The 'remediating'-recovery branch only re-requests review —
+    // it cannot re-run the sync — so park instead: sync withheld, the lane's
+    // onPark disarms/annotates, and a human (or a re-arm on a new head)
+    // reconciles. Stamped with newHead so our own push can't self-re-arm.
+    return park(db, prNumber, `post-push PR revalidation failed (fix commit ${shortSha(newHead)} pushed, sync withheld): ${e.message}`, onPark, newHead || headSha);
+  }
+
   // Lane-specific post-commit sync (scheduler lane: mirror the fixed body into
   // blog_posts.content so a later edit/republish/social share can't resurrect
   // the pre-fix body). A failed sync parks: the branch now diverges from the
@@ -772,9 +1147,13 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (typeof onRemediated === 'function') {
     try {
       const body = String((fm.parse(fixed) || {}).content || '').trim();
-      await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped });
+      await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped, frontmatterChanges: fmDelta.changed });
     } catch (e) {
-      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark);
+      // Stamp the park with newHead, NOT the pre-push headSha: the fix commit
+      // is already on the branch, so a headSha stamp would make the re-arm
+      // logic read our own push as "head advanced" next tick and un-park the
+      // exact divergence this park exists to hold for a human.
+      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, newHead || headSha);
     }
   }
 
@@ -826,8 +1205,18 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // publishing sweep or an admin republish can move the row (or repoint it
     // at a NEW PR) mid-flight — an id-only update would overwrite the current
     // row with the OLD PR's fixed body. A CAS miss throws → the caller parks.
-    onRemediated: async ({ markdown, body, datesRestamped }) => {
+    onRemediated: async ({ markdown, body, datesRestamped, frontmatterChanges }) => {
       const patch = { content: body, updated_at: new Date() };
+      // Whitelisted frontmatter fixes mirror into their row columns for the
+      // same reason the body does: publishAstro rebuilds frontmatter from
+      // blog_posts on a republish, so an unmirrored meta_description /
+      // hero alt would resurrect the exact value Codex flagged.
+      if (frontmatterChanges && frontmatterChanges.meta_description !== undefined) {
+        patch.meta_description = frontmatterChanges.meta_description;
+      }
+      if (frontmatterChanges && frontmatterChanges.hero_alt !== undefined) {
+        patch.hero_image_alt = frontmatterChanges.hero_alt;
+      }
       // When the deterministic date restamp is part of the committed fix,
       // mirror the corrected dates into the row's DATE columns too —
       // otherwise the PR merges with healed frontmatter while blog_posts
@@ -875,19 +1264,93 @@ async function maybeRemediateBlogPost(post, deps = {}) {
 async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
   const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
+  const db = deps.db || dbDefault;
+  // Derive the publish path's narrow operator-FAQ exception from the run's
+  // opportunity + brief via the SAME runner derivation the run-context gate
+  // uses — an intercept post on a FAQ-blocked service carries its FAQ by
+  // owner mandate, and evaluating validateFixedBlogFile without the flag
+  // P0s the pre-existing body so every fix parks (PR #368). Scoped to
+  // new_supporting_blog (the only action the gates cover — and skipping it
+  // avoids the refresh lane's live-frontmatter load on every tick); any
+  // missing row or lookup failure stays false, which only parks (stricter),
+  // never merges.
+  let operatorFaqException = false;
+  try {
+    const fullRun = run && run.id ? await db('autonomous_runs').where({ id: run.id }).first() : null;
+    const opp = (fullRun && fullRun.action_type === 'new_supporting_blog' && fullRun.opportunity_id)
+      ? await db('opportunity_queue').where({ id: fullRun.opportunity_id }).first()
+      : null;
+    if (opp) {
+      const runner = deps.autonomousRunner || require('./autonomous-runner');
+      const brief = await runner._loadReviewedBrief(fullRun);
+      if (brief) {
+        const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
+        operatorFaqException = !!guardOptions && guardOptions.operatorFaqException === true;
+      }
+    }
+  } catch (e) {
+    logger.warn(`[codex-remediation] operator-FAQ exception derivation failed for PR #${pr && pr.number}: ${e.message} — evaluating gates without it`);
+  }
   return runRemediationForPr({
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
     // path comes from the findings themselves (the autonomous run has no slug
-    // column and posts are .mdx); onPark left null — the run stays parked at
-    // completed_pending_review and status='parked' stops re-remediation.
+    // column and posts are .mdx).
     slug: null,
     // Only a brand-new publish may restamp `published` — refresh/rewrite
     // lanes must never rewrite an existing post's publication date. (Those
     // lanes park at validateAutonomousRunGates before any commit anyway;
     // this keeps the invariant local instead of relying on that gate.)
     restampPublished: (run && run.action_type) === 'new_supporting_blog',
-    onPark: null,
+    operatorFaqException,
+    // Surface the park on the run itself: the run stays parked at
+    // completed_pending_review (status='parked' stops re-remediation until a
+    // new head re-arms), and without this note the ONLY record of why lived
+    // in short-retention logs — a parked PR was indistinguishable from one
+    // still waiting on Codex. Append-only; park() wraps this in try/catch so
+    // an annotation failure never blocks the park itself.
+    onPark: run && run.id ? async (reason) => {
+      const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+      if (!fresh) return;
+      const note = `Codex remediation parked PR #${pr.number}: ${String(reason || '').slice(0, 500)} — fix the findings on the PR branch (a new head re-arms remediation) or merge/close manually.`;
+      await db('autonomous_runs').where({ id: run.id }).update({
+        reviewer_notes: [fresh.reviewer_notes, note].filter(Boolean).join(' | '),
+        updated_at: new Date(),
+      });
+    } : null,
+    // Mirror whitelisted frontmatter fixes into the run's draft payload: the
+    // poller's finalize path builds the social-share caption from
+    // draft_payload's meta_description, so an unmirrored fix would post the
+    // exact truncated snippet Codex flagged. Fail-SOFT, unlike the scheduler
+    // lane's row sync (runRemediationForPr parks when onRemediated throws):
+    // a stale caption degrades to the title-only fallback, never a wrong
+    // route — not worth parking a pushed fix over, so failures only warn.
+    onRemediated: run && run.id ? async ({ frontmatterChanges }) => {
+      if (!frontmatterChanges
+        || (frontmatterChanges.meta_description === undefined && frontmatterChanges.hero_alt === undefined)) return;
+      try {
+        const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+        if (!fresh || !fresh.draft_payload) return;
+        const payload = typeof fresh.draft_payload === 'string' ? JSON.parse(fresh.draft_payload) : fresh.draft_payload;
+        if (!payload || typeof payload !== 'object') return;
+        payload.frontmatter = payload.frontmatter && typeof payload.frontmatter === 'object' ? payload.frontmatter : {};
+        if (frontmatterChanges.meta_description !== undefined) {
+          payload.frontmatter.meta_description = frontmatterChanges.meta_description;
+        }
+        if (frontmatterChanges.hero_alt !== undefined) {
+          payload.frontmatter.hero_image = {
+            ...(payload.frontmatter.hero_image && typeof payload.frontmatter.hero_image === 'object' ? payload.frontmatter.hero_image : {}),
+            alt: frontmatterChanges.hero_alt,
+          };
+        }
+        await db('autonomous_runs').where({ id: run.id }).update({
+          draft_payload: JSON.stringify(payload),
+          updated_at: new Date(),
+        });
+      } catch (e) {
+        logger.warn(`[codex-remediation] draft_payload mirror failed for PR #${pr && pr.number}: ${e.message} — social caption may use the pre-fix value`);
+      }
+    } : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
@@ -902,6 +1365,7 @@ module.exports = {
   maybeRemediateBlogPost,
   maybeRemediateAutonomousPr,
   runRemediationForPr,
+  markPrTerminal,
   parseCodexFindings,
   pickTargetPath,
   buildReviewRequestBody,
@@ -909,10 +1373,12 @@ module.exports = {
   reviewRequestedForHead,
   validateFixedBlogFile,
   validateAutonomousRunGates,
-  immutableFrontmatterChanged,
+  frontmatterFixViolation,
+  validateRewrittenMeta,
   schemaShapeChanged,
   isDateStampFinding,
   restampFrontmatterDates,
+  _internals: { saveState, getState },
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,

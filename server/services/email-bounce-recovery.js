@@ -350,6 +350,56 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
 }
 
 /**
+ * Gmail-aware ownership: Google ignores local-part dots and everything after
+ * '+', so EVERY dot/tag variant of one mailbox name delivers to one inbox.
+ * The exact-string check above cannot see those aliases — john.doe@gmail.com
+ * passes it even when another customer is on file as johndoe@gmail.com or
+ * johndoe+billing@gmail.com. This compares by INBOX IDENTITY (mailbox name
+ * before '+', dots stripped) across the same sources, with the same
+ * fail-closed contract. Non-Google addresses return false — dots and tags
+ * are significant everywhere else, so the exact check is the right one there.
+ */
+async function gmailMailboxOwnedByOther(email, ownCustomerId) {
+  const s = String(email || '').trim().toLowerCase();
+  const [local, domain] = s.split('@');
+  if (!local || !domain || !['gmail.com', 'googlemail.com'].includes(domain)) return false;
+  const mailbox = local.split('+')[0].replace(/\./g, '');
+  if (!mailbox) return false;
+  const own = String(ownCustomerId || '');
+  const isOther = (rowCustomerId) => !own || String(rowCustomerId || '') !== own;
+  // Column names come from the hardcoded field lists below — never user input.
+  const CANON = (f) => `REPLACE(SPLIT_PART(SPLIT_PART(LOWER(${f}), '@', 1), '+', 1), '.', '')`;
+  const GOOGLE = (f) => `SPLIT_PART(LOWER(${f}), '@', 2) IN ('gmail.com', 'googlemail.com')`;
+  try {
+    const customerRows = await db('customers')
+      .where((q) => {
+        for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`(${GOOGLE(f)} AND ${CANON(f)} = ?)`, [mailbox]);
+      })
+      .select('id');
+    if (customerRows.some((r) => String(r.id) !== own)) return true;
+
+    const estRows = await db('estimates')
+      .whereRaw(`${GOOGLE('customer_email')} AND ${CANON('customer_email')} = ?`, [mailbox])
+      .select('customer_id');
+    if (estRows.some((r) => isOther(r.customer_id))) return true;
+
+    const leadRows = await db('leads')
+      .whereRaw(`${GOOGLE('email')} AND ${CANON('email')} = ?`, [mailbox])
+      .select('customer_id');
+    if (leadRows.some((r) => isOther(r.customer_id))) return true;
+
+    const prefRows = await db('notification_prefs')
+      .whereRaw(`${GOOGLE('billing_email')} AND ${CANON('billing_email')} = ?`, [mailbox])
+      .select('customer_id');
+    if (prefRows.some((r) => isOther(r.customer_id))) return true;
+  } catch (err) {
+    logger.warn(`[bounce-recovery] gmail mailbox ownership lookup failed — treating as owned by other: ${err.message}`);
+    return true;
+  }
+  return false;
+}
+
+/**
  * Insert (or reuse) the QUEUED recovery email_messages row. Deliberately does
  * NOT publish a provider_message_id — the caller links the ledger first, then
  * dispatches. The SendGrid webhook can only match this row once provider_message_id
@@ -544,6 +594,24 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       // when we have one, e.g. a medium-confidence typo below the auto-send bar).
       if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other', 'has_attachments', 'address_no_longer_on_file'].includes(decision.status)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
+        // Audio re-verification lane (gated, best-effort): the domain
+        // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
+        // "P-I-T-T-S"), but the source recording can settle them. ONLY when
+        // the corrector had NO candidate: the lane anchors its candidates to
+        // the bounced address's own domain, so running it while a domain
+        // correction exists (has_attachments, suppressed, low-confidence…)
+        // could card variants of the KNOWN-SUSPECT domain for read-back while
+        // the alert above already carries the real suggestion. Deliberately
+        // NOT awaited — re-transcription takes tens of seconds and this runs
+        // off the bounce webhook; the result is a Needs-Review card, nothing
+        // time-coupled to this handler.
+        if (!candidate) {
+          try {
+            const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
+            reverifyBouncedEmailFromCall({ bouncedEmail, customerId: match?.customerId || null })
+              .catch((e) => logger.warn(`[bounce-recovery] reverify lane failed open: ${e.message}`));
+          } catch (e) { logger.warn(`[bounce-recovery] reverify lane unavailable: ${e.message}`); }
+        }
       }
       logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
       return { skipped: decision.status };
@@ -780,6 +848,21 @@ async function handleRecoveryBounce(recoveryMessage, ev) {
         customerId: rec.customer_id,
         status: 'redelivered_bounced',
       });
+      // Audio re-verification also applies here: the domain corrector
+      // succeeded but the RESEND bounced too — the local part was also wrong
+      // (apitz@gmial.com → apitz@gmail.com → still bounces; the recording
+      // says apitts). Locate the call by the ORIGINAL capture and exclude
+      // BOTH known-bad variants from the candidates. Fire-and-forget, same
+      // as the original-skip branch.
+      try {
+        const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
+        reverifyBouncedEmailFromCall({
+          bouncedEmail: String(recoveryMessage.recipient_email_snapshot || '').trim().toLowerCase(),
+          customerId: rec.customer_id || null,
+          sourceEmail: rec.bounced_email || null,
+          alsoExclude: [rec.bounced_email].filter(Boolean),
+        }).catch((e) => logger.warn(`[bounce-recovery] rebounce reverify failed open: ${e.message}`));
+      } catch (e) { logger.warn(`[bounce-recovery] rebounce reverify unavailable: ${e.message}`); }
     }
   } catch (err) {
     logger.error(`[bounce-recovery] handleRecoveryBounce failed: ${err.message}`);
@@ -1027,6 +1110,7 @@ module.exports = {
   resolveCustomerEmailField,
   correctedAddressSuppressed,
   correctedAddressOwnedByOther,
+  gmailMailboxOwnedByOther,
   bouncedAddressStillOnFile,
   CUSTOMER_EMAIL_FIELDS,
 };

@@ -977,13 +977,28 @@ router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:id/charge-card-quote — exact saved-card amount, including the
+// funding-aware card fee and projected account credit. No money moves here.
+router.post('/:id/charge-card-quote', async (req, res) => {
+  try {
+    const { paymentMethodId } = req.body || {};
+    if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
+    const StripeService = require('../services/stripe');
+    const quote = await StripeService.quoteInvoiceSavedCardCharge(req.params.id, paymentMethodId);
+    return res.json({ quote });
+  } catch (err) {
+    logger.warn(`[admin-invoices] charge-card quote failed: ${err.message}`);
+    return res.status(400).json({ error: err.message });
+  }
+});
+
 // POST /:id/charge-card — charge a saved card on file against this invoice.
 // Body: { paymentMethodId } (our internal payment_methods.id).
 // The card must belong to the invoice customer. Succeeds by calling
 // Stripe off-session with confirm:true; webhook marks the invoice paid.
 router.post('/:id/charge-card', async (req, res, next) => {
   try {
-    const { paymentMethodId } = req.body || {};
+    const { paymentMethodId, expectedTotal } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
 
     // Account credit is auto-applied INSIDE chargeInvoiceWithSavedCard — after it
@@ -993,10 +1008,43 @@ router.post('/:id/charge-card', async (req, res, next) => {
     // stale/invalid paymentMethodId would otherwise consume credit before the
     // card check throws, leaving the invoice reduced/edit-locked with no charge.
     const StripeService = require('../services/stripe');
-    const result = await StripeService.chargeInvoiceWithSavedCard(req.params.id, paymentMethodId);
+    const result = await StripeService.chargeInvoiceWithSavedCard(
+      req.params.id,
+      paymentMethodId,
+      { expectedTotal },
+    );
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[admin-invoices] charge-card failed: ${err.message}`);
+    // Stripe already collected the money, but the local invoice/payment write
+    // rolled back. Returning the generic 400 below makes the mobile sheet
+    // re-enable Charge and invites a second collection once the one-minute
+    // Stripe idempotency bucket rolls over.
+    if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
+      return res.status(409).json({
+        error: `Charge succeeded at Stripe (PI ${err.stripePaymentIntentId}) but could not be recorded. DO NOT charge again — an admin must reconcile it.`,
+        code: err.code,
+        orphan: true,
+        stripe_payment_intent_id: err.stripePaymentIntentId,
+      });
+    }
+    // A connection/API failure without a returned PaymentIntent has an unknown
+    // outcome: Stripe may have accepted it. Keep this non-retryable for the same
+    // reason as a confirmed orphan charge.
+    if (err.code === 'STRIPE_AMBIGUOUS_OUTCOME') {
+      return res.status(409).json({
+        error: 'Charge outcome is uncertain — Stripe may have processed it. DO NOT charge again until an admin checks Stripe.',
+        code: err.code,
+        ambiguous: true,
+      });
+    }
+    if (err.code === 'STRIPE_CHARGE_IN_PROGRESS') {
+      return res.status(409).json({
+        error: 'A saved-card charge is already in progress or awaiting reconciliation. DO NOT charge again until an admin verifies it.',
+        code: err.code,
+        in_progress: true,
+      });
+    }
     res.status(400).json({ error: err.message });
   }
 });
@@ -1443,22 +1491,59 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // precheck above, but Postgres serializes UPDATEs against the same
     // row so only one of these statements actually changes anything;
     // the loser gets an empty .returning('*') and bails out before any
-    // side effects (receipt send, payments-ledger insert, activity row)
-    // run a second time.
-    const [updatedInvoice] = await db('invoices')
-      .where({ id })
-      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
-      .update({
+    // side effects (receipt send, activity row) run a second time.
+    //
+    // The payments-ledger insert rides the SAME transaction as the status
+    // flip: the ledger row is load-bearing for every revenue rollup, and a
+    // best-effort insert after commit left collected cash permanently
+    // missing on a transient DB failure — with no alert and no sweep (the
+    // dashboard gap-fallback only rescues Stripe-PI invoices). Either both
+    // commit or the operator gets a retryable error and nothing changed.
+    const updatedInvoice = await db.transaction(async (trx) => {
+      const [row] = await trx('invoices')
+        .where({ id })
+        .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+        .update({
+          status: 'paid',
+          paid_at: trx.fn.now(),
+          payment_method: method,
+          payment_reference: trimmedReference || null,
+          payment_recorded_by: recordedBy,
+          payment_recorded_at: trx.fn.now(),
+          notes: nextNotes,
+          updated_at: trx.fn.now(),
+        })
+        .returning('*');
+      if (!row) return null;
+
+      // Payments-ledger row so revenue dashboards (admin-dashboard, monthly
+      // reports) sum manual cash/check/Zelle alongside Stripe collections.
+      // No `processor` set — that column is reserved for actual gateways
+      // (`stripe`); leaving it null is the existing convention for off-
+      // gateway money (see admin-payments-reconcile.js manual branch).
+      const paymentRow = {
+        customer_id: row.customer_id,
+        // Record the CASH actually received — amount due (total − applied account
+        // credit) — not the full total, or manual cash/check/Zelle over-states
+        // revenue by the applied credit (which isn't cash).
+        amount: invoiceAmountDue(row),
         status: 'paid',
-        paid_at: db.fn.now(),
-        payment_method: method,
-        payment_reference: trimmedReference || null,
-        payment_recorded_by: recordedBy,
-        payment_recorded_at: db.fn.now(),
-        notes: nextNotes,
-        updated_at: db.fn.now(),
-      })
-      .returning('*');
+        description: `Invoice ${row.invoice_number} — ${method}`
+          + `${trimmedReference ? ` (${trimmedReference})` : ''}`,
+        payment_date: etDateString(),
+      };
+      // Third-party Bill-To: link a payer-billed manual payment to its invoice so
+      // the customer-facing billing history/balance can filter it out. Self-pay
+      // rows normally stay unlinked to use the receipt-total fallback — BUT when
+      // account credit was applied the recorded cash (amount due) differs from
+      // invoice.total, so they MUST be linked or the receipt falls back to the
+      // pre-credit total instead of the amount actually received.
+      if (row.payer_id || Number(row.credit_applied) > 0) {
+        paymentRow.metadata = JSON.stringify({ invoice_id: row.id });
+      }
+      await trx('payments').insert(paymentRow);
+      return row;
+    });
 
     if (!updatedInvoice) {
       // Lost the race to a concurrent caller (or another path marked it
@@ -1470,37 +1555,6 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       });
     }
 
-    // Payments-ledger row so revenue dashboards (admin-dashboard, monthly
-    // reports) sum manual cash/check/Zelle alongside Stripe collections.
-    // No `processor` set — that column is reserved for actual gateways
-    // (`stripe`); leaving it null is the existing convention for off-
-    // gateway money (see admin-payments-reconcile.js manual branch).
-    try {
-      const paymentRow = {
-        customer_id: updatedInvoice.customer_id,
-        // Record the CASH actually received — amount due (total − applied account
-        // credit) — not the full total, or manual cash/check/Zelle over-states
-        // revenue by the applied credit (which isn't cash).
-        amount: invoiceAmountDue(updatedInvoice),
-        status: 'paid',
-        description: `Invoice ${updatedInvoice.invoice_number} — ${method}`
-          + `${trimmedReference ? ` (${trimmedReference})` : ''}`,
-        payment_date: etDateString(),
-      };
-      // Third-party Bill-To: link a payer-billed manual payment to its invoice so
-      // the customer-facing billing history/balance can filter it out. Self-pay
-      // rows normally stay unlinked to use the receipt-total fallback — BUT when
-      // account credit was applied the recorded cash (amount due) differs from
-      // invoice.total, so they MUST be linked or the receipt falls back to the
-      // pre-credit total instead of the amount actually received.
-      if (updatedInvoice.payer_id || Number(updatedInvoice.credit_applied) > 0) {
-        paymentRow.metadata = JSON.stringify({ invoice_id: updatedInvoice.id });
-      }
-      await db('payments').insert(paymentRow);
-    } catch (err) {
-      logger.error(`[admin-invoices:record-payment] payments-ledger insert failed for ${updatedInvoice.invoice_number}: ${err.message}`);
-    }
-
     // Stop the follow-up sequence the same way the Stripe webhook does.
     try {
       const FollowUps = require('../services/invoice-followups');
@@ -1508,6 +1562,11 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     } catch (err) {
       logger.warn(`[admin-invoices:record-payment] stopOnPayment failed: ${err.message}`);
     }
+
+    // Fire-and-forget: a manually recorded payment (check/cash/Zelle) may
+    // settle an invoice gating a payment-held WDO report — nudge the release
+    // sweep (60s interval is the fallback).
+    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
 
     try {
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
@@ -1764,6 +1823,10 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     } catch (err) {
       logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
     }
+
+    // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a
+    // payment-held WDO report — nudge the release sweep.
+    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
     try {
       const final = await db('invoices').where({ id }).first();
       await AnnualPrepayRenewals.syncTermForInvoicePayment(final);

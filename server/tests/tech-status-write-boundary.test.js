@@ -3,9 +3,16 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '../..');
 const SCAN_DIRS = [
+  'server/middleware',
+  'server/models',
   'server/routes',
+  'server/scripts',
   'server/services',
+  'server/sockets',
+  'server/utils',
 ];
+// Schema migrations may reference tech_status DDL; the single-writer rule is about runtime code.
+const SKIP_DIR_NAMES = new Set(['migrations']);
 const ALLOWED_WRITER = 'server/services/tech-status.js';
 
 const DIRECT_WRITE_PATTERNS = [
@@ -13,16 +20,19 @@ const DIRECT_WRITE_PATTERNS = [
   /UPDATE\s+tech_status\b/i,
   /DELETE\s+FROM\s+tech_status\b/i,
   /TRUNCATE\s+TABLE\s+tech_status\b/i,
-  /db\(\s*['"`]tech_status['"`]\s*\)[\s\S]{0,240}\.(?:insert|update|del|delete)\s*\(/i,
-  /knex\(\s*['"`]tech_status['"`]\s*\)[\s\S]{0,240}\.(?:insert|update|del|delete)\s*\(/i,
-  /trx\(\s*['"`]tech_status['"`]\s*\)[\s\S]{0,240}\.(?:insert|update|del|delete)\s*\(/i,
+  /db\(\s*['"`]tech_status['"`]\s*\)[\s\S]{0,2000}\.(?:insert|update|del|delete)\s*\(/i,
+  /knex\(\s*['"`]tech_status['"`]\s*\)[\s\S]{0,2000}\.(?:insert|update|del|delete)\s*\(/i,
+  /trx\(\s*['"`]tech_status['"`]\s*\)[\s\S]{0,2000}\.(?:insert|update|del|delete)\s*\(/i,
 ];
 
 function walk(dir) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   return entries.flatMap((entry) => {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) return walk(fullPath);
+    if (entry.isDirectory()) {
+      if (SKIP_DIR_NAMES.has(entry.name)) return [];
+      return walk(fullPath);
+    }
     if (!entry.name.endsWith('.js')) return [];
     return [fullPath];
   });

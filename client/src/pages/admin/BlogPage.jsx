@@ -110,6 +110,26 @@ const BLOG_POST_TYPES = [
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 
+// blog_posts.publish_date is a pg DATE: knex hydrates it as a JS Date and the
+// API serializes a full ISO string ("2026-07-15T00:00:00.000Z"), while seeded
+// or legacy rows can carry a bare "YYYY-MM-DD". Appending "T12:00:00" to the
+// ISO form made every dated row render "Invalid Date" — take the stored date
+// part for either shape (same defense as ContentCalendar's calendarDateKey).
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+function publishDateLabel(value) {
+  if (!value) return "";
+  const text = String(value);
+  const dateOnly = DATE_ONLY.test(text) ? text : text.slice(0, 10);
+  const parsed = new Date(dateOnly + "T12:00:00");
+  return Number.isNaN(parsed.getTime())
+    ? ""
+    : parsed.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+}
+
 function Card({ children, style }) {
   return (
     <div
@@ -315,16 +335,8 @@ function PostList({ status, onSelectPost }) {
                   {p.tag && <span>{p.tag}</span>}
                   {p.city && <span>{p.city}</span>}
                   {p.keyword && <span>{p.keyword}</span>}
-                  {p.publish_date && (
-                    <span>
-                      {new Date(
-                        p.publish_date + "T12:00:00",
-                      ).toLocaleDateString("en-US", {
-                        month: "short",
-                        day: "numeric",
-                        year: "numeric",
-                      })}
-                    </span>
+                  {publishDateLabel(p.publish_date) && (
+                    <span>{publishDateLabel(p.publish_date)}</span>
                   )}
                   {p.word_count > 0 && <span>{p.word_count} words</span>}
                 </div>{" "}
@@ -633,12 +645,12 @@ function PostEditor({ post, onBack, onUpdate }) {
   };
 
   const [sharing, setSharing] = useState(false);
-  const handleShareSocial = async () => {
+  const handleShareSocial = async (force = false) => {
     setSharing(true);
     try {
       const result = await adminPost(
         `/admin/content/blog/${post.id}/share-social`,
-        {},
+        force ? { force: true } : {},
       );
       const platforms = result.platforms || [];
       const successes = platforms
@@ -653,6 +665,19 @@ function PostEditor({ post, onBack, onUpdate }) {
         `Shared to: ${successes || "none"}${failures ? "\n\nFailed:\n" + failures : ""}`,
       );
     } catch (err) {
+      // Posts auto-share when they go live now — a plain click on an
+      // already-shared post 409s; confirm before deliberately re-posting.
+      if (!force && /already went out|alreadyShared/i.test(err.message || "")) {
+        setSharing(false);
+        if (
+          window.confirm(
+            "This post was already shared to social. Share it again anyway?",
+          )
+        ) {
+          await handleShareSocial(true);
+        }
+        return;
+      }
       alert("Social share failed: " + err.message);
     }
     setSharing(false);
@@ -1625,7 +1650,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             404 link to every enabled platform. */}
         {editing.astro_status === "live" && (
           <button
-            onClick={handleShareSocial}
+            onClick={() => handleShareSocial()}
             disabled={sharing}
             style={{
               padding: "10px 20px",

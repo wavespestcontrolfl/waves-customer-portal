@@ -37,7 +37,9 @@ describe('admin estimate roach UI copy', () => {
     expect(source).toContain('recurringRoachType');
     expect(source).toContain('standaloneRoachTreatment');
     expect(source).toContain('germanRoachCleanoutSelected');
-    expect(source).toContain('Roach Routing Notes');
+    // Renamed 2026-07: the box now carries all hoisted pricing review
+    // reasons, not just roach routing.
+    expect(source).toContain('Pricing Review Notes');
   });
 
   test('legacy client preview keeps roach routing metadata explicit', () => {

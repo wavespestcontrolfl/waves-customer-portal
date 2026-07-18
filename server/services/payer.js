@@ -111,6 +111,56 @@ async function createPayer(body) {
   return { payer: row };
 }
 
+/**
+ * Find an existing ACTIVE payer by AP email (case-insensitive), else create one.
+ * Used by automated linkage (e.g. the call pipeline) where the same owner-payer
+ * recurs across many jobs and must NOT spawn a duplicate `payers` row each time.
+ * An AP email is required — a payer with no email can't receive an invoice, so
+ * we return { payer: null } rather than minting an unroutable Bill-To.
+ * Never throws; returns { error } on a validation/DB problem so the caller can
+ * fall back to booking without a payer.
+ */
+async function findOrCreatePayerByEmail(body = {}) {
+  const apEmail = cleanEmail(body.apEmail ?? body.ap_email);
+  if (!apEmail || !isEmailLike(apEmail)) return { payer: null };
+  try {
+    return await db.transaction(async (trx) => {
+      // Atomic find-or-create: `payers.ap_email` has no unique index, so a bare
+      // lookup-then-insert lets two concurrent call processors both miss the
+      // existing row and insert DUPLICATE active payers for the same owner —
+      // splitting AR across payer ids. A transaction-scoped advisory lock keyed
+      // on the normalized email serializes same-email creators (different emails
+      // never contend); the lock releases on commit/rollback.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [apEmail]);
+      const matches = await trx('payers')
+        .whereRaw('LOWER(ap_email) = ?', [apEmail])
+        .orderBy('id', 'asc');
+      const active = matches.find((p) => p.active !== false);
+      if (active) return { payer: active, created: false };
+      // An INACTIVE payer with this email means an operator deliberately
+      // disabled that Bill-To — do NOT silently recreate it (that would defeat
+      // the fail-closed deactivation and route a new invoice to a disabled AP
+      // inbox). Leave it unlinked for review.
+      if (matches.length > 0) return { payer: null, inactive: true };
+      // buildPayerWrite validates/normalizes (same as createPayer); it requires
+      // display_name, so fall back to the email local-part when the caller
+      // couldn't name the payer.
+      const displayName = cleanOrNull(body.displayName ?? body.display_name, 160)
+        || apEmail.split('@')[0];
+      const { dbUpdates, error } = buildPayerWrite(
+        { ...body, ap_email: apEmail, display_name: displayName },
+        { partial: false },
+      );
+      if (error) return { error };
+      const [row] = await trx('payers').insert(dbUpdates).returning('*');
+      return { payer: row, created: true };
+    });
+  } catch (err) {
+    logger.warn(`[payer] findOrCreatePayerByEmail failed: ${err.message}`);
+    return { error: err.message };
+  }
+}
+
 async function updatePayer(id, body) {
   const pid = Number(id);
   if (!Number.isInteger(pid) || pid <= 0) return { error: 'Invalid payer id' };
@@ -157,6 +207,25 @@ function parseSnapshot(value) {
   }
 }
 
+// Column guard for scheduled_services.self_pay_override (migration
+// 20260713000001). Selecting it unguarded on a pre-migration database would
+// error the whole scheduled-service lookup — and on the fail-soft path that
+// silently DROPS an existing per-job payer_id/PO. Introspection result is
+// cached process-wide on success (migrations run pre-deploy, so a booted
+// process's schema is stable); introspection that itself fails (e.g. mocked
+// databases in tests) assumes the modern schema and is NOT cached.
+let selfPayColumnCache = null;
+async function scheduledServicesHasSelfPay(database) {
+  if (selfPayColumnCache !== null) return selfPayColumnCache;
+  try {
+    const present = await database.schema.hasColumn('scheduled_services', 'self_pay_override');
+    selfPayColumnCache = present;
+    return present;
+  } catch {
+    return true;
+  }
+}
+
 async function resolveForInvoice({ database = db, customerId, customer = null, scheduledServiceId = null, throwOnError = false } = {}) {
   const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false, snapshot: null, paymentTerms: null };
   // throwOnError: callers whose contract is "skip on uncertainty" (e.g. the
@@ -169,6 +238,7 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
   try {
     let payerId = null;
     let poNumber = null;
+    let selfPayOverride = false;
 
     // The owning customer of this invoice; used to scope the per-job lookup so
     // a stale/mismatched scheduledServiceId can never snapshot a DIFFERENT
@@ -178,16 +248,24 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
     if (scheduledServiceId) {
       const ssWhere = { id: scheduledServiceId };
       if (ownerCustomerId) ssWhere.customer_id = ownerCustomerId;
+      const ssCols = ['payer_id', 'po_number'];
+      if (await scheduledServicesHasSelfPay(database)) ssCols.push('self_pay_override');
       const ss = await softNull(database('scheduled_services')
         .where(ssWhere)
-        .first('payer_id', 'po_number'));
+        .first(ssCols));
       if (ss) {
         if (ss.payer_id) payerId = ss.payer_id;
         if (clean(ss.po_number)) poNumber = clean(ss.po_number);
+        selfPayOverride = ss.self_pay_override === true;
       }
     }
 
     if (!payerId) {
+      // Explicit per-job self-pay: the visit is pinned to "customer pays
+      // (self)", so the account-default payer must NOT be inherited. A concrete
+      // per-job payer_id above still wins (the write path keeps the two
+      // mutually exclusive), so the flag only blocks the fallback.
+      if (selfPayOverride) return SELF_PAY;
       let cust = customer;
       if (!cust && customerId) {
         cust = await softNull(database('customers').where({ id: customerId }).first('payer_id'));
@@ -349,11 +427,13 @@ module.exports = {
   listPayers,
   getPayer,
   createPayer,
+  findOrCreatePayerByEmail,
   updatePayer,
   resolveForInvoice,
   attachToInvoice,
   freezeApEmail,
   payerRecipient,
   payerSnapshot,
+  scheduledServicesHasSelfPay,
   _private: { isEmailLike, normalizeTerms, parseSnapshot },
 };

@@ -994,6 +994,17 @@ function Dashboard({
       accent: C.org,
     },
   ];
+  // Digital business cards carry a passive review QR (/l kind='card');
+  // scans land here so card-driven asks are visible next to the active funnel.
+  const cardScans = analytics?.cardScans;
+  if (cardScans && cardScans.cards > 0) {
+    kpis.push({
+      label: "Card QR Scans",
+      value: cardScans.windowScans ?? 0,
+      desc: `from ${cardScans.cards} digital cards (${cardScans.days ?? 90}d) · ${cardScans.scans} all-time`,
+      accent: C.acc,
+    });
+  }
 
   // Conversion funnel stages + channel split for the reporting strip.
   const funnelStages = [

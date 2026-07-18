@@ -49,6 +49,17 @@ describe('LawnReportViewPage', () => {
     expect(await screen.findByText(/isn't available/i)).toBeInTheDocument();
   });
 
+  it('keeps a temporary outage distinct from a missing report and retries', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 503, json: async () => ({ error: 'unavailable' }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderAt();
+
+    expect(await screen.findByText(/couldn.t load that lawn report/i)).toBeInTheDocument();
+    expect(screen.queryByText(/isn't available/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('validates the quote form before submitting', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report: { ...REPORT, first_name: '' } }) })));
     renderAt();

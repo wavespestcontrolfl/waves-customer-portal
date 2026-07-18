@@ -1,14 +1,30 @@
 /**
  * SMS Shadow Judge — Phase C of the SMS brand-voice loop.
  *
- * Nightly: pairs each unjudged message_drafts status='shadow' row with the
- * reply a human actually sent (first human-authored 'manual' or
- * human-approved 'ai_approved'/'ai_revised' outbound that really left the
- * system, to the same customer within REPLY_WINDOW_HOURS of the inbound),
- * scores the AI draft against it
- * per intent class, and writes shadow_draft_judgments. Per-intent score
- * history is what eventually graduates an intent from shadow → suggest →
- * auto-send (Phase E); escalation classes never graduate regardless.
+ * Nightly: pairs each unjudged eligible draft with the reply a human
+ * actually sent, scores the AI draft against it per intent class, and
+ * writes shadow_draft_judgments. Ground truth is found per lane:
+ *   - shadow drafts — heuristic pairing: the first human-authored 'manual'
+ *     or human-approved 'ai_approved'/'ai_revised' outbound that really
+ *     left the system, to the same customer within REPLY_WINDOW_HOURS of
+ *     the inbound (window capped at the customer's next inbound);
+ *   - corrected suggestions — deterministic pairing: the exact send that
+ *     resolved the draft's Agent Review decision, linked through
+ *     sms_log.metadata->>'agent_decision_id' (stamped by both the immediate
+ *     and the scheduled send paths). Never the reply window: the edit can
+ *     land as late as the 48h suggest expiry (later still for scheduled
+ *     sends), and the first same-customer outbound can be an unrelated
+ *     parallel-thread reply — either would corrupt the signal (Codex P2 ×2).
+ * Per-intent score history is what eventually graduates an intent from
+ * shadow → suggest → auto-send (Phase E); escalation classes never graduate.
+ *
+ * Eligible drafts (owner 2026-07-11: maximize training signal, no autonomy):
+ *   - status='shadow' — the classic silent lane; and
+ *   - status='suggested' whose Agent Review decision resolved CORRECTED —
+ *     the human EDITED the draft before sending, so the sent text is
+ *     independent ground truth and the edit itself is the richest signal we
+ *     get. ACCEPTED (verbatim) suggestions stay excluded: judging a draft
+ *     against its own text would only inflate scores (self-pairing).
  *
  * Token discipline:
  *   - LLM is called ONLY when the human actually replied — that's the only
@@ -254,16 +270,46 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
   const startedAt = Date.now();
   const eligibleBefore = new Date(Date.now() - REPLY_WINDOW_HOURS * 3600 * 1000);
 
+  const { SUGGEST_WORKFLOW, HUMAN_REPLY_TYPES, SENT_STATUSES } = require('./sms-suggest-mode');
   const drafts = await db('message_drafts')
     .leftJoin('shadow_draft_judgments', 'message_drafts.id', 'shadow_draft_judgments.draft_id')
     .leftJoin('sms_log as inbound_sms', 'message_drafts.sms_log_id', 'inbound_sms.id')
+    // The draft's Agent Review decision (one per draft — idempotency-keyed):
+    // a CORRECTED resolution makes a status='suggested' draft judgeable too,
+    // because the human's edited send is independent ground truth.
+    .leftJoin('agent_decisions as ad', function joinDecision() {
+      this.on('ad.entity_id', 'message_drafts.id')
+        .andOnVal('ad.entity_type', 'message_draft')
+        .andOnVal('ad.workflow', SUGGEST_WORKFLOW);
+    })
     .whereNull('shadow_draft_judgments.id')
-    .where('message_drafts.status', 'shadow')
+    .where(function eligibleStatuses() {
+      this.where('message_drafts.status', 'shadow')
+        .orWhere(function correctedSuggestion() {
+          this.where('message_drafts.status', 'suggested')
+            .where('ad.status', 'corrected')
+            // The decision-resolving send IS this draft's ground truth
+            // (paired by id below, never by the reply window). Require it
+            // to exist and to have actually left the system — a corrected
+            // row whose send can never qualify (delivery failure, empty
+            // media-only body) must not burn a batch slot every night.
+            .whereExists(function correctedSendExists() {
+              this.select(db.raw('1'))
+                .from('sms_log as corrected_send')
+                .whereRaw("corrected_send.metadata->>'agent_decision_id' = ad.id::text")
+                .where('corrected_send.direction', 'outbound')
+                .whereIn('corrected_send.message_type', HUMAN_REPLY_TYPES)
+                .whereIn('corrected_send.status', SENT_STATUSES)
+                .whereRaw("TRIM(COALESCE(corrected_send.message_body, '')) <> ''");
+            });
+        });
+    })
     .where('message_drafts.created_at', '<', eligibleBefore)
     .select(
       'message_drafts.id', 'message_drafts.customer_id', 'message_drafts.inbound_message',
       'message_drafts.draft_response', 'message_drafts.intent', 'message_drafts.context_summary',
       'message_drafts.facts_block', 'message_drafts.created_at', 'message_drafts.sms_log_id',
+      'message_drafts.status as draft_status', 'ad.id as decision_id',
       'inbound_sms.created_at as inbound_at'
     )
     .orderBy('message_drafts.created_at', 'asc')
@@ -323,13 +369,52 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
     return null;
   };
 
+  // Corrected suggestions pair to the send that RESOLVED their decision —
+  // the id linkage both send paths stamp — never the window heuristic: the
+  // edit can land 24–48h after the inbound (suggest expiry; later still for
+  // scheduled sends), and the first same-customer outbound can be an
+  // unrelated parallel-thread reply. Same filters as the candidate query's
+  // EXISTS, so every corrected draft in this batch finds its send here.
+  const correctedIds = drafts
+    .filter((d) => d.draft_status === 'suggested' && d.decision_id)
+    .map((d) => String(d.decision_id));
+  const sendByDecision = new Map();
+  if (correctedIds.length) {
+    const correctedSends = await db('sms_log')
+      .where('direction', 'outbound')
+      .whereIn('message_type', HUMAN_REPLY_TYPES)
+      .whereIn('status', SENT_STATUSES)
+      .whereRaw("TRIM(COALESCE(message_body, '')) <> ''")
+      .whereIn(db.raw("metadata->>'agent_decision_id'"), correctedIds)
+      .select('id', 'customer_id', 'message_body', 'created_at', db.raw("metadata->>'agent_decision_id' as decision_id"))
+      .orderBy('created_at', 'asc');
+    for (const s of correctedSends) {
+      // One send resolves one decision; keep the earliest defensively.
+      if (!sendByDecision.has(s.decision_id)) sendByDecision.set(s.decision_id, s);
+    }
+  }
+
   const byVerdict = {};
   let judged = 0;
   for (const draft of drafts) {
     try {
-      const humanReply = pairDraftWithHumanReply(draft, outboundsByCustomer.get(draft.customer_id) || [], {
-        nextInboundAt: nextInboundAfter(draft),
-      });
+      let humanReply = null;
+      if (draft.draft_status === 'suggested') {
+        humanReply = sendByDecision.get(String(draft.decision_id)) || null;
+        if (!humanReply) {
+          // The candidate query proved a qualifying send existed; only a
+          // status change between the two reads (delivery-failure callback)
+          // lands here. Leave the draft for the next run — recording
+          // human_no_reply would be exactly the corruption the linkage
+          // exists to prevent.
+          logger.warn(`[shadow-judge] corrected suggestion draft ${String(draft.id).slice(0, 8)} lost its linked send mid-run; skipping`);
+          continue;
+        }
+      } else {
+        humanReply = pairDraftWithHumanReply(draft, outboundsByCustomer.get(draft.customer_id) || [], {
+          nextInboundAt: nextInboundAfter(draft),
+        });
+      }
       const judgment = await judgeOne(draft, humanReply);
       if (!judgment) continue;
       await db('shadow_draft_judgments').insert(judgment).onConflict('draft_id').ignore();

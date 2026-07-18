@@ -1,4 +1,4 @@
-// Check Out Appointment — mobile-only, full-screen sheet opened from
+// Check out appointment — mobile-only, full-screen sheet opened from
 // MobileAppointmentDetailSheet's "Review & checkout" CTA. Square-style
 // layout per IMG_3729: Charge button up top, service line items below,
 // Add Service / Add Item or Discount buttons at the bottom.
@@ -28,6 +28,13 @@ import { X, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import MobileServicePickerSheet from './MobileServicePickerSheet';
 import MobileItemDiscountPickerSheet from './MobileItemDiscountPickerSheet';
+import {
+  useCustomerCards,
+  chargeableCardOnFile,
+  cardOnFileTitle,
+  isCardExpired,
+} from '../../hooks/useCustomerCards';
+import { attachedVisitInvoice } from './visitInvoice';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -66,6 +73,11 @@ export default function MobileCheckoutSheet({
   //   _kind is 'service' | 'discount' (UI label only — server treats uniformly)
   const [showServicePicker, setShowServicePicker] = useState(false);
   const [showItemPicker, setShowItemPicker] = useState(false);
+  // Saved payment methods — shown under the Charge button so the tech knows
+  // whether a card is on file before picking a tender. null = unknown
+  // (loading / fetch failed) and renders nothing: a false "No card on file"
+  // would send the tech chasing cash from an autopay customer.
+  const { cards: cardsOnFile } = useCustomerCards(service?.customerId || service?.customer_id);
 
   if (!service) return null;
 
@@ -101,8 +113,37 @@ export default function MobileCheckoutSheet({
 
   const servicesSubtotal = price + extraServicesTotal;
   const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
-  const totalBeforePrepaid = Math.max(0, servicesSubtotal + extraDiscountsTotal);
-  const prepaidCredit = Math.min(prepaidAmount, totalBeforePrepaid);
+  // An open invoice already attached to this visit (accept-minted setup +
+  // first-application invoice, or an earlier Charge-now mint) is what the
+  // charge actually collects — the mint endpoint reuses it AS-IS and ignores
+  // extraLineItems. Preview its total instead of the per-application price
+  // (e.g. a $214 first-visit invoice on a $115/application plan), and drop
+  // the add-service/discount affordances that would silently do nothing.
+  const inv = attachedVisitInvoice(service);
+  // Payer-billed visits never collect in person — the Charge-now endpoint
+  // refuses them and AR routes to the payer's AP inbox — so an attached
+  // invoice must not be presented as collectible here. Use the SERVER-
+  // RESOLVED signals only: `billedToPayer` (active payer resolution) and the
+  // invoice's own payer flag (via inv.open). Raw payerId is deliberately NOT
+  // consulted — an inactive per-job payer resolves self-pay and the visit's
+  // invoice IS collectible.
+  const payerBilled = !!service.billedToPayer;
+  const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
+  // A processing invoice is money already in flight (e.g. a pending ACH
+  // debit) — the payment routes reject it, so block charging outright
+  // instead of falling back to a preview that fails after tender pick.
+  const processingVisitInvoice = !payerBilled && !inv?.payerBilled && inv && inv.processing ? inv : null;
+  const invoicePreview = openVisitInvoice || processingVisitInvoice;
+  // amountDue (total − credit_applied), never the gross — the charge paths
+  // collect the amount due. And when the recorded prepayment was already
+  // consumed by this invoice (prepaidApplied), its total is already net, so
+  // netting service.prepaidAmount again would understate the button.
+  const totalBeforePrepaid = invoicePreview
+    ? invoicePreview.amountDue
+    : Math.max(0, servicesSubtotal + extraDiscountsTotal);
+  const prepaidCredit = invoicePreview && invoicePreview.prepaidApplied
+    ? 0
+    : Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
   // A genuinely $0 visit (e.g. a free callback with no added extras) has nothing
   // to mint — the invoice endpoint rejects a zero charge — so disable the Charge
@@ -110,7 +151,23 @@ export default function MobileCheckoutSheet({
   // chargeable amount: a positive-price visit that's fully prepaid still needs to
   // mint its invoice (the endpoint applies the prepaid credit → paid receipt), so
   // it must stay enabled even though `total` nets to $0.
-  const nothingToCharge = totalBeforePrepaid <= 0;
+  const nothingToCharge = totalBeforePrepaid <= 0 || !!processingVisitInvoice;
+
+  // One-line card-on-file note for the tech. Shows the first non-expired
+  // method (server orders default first); if every method is expired, says
+  // so rather than claiming there's no card.
+  let cardOnFileNote = null;
+  if (Array.isArray(cardsOnFile)) {
+    const card = chargeableCardOnFile(cardsOnFile);
+    if (!card) {
+      cardOnFileNote = 'No card on file';
+    } else {
+      const kind = card.method_type === 'ach' ? 'Bank' : 'Card';
+      const expired = isCardExpired(card) ? ` (expired ${card.exp_month}/${card.exp_year})` : '';
+      const more = cardsOnFile.length > 1 ? ` · +${cardsOnFile.length - 1} more` : '';
+      cardOnFileNote = `${kind} on file: ${cardOnFileTitle(card)}${expired}${more}`;
+    }
+  }
 
   const startTime = formatTime(service.windowStart);
   const duration = service.estimatedDuration ? `${service.estimatedDuration} mins` : '';
@@ -191,7 +248,7 @@ export default function MobileCheckoutSheet({
     setMintError(null);
     try {
       const body = {
-        extraLineItems: extras.map(({ _kind: _k, id: _i, ...rest }) => rest), // eslint-disable-line no-unused-vars
+        extraLineItems: extras.map(({ _kind: _k, id: _i, ...rest }) => rest),  
       };
       const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/invoice`, {
         method: 'POST',
@@ -233,7 +290,7 @@ export default function MobileCheckoutSheet({
     <div className={`fixed inset-0 z-[105] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
       <div
         className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
-        style={{ height: 56, paddingTop: 'env(safe-area-inset-top, 0)' }}
+        style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
           type="button"
@@ -244,7 +301,7 @@ export default function MobileCheckoutSheet({
           <X size={22} strokeWidth={1.75} />
         </button>
         <div className="flex-1 text-center font-medium text-zinc-900" style={{ fontSize: 16 }}>
-          Check Out Appointment
+          Check out appointment
         </div>
         <div className="w-11" />
       </div>
@@ -259,10 +316,17 @@ export default function MobileCheckoutSheet({
         >
           {minting
             ? 'Opening payment…'
-            : nothingToCharge
-              ? 'No charge — complete from job'
-              : `Charge $${total.toFixed(2)}`}
+            : processingVisitInvoice
+              ? 'Payment processing — nothing to collect'
+              : nothingToCharge
+                ? 'No charge — complete from job'
+                : `Charge $${total.toFixed(2)}`}
         </button>
+        {cardOnFileNote && (
+          <div className="text-center text-ink-tertiary" style={{ fontSize: 13, marginTop: 8 }}>
+            {cardOnFileNote}
+          </div>
+        )}
         {mintError && (
           <div className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
             {mintError}
@@ -270,6 +334,55 @@ export default function MobileCheckoutSheet({
         )}
         {/* Service line items */}
         <div className="mt-6">
+          {invoicePreview ? (
+            <>
+              {/* The attached invoice is collected as-is — its lines ARE the
+                  charge preview. No edit affordance: line edits on the
+                  appointment don't change an already-minted invoice. */}
+              <div className="flex items-start justify-between gap-3 py-4 border-b border-hairline border-zinc-200">
+                <div className="flex-1 min-w-0 pr-2">
+                  <div className="font-medium text-zinc-900 truncate" style={{ fontSize: 15 }}>
+                    {baseServiceLabel}
+                  </div>
+                  <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
+                    Invoice on file{invoicePreview.number ? ` · ${invoicePreview.number}` : ''}
+                  </div>
+                  {timeSubtitle && (
+                    <div className="text-ink-tertiary u-nums" style={{ fontSize: 12, marginTop: 1 }}>
+                      {timeSubtitle}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {invoicePreview.lines.map((line, i) => (
+                <div
+                  key={`${line.description}-${i}`}
+                  className="flex items-start justify-between gap-3 py-4 border-b border-hairline border-zinc-200"
+                >
+                  <div className="flex-1 min-w-0 pr-2 text-zinc-900" style={{ fontSize: 15 }}>
+                    {line.description}
+                  </div>
+                  <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
+                    {line.amount < 0 ? '−' : ''}${Math.abs(line.amount).toFixed(2)}
+                  </div>
+                </div>
+              ))}
+              {invoicePreview.creditApplied > 0 && (
+                <div className="flex items-center justify-between gap-3 py-4 border-b border-hairline border-zinc-200">
+                  <span className="text-zinc-900" style={{ fontSize: 15 }}>Account credit applied</span>
+                  <span className="u-nums text-zinc-900 shrink-0" style={{ fontSize: 15 }}>
+                    −${invoicePreview.creditApplied.toFixed(2)}
+                  </span>
+                </div>
+              )}
+              {invoicePreview.prepaidApplied && (
+                <div className="py-3 text-ink-secondary border-b border-hairline border-zinc-200" style={{ fontSize: 13 }}>
+                  Recorded prepayment already applied to this invoice.
+                </div>
+              )}
+            </>
+          ) : (
+          <>
           {/* Base appointment service */}
           <button
             type="button"
@@ -352,6 +465,8 @@ export default function MobileCheckoutSheet({
               </div>
             );
           })}
+          </>
+          )}
           {prepaidCredit > 0 && (
             <div className="flex items-center justify-between py-4 border-b border-hairline border-zinc-200">
               <span className="font-medium text-zinc-900" style={{ fontSize: 15 }}>
@@ -371,7 +486,19 @@ export default function MobileCheckoutSheet({
           </div>
         </div>
 
-        {/* Add Service / Add Item or Discount */}
+        {/* Add Service / Add Item or Discount. Hidden when an invoice is
+            already attached: the mint endpoint reuses that invoice as-is and
+            ignores extraLineItems, so offering the pickers would silently
+            drop whatever the tech added. */}
+        {invoicePreview ? (
+          <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
+            {processingVisitInvoice
+              ? 'A payment for this invoice is already processing — do not collect again.'
+              : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
+                {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
+                the Invoices page before charging.</>}
+          </div>
+        ) : (
         <div className="mt-4 space-y-3">
           <button
             type="button"
@@ -390,6 +517,7 @@ export default function MobileCheckoutSheet({
             Add Item or Discount
           </button>
         </div>
+        )}
       </div>
 
       {showServicePicker && (

@@ -121,12 +121,22 @@ function buildBlogSeoContract({ draft = {}, brief = {} } = {}) {
   const primaryService = SERVICE_TARGETS[serviceKey] || null;
   const faq = extractVisibleFaqs(body);
   const schema = resolveSchemaState({ draft, frontmatter, body });
-  const breadcrumbs = normalizeBreadcrumbs(
+  let breadcrumbs = normalizeBreadcrumbs(
     draft.seo_contract?.breadcrumbs
     || draft.seoContract?.breadcrumbs
     || frontmatter.breadcrumbs
     || []
   );
+  if (!breadcrumbs.length) {
+    // Drafts have no legal channel to carry breadcrumbs: the writer's
+    // emit_draft tool has no seo_contract field and the binding blog schema
+    // (additionalProperties: false) rejects a breadcrumbs frontmatter key.
+    // The Astro blog layout renders Home > Waves Blog > <post> unconditionally
+    // (visible nav + BreadcrumbList JSON-LD), so an empty draft-level list
+    // means "layout default", not "missing breadcrumbs" — without this
+    // fallback P1_MISSING_BREADCRUMBS fired on every autonomous draft.
+    breadcrumbs = normalizeBreadcrumbs(buildDefaultBlogBreadcrumbs({ title, slug }));
+  }
   const includedInternalLinks = normalizeInternalLinks(
     extractMarkdownLinkItems(body).map((link) => {
       const reason = inferLinkReason(link.url);
@@ -333,14 +343,26 @@ function resolveSchemaState({ draft = {}, frontmatter = {}, body = '' } = {}) {
 }
 
 function extractPestPractices(markdown = '') {
-  const body = String(markdown || '').toLowerCase();
+  // Writers emit typographic punctuation (don’t, “quotes”, em-dashes) —
+  // normalize to ASCII before literal matching or the whatNotToDo bucket
+  // never sees a curly-apostrophe "don't".
+  const body = String(markdown || '')
+    .toLowerCase()
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, '-');
   return {
-    identification: matchSection(body, /\b(what you'?re seeing|identify|identification|signs of|what this means)\b/),
-    swflContext: matchSection(body, /\b(swfl|southwest florida|sarasota|bradenton|lakewood ranch|afternoon storms?|sandy soil|humidity)\b/),
-    homeownerChecks: collectSignals(body, ['check', 'look for', 'inspect', 'confirm', 'watch for']),
-    whatNotToDo: collectSignals(body, ['avoid', 'do not', "don't", 'what not to do']),
-    whenToCallPro: matchSection(body, /\b(when to call|call waves|call a pro|professional|schedule|inspection)\b/),
-    wavesApproach: matchSection(body, /\b(waves pest control|waves can|our approach|we inspect|we treat)\b/),
+    identification: matchSection(body, /\b(what you'?re seeing|identify|identification|signs of|what this means|how to tell|what (?:it|they) looks? like|telltale|recognize)\b/),
+    swflContext: matchSection(body, /\b(swfl|southwest florida|sarasota|bradenton|lakewood ranch|venice|parrish|palmetto|north port|afternoon storms?|sandy soil|humidity)\b/),
+    homeownerChecks: collectSignals(body, ['check', 'look for', 'inspect', 'confirm', 'watch for', 'walk the', 'shine a flashlight']),
+    // No bare-'never' signal: as a substring it matched "whenever", and even
+    // word-bounded it passes reassurance copy ("you'll never have to worry
+    // again") that contains no avoidance guidance. Prohibition writing
+    // reliably carries don't/avoid/do not, which (apostrophe-normalized
+    // above) cover the bucket without that false positive.
+    whatNotToDo: collectSignals(body, ['avoid', 'do not', "don't", 'what not to do', 'skip the', 'resist the']),
+    whenToCallPro: matchSection(body, /\b(when to call|call waves|call a pro|professional|schedule|inspection|exterminator|pest control company)\b/),
+    wavesApproach: matchSection(body, /\b(waves pest control|waves can|our approach|we inspect|we treat|we start|our technicians?)\b/),
   };
 }
 
@@ -459,11 +481,17 @@ function normalizeSlug(value) {
 function normalizeUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
+  let normalized;
   if (/^https?:\/\//i.test(raw)) {
-    try { return normalizeSlug(new URL(raw).pathname); } catch { return ''; }
+    try { normalized = normalizeSlug(new URL(raw).pathname); } catch { return ''; }
+  } else if (!raw.startsWith('/')) {
+    return '';
+  } else {
+    normalized = normalizeSlug(raw);
   }
-  if (!raw.startsWith('/')) return '';
-  return normalizeSlug(raw);
+  // normalizeSlug('/') yields '//' (strip-then-rewrap) — keep the site root
+  // as '/' so the default Home breadcrumb matches the layout's visible link.
+  return normalized === '//' ? '/' : normalized;
 }
 
 function urlPath(value) {

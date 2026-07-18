@@ -36,6 +36,10 @@ const {
 } = require('../services/invoice-helpers');
 const {
   classifyExistingWebhookEvent,
+  invoicePaymentIntentBlocksFallback,
+  lateSavedCardPaymentNeedsOrphan,
+  savedCardAttemptMatchesPaymentIntent,
+  savedCardCreditAdjustment,
   STALE_CLAIM_WINDOW_MS,
 } = require('../routes/stripe-webhook-helpers');
 const {
@@ -234,6 +238,177 @@ describe('invoice INVOICE_UPDATE_ALLOWED_FIELDS', () => {
 
   test('allowlist is frozen — accidental mutation throws in strict mode', () => {
     expect(Object.isFrozen(INVOICE_UPDATE_ALLOWED_FIELDS)).toBe(true);
+  });
+});
+
+describe('saved-card ambiguous webhook binding', () => {
+  const invoice = { id: 'inv-1', customer_id: 'cust-1' };
+  const attempt = {
+    id: 'attempt-1',
+    invoice_id: 'inv-1',
+    status: 'ambiguous',
+    resolved_at: null,
+    stripe_payment_method_id: 'pm-stripe-1',
+  };
+  const paymentIntent = {
+    id: 'pi-1',
+    payment_method: 'pm-stripe-1',
+    metadata: {
+      source: 'admin_card_on_file',
+      saved_card_attempt_id: 'attempt-1',
+      waves_invoice_id: 'inv-1',
+      waves_customer_id: 'cust-1',
+    },
+  };
+
+  test('allows the exact fenced invoice, customer, source, and saved method to bind', () => {
+    expect(savedCardAttemptMatchesPaymentIntent({ attempt, invoice, paymentIntent })).toBe(true);
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: { ...attempt, status: 'claimed' },
+      invoice,
+      paymentIntent,
+    })).toBe(true);
+  });
+
+  test.each([
+    ['wrong invoice', { attempt: { ...attempt, invoice_id: 'inv-2' } }],
+    ['wrong customer', { paymentIntent: { ...paymentIntent, metadata: { ...paymentIntent.metadata, waves_customer_id: 'cust-2' } } }],
+    ['wrong source', { paymentIntent: { ...paymentIntent, metadata: { ...paymentIntent.metadata, source: 'public_pay' } } }],
+    ['wrong saved method', { paymentIntent: { ...paymentIntent, payment_method: 'pm-stripe-2' } }],
+    ['wrong attempt id', { paymentIntent: { ...paymentIntent, metadata: { ...paymentIntent.metadata, saved_card_attempt_id: 'attempt-old' } } }],
+    ['different attached PaymentIntent', { attempt: { ...attempt, stripe_payment_intent_id: 'pi-other' } }],
+    ['resolved fence', { attempt: { ...attempt, resolved_at: new Date().toISOString() } }],
+  ])('rejects %s', (_label, overrides) => {
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: overrides.attempt || attempt,
+      invoice,
+      paymentIntent: overrides.paymentIntent || paymentIntent,
+    })).toBe(false);
+  });
+
+  test('accepts a legacy event only when the attempt already records that exact PI', () => {
+    const legacyPaymentIntent = {
+      ...paymentIntent,
+      metadata: { ...paymentIntent.metadata },
+    };
+    delete legacyPaymentIntent.metadata.saved_card_attempt_id;
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: { ...attempt, stripe_payment_intent_id: 'pi-1' },
+      invoice,
+      paymentIntent: legacyPaymentIntent,
+    })).toBe(true);
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt,
+      invoice,
+      paymentIntent: legacyPaymentIntent,
+    })).toBe(false);
+  });
+
+  test('can bind a resolved succeeded attempt only for final orphan cleanup', () => {
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: {
+        ...attempt,
+        status: 'succeeded',
+        resolved_at: new Date().toISOString(),
+        stripe_payment_intent_id: 'pi-1',
+      },
+      invoice,
+      paymentIntent,
+      allowResolvedSucceeded: true,
+    })).toBe(true);
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: {
+        ...attempt,
+        status: 'succeeded',
+        resolved_at: new Date().toISOString(),
+        stripe_payment_intent_id: 'pi-1',
+      },
+      invoice,
+      paymentIntent,
+    })).toBe(false);
+  });
+});
+
+describe('saved-card webhook credit recovery', () => {
+  test('reapplies the missing rolled-back credit to its exact Stripe-time target', () => {
+    expect(savedCardCreditAdjustment({
+      attempt: { credit_applied_delta: 15, credit_applied_total: 25 },
+      invoice: { credit_applied: 10 },
+    })).toEqual({ target: 25, delta: 15 });
+  });
+
+  test('does not consume credit twice after the request already persisted it', () => {
+    expect(savedCardCreditAdjustment({
+      attempt: { credit_applied_delta: 15, credit_applied_total: 25 },
+      invoice: { credit_applied: 25 },
+    })).toBeNull();
+  });
+});
+
+describe('saved-card webhook invoice binding', () => {
+  test('exact attempt can replace a stale PaymentIntent binding', () => {
+    expect(invoicePaymentIntentBlocksFallback({
+      invoiceStatus: 'sent',
+      activePaymentIntentId: 'pi-abandoned',
+      incomingPaymentIntentId: 'pi-saved-card',
+      terminalStatuses: ['paid', 'void'],
+      hasMatchingSavedCardAttempt: true,
+    })).toBe(false);
+  });
+
+  test('unfenced PaymentIntent cannot replace a stale binding', () => {
+    expect(invoicePaymentIntentBlocksFallback({
+      invoiceStatus: 'sent',
+      activePaymentIntentId: 'pi-abandoned',
+      incomingPaymentIntentId: 'pi-unknown',
+      terminalStatuses: ['paid', 'void'],
+      hasMatchingSavedCardAttempt: false,
+    })).toBe(true);
+  });
+
+  test('processing and terminal invoices remain closed without the exact fence', () => {
+    expect(invoicePaymentIntentBlocksFallback({
+      invoiceStatus: 'processing',
+      activePaymentIntentId: null,
+      incomingPaymentIntentId: 'pi-unknown',
+      terminalStatuses: ['paid', 'void'],
+    })).toBe(true);
+    expect(invoicePaymentIntentBlocksFallback({
+      invoiceStatus: 'paid',
+      activePaymentIntentId: 'pi-saved-card',
+      incomingPaymentIntentId: 'pi-saved-card',
+      terminalStatuses: ['paid', 'void'],
+      hasMatchingSavedCardAttempt: true,
+    })).toBe(true);
+  });
+});
+
+describe('late saved-card succeeded-payment quarantine', () => {
+  test('records an orphan when another payment already closed the invoice', () => {
+    expect(lateSavedCardPaymentNeedsOrphan({
+      invoiceStatus: 'paid',
+      activePaymentIntentId: 'pi-winner',
+      incomingPaymentIntentId: 'pi-late-saved-card',
+      terminalStatuses: ['paid', 'void', 'refunded'],
+      hasMatchingSavedCardAttempt: true,
+    })).toBe(true);
+    expect(lateSavedCardPaymentNeedsOrphan({
+      invoiceStatus: 'paid',
+      activePaymentIntentId: null,
+      incomingPaymentIntentId: 'pi-late-saved-card',
+      terminalStatuses: ['paid', 'void', 'refunded'],
+      hasMatchingSavedCardAttempt: true,
+    })).toBe(true);
+  });
+
+  test('does not orphan the PI that actually settled the invoice', () => {
+    expect(lateSavedCardPaymentNeedsOrphan({
+      invoiceStatus: 'paid',
+      activePaymentIntentId: 'pi-saved-card',
+      incomingPaymentIntentId: 'pi-saved-card',
+      terminalStatuses: ['paid', 'void', 'refunded'],
+      hasMatchingSavedCardAttempt: true,
+    })).toBe(false);
   });
 });
 

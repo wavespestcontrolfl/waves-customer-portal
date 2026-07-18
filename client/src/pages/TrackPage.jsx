@@ -42,9 +42,9 @@ const TRACK_PRIMARY_CTA = {
   justifyContent: 'center',
   minHeight: 48,
   padding: '0 20px',
-  background: COLORS.blueDeeper,
+  background: COLORS.glassNavy,
   color: COLORS.white,
-  border: `1px solid ${COLORS.blueDeeper}`,
+  border: `1px solid ${COLORS.glassNavy}`,
   borderRadius: 8,
   fontFamily: FONTS.ui,
   fontWeight: 800,
@@ -290,7 +290,7 @@ function TrackerMap({ tech, property }) {
           position={property}
           icon={{
             path: 'M -10,4 L -10,-4 L 0,-12 L 10,-4 L 10,4 Z',
-            scale: 1, fillColor: COLORS.blueDeeper, fillOpacity: 1,
+            scale: 1, fillColor: COLORS.glassNavy, fillOpacity: 1,
             strokeColor: COLORS.white, strokeWeight: 2,
           }}
           title="Your property"
@@ -338,12 +338,13 @@ function TechBlock({ tech, size = 'md' }) {
         <img
           src={tech.photoUrl}
           alt={tech.firstName || ''}
+          referrerPolicy="no-referrer"
           style={{ width: px, height: px, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${TRACK_SURFACE.border}` }}
         />
       ) : (
         <div style={{
           width: px, height: px, borderRadius: '50%',
-          background: COLORS.blueDeeper, color: COLORS.white,
+          background: COLORS.glassNavy, color: COLORS.white,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: px * 0.4, fontWeight: 600,
         }}>
@@ -359,30 +360,55 @@ function TechBlock({ tech, size = 'md' }) {
   );
 }
 
-// Client identity block (owner spec 2026-07-06): replaces the old
-// "Today's visit" service-description/window/address meta — the card
-// shows WHO the visit is for (name, address, email, phone).
+// Client identity block (owner spec 2026-07-13): the card shows WHO the
+// visit is for and WHAT it is — account holder's name, any service-contact
+// names under it (tenant / home buyer / property manager), the address,
+// and the service. Never email/phone: this tokenized link is texted to
+// service contacts too, so contact PII stays off it.
 function ClientMeta({ data }) {
   const c = data.customer || {};
+  const contactNames = (c.serviceContactNames || []).filter((name) => name && name !== c.name);
   const addrLines = fullAddressLines(data.property);
-  if (!c.name && addrLines.length === 0 && !c.email && !c.phone) return null;
+  const serviceLabel = data.service?.type || null;
+  if (!c.name && contactNames.length === 0 && addrLines.length === 0 && !serviceLabel) return null;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${TRACK_SURFACE.border}` }}>
       {c.name ? (
         <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{c.name}</div>
       ) : null}
+      {contactNames.map((name) => (
+        <div key={name} style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{name}</div>
+      ))}
       {addrLines.length > 0 ? (
         <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 6, lineHeight: 1.5 }}>
           {addrLines.map((line, i) => <div key={i}>{line}</div>)}
         </div>
       ) : null}
-      {c.email ? (
-        <div style={{ fontSize: 14, marginTop: 6, color: TRACK_SURFACE.body }}>{c.email}</div>
-      ) : null}
-      {c.phone ? (
-        <div style={{ fontSize: 14, marginTop: 4, color: TRACK_SURFACE.body }}>{c.phone}</div>
+      {serviceLabel ? (
+        <div style={{ fontSize: 14, marginTop: 6, color: TRACK_SURFACE.body }}>{serviceLabel}</div>
       ) : null}
     </div>
+  );
+}
+
+// Prep-guide link for the pre-visit cards (Scheduled / EnRoute / OnProperty).
+// Renders only when prep was actually sent for this visit — prepToken stays
+// null otherwise, so most visits show nothing here.
+function PrepLink({ data }) {
+  if (!data.prepToken) return null;
+  return (
+    <a
+      href={`/prep/${data.prepToken}`}
+      data-glass="soft"
+      style={{
+        display: 'block', marginTop: 16, padding: '12px 16px',
+        border: `1px solid ${TRACK_SURFACE.border}`, borderRadius: 8,
+        textAlign: 'center', fontSize: 15, fontWeight: 600,
+        color: COLORS.glassNavy, textDecoration: 'none',
+      }}
+    >
+      View prep instructions
+    </a>
   );
 }
 
@@ -403,6 +429,7 @@ function ScheduledCard({ data }) {
         You'll get a text as soon as {techFirst} is on the way.
       </div>
       <ClientMeta data={data} />
+      <PrepLink data={data} />
     </Card>
   );
 }
@@ -454,6 +481,7 @@ function EnRouteCard({ data }) {
         </div>
 
         <ClientMeta data={data} />
+        <PrepLink data={data} />
 
         <a
           href={WAVES_SUPPORT_SMS_TEL}
@@ -485,6 +513,7 @@ function OnPropertyCard({ data }) {
         </div>
       ) : null}
       <ClientMeta data={data} />
+      <PrepLink data={data} />
     </Card>
   );
 }
@@ -527,7 +556,7 @@ function CompleteCard({ data }) {
             href={`/report/${summary.serviceReportToken}`}
             data-glass-accent=""
             style={{
-              display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
+              display: 'block', padding: '16px 20px', background: COLORS.glassNavy, color: COLORS.white,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
@@ -538,7 +567,7 @@ function CompleteCard({ data }) {
             href={summary.reviewUrl}
             data-glass-accent=""
             style={{
-              display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
+              display: 'block', padding: '16px 20px', background: COLORS.glassNavy, color: COLORS.white,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
@@ -581,7 +610,7 @@ function CancelledCard({ data }) {
         data-glass-accent=""
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
-          background: COLORS.blueDeeper, color: COLORS.white,
+          background: COLORS.glassNavy, color: COLORS.white,
           textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
           textDecoration: 'none',
         }}
@@ -609,7 +638,7 @@ function NoShowCard({ data }) {
         data-glass-accent=""
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
-          background: COLORS.blueDeeper, color: COLORS.white,
+          background: COLORS.glassNavy, color: COLORS.white,
           textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
           textDecoration: 'none',
         }}

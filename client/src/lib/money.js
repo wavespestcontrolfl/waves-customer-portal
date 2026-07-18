@@ -1,14 +1,12 @@
 /**
- * Shared customer-surface money formatter (design audit 2026-07-06):
- * the estimate page previously carried three identical copies plus a
- * fourth always-".00" variant, so "$99" and "$99.00" could coexist on
- * one page. One rule everywhere: whole dollars drop cents, fractional
- * amounts always show two decimals ($149, $12.34).
+ * Shared customer-surface money formatter. One rule everywhere (owner
+ * directive 2026-07-11): every price shows the full amount with cents —
+ * $149.00, $12.34 — never a bare "$149".
  */
 export function fmtMoney(n) {
   if (n == null) return '—';
   const v = Math.round(Number(n) * 100) / 100;
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 // Signed variant for discount/credit lines. Negative amounts render with the

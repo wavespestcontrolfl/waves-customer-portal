@@ -10,7 +10,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
-const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT } = require('./pricing-engine/constants');
+const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 const {
   inferFrequencyKeyFromEstimateData,
   resolveBillingCadence,
@@ -169,21 +169,11 @@ function recurringServiceKey(svc = {}) {
 // is scheduled. Route order is precedence: a pest line combines with at
 // most ONE companion (rodent bait first), the other stays standalone.
 const COMBINED_SERVICE_ROUTES = [
-  {
-    primaryKey: 'pest_control',
-    companionKey: 'rodent_bait',
-    catalogServiceKey: 'pest_rodent_quarterly',
-    name: 'Pest & Rodent Control',
-    // Rodent bait stations are a quarterly program platform-wide
-    // (rodent_bait_quarterly); server-priced estimates persist the line
-    // with no cadence of its own.
-    companionDefaultPattern: 'quarterly',
-    // For PEST plans the accepted customerSelection.frequency IS the visit
-    // cadence the customer chose (quarterly/bimonthly/monthly plan) and
-    // beats stale quote-time line cadence. NOT true for lawn, where the
-    // selection stores the BILLING cadence.
-    primaryUsesAcceptFrequency: true,
-  },
+  // The pest+rodent route ("Pest & Rodent Control" / pest_rodent_quarterly)
+  // was REMOVED by owner decision 2026-07-12: rodent bait stations ride
+  // their own standalone visit instead of combining into the pest visit —
+  // see STANDALONE_SUPPLEMENT_ROUTES below. The catalog row + completion
+  // profile are retired by 20260712600000.
   {
     primaryKey: 'pest_control',
     companionKey: 'termite_bait',
@@ -192,6 +182,10 @@ const COMBINED_SERVICE_ROUTES = [
     // Termite bait station checks are quarterly (termite_active_bait_*);
     // the v1 mapper persists "Termite Bait" with no frequency/visits.
     companionDefaultPattern: 'quarterly',
+    // For PEST plans the accepted customerSelection.frequency IS the visit
+    // cadence the customer chose (quarterly/bimonthly/monthly plan) and
+    // beats stale quote-time line cadence. NOT true for lawn, where the
+    // selection stores the BILLING cadence.
     primaryUsesAcceptFrequency: true,
   },
   {
@@ -206,6 +200,21 @@ const COMBINED_SERVICE_ROUTES = [
     requireVisitsMatch: true,
   },
 ];
+
+// Sold lines/supplements that schedule as their OWN standalone visit when
+// no combined route consumes them. Without this, server-priced estimates
+// that persist rodent bait OUTSIDE recurring.services (rodentBaitMo — see
+// supplementalCompanionLines) would schedule NOTHING for the bait stations
+// after the pest+rodent route removal. The catalog identity is used for
+// the scheduled row so completion resolves the typed rodent_bait_station
+// profile by service_id/name.
+const STANDALONE_SUPPLEMENT_ROUTES = {
+  rodent_bait: {
+    name: 'Quarterly Rodent Bait Station Service',
+    catalogServiceKey: 'rodent_bait_quarterly',
+    defaultPattern: 'quarterly',
+  },
+};
 
 // EXPLICIT service-level cadence only: frequency-ish fields, visit counts,
 // or pattern text in the display name. Deliberately NO platform defaults —
@@ -322,7 +331,53 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
       },
     });
   }
-  return { remaining, combos };
+  // Standalone rewrites (owner decision 2026-07-12): sold rodent bait that
+  // no route consumed schedules as its own catalog visit — both when it is
+  // a recurring.services line (in `remaining`) and when it rides only as a
+  // server-priced supplement (never in `remaining` at all). The catalog
+  // identity replaces the raw line name so the scheduled row resolves the
+  // typed profile instead of the generic fallback.
+  const standalone = [];
+  const consumedSupplementKeys = new Set(
+    combos.flatMap((combo) => combo.combinedFrom.map((line) => recurringServiceKey(line))),
+  );
+  for (let i = remaining.length - 1; i >= 0; i -= 1) {
+    const line = remaining[i];
+    const key = recurringServiceKey(line);
+    const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
+    if (!standaloneRoute) continue;
+    remaining.splice(i, 1);
+    // A recurring LINE covering this program also consumes any duplicate
+    // supplement below — legacy payloads can carry rodent bait in BOTH
+    // places (a lineItems row plus the rodentBaitMo scalar), and scheduling
+    // both would double-book the same sold program (Codex P2).
+    consumedSupplementKeys.add(key);
+    standalone.push({
+      catalogServiceKey: standaloneRoute.catalogServiceKey,
+      service: {
+        name: standaloneRoute.name,
+        frequency: explicitServiceCadence(line) || standaloneRoute.defaultPattern,
+      },
+    });
+  }
+  for (const supplement of supplements) {
+    const key = recurringServiceKey(supplement);
+    const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
+    if (!standaloneRoute || consumedSupplementKeys.has(key)) continue;
+    consumedSupplementKeys.add(key);
+    standalone.push({
+      catalogServiceKey: standaloneRoute.catalogServiceKey,
+      // fromSupplement: this unit exists ONLY because of the scalar — a
+      // line-sourced unit was already counted in the recurring lines, so
+      // unit counting (prepay block, deposit-intent helper) adds only these.
+      fromSupplement: true,
+      service: {
+        name: standaloneRoute.name,
+        frequency: explicitServiceCadence(supplement) || standaloneRoute.defaultPattern,
+      },
+    });
+  }
+  return { remaining, combos, standalone };
 }
 
 // A reserved (customer-picked) first appointment must reflect the same
@@ -619,16 +674,23 @@ function isTermiteBaitOneTimeItem(item = {}) {
 }
 
 // Service-type predicate (independent of existing-customer status): the WaveGuard
-// $99 setup is a Pest/Mosquito membership fee. Lawn, termite-bait, rodent-bait,
-// tree & shrub, and palm carry no setup fee — they earn the annual-prepay discount
-// instead. This drives the prepay-discount decision (which must not depend on the
-// existing-customer waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
+// $99 setup applies ONLY to single-service recurring plans — recurring pest
+// only, or recurring mosquito only (owner directive 2026-07-10 evening,
+// supersedes the same-day pest-mixes rule). Any multi-service recurring
+// bundle carries no setup fee (the bundle is the incentive), and lawn /
+// termite-bait / rodent-bait / T&S / palm solo plans never carry it — all of
+// those earn the annual-prepay % discount instead. This drives the
+// prepay-discount decision (which must not depend on the existing-customer
+// waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
 // existing-customer waiver on top for the actual setup invoice.
+const MEMBERSHIP_FEE_SOLO_KEYS = new Set(['pest_control', 'mosquito']);
 function recurringMixHasMembershipFeeService(recurringServices = []) {
-  const keys = (Array.isArray(recurringServices) ? recurringServices : [])
-    .map(recurringServiceKey)
-    .filter(Boolean);
-  return keys.includes('pest_control') || keys.includes('mosquito');
+  const keys = Array.from(new Set(
+    (Array.isArray(recurringServices) ? recurringServices : [])
+      .map(recurringServiceKey)
+      .filter(Boolean),
+  ));
+  return keys.length === 1 && MEMBERSHIP_FEE_SOLO_KEYS.has(keys[0]);
 }
 
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
@@ -638,7 +700,18 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
-  // Pest/Mosquito mixes always charge the setup (no 5% stacking).
+  // A standalone-scheduling supplement (rodent bait scalar after the
+  // pest+rodent route removal) makes the plan a multi-service bundle even
+  // with one recurring LINE — and the owner rule says bundles carry no
+  // setup fee (the bundle is the incentive). A scalar duplicating a real
+  // line doesn't count (the mix check below already handles that shape).
+  const recurringKeys = new Set(recurring.map(recurringServiceKey).filter(Boolean));
+  const hasStandaloneSupplement = supplementalCompanionLines(data).some((supplement) => {
+    const key = recurringServiceKey(supplement);
+    return !!STANDALONE_SUPPLEMENT_ROUTES[key] && !recurringKeys.has(key);
+  });
+  if (hasStandaloneSupplement) return false;
+  // Solo pest / solo mosquito plans charge the setup (no 5% stacking).
   return recurringMixHasMembershipFeeService(recurring);
 }
 
@@ -778,31 +851,104 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
   return calculateAnnualPrepayAmount(monthlyRate);
 }
 
+// The lawn program minimum's floor-protected annual (owner directive
+// 2026-07-09): the first $50/mo × 12 of each recurring lawn line that no
+// discount — including the annual-prepay % — may cut into. Scans the same
+// dual sources as nonDiscountableRecurringAnnualFloor (mapped service rows +
+// lineItems) and dedupes by key so a lawn line is only protected once.
+function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
+  const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
+  const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
+  const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
+    const annual = recurringLineAnnualAmount(item);
+    // Protect the FULL floor per line, not min(annual, floor): the floor is
+    // what the customer is actually billed — public render/accept clamp every
+    // recurring lawn line up to the program minimum, so a stale pre-floor
+    // stored annual (e.g. $408 on an outstanding link whose bundle re-clamps
+    // to $600) must not leave the clamped-up slice discountable, or the
+    // prepay % lands the invoice below the minimum. Over-protection is the
+    // safe direction: the caller's Math.min(base, floor) cap means it can
+    // only shrink the prepay discount, never raise the invoice above base.
+    return annual > 0 ? sum + floorAnnual : sum;
+  }, 0) * 100) / 100;
+  // Acceptance restamps recurring.services (NOT engine lineItems), so a
+  // stale source must never shrink the protection below what the accepted
+  // rows warrant — take the larger of the two sources. Both protect exactly
+  // the floor per line, so a source disagreement (differing line counts) can
+  // only over-protect (shrinking the prepay discount), never under-protect.
+  const fromLineItems = protectedSum(estimateLineItemsFromData(estimateData)
+    .filter((i) => recurringServiceKey(i) === 'lawn_care'));
+  const fromRecurringRows = protectedSum(recurringServicesFromEstimateData(estimateData)
+    .filter((svc) => recurringServiceKey(svc) === 'lawn_care'));
+  return Math.max(fromLineItems, fromRecurringRows);
+}
+
 // Single source of truth for the annual-prepay invoice amount, shared by the
 // converter (billing), the public estimate render, and the accept response so the
 // displayed/messaged total always equals the invoice the converter creates.
 // Non-pest/mosquito mixes take ANNUAL_PREPAY_DISCOUNT_PCT off the recurring annual;
 // the non-discountable recurring floor (margin-protected non-lawn lines) still
 // clamps the result, so callers never quote a total below what is actually billed.
+// The two inputs the prepay math needs for ANY base annual: the configured
+// discount % for this service mix, and the floor-protected slice no discount
+// may cut into. Exposed so the SSR page's client-side refresh
+// (refreshBillingAmounts) can re-derive the SAME floor-aware total this
+// module invoices when the annual changes — multiplying a new annual by a
+// previously-computed flat "effective rate" goes stale immediately, because
+// the effective rate is itself a function of the annual.
+function annualPrepayDiscountComponents({ recurringServices = [], estimateData = {} } = {}) {
+  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
+  const protectedFloor = Math.round((
+    nonDiscountableRecurringAnnualFloor(estimateData)
+    + lawnProgramMinimumProtectedAnnual(estimateData)
+  ) * 100) / 100;
+  return { discountRate, protectedFloor };
+}
+
 function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], estimateData = {} } = {}) {
   const base = Math.round((Number(baseAnnual) || 0) * 100) / 100;
   if (!(base > 0)) return { amount: 0, discount: 0, rate: 0 };
-  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
   // Apply the prepay % ONLY to the discountable portion. Non-discountable
   // recurring lines (e.g. foam_recurring, whose cadence multiplier is its only
   // discount) are split out first and added back at full price — otherwise a
   // mixed plan (foam + lawn) would still bleed part of the 5% onto foam because
   // a simple max(discounted, floor) clamp only protects foam-heavy mixes.
-  const floor = Math.min(base, nonDiscountableRecurringAnnualFloor(estimateData));
+  // The lawn program minimum's protected slice (owner directive 2026-07-09:
+  // prepay is NOT exempt from the floor) joins the same non-discountable
+  // floor — only lawn's above-floor headroom earns the prepay %.
+  const { discountRate, protectedFloor } = annualPrepayDiscountComponents({ recurringServices, estimateData });
+  const floor = Math.min(base, protectedFloor);
   const discountableBase = Math.max(0, Math.round((base - floor) * 100) / 100);
   const amount = Math.round((floor + discountableBase * (1 - discountRate)) * 100) / 100;
   const discount = Math.max(0, Math.round((base - amount) * 100) / 100);
   return { amount, discount, rate: Math.round((discount / base) * 10000) / 10000 };
 }
 
-function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
-  if (!Array.isArray(recurringServices) || recurringServices.length === 0) return false;
-  if (billingTerm === 'prepay_annual') return true;
+// Human label for the EFFECTIVE annual-prepay rate on invoice copy. The lawn
+// program minimum's protected floor can cap the discount well below the
+// configured 5% (only above-floor headroom is discountable), so the invoice
+// must never claim the configured rate. Mirrors the estimate-public SSR label
+// rules — integer percent at ≥1%, one decimal below — and renders '<0.1%'
+// instead of a misleading '0%' when a nonzero discount rounds away.
+function annualPrepayDiscountPctLabel(rate) {
+  const r = Number(rate) || 0;
+  if (r >= 0.01) return `${Math.round(r * 100)}%`;
+  if (r <= 0) return '0%';
+  const oneDecimal = Math.round(r * 1000) / 10;
+  return oneDecimal > 0 ? `${oneDecimal}%` : '<0.1%';
+}
+
+function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [], standaloneUnitCount = 0 } = {}) {
+  const hasRecurringLines = Array.isArray(recurringServices) && recurringServices.length > 0;
+  if (!hasRecurringLines) {
+    // A supplemental-only accept (bait scalar, no recurring lines) still
+    // schedules a real recurring series — an annual prepay for it needs its
+    // term + invoice or the paid prepay never stamps the visits (Codex r2
+    // on the pest+rodent removal). Standard supplemental-only accepts keep
+    // the pre-existing no-draft shape.
+    return billingTerm === 'prepay_annual' && standaloneUnitCount > 0;
+  }
   return true;
 }
 
@@ -940,6 +1086,11 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // monthly), so seed follow-ups for whichever pattern the customer accepted —
   // otherwise the accepted plan would stop after the first visit.
   if (key === 'foam_recurring') return ['quarterly', 'bimonthly', 'monthly'].includes(pattern);
+  // Standalone rodent bait (owner 2026-07-12, pest+rodent combined route
+  // removed): the quarterly bait-station program seeds its own series — the
+  // old combined row keyed as pest_control and seeded; a standalone row
+  // keying rodent_bait must not stop after the first check (Codex P1).
+  if (key === 'rodent_bait') return pattern === 'quarterly';
   return false;
 }
 
@@ -1108,13 +1259,19 @@ const EstimateConverter = {
     // downstream) guarantees no partial rows are created; all three convertEstimate
     // entrypoints run inside a transaction, so a throw rolls back cleanly.
     const supplementalCompanions = supplementalCompanionLines(estimateData);
-    const soloRecurringKey = recurringServicesForConversion.length === 1
-      ? recurringServiceKey(recurringServicesForConversion[0]) : null;
-    const absorbedCompanions = soloRecurringKey
-      ? supplementalCompanions.filter((companion) => COMBINED_SERVICE_ROUTES.some((route) =>
-        soloRecurringKey === route.primaryKey && recurringServiceKey(companion) === route.companionKey))
-      : [];
-    const recurringUnitCount = recurringServicesForConversion.length + absorbedCompanions.length;
+    // ONE scheduling decision for the whole accept (Codex r2 on the
+    // pest+rodent removal): the auto-schedule loop, the reservation branch,
+    // unit counting, and prepay coverage all read this same result, so the
+    // count can never disagree with what actually schedules. Only
+    // fromSupplement standalone units add to the count — a line-sourced
+    // standalone unit was already counted among the recurring lines, and
+    // the combine dedupes a line + duplicate scalar to one unit.
+    const combinedScheduling = combineRecurringServicesForScheduling(recurringServicesForConversion, {
+      acceptFrequency: estimateData.customerSelection?.frequency || null,
+      supplementalCompanions,
+    });
+    const supplementStandaloneUnits = combinedScheduling.standalone.filter((unit) => unit.fromSupplement);
+    const recurringUnitCount = recurringServicesForConversion.length + supplementStandaloneUnits.length;
     if (billingTerm === 'prepay_annual' && recurringUnitCount > 1) {
       const err = new Error(
         `Annual prepay isn't supported for multi-service plans (${recurringUnitCount} recurring services) yet — convert this estimate as monthly, or bill the annual prepay manually.`
@@ -1141,6 +1298,7 @@ const EstimateConverter = {
     const shouldCreateDraftInvoice = shouldCreateDraftInvoiceForRecurring({
       billingTerm,
       recurringServices: recurringServicesForConversion,
+      standaloneUnitCount: supplementStandaloneUnits.length,
     });
 
     // Determine tier
@@ -1167,6 +1325,26 @@ const EstimateConverter = {
         })
       : null;
 
+    // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
+    // their membership model — an unconditional per_application stamp would
+    // stop the monthly cron for them and start billing every completion per
+    // visit (Codex round-7 P1). "Current member" = live pipeline stage + a
+    // positive monthly_rate + not already an estimate-flow mode. Everyone
+    // else (new signups, leads, churned/dormant re-signups) converts to
+    // per-visit billing per the owner ruling; annual-prepay accepts are
+    // re-stamped at the term choke point either way.
+    const preservesExistingMembership = ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
+      && Number(customer.monthly_rate) > 0
+      && !['per_application', 'annual_prepay'].includes(customer.billing_mode || '');
+    // Pre-migration compatibility (Codex round-8): billing_mode +
+    // per_application_fee ship in migration 20260709000010 — on a database
+    // that hasn't run it (preview env, deploy window) the update keys would
+    // fail the whole acceptance with "column does not exist". One probe
+    // covers both columns (same migration).
+    let billingModeColumnsExist = false;
+    try {
+      billingModeColumnsExist = await database.schema.hasColumn('customers', 'billing_mode');
+    } catch { /* keep false — legacy update shape */ }
     // 1. Update customer to active. Clear deleted_at: admin screens filter
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
@@ -1200,6 +1378,49 @@ const EstimateConverter = {
           // Only SET it for commercial; never downgrade a residential customer.
           ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
           monthly_rate: monthlyRate,
+          // Estimate-flow recurring customers bill PER VISIT (owner ruling
+          // 2026-07-09), never as a monthly membership subscription: the
+          // monthly billing cron skips non-membership modes and completion
+          // collects per_application_fee each visit. Annual-prepay accepts are
+          // re-stamped 'annual_prepay' at their term choke point
+          // (createTermForAnnualPrepay), which every prepay path runs through.
+          // CURRENT monthly members accepting an add-on keep their existing
+          // model (see preservesExistingMembership above). Column-guarded —
+          // pre-migration accepts keep the legacy update shape.
+          ...(billingModeColumnsExist ? {
+            billing_mode: preservesExistingMembership
+              ? (customer.billing_mode || null)
+              : 'per_application',
+          // Exact per-visit charge at the accepted billing cadence (quarterly
+          // derives from the exact annual: $98.00, not 3 x rounded-monthly
+          // $98.01 — resolveBillingCadence). SINGLE-recurring-service accepts
+          // only — the same gate the scheduled-row estimated_price writer
+          // uses: a multi-service plan creates one row per service, and a
+          // customer-level whole-plan fee would bill the full package on
+          // EVERY row's completion (Codex P1). Multi-service plans leave the
+          // fee NULL so completion keeps its existing per-row precedence.
+            // An already-per_application customer accepting an ADD-ON keeps
+            // their established fee (Codex round-10): the customer-level fee
+            // is the fallback for EVERY per-app visit without a row price,
+            // so overwriting it with the add-on's cadence amount would
+            // re-price the ORIGINAL series; the add-on's own rows carry
+            // their explicit estimated_price (single-service writer).
+            // recurringUnitCount, not raw line count (Codex P1 on the
+            // pest+rodent removal): a standalone-scheduling supplement
+            // (rodent bait) makes the plan multi-row even with ONE
+            // recurring line — a customer-level whole-plan fee would bill
+            // the full package on BOTH rows' completions.
+            per_application_fee: preservesExistingMembership
+              ? (customer.per_application_fee ?? null)
+              : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
+                ? Number(customer.per_application_fee)
+                : ((recurringUnitCount === 1
+                  && billingCadence && Number(billingCadence.amount) > 0)
+                  ? Number(billingCadence.amount)
+                  : (recurringUnitCount === 1 && Number(monthlyRate) > 0
+                    ? Number(monthlyRate)
+                    : null))),
+          } : {}),
           active: true,
           deleted_at: null,
           // Reactivating to active_customer — clear any churn stamp so a former
@@ -1290,10 +1511,76 @@ const EstimateConverter = {
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
       try {
-        const { combos } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
-          acceptFrequency: acceptedPlanFrequency,
-          supplementalCompanions: supplementalCompanionLines(estimateData),
-        });
+        const { combos, standalone: reservedStandalone } = combinedScheduling;
+        // Standalone units (sold rodent bait) must schedule in reserved
+        // accepts too (Codex P1): before the pest+rodent route removal the
+        // combo REWRITE covered the bait on the reserved row; now the bait
+        // is its own visit, so insert it (anchored to the reserved date —
+        // same-trip check) and seed its quarterly series. This preserves
+        // the coverage the rewrite used to provide; it does NOT auto-
+        // schedule other `remaining` lines (adjudicated semantic intact).
+        for (const unit of (reservedStandalone || [])) {
+          if (!reservedStart?.scheduled_date) break;
+          // A reserved row already covering this program means nothing to add.
+          const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === 'rodent_bait');
+          if (alreadyReserved) continue;
+          try {
+            // Copy the customer's picked slot onto the bait row (Codex r2):
+            // same trip, same window, same tech/zone — otherwise dispatch
+            // sees an un-slotted job floating on that day.
+            const standaloneRow = {
+              customer_id: customerId,
+              scheduled_date: reservedStart.scheduled_date,
+              ...(reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
+              ...(reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
+              ...(reservedStart.technician_id ? { technician_id: reservedStart.technician_id } : {}),
+              ...(reservedStart.zone ? { zone: reservedStart.zone } : {}),
+              service_type: unit.service.name,
+              status: 'pending',
+              notes: `Auto-scheduled from estimate #${estimateId} (standalone bait program alongside reserved visit). Frequency: ${unit.service.frequency}.`,
+              source_estimate_id: estimateId,
+            };
+            try {
+              const catalogRow = await database('services')
+                .where({ service_key: unit.catalogServiceKey })
+                .first('id', 'default_duration_minutes');
+              if (catalogRow) {
+                standaloneRow.service_id = catalogRow.id;
+                if (catalogRow.default_duration_minutes) standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+              }
+            } catch (lookupErr) {
+              logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+            }
+            const inserted = await database('scheduled_services').insert(standaloneRow).returning('*');
+            const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
+              ? inserted[0]
+              : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+            scheduledCount += 1;
+            // The reserved row's reminders were registered by the public
+            // accept route; this added row needs its own (Codex r2) —
+            // same fail-soft registration the seeded follow-ups use.
+            if (!deferFollowUpReminderRegistration && parentRow.id && standaloneRow.window_start) {
+              await registerSeededFollowUpReminders([parentRow], customerId);
+            } else if (deferFollowUpReminderRegistration && parentRow.id) {
+              deferredFollowUpReminderRows.push(parentRow);
+            }
+            try {
+              const seedResult = await seedRecurringFollowUpsForParent(database, parentRow, unit.service, {
+                fallbackFrequency: unit.service.frequency,
+                registerReminders: !deferFollowUpReminderRegistration,
+              });
+              if (deferFollowUpReminderRegistration && Array.isArray(seedResult.insertedRows)) {
+                deferredFollowUpReminderRows.push(...seedResult.insertedRows);
+              }
+              scheduledCount += seedResult.insertedCount || 0;
+            } catch (seedErr) {
+              logger.error(`[estimate-converter] standalone bait follow-up seeding failed for estimate ${estimateId}: ${seedErr.message}`);
+            }
+            logger.info(`[estimate-converter] standalone "${unit.service.name}" scheduled alongside reserved accept for estimate ${estimateId}`);
+          } catch (standaloneErr) {
+            logger.error(`[estimate-converter] standalone bait scheduling failed for estimate ${estimateId}: ${standaloneErr.message}`);
+          }
+        }
         for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
           const update = { service_type: combo.route.name, updated_at: new Date() };
           try {
@@ -1368,25 +1655,26 @@ const EstimateConverter = {
       termStartDate = firstServiceDate;
 
       // Combined-service routing: matching-cadence pairs schedule as ONE
-      // combined service; everything else flows through unchanged.
-      const { remaining, combos } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
-        acceptFrequency: acceptedPlanFrequency,
-        supplementalCompanions: supplementalCompanionLines(estimateData),
-      });
+      // combined service; standalone rewrites (e.g. rodent bait) schedule
+      // as their own catalog visit; everything else flows through unchanged.
+      // Shares the hoisted combinedScheduling so scheduling can never
+      // disagree with the unit count / prepay coverage derivation.
+      const { remaining, combos, standalone } = combinedScheduling;
       const scheduleUnits = [
-        ...combos.map((combo) => ({ svc: combo.service, combo })),
+        ...combos.map((combo) => ({ svc: combo.service, combo, catalogServiceKey: combo.route.catalogServiceKey })),
+        ...standalone.map((unit) => ({ svc: unit.service, catalogServiceKey: unit.catalogServiceKey })),
         ...remaining.map((svc) => ({ svc })),
       ];
       for (const unit of scheduleUnits) {
         const svc = unit.svc;
         let combinedServiceId = null;
-        if (unit.combo) {
+        if (unit.catalogServiceKey) {
           // service_id makes profile resolution sturdy against later
           // renames; name-based resolution still works without it, so a
           // missing catalog row (env not yet migrated) degrades safely.
           try {
             const catalogRow = await database('services')
-              .where({ service_key: unit.combo.route.catalogServiceKey })
+              .where({ service_key: unit.catalogServiceKey })
               .first('id', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
@@ -1394,10 +1682,10 @@ const EstimateConverter = {
                 svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
               }
             } else {
-              logger.warn(`[estimate-converter] combined catalog row ${unit.combo.route.catalogServiceKey} absent — scheduling by name only`);
+              logger.warn(`[estimate-converter] catalog row ${unit.catalogServiceKey} absent — scheduling by name only`);
             }
           } catch (lookupErr) {
-            logger.warn(`[estimate-converter] combined catalog lookup failed for ${unit.combo.route.catalogServiceKey}: ${lookupErr.message}`);
+            logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
           }
         }
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
@@ -1406,7 +1694,11 @@ const EstimateConverter = {
           fallbackFrequency: inferredFrequencyKey,
         });
         const frequency = svc.frequency || pattern || 'monthly';
-        const estimatedPrice = billingCadence && recurringServicesForConversion.length === 1
+        // recurringUnitCount, not raw line count (Codex P1): with a
+        // standalone bait unit beside one pest line, stamping the whole
+        // plan amount on BOTH rows would double-charge at completion.
+        // Multi-unit plans leave rows unpriced for manual allocation.
+        const estimatedPrice = billingCadence && recurringUnitCount === 1
           ? billingCadence.amount
           : null;
         const durationMinutes = durationMinutesForRecurringService(svc, pattern);
@@ -1517,7 +1809,11 @@ const EstimateConverter = {
           const termMonthlyRate = monthlyRate > 0
             ? monthlyRate
             : Math.round((annualAmount / 12) * 100) / 100;
-          const prepayDiscountPctLabel = `${Math.round(ANNUAL_PREPAY_DISCOUNT_PCT * 100)}%`;
+          // Label the EFFECTIVE prepay rate, not the configured 5% — the lawn
+          // program minimum's protected floor can cap the discount to a sliver
+          // of the annual, and the invoice must claim the same rate the public
+          // page showed at approval.
+          const prepayDiscountPctLabel = annualPrepayDiscountPctLabel(prepayResolved.rate);
           // Commercial plans are not a WaveGuard membership and tier is the
           // non-member 'none'; label them 'Commercial' rather than letting the
           // truthy 'none' render as "WaveGuard none".
@@ -1531,7 +1827,7 @@ const EstimateConverter = {
               : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
           const prepayNotes = prepayDiscountApplied
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
-            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`;
+            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99.00 setup fee waived per WaveGuard membership policy.`;
           // Commercial prepay tax: pass an explicit BLENDED rate (see
           // resolveCommercialPrepayTaxRate) so only the taxable pest share of a
           // mixed commercial plan is taxed. Non-commercial prepay passes no rate
@@ -1571,12 +1867,28 @@ const EstimateConverter = {
             throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
           }
           const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
+          // Labeled manual discount on the prepay invoice (owner 2026-07-11):
+          // DESCRIPTION-level only — the prepay line stays at the NET
+          // annualAmount because annual-prepay-renewals seeds each covered
+          // visit's fallback estimated_price from invoices.subtotal
+          // (annual-prepay-renewals.js ~375-379); a grossed subtotal would
+          // rebill voided/refunded prepay visits at the pre-credit rate
+          // (codex 2652 r1). The prepay % discount is already communicated
+          // the same way (in the line description), so the manual credit
+          // rides beside it. The standard (per-application) leg keeps the
+          // real labeled discount line — its invoice subtotal feeds nothing.
+          const prepayManualLabel = opts.manualDiscountItemization
+            && Number(opts.manualDiscountItemization.annualAmount) > 0
+            ? String(opts.manualDiscountItemization.label || '').trim()
+            : '';
           const inv = await InvoiceService.create({
             database,
             customerId,
             title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
             lineItems: [{
-              description: prepayLineDescription,
+              description: prepayManualLabel
+                ? `${prepayLineDescription} — ${prepayManualLabel} applied`
+                : prepayLineDescription,
               quantity: 1,
               unit_price: annualAmount,
             }],
@@ -1660,6 +1972,22 @@ const EstimateConverter = {
               // term-creation try fails closed (routes to manual).
               logger.warn(`[estimate-converter] annual-prepay coverage underivable for estimate ${estimateId} (serviceType=${svcType}, visits=${visits}) — will fail closed`);
             }
+          } else if (recurringServicesForConversion.length === 0 && supplementStandaloneUnits.length === 1) {
+            // Supplemental-only accept (Codex r2 on the pest+rodent removal):
+            // a server-priced bait-only estimate carries just the scalar —
+            // the standalone unit schedules a real quarterly series (the
+            // auto-schedule loop uses this same combinedScheduling), so the
+            // prepay term MUST carry its coverage or those visits complete-
+            // bill again on top of the prepaid amount. The unit's catalog
+            // name is exactly the scheduled rows' service_type, so
+            // ensureCoverageRowsForTerm attaches the existing visits.
+            const unit = supplementStandaloneUnits[0];
+            const CADENCE_VISITS = {
+              monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
+            };
+            coverageServiceType = unit.service.name;
+            coverageCadence = unit.service.frequency || undefined;
+            coverageVisitCount = CADENCE_VISITS[unit.service.frequency] || 4;
           } else if (recurringServicesForConversion.length > 1) {
             // Unreachable — multi-service prepay_annual is hard-blocked at the top
             // of convertEstimate. Re-assert fail-closed so a future refactor that
@@ -1685,7 +2013,9 @@ const EstimateConverter = {
             // it IS set stamping matches; when it can't be, refuse and route to
             // manual rather than ship an unstampable term. The catch below voids
             // the draft invoice; the enclosing transaction rolls back the rest.
-            if (recurringServicesForConversion.length === 1 && !coverageServiceType) {
+            if ((recurringServicesForConversion.length === 1
+              || (recurringServicesForConversion.length === 0 && supplementStandaloneUnits.length === 1))
+              && !coverageServiceType) {
               const err = new Error(
                 `Couldn't derive annual-prepay coverage for estimate ${estimateId} (the recurring service line has no resolvable name) — convert as monthly or bill the prepay manually.`
               );
@@ -1781,9 +2111,9 @@ const EstimateConverter = {
             ? 'WaveGuard Membership Setup + First Application'
             : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
           const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99 setup fee plus first application.`
+            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99.00 setup fee plus first application.`
             : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99 setup fee only.`
+                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99.00 setup fee only.`
                 : `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`);
           let inv = null;
           let appliedDepositCredit = 0;
@@ -1862,6 +2192,11 @@ const EstimateConverter = {
             payUrlParams: {
               source: 'estimate',
               saveCard: '1',
+              // Recurring accepts require a method on file — keeps this
+              // inline param set in lockstep with estimateInvoicePayUrlParams
+              // (Codex #2507 P1). Display hint only: the pay endpoints
+              // enforce the requirement server-side from billing_mode.
+              saveRequired: '1',
               billingTerm,
             },
           });
@@ -1916,6 +2251,7 @@ const EstimateConverter = {
     // Commercial recurring follow-ups aren't auto-scheduled yet — surface it so
     // the team sets up the schedule manually (fire-and-forget; never blocks the
     // accept). Only the initial visit was scheduled above.
+    let commercialScheduleNotification = null;
     if (hasCommercialRecurring && !suppressRecurringConversion) {
       // skipAutoSchedule (manual Mark Won) schedules NOTHING; the normal path
       // schedules only the initial visit. Reflect what actually happened so
@@ -1925,16 +2261,30 @@ const EstimateConverter = {
         ? 'No visits were auto-scheduled — set up the full commercial visit schedule (including the first visit) manually.'
         : 'Initial visit scheduled — set up the remaining recurring commercial visits manually.';
       logger.warn(`[estimate-converter] Commercial recurring estimate ${estimateId} (customer ${customerId}) accepted — ${scheduleNote} (commercial cadence auto-scheduling not yet supported).`);
-      try {
-        const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
-          'estimate_converted',
-          `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
-          `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
-          { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } }
-        ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
-      } catch (err) {
-        logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+      const notificationPayload = {
+        type: 'estimate_converted',
+        title: `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
+        body: `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
+        options: { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } },
+      };
+      if (opts.deferCommercialScheduleNotification === true) {
+        // In-transaction callers (public accept, manual Mark Won) dispatch this
+        // post-commit from the returned payload — notifyAdmin writes through the
+        // GLOBAL pool, so firing it here would alert staff about a commercial
+        // schedule even when the outer transaction rolls the acceptance back.
+        commercialScheduleNotification = notificationPayload;
+      } else {
+        try {
+          const NotificationService = require('./notification-service');
+          void NotificationService.notifyAdmin(
+            notificationPayload.type,
+            notificationPayload.title,
+            notificationPayload.body,
+            notificationPayload.options
+          ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+        }
       }
     }
 
@@ -1991,6 +2341,10 @@ const EstimateConverter = {
       // non-member 'none'/'Commercial' tier).
       membershipEmail: commercialOnlyRecurring ? null : membershipEmail,
       welcomeSms,
+      // Non-null ONLY when opts.deferCommercialScheduleNotification asked for
+      // it (dispatched inline otherwise) — so callers can dispatch whatever
+      // comes back without double-send risk.
+      commercialScheduleNotification,
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,
@@ -2013,14 +2367,17 @@ module.exports.recurringServiceKey = recurringServiceKey;
 // absorbs into one combo visit). Shared with the public /deposit-intent mirror
 // so a deposit is never collected for a prepay the converter will 422.
 module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUnitCount(estimateData = {}) {
+  // MUST mirror convertEstimate's recurringUnitCount exactly — the public
+  // deposit-intent flow gates on this helper, and a mismatch collects a
+  // prepay deposit that acceptance later 422s (Codex r2 on the pest+rodent
+  // removal). Same source of truth: recurring lines + fromSupplement
+  // standalone units (combine dedupes a line + duplicate scalar to one).
   const recurring = recurringServicesFromEstimateData(estimateData);
-  const companions = supplementalCompanionLines(estimateData);
-  const soloKey = recurring.length === 1 ? recurringServiceKey(recurring[0]) : null;
-  const absorbed = soloKey
-    ? companions.filter((companion) => COMBINED_SERVICE_ROUTES.some((route) =>
-      soloKey === route.primaryKey && recurringServiceKey(companion) === route.companionKey))
-    : [];
-  return recurring.length + absorbed.length;
+  const { standalone } = combineRecurringServicesForScheduling(recurring, {
+    acceptFrequency: estimateData?.customerSelection?.frequency || null,
+    supplementalCompanions: supplementalCompanionLines(estimateData),
+  });
+  return recurring.length + standalone.filter((unit) => unit.fromSupplement).length;
 };
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
@@ -2032,6 +2389,8 @@ module.exports.durationMinutesForRecurringService = durationMinutesForRecurringS
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
+module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
+module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
 module.exports.resolveCommercialPrepayBaseRate = resolveCommercialPrepayBaseRate;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
@@ -2039,4 +2398,5 @@ module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConver
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
+module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;

@@ -7,7 +7,11 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const config = require('../config');
-const { adminAuthenticate } = require('../middleware/admin-auth');
+const {
+  adminAuthenticate,
+  isStaffAccessToken,
+  staffTokenVersionMatches,
+} = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const {
   buildSurchargeAmountDetails,
@@ -16,6 +20,28 @@ const {
   SURCHARGE_API_VERSION,
 } = require('../services/stripe-pricing');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
+const {
+  assertNoInvoiceChargeReconciliationPending,
+  parkInvoiceForSavedCardReconciliation,
+} = require('../services/stripe');
+
+function terminalChargeFenceResponse(err) {
+  return {
+    error: err?.code === 'STRIPE_CHARGE_IN_PROGRESS'
+      ? 'Another payment attempt is already in progress for this invoice'
+      : 'This invoice has a payment awaiting reconciliation',
+    code: err?.code === 'STRIPE_CHARGE_IN_PROGRESS'
+      ? 'payment_charge_in_progress'
+      : 'payment_reconciliation_pending',
+    reconciliationRequired: err?.reconciliationRequired === true,
+  };
+}
+
+function terminalHandoffNeedsReissue(handoff) {
+  const usedAt = new Date(handoff?.used_at || '').getTime();
+  const expiresAt = new Date(handoff?.expires_at || '').getTime();
+  return Number.isFinite(usedAt) && Number.isFinite(expiresAt) && expiresAt <= usedAt;
+}
 
 // Accepts both regular admin JWTs and terminal-scoped JWTs (minted by
 // /validate-handoff). Regular adminAuthenticate rejects scope:'terminal'
@@ -27,12 +53,19 @@ async function terminalAuthenticate(req, res, next) {
   }
   try {
     const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    if (!isStaffAccessToken(decoded)) return res.status(401).json({ error: 'Invalid token type' });
     if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid token' });
     if (decoded.scope && decoded.scope !== 'terminal') {
       return res.status(401).json({ error: 'Invalid token scope' });
     }
     const tech = await db('technicians').where({ id: decoded.technicianId }).first();
     if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
+    if (!['admin', 'technician'].includes(tech.role)) {
+      return res.status(401).json({ error: 'Account not found or inactive' });
+    }
+    if (!staffTokenVersionMatches(decoded, tech) || tech.must_change_password) {
+      return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    }
     req.technician = tech;
     req.technicianId = tech.id;
     req.techRole = tech.role;
@@ -58,6 +91,19 @@ const TERMINAL_LOCATION_ID = process.env.STRIPE_TERMINAL_LOCATION_ID || null;
 const HANDOFF_TTL_SECONDS = 60;
 const HANDOFF_ISS = 'waves-portal';
 const HANDOFF_AUD = 'waves-pay-ios';
+
+function handoffStaffSessionMatches(claims, tech) {
+  const claimedVersion = claims?.staff_token_version;
+  const currentVersion = Number(tech?.auth_token_version);
+  return Boolean(tech?.active)
+    && ['admin', 'technician'].includes(tech.role)
+    && !tech.must_change_password
+    && Number.isInteger(claimedVersion)
+    && claimedVersion >= 1
+    && Number.isInteger(currentVersion)
+    && currentVersion >= 1
+    && claimedVersion === currentVersion;
+}
 
 // Per-tech mint ceiling. The limiter is a security control (handoff tokens
 // authorize real-money charges) — it MUST survive deploys and be accurate
@@ -259,6 +305,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         invoice_id: String(invoice.id),
         amount_cents,
         tech_user_id: req.technicianId,
+        staff_token_version: req.staffToken.tokenVersion,
         jti: mintedJti,
       },
       secret,
@@ -479,7 +526,7 @@ router.post('/validate-handoff', async (req, res) => {
     }
 
     const tech = await db('technicians').where({ id: handoffRow.tech_user_id }).first();
-    if (!tech || tech.active === false) {
+    if (!tech || !tech.active) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: invoice.id,
@@ -491,6 +538,20 @@ router.post('/validate-handoff', async (req, res) => {
       return res.status(409).json({
         error: 'Technician not active',
         code: 'technician_not_active',
+      });
+    }
+    if (!handoffStaffSessionMatches(claims, tech)) {
+      auditTerminalHandoffValidate({
+        tech_user_id: handoffRow.tech_user_id || null,
+        invoice_id: invoice.id,
+        jti: claims.jti,
+        outcome: 'session_revoked',
+        ip_address: ip,
+        user_agent: ua,
+      });
+      return res.status(401).json({
+        error: 'Staff session has been revoked',
+        code: 'staff_session_revoked',
       });
     }
 
@@ -515,7 +576,14 @@ router.post('/validate-handoff', async (req, res) => {
     // Keychain login token expired. scope:'terminal' is rejected by
     // adminAuthenticate, so this token can't access other admin routes.
     const authToken = jwt.sign(
-      { technicianId: tech.id, role: tech.role, name: tech.name, scope: 'terminal' },
+      {
+        technicianId: tech.id,
+        role: tech.role,
+        name: tech.name,
+        scope: 'terminal',
+        type: 'access',
+        tokenVersion: Number(tech.auth_token_version),
+      },
       config.jwt.secret,
       { expiresIn: '15m' },
     );
@@ -616,6 +684,12 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     if (!handoff) {
       return res.status(404).json({ error: 'Handoff not found', code: 'handoff_unknown' });
     }
+    if (terminalHandoffNeedsReissue(handoff)) {
+      return res.status(409).json({
+        error: 'This payment handoff was canceled. Start a new handoff and try again.',
+        code: 'handoff_reissue_required',
+      });
+    }
     if (!handoff.used_at) {
       return res.status(409).json({ error: 'Handoff not validated', code: 'handoff_not_validated' });
     }
@@ -660,6 +734,14 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
         error: 'Invoice amount changed since handoff',
         code: 'invoice_amount_changed',
       });
+    }
+    try {
+      await assertNoInvoiceChargeReconciliationPending(invoice.id);
+    } catch (fenceErr) {
+      if (fenceErr.reconciliationRequired) {
+        await parkInvoiceForSavedCardReconciliation({ invoiceId: invoice.id, error: fenceErr });
+      }
+      return res.status(409).json(terminalChargeFenceResponse(fenceErr));
     }
 
     const tech = await db('technicians').where({ id: handoff.tech_user_id }).first();
@@ -718,6 +800,24 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       if (lockedAmountCents !== Number(handoff.amount_cents)) {
         return { ok: false, amountChanged: true };
       }
+      try {
+        // Close the race between the unlocked pre-create fence check and PI
+        // creation. If a saved-card owner claimed the invoice meanwhile, do
+        // not bind or return this PI; the caller cancels it below.
+        await assertNoInvoiceChargeReconciliationPending(invoice.id, trx);
+      } catch (fenceErr) {
+        if (fenceErr.reconciliationRequired) {
+          // The invoice row is already locked by this transaction. Park it on
+          // the same connection so status-only collection paths cannot race the
+          // ambiguous saved-card owner while the new terminal PI is canceled.
+          await trx('invoices').where({ id: invoice.id }).update({
+            status: 'processing',
+            stripe_payment_intent_id: fenceErr.stripePaymentIntentId || null,
+            updated_at: trx.fn.now(),
+          });
+        }
+        return { ok: false, chargeFence: terminalChargeFenceResponse(fenceErr) };
+      }
       // SET only if still NULL — two concurrent /payment-intent calls for the
       // same jti share an idempotency key and get the same PI back; first
       // UPDATE wins, second is a no-op.
@@ -734,15 +834,36 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     if (!bound.ok) {
       // PI was minted but the invoice changed under the lock (went terminal, or
       // account credit reduced the amount due) — cancel it so the card can't be
-      // charged at the stale amount, then report the changed state.
+      // charged at the stale amount, then report the changed state. Permanently
+      // invalidate this jti too: Stripe keys create by handoff_${jti}, so a later
+      // retry would otherwise replay the canceled PI and return its unusable
+      // client secret. expires_at <= used_at is the durable reissue marker; a
+      // naturally expired but otherwise valid handoff remains distinguishable.
+      let handoffInvalidated = false;
+      try {
+        const invalidated = await db('terminal_handoff_tokens')
+          .where({ jti })
+          .update({ expires_at: handoff.used_at });
+        handoffInvalidated = invalidated > 0;
+      } catch (invalidateErr) {
+        logger.error(`[stripe-terminal] failed to invalidate canceled handoff ${jti}: ${invalidateErr.message}`);
+      }
       await stripe.paymentIntents
         .cancel(pi.id, { cancellation_reason: 'abandoned' })
         .catch((e) => logger.warn(`[stripe-terminal] failed to cancel orphaned PI ${pi.id}: ${e.message}`));
+      if (!handoffInvalidated) {
+        // Fail closed. A retry will replay the same Stripe PI, reach this branch,
+        // and retry the durable invalidation before any client secret is exposed.
+        throw new Error('Payment handoff could not be invalidated; start a new handoff');
+      }
       if (bound.amountChanged) {
         return res.status(409).json({
           error: 'Invoice amount changed since handoff',
           code: 'invoice_amount_changed',
         });
+      }
+      if (bound.chargeFence) {
+        return res.status(409).json({ ...bound.chargeFence, newHandoffRequired: true });
       }
       return res.status(409).json({
         error: bound.status ? `Invoice is ${bound.status}` : 'Invoice not found',
@@ -962,3 +1083,8 @@ router.post('/capture', adminAuthenticate, async (req, res) => {
 });
 
 module.exports = router;
+module.exports._test = {
+  handoffStaffSessionMatches,
+  terminalChargeFenceResponse,
+  terminalHandoffNeedsReissue,
+};

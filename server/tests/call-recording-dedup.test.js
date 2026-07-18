@@ -20,6 +20,7 @@ function mockDbWithResults(resultArrays) {
       orderBy: () => builder,
       orderByRaw: () => builder,
       limit: () => builder,
+      count: () => builder,
       first: () => Promise.resolve(null),
       then: (resolve, reject) => Promise.resolve(queue.shift() ?? []).then(resolve, reject),
     };

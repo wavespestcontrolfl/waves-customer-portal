@@ -4,6 +4,7 @@ const BudgetManager = require('./budget-manager');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { publicPortalUrl } = require('../../utils/portal-url');
+const { parseLooseJson } = require('../../utils/llm-json');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -13,6 +14,19 @@ try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
 let SearchConsole;
 try { SearchConsole = require('../seo/search-console-v2'); } catch { SearchConsole = null; }
+
+// Lazy: whether the Google Ads client can actually push. Apply buttons on
+// LINKED campaigns are stripped when it can't — both locked manager paths
+// throw live_push_unavailable for linked rows without a configured client,
+// so the button would deterministically fail (preview envs, credential
+// outages).
+let _adsClient;
+function adsClientConfigured() {
+  try {
+    if (!_adsClient) _adsClient = require('./google-ads');
+    return Boolean(_adsClient.isConfigured());
+  } catch { return false; }
+}
 
 class CampaignAdvisor {
   async generateDailyAdvice() {
@@ -103,7 +117,11 @@ class CampaignAdvisor {
       const perf30d = last30days.filter(p => p.campaign_id === c.id);
 
       return {
+        id: c.id,
         name: c.campaign_name,
+        platform: c.platform,
+        status: c.status,
+        linked: Boolean(c.platform_campaign_id),
         type: c.campaign_type,
         area: c.target_area,
         serviceLine: c.service_line,
@@ -140,6 +158,7 @@ PAID ADS RULES:
 - Flag campaigns where ROAS is declining week-over-week
 - Identify opportunities where impression share is being lost on profitable campaigns
 - Consider capacity — don't recommend scaling ads in areas that are already at 90%+ utilization
+- For an auto-applicable action (increase_budget/decrease_budget/change_mode), the target MUST be a platform "google_ads" campaign — other platforms are managed in their own Ads Manager and can only be advised on, never auto-applied. Set "campaign" to the EXACT campaign_name AND "campaign_id" to the EXACT id from CAMPAIGN PERFORMANCE (names are not unique; the id is what gets applied), and set "apply_value" so the change can be applied with one click: for increase_budget/decrease_budget it is the new daily budget in dollars (a number, e.g. 30); for change_mode it is one of "base"|"spent"|"stop". Omit apply_action (or use a non-budget action) when you can't tie the recommendation to a specific google_ads campaign and value.
 
 SEO/GSC RULES:
 - Distinguish branded (people already searching "Waves") from non-branded (real organic market capture)
@@ -151,15 +170,15 @@ SEO/GSC RULES:
 - For GBP, recommend specific actions per location (photos, posts, review responses)
 
 BUSINESS CONTEXT:
-- Waves Pest Control, 4 locations in SWFL (Lakewood Ranch, Parrish, Sarasota, Venice)
-- Main site: wavespestcontrol.com + 9 domain-specific microsites
-- 3 technicians (Adam, Jose, Jacob), max ~8 services per tech per day
+- Waves Pest Control, SWFL (Manatee / Sarasota / Charlotte counties), 5 staffed offices (Bradenton, Sarasota, Venice, Parrish, Lakewood Ranch)
+- Main site: wavespestcontrol.com + a 15-site hub-and-spoke network
+- 1 field technician (Adam), max ~${targets?.max_services_per_tech || 8} services per tech per day — capacity is tight, so weigh scaling recommendations against it
 - WaveGuard membership tiers: Bronze/Silver/Gold/Platinum with 0/10/15/20% discounts
 - Recurring lawn services use $35/hr loaded labor cost and a 45% fully loaded floor
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}
 - Competes with Turner, Nozzle Nolen, HomeTeam in SWFL market
 
-Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "name or page/query", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`,
+Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "campaign_id": "EXACT id from CAMPAIGN PERFORMANCE — REQUIRED for budget/mode actions; omit otherwise", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number) and change_mode (base|spent|stop); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`,
 
         messages: [{
           role: 'user',
@@ -211,14 +230,15 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
         }]
       });
 
-      let advice;
-      try {
-        advice = JSON.parse(response.content[0].text.replace(/```json|```/g, '').trim());
-      } catch {
-        advice = { raw: response.content[0].text, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse structured output.' };
+      const rawText = response.content[0].text;
+      let advice = parseLooseJson(rawText);
+      if (!advice) {
+        logger.warn(`[campaign-advisor] daily advice JSON parse failed (len=${String(rawText).length}); head: ${String(rawText).slice(0, 300)}`);
+        advice = { raw: rawText, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse structured output.' };
       }
 
       advice.date = etDateString(now);
+      this.normalizeRecommendations(advice, campaigns);
       await this.storeReport(advice);
       await this.sendSummary(advice);
 
@@ -231,24 +251,112 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     }
   }
 
+  // Model recommendations are stored verbatim and drive real Apply buttons,
+  // so their apply fields must pass the same executability guards
+  // /advisor/apply enforces (google_ads + active + concrete value + base
+  // mode + within the 3× bound + not a no-op). A rec failing any of them
+  // keeps its advice text but loses apply_action/apply_value — the client
+  // shows the "Manual action" hint instead of a button that
+  // deterministically 422s. The resolved row's id is stamped back on as the
+  // stable campaign_id the route prefers.
+  normalizeRecommendations(advice, campaigns) {
+    if (!advice || !Array.isArray(advice.recommendations)) return advice;
+    const AUTO = new Set(['increase_budget', 'decrease_budget', 'change_mode']);
+    const adsConfigured = adsClientConfigured();
+    const byId = new Map(campaigns.map((c) => [String(c.id), c]));
+    const byName = new Map();
+    for (const c of campaigns) {
+      const key = String(c.campaign_name || '').toLowerCase();
+      byName.set(key, byName.has(key) ? null : c); // null = ambiguous name
+    }
+    for (const rec of advice.recommendations) {
+      if (!rec || !AUTO.has(rec.apply_action)) continue;
+      // Keep the intended action as a marker when stripping automation, so
+      // the client can still render its "Manual action" hint — otherwise the
+      // rec silently loses the indicator the advisor promised.
+      const strip = () => { rec.manual_action = rec.apply_action; delete rec.apply_action; delete rec.apply_value; delete rec.campaign_id; };
+      // The card shows the NAME and the confirm dialog repeats it — a rec
+      // with only a hidden id would let the admin approve a spend change
+      // without seeing which campaign it targets.
+      if (!String(rec.campaign || '').trim()) { strip(); continue; }
+      const campaign = byId.get(String(rec.campaign_id || ''))
+        || byName.get(String(rec.campaign || '').toLowerCase())
+        || null;
+      if (!campaign || campaign.platform !== 'google_ads' || campaign.status !== 'active') { strip(); continue; }
+      // A linked campaign needs a live push the unconfigured client can't run.
+      if (campaign.platform_campaign_id && !adsConfigured) { strip(); continue; }
+      // An id resolving to a different campaign than the displayed name is
+      // exactly the mislabel the route rejects.
+      if (String(campaign.campaign_name).toLowerCase() !== String(rec.campaign).toLowerCase()) { strip(); continue; }
+      if (rec.apply_action === 'change_mode') {
+        if (!['base', 'spent', 'stop'].includes(rec.apply_value) || rec.apply_value === campaign.budget_mode) { strip(); continue; }
+        // A LINKED campaign with no base budget can't take a live mode push
+        // (setMode throws live_push_unavailable) — advisory only.
+        if (campaign.platform_campaign_id && campaign.daily_budget_base == null) { strip(); continue; }
+      } else {
+        const amount = Number(rec.apply_value);
+        const baseBudget = Number(campaign.daily_budget_base);
+        const boundRef = Number.isFinite(baseBudget) && baseBudget > 0 ? baseBudget : Number(campaign.daily_budget_current);
+        const throttled = Boolean(campaign.budget_mode) && campaign.budget_mode !== 'base';
+        const noop = amount === baseBudget && amount === Number(campaign.daily_budget_current);
+        if (!Number.isFinite(amount) || amount <= 0 || throttled || !(boundRef > 0)
+          || amount > boundRef * 3 || amount < boundRef / 3 || noop) { strip(); continue; }
+      }
+      rec.campaign_id = campaign.id;
+    }
+    return advice;
+  }
+
   generateFallbackAdvice(summaries, targets) {
     const recommendations = [];
     const minRoas = parseFloat(targets?.min_roas || 4.0);
 
+    // Only google_ads campaigns get apply_action/apply_value — other platforms
+    // are managed in their own Ads Manager, so their recs stay advisory. A rec
+    // that can't carry a concrete executable value stays advisory too (the
+    // client only renders Apply when the value is concrete), and the apply
+    // fields must mirror the /advisor/apply guards: a STOP rec for a campaign
+    // already stopped is a no-op the route rejects, and a budget rec for a
+    // throttled (spent/stop) campaign can't take effect — either would render
+    // an Apply button that is guaranteed to 422.
+    const adsConfigured = adsClientConfigured();
     for (const c of summaries) {
+      // Mirrors /advisor/apply: only active Google campaigns take one-click
+      // changes (a paused campaign's apply would 422), and a LINKED campaign
+      // needs a configured client for its live push.
+      const controllable = c.platform === 'google_ads' && c.status === 'active'
+        && !(c.linked && !adsConfigured);
       if (c.last7d.roas > 0 && c.last7d.roas < minRoas * 0.5) {
         recommendations.push({
           priority: 'high', campaign: c.name,
           action: `Set to STOP mode — 7-day ROAS ${c.last7d.roas}x is less than half of ${minRoas}x target`,
           reasoning: 'Underperforming campaign burning budget',
-          apply_action: 'change_mode',
+          ...(controllable && c.budgetMode !== 'stop'
+            && !(c.linked && c.dailyBudgetBase == null) // linked + no base can't push live
+            ? { campaign_id: c.id, apply_action: 'change_mode', apply_value: 'stop' }
+            : {}),
         });
       } else if (c.last7d.lostISBudget > 20 && c.last7d.roas >= minRoas) {
+        // setBudget sets the BASE daily budget, so derive the target from the
+        // base (current can be throttled by spent/stop mode); +25%, whole dollars.
+        const baseBudget = Number(c.dailyBudgetBase ?? c.dailyBudgetCurrent);
+        // Math.max keeps tiny budgets from rounding to a no-op "increase".
+        const target = Number.isFinite(baseBudget) && baseBudget > 0
+          ? Math.max(Math.round(baseBudget * 1.25), Math.floor(baseBudget) + 1)
+          : null;
+        // target <= 3x base mirrors the route's bound: a tiny budget's
+        // whole-dollar minimum (e.g. $0.30 -> $1) would otherwise carry an
+        // Apply button that deterministically 422s as out-of-bounds.
+        const budgetApplicable = controllable && target
+          && target <= baseBudget * 3
+          && (!c.budgetMode || c.budgetMode === 'base');
         recommendations.push({
           priority: 'medium', campaign: c.name,
-          action: `Increase budget — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`,
+          action: target
+            ? `Increase daily budget from $${baseBudget} to $${target} — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`
+            : `Increase budget — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`,
           reasoning: 'Profitable campaign with headroom',
-          apply_action: 'increase_budget',
+          ...(budgetApplicable ? { campaign_id: c.id, apply_action: 'increase_budget', apply_value: target } : {}),
         });
       }
     }

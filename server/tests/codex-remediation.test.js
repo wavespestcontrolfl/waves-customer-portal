@@ -36,13 +36,51 @@ function makeDb(initial = {}) {
   function db(table) {
     tables[table] = tables[table] || [];
     let crit = {};
+    let notIn = null;
     return {
       where(c) { crit = c; return this; },
+      whereNotIn(col, vals) { notIn = { col, vals }; return this; },
       async first() { const r = tables[table].find((x) => match(x, crit)); return r ? { ...r } : null; },
-      async update(patch) { const rows = tables[table].filter((x) => match(x, crit)); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
-      async insert(row) { tables[table].push({ ...row }); return [1]; },
+      async update(patch) {
+        const rows = tables[table].filter((x) => match(x, crit) && (!notIn || !notIn.vals.includes(x[notIn.col])));
+        rows.forEach((r) => Object.assign(r, patch));
+        return rows.length;
+      },
+      insert(row) {
+        const exec = (ignoreConflict) => {
+          const dup = row.pr_number !== undefined
+            && tables[table].some((x) => x.pr_number === row.pr_number);
+          if (dup) {
+            if (ignoreConflict) return [0];
+            throw new Error('duplicate key value violates unique constraint');
+          }
+          tables[table].push({ ...row });
+          return [1];
+        };
+        return {
+          onConflict: () => ({ ignore: async () => exec(true) }),
+          then: (res, rej) => Promise.resolve().then(() => exec(false)).then(res, rej),
+        };
+      },
     };
   }
+  // Emulates markPrTerminal's atomic upsert — the only raw statement these
+  // tests reach (insert-or-flip, terminal rows untouched).
+  db.raw = async (sql, params) => {
+    const [n, status] = params;
+    tables.codex_remediation_state = tables.codex_remediation_state || [];
+    const t = tables.codex_remediation_state;
+    const row = t.find((x) => x.pr_number === n);
+    if (!row) {
+      t.push({ pr_number: n, status, rounds: 0 });
+      return { rowCount: 1 };
+    }
+    // merged permanent; closed only upgradeable to merged
+    if (row.status === 'merged') return { rowCount: 0 };
+    if (row.status === 'closed' && status !== 'merged') return { rowCount: 0 };
+    row.status = status;
+    return { rowCount: 1 };
+  };
   db._tables = tables;
   return db;
 }
@@ -50,7 +88,14 @@ function makeDb(initial = {}) {
 function makeGh(over = {}) {
   const calls = { putFile: [], comments: [] };
   const gh = {
-    async getPr() { return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }; },
+    // Post-push revalidation compares the live PR head to the pushed commit —
+    // after a putFile the fake PR's head is the pushed sha, like GitHub's.
+    async getPr() {
+      return {
+        state: 'open',
+        head: { sha: calls.putFile.length ? 'newcommit999aaa' : HEAD, ref: 'content/blog-x' },
+      };
+    },
     async listPrReviewComments() { return over.reviewComments || [finding()]; },
     async listIssueComments() { return over.issueComments || []; },
     async getFile() { return { content: over.fileContent ?? 'ORIGINAL BODY', sha: 'file-sha-1' }; },
@@ -186,10 +231,185 @@ describe('runRemediationForPr', () => {
     expect(r.reason).toMatch(/no change/);
   });
 
-  test('already parked → skip', async () => {
-    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked' }] });
-    const r = await runRemediationForPr(CTX, { db, gh: makeGh(), callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+  test('parked at the CURRENT head → skip', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: HEAD }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('same-head park with a non-"moved past" reason → stays parked (human hold)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: HEAD, park_reason: `portal row sync failed after fix commit ${HEAD.slice(0, 7)}: boom` }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
+  });
+
+  test('same-head "moved past" park + ref agrees → contradiction re-arm and run the round (PR #383 wedge)', async () => {
+    // The park claimed another push superseded ours, but the live head IS the
+    // push we parked against AND the branch ref confirms it — the claim was a
+    // stale read. Must re-arm, not sit parked forever.
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'pr head moved past the remediation push (abc1234 → 9999999); sync withheld' }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], gh: { getBranchSha: async () => HEAD } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    // Re-armed with no findings for this head → posts the review request the
+    // withheld round never sent.
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/requested codex review/);
+    expect(gh._calls.comments).toHaveLength(1);
+    expect(gh._calls.comments[0].body).toContain(HEAD);
+    const row = db._tables.codex_remediation_state[0];
+    expect(row.status).toBe('active');
+    expect(row.park_reason).toBeNull();
+    expect(row.parked_head_sha).toBeNull();
+  });
+
+  test('same-head "moved past" park but ref shows a THIRD sha → stays parked (stale getPr of a real parallel push)', async () => {
+    // Park recorded our push B; a real parallel C landed; this tick's getPr
+    // stalely reports B. The ref disagreeing with the observed head means the
+    // observation is untrustworthy — hold the park; the next tick sees C and
+    // the ordinary head-advance re-arm carries it.
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'pr head moved past the remediation push (abc1234 → 9999999); sync withheld' }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], gh: { getBranchSha: async () => 'parallel777push' } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
+  });
+
+  test('same-head "moved past" park + getBranchSha failure → stays parked (fail closed)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'pr head moved past the remediation push (abc1234 → 9999999); sync withheld' }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [], gh: { getBranchSha: async () => { throw new Error('gh 500'); } } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
+  });
+
+  test('park persists reason + the head the verdict applied to', async () => {
+    const db = makeDb();
+    const gh = makeGh({ fileContent: 'ORIGINAL BODY' });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('ORIGINAL BODY'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    const row = db._tables.codex_remediation_state[0];
+    expect(row.status).toBe('parked');
+    expect(row.park_reason).toMatch(/no change/);
+    expect(row.parked_head_sha).toBe(HEAD.toLowerCase());
+  });
+
+  test('parked at an OLDER head → re-arm with fresh rounds and run the round', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: MAX_ROUNDS, status: 'parked', parked_head_sha: 'older9999999', park_reason: 'exhausted rounds' }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(r.round).toBe(1); // rounds reset on re-arm
+    const row = db._tables.codex_remediation_state[0];
+    expect(row.park_reason).toBeNull();
+    expect(row.parked_head_sha).toBeNull();
+  });
+
+  test('legacy parked row (no parked_head_sha) → re-arms once', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked' }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+  });
+
+  test('stale post-push getPr head + ref confirms our push → round completes (no park)', async () => {
+    // The post-push getPr serves the PRE-push head (read-after-write lag
+    // behind our own putFile — PR #383); the branch ref says our commit is
+    // the head, and the mandatory state re-read has caught up.
+    const db = makeDb();
+    let getPrCalls = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => {
+        getPrCalls += 1;
+        if (getPrCalls === 2) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }; // stale post-push read
+        return { state: 'open', head: { sha: getPrCalls === 1 ? HEAD : 'newcommit999aaa', ref: 'content/blog-x' } };
+      },
+    } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(gh._calls.comments).toHaveLength(1); // re-review request posted
+    expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
+    expect(db._tables.codex_remediation_state[0].rounds).toBe(1);
+  });
+
+  test('ref confirms our push but the state re-read shows a NEWER head → park stamped with OUR push', async () => {
+    // A concurrent push C lands between the ref confirmation and the state
+    // re-read: syncing our B would mirror content the merge won't take.
+    const db = makeDb();
+    let getPrCalls = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => {
+        getPrCalls += 1;
+        if (getPrCalls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+        if (getPrCalls === 2) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }; // stale post-push read
+        return { state: 'open', head: { sha: 'parallel777push', ref: 'content/blog-x' } }; // re-read sees C
+      },
+    } });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/moved past the remediation push/);
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].parked_head_sha).toBe('newcommit999aaa');
+  });
+
+  test('genuine parallel push (ref shows a third sha) → park stamped with OUR push', async () => {
+    const db = makeDb();
+    // First getPr (round start) serves the head Codex reviewed; the post-push
+    // read sees the parallel push, and so does the authoritative branch ref.
+    let getPrCalls = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => ({ state: 'open', head: { sha: getPrCalls++ === 0 ? HEAD : 'parallel777push', ref: 'content/blog-x' } }),
+      getBranchSha: async () => 'parallel777push',
+    } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/moved past the remediation push/);
+    expect(gh._calls.comments).toHaveLength(0); // sync + re-review withheld
+    const row = db._tables.codex_remediation_state[0];
+    expect(row.status).toBe('parked');
+    expect(row.parked_head_sha).toBe('newcommit999aaa'); // our push → head-advance re-arm fires next tick
+  });
+
+  test('ref confirms our push but the PR closed behind it → terminal stamp, sync + comment skipped', async () => {
+    // The stale snapshot that misreported the head may misreport state too:
+    // the post-push getPr says {open, head A} (stale), the ref proves our
+    // push B is the tip, and the mandatory state re-read shows the PR closed.
+    const db = makeDb();
+    let getPrCalls = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => {
+        getPrCalls += 1;
+        if (getPrCalls <= 2) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+        return { state: 'closed', head: { sha: 'newcommit999aaa', ref: 'content/blog-x' } };
+      },
+    } });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toContain('post-push check');
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber).status).toBe('closed');
+  });
+
+  test('stale getPr head + getBranchSha failure → park (fail closed; contradiction re-arm recovers)', async () => {
+    const db = makeDb();
+    const gh = makeGh({ gh: {
+      getPr: async () => ({ state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }),
+      getBranchSha: async () => { throw new Error('gh 500'); },
+    } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/moved past the remediation push/);
+    expect(db._tables.codex_remediation_state[0].parked_head_sha).toBe('newcommit999aaa');
   });
 
   test('closed PR → skip', async () => {
@@ -240,7 +460,7 @@ describe('lane entry points', () => {
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     const run = { id: 'run-1', action_type: 'new_supporting_blog' };
     // getPr returns the same open PR
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     let revalidatedWith = null;
     const r = await maybeRemediateAutonomousPr(pr, run, {
       db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
@@ -257,7 +477,7 @@ describe('lane entry points', () => {
     const db = makeDb();
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
       db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: false, reason: 'uniqueness gate: near-duplicate' }),
@@ -267,12 +487,29 @@ describe('lane entry points', () => {
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
+  test('autonomous lane park annotates the run reviewer_notes with the reason', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', reviewer_notes: 'prior note' }] });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: false, reason: 'uniqueness gate: near-duplicate' }),
+    });
+    expect(r.parked).toBe(true);
+    const run = db._tables.autonomous_runs[0];
+    expect(run.reviewer_notes).toContain('prior note');
+    expect(run.reviewer_notes).toContain('Codex remediation parked PR #7');
+    expect(run.reviewer_notes).toContain('uniqueness gate: near-duplicate');
+  });
+
   test('autonomous lane with NO run row -> park (fail closed), runner never loaded', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const db = makeDb();
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     // No injected validator: the real validateAutonomousRunGates must bail on
     // the missing run BEFORE requiring the autonomous-runner module.
     const r = await maybeRemediateAutonomousPr(pr, null, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
@@ -329,10 +566,10 @@ describe('round-4 hardening', () => {
     expect(captured.factContext.title).toBe('Roof Rats');
   });
 
-  test('immutableFrontmatterChanged detects slug/canonical/domains edits', () => {
+  test('frontmatterFixViolation detects slug/canonical/domains edits', () => {
     const orig = '---\nslug: /a/\ncanonical: https://x/a/\ndomains:\n  - hub\n---\nbody';
-    expect(rem.immutableFrontmatterChanged(orig, orig)).toBe(false);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('/a/', '/b/'))).toBe(true);
+    expect(rem.frontmatterFixViolation(orig, orig).violation).toBeNull();
+    expect(rem.frontmatterFixViolation(orig, orig.replace('/a/', '/b/')).violation).toMatch(/"slug"/);
   });
 
   test('fix that changes routing frontmatter -> park', async () => {
@@ -376,17 +613,49 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
-  // P2: the ENTIRE frontmatter is immutable — not just slug/canonical/domains.
-  test('immutableFrontmatterChanged flags any key change (title/hero/author/date/added key)', () => {
+  // P2: frontmatter outside the whitelist is immutable — not just slug/canonical/domains.
+  test('frontmatterFixViolation flags any non-whitelisted key change (title/hero path/author/date/added key)', () => {
     const orig = '---\ntitle: Roof Rats\nhero_image: /images/blog/x/hero.webp\nauthor: Adam\npublished: "2026-07-01"\n---\nbody text';
-    expect(rem.immutableFrontmatterChanged(orig, orig)).toBe(false);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('Roof Rats', 'Rats'))).toBe(true);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('/images/blog/x/hero.webp', '/images/blog/x/other.webp'))).toBe(true);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('Adam', 'Ghost Writer'))).toBe(true);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('"2026-07-01"', '"2026-07-05"'))).toBe(true);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('---\nbody', 'og_image: /og.png\n---\nbody'))).toBe(true);
+    expect(rem.frontmatterFixViolation(orig, orig).violation).toBeNull();
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Roof Rats', 'Rats')).violation).toMatch(/"title"/);
+    // a STRING hero_image (bare path) counts as a path change, never an alt fix
+    expect(rem.frontmatterFixViolation(orig, orig.replace('/images/blog/x/hero.webp', '/images/blog/x/other.webp')).violation).toMatch(/hero_image/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Adam', 'Ghost Writer')).violation).toMatch(/"author"/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('"2026-07-01"', '"2026-07-05"')).violation).toMatch(/"published"/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('---\nbody', 'og_image: /og.png\n---\nbody')).violation).toMatch(/"og_image"/);
     // body-only edit with identical frontmatter is allowed
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('body text', 'fixed body text'))).toBe(false);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('body text', 'fixed body text')).violation).toBeNull();
+  });
+
+  test('whitelist: a valid meta_description rewrite passes and is surfaced in `changed`', () => {
+    const orig = '---\nslug: /pest-control/x/\nmeta_description: Too short and it ends with and\n---\nbody';
+    const fixedMeta = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const fixed = orig.replace('Too short and it ends with and', fixedMeta);
+    const res = rem.frontmatterFixViolation(orig, fixed, [{ body: 'Complete the truncated meta description' }]);
+    expect(res.violation).toBeNull();
+    expect(res.changed.meta_description).toBe(fixedMeta);
+    // The same delta WITHOUT a finding targeting the field is rejected —
+    // an LLM must not smuggle SERP copy changes past a body-only round.
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'Fix the broken link.' }]).violation).toMatch(/no finding in this round targets it/);
+  });
+
+  test('whitelist: a meta_description rewrite outside the 115–160 schema bound parks', () => {
+    const orig = '---\nslug: /pest-control/x/\nmeta_description: Old value that is being replaced entirely by the fix\n---\nbody';
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Old value that is being replaced entirely by the fix', 'Way too short'), [{ body: 'Complete the truncated meta description' }]).violation)
+      .toMatch(/115–160/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Old value that is being replaced entirely by the fix', 'x'.repeat(200)), [{ body: 'Complete the truncated meta description' }]).violation)
+      .toMatch(/115–160/);
+  });
+
+  test('whitelist: hero_image.alt rewrite passes; hero_image.src change parks; empty alt parks', () => {
+    const orig = '---\nslug: /x/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Wrong species described here\n---\nbody';
+    const altFix = rem.frontmatterFixViolation(orig, orig.replace('Wrong species described here', 'Large glossy dark-mahogany cockroach on a driveway'), [{ body: 'Hero alt does not match the image' }]);
+    expect(altFix.violation).toBeNull();
+    expect(altFix.changed.hero_alt).toBe('Large glossy dark-mahogany cockroach on a driveway');
+    expect(rem.frontmatterFixViolation(orig, orig.replace('/images/blog/x/hero.webp', '/images/blog/x/new.webp')).violation)
+      .toMatch(/hero_image\.src/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Wrong species described here', '""'), [{ body: 'Hero alt does not match the image' }]).violation)
+      .toMatch(/alt rewrite invalid/);
   });
 
   test('fix that changes non-routing frontmatter (title) -> park', async () => {
@@ -473,6 +742,22 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     expect(gh._calls.putFile).toHaveLength(1); // the commit DID land on the branch
     expect(gh._calls.comments).toHaveLength(0); // but Codex re-review was not requested
   });
+
+  test('sync-failure park stamps the NEW head so our own push cannot re-arm it', async () => {
+    const db = makeDb();
+    const gh = makeGh();
+    await runRemediationForPr(
+      { ...CTX, onRemediated: async () => { throw new Error('db down'); } },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    // The park verdict applies to the commit we just pushed, not the pre-push head.
+    expect(db._tables.codex_remediation_state[0].parked_head_sha).toBe('newcommit999aaa');
+    // Next tick, the PR head IS that pushed commit — the park must hold.
+    const gh2 = makeGh({ gh: { getPr: async () => ({ state: 'open', head: { sha: 'newcommit999aaa', ref: 'content/blog-x' } }) } });
+    const r2 = await runRemediationForPr(CTX, { db, gh: gh2, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r2.skipped).toBe(true);
+    expect(r2.reason).toBe('parked');
+  });
 });
 
 describe('round-10 hardening (Codex findings on 82ec5608)', () => {
@@ -543,7 +828,7 @@ describe('round-11 hardening (Codex findings on 145dcee5)', () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     let checked = false;
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
       db: makeDb(), gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
@@ -570,6 +855,119 @@ describe('round-11 hardening (Codex findings on 145dcee5)', () => {
     const ghMd = makeGh();
     const r2 = await runRemediationForPr(CTX, { db: makeDb(), gh: ghMd, callAnthropic: makeCall('Call {{cityPhone}} today.'), validateFixedBlogFile: PASS });
     expect(r2.remediated).toBe(true);
+  });
+});
+
+describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () => {
+  // Real content-guardrails end-to-end: a termite intercept post ships WITH a
+  // FAQ by owner mandate (2026-06-11), so the pre-commit gate must honor the
+  // same narrow exception the publish path does — without it every fix on
+  // such a post P0s on the PRE-EXISTING FAQ and the PR parks (PR #368).
+  const TERMITE_FM = {
+    title: 'Sentricon in Southwest Florida',
+    slug: '/termite/sentricon-swfl/',
+    meta_description: 'How termite bait stations work in Southwest Florida sandy soil, and what a monitored bait program actually covers for SWFL homeowners.',
+    primary_keyword: 'sentricon',
+    secondary_keywords: [],
+    category: 'termite',
+    post_type: 'location',
+    service_areas_tag: ['Sarasota'],
+    related_services: [],
+    spoke_links: [],
+    author: { name: 'Adam Benetti', role: 'Owner', fdacs_license: 'JB1234', bio_url: '/about/authors/adam-benetti' },
+    technically_reviewed_by: { name: 'Adam Benetti', credential: 'Certified Operator', fdacs_license: 'JB1234', bio_url: '/about/authors/adam-benetti' },
+    published: '2026-07-10',
+    updated: '2026-07-10',
+    technically_reviewed: '2026-07-10',
+    fact_checked: '2026-07-10',
+    review_cadence: 'quarterly',
+    reading_time_min: 3,
+    hero_image: { src: '/images/blog/termite/sentricon-swfl/hero.webp', alt: 'Bait station along a home perimeter' },
+    og_image: '/images/blog/termite/sentricon-swfl/hero.webp',
+    canonical: 'https://www.wavespestcontrol.com/termite/sentricon-swfl/',
+    schema_types: ['Article', 'FAQPage'],
+    disclosure: { type: 'pricing-transparency' },
+    domains: ['wavespestcontrol.com'],
+    tracking: { domains: ['wavespestcontrol.com'] },
+  };
+  // JSON is valid YAML, so a stringified object is a parseable frontmatter block.
+  const FAQ_MD = `---\n${JSON.stringify(TERMITE_FM, null, 2)}\n---\nBait stations target the colony itself.\n\n## Frequently Asked Questions\n\n### How long does bait last?\n\nStations stay in service as long as they are monitored.`;
+  const gateDeps = { factCheckEvaluate: async () => ({ pass: true }) };
+
+  test('validateFixedBlogFile: termite post with a pre-existing FAQ blocks without the flag, passes with it', async () => {
+    const strict = await rem.validateFixedBlogFile(FAQ_MD, {}, gateDeps);
+    expect(strict.ok).toBe(false);
+    expect(strict.reason).toMatch(/FAQ_BLOCKED_SERVICE/);
+
+    const excepted = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true }, gateDeps);
+    expect(excepted.ok).toBe(true);
+  });
+
+  test('runRemediationForPr threads ctx.operatorFaqException into the content-gate re-run', async () => {
+    let optsSeen = null;
+    const spy = (md, opts) => { optsSeen = opts; return { ok: true }; };
+    const r = await runRemediationForPr(
+      { ...CTX, operatorFaqException: true },
+      { db: makeDb(), gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: spy },
+    );
+    expect(r.remediated).toBe(true);
+    expect(optsSeen.operatorFaqException).toBe(true);
+  });
+
+  test('autonomous lane derives the flag from the run opportunity/brief via the runner derivation', async () => {
+    const prevGate = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    try {
+      const db = makeDb({
+        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' }],
+        opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
+      });
+      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
+      const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+      gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+      let optsSeen = null;
+      const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+        db, gh, callAnthropic: makeCall('FIXED'),
+        validateFixedBlogFile: (md, opts) => { optsSeen = opts; return { ok: true }; },
+        validateAutonomousRunGates: async () => ({ ok: true }),
+        autonomousRunner: {
+          _loadReviewedBrief: async () => ({ voice_constraints: { operator_brief: { faq_required: true } } }),
+          _deriveGuardrailOptions: async () => ({ service: 'termite', domains: null, operatorFaqException: true }),
+        },
+      });
+      expect(r.remediated).toBe(true);
+      expect(optsSeen.operatorFaqException).toBe(true);
+    } finally {
+      process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
+    }
+  });
+
+  test('autonomous lane derivation failure stays false (fail closed, remediation still runs)', async () => {
+    const prevGate = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    try {
+      const db = makeDb({
+        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' }],
+        opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
+      });
+      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
+      const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+      gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+      let optsSeen = null;
+      const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+        db, gh, callAnthropic: makeCall('FIXED'),
+        validateFixedBlogFile: (md, opts) => { optsSeen = opts; return { ok: true }; },
+        validateAutonomousRunGates: async () => ({ ok: true }),
+        autonomousRunner: {
+          _loadReviewedBrief: async () => { throw new Error('briefs table unavailable'); },
+          _deriveGuardrailOptions: async () => ({ operatorFaqException: true }),
+        },
+      });
+      expect(r.remediated).toBe(true);
+      expect(optsSeen.operatorFaqException).toBe(false);
+    } finally {
+      process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
+    }
   });
 });
 
@@ -942,5 +1340,404 @@ describe('deterministic date-restamp carve-out', () => {
     } finally {
       delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
     }
+  });
+});
+
+describe('frontmatter whitelist round trip (meta_description + hero_image.alt)', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+
+  test('a fix that completes meta_description + hero alt PUSHES instead of parking (scheduler lane) and mirrors the row columns', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Old alt\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META).replace('Old alt', 'Accurate new alt text');
+    const db = makeDb({
+      blog_posts: [{ id: 1, publish_status: 'publishing', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'BODY', meta_description: 'Truncated ending with and', hero_image_alt: 'Old alt' }],
+    });
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' }), finding({ body: 'Hero image alt is inaccurate' })] });
+    const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(1);
+    // Mirrored so a later republish (which rebuilds frontmatter from the
+    // row) can't resurrect the flagged values.
+    expect(db._tables.blog_posts[0].meta_description).toBe(VALID_META);
+    expect(db._tables.blog_posts[0].hero_image_alt).toBe('Accurate new alt text');
+  });
+
+  test('autonomous lane mirrors the whitelisted fix into draft_payload (social caption source), other keys untouched', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ type: 'draft', frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and' } }) }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.remediated).toBe(true);
+    const payload = JSON.parse(db._tables.autonomous_runs[0].draft_payload);
+    expect(payload.frontmatter.meta_description).toBe(VALID_META);
+    expect(payload.frontmatter.canonical).toBe('https://x/a/');
+  });
+
+  test('autonomous lane draft_payload mirror failure is fail-SOFT — the pushed fix still counts', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    // Unparseable payload → JSON.parse throws inside the mirror → warn only.
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: 'not json {' }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.remediated).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(1);
+    expect(db._tables.autonomous_runs[0].draft_payload).toBe('not json {'); // untouched
+  });
+
+  test('an out-of-bound meta_description rewrite still parks end-to-end', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', 'Too short.');
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
+    const r = await runRemediationForPr(CTX, { db: makeDb(), gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/beyond the whitelist/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+});
+
+describe('validateAutonomousRunGates revalidates REWRITTEN frontmatter (Codex r1 on #2757)', () => {
+  test('gates receive the fixed meta_description + hero alt, not the stale stored payload values', async () => {
+    const db = makeDb({
+      autonomous_runs: [{
+        id: 'run-1',
+        action_type: 'new_supporting_blog',
+        opportunity_id: 'opp-1',
+        facts_sufficiency: null,
+        draft_payload: JSON.stringify({
+          type: 'draft',
+          body: 'OLD',
+          meta_description: 'Truncated ending with and',
+          frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and', hero_image: { src: '/images/blog/x/hero.webp', alt: 'Old alt' } },
+        }),
+      }],
+      opportunity_queue: [{ id: 'opp-1' }],
+    });
+    const seen = {};
+    const capture = (name) => (arg) => {
+      seen[name] = arg && arg.draft ? arg.draft : arg;
+      return name === 'seo'
+        ? { passed: true, skipped: false, findings: [] }
+        : { pass: true, ok: true, findings: [] };
+    };
+    const fixedMd = [
+      '---',
+      "title: T",
+      "meta_description: A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.",
+      'hero_image:',
+      '  src: /images/blog/x/hero.webp',
+      '  alt: Accurate new alt',
+      '---',
+      'FIXED BODY',
+    ].join('\n');
+    const res = await rem.validateAutonomousRunGates(fixedMd, { id: 'run-1' }, {
+      db,
+      autonomousRunner: {
+        _loadReviewedBrief: async () => ({ page_type: 'supporting-blog' }),
+        _deriveGuardrailOptions: async () => ({}),
+        _loadBlogCorpus: async () => [],
+      },
+      contentGuardrails: { evaluate: capture('guardrails') },
+      comparisonTableGate: { evaluate: capture('comparison') },
+      uniquenessGate: { evaluateBlog: (draft) => { seen.uniq = draft; return { ok: true }; } },
+      qualityGate: { evaluate: (draft) => { seen.quality = draft; return { ok: true }; } },
+      seoCompletionGate: { evaluate: capture('seo') },
+      aiVisibilityGate: { evaluateStatic: () => ({ passed: true, findings: [] }) },
+    });
+    expect(res.ok).toBe(true);
+    // Every gate sees the REWRITTEN metadata.
+    for (const d of [seen.guardrails, seen.uniq, seen.quality, seen.seo]) {
+      expect(d.meta_description).toMatch(/^A no-panic Southwest Florida guide/);
+      expect(d.frontmatter.meta_description).toMatch(/^A no-panic Southwest Florida guide/);
+      expect(d.frontmatter.hero_image.alt).toBe('Accurate new alt');
+      expect(d.frontmatter.hero_image.src).toBe('/images/blog/x/hero.webp');
+      expect(d.body).toBe('FIXED BODY');
+    }
+  });
+});
+
+describe('whitelist hardening round 2 (Codex r2 on #2757)', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  test('an image/path finding does NOT authorize an alt rewrite (alt-specific wording required)', () => {
+    const orig = '---\nslug: /x/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Old alt\n---\nbody';
+    const fixed = orig.replace('Old alt', 'New alt text');
+    // "hero image"/"hero art" findings are about the asset, not the alt.
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'Replace the misleading roach hero image' }]).violation)
+      .toMatch(/no finding in this round targets it/);
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'Use accurate smokybrown hero art' }]).violation)
+      .toMatch(/no finding in this round targets it/);
+    // Alt-specific wording still authorizes.
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'The hero alt describes the wrong species' }]).violation).toBeNull();
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'heroAlt claims a red spider' }]).violation).toBeNull();
+  });
+
+  test('hero_image.alt over 255 chars parks (mirror column is varchar(255))', () => {
+    const orig = '---\nslug: /x/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Old alt\n---\nbody';
+    const fixed = orig.replace('Old alt', 'A'.repeat(260));
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'hero alt is wrong' }]).violation)
+      .toMatch(/>255 chars/);
+  });
+
+  test('scheduler lane: rewritten meta failing the title/meta spam check parks before push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
+    const r = await runRemediationForPr(
+      { ...CTX, factContext: { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'Rodents' } },
+      {
+        db: makeDb(), gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+        titleMetaSpamGate: { evaluateTitleMetaSpam: () => ({ ok: false, hard_failures: [{ code: 'near_me_stuffing' }] }) },
+        contentQualityGate: { _internals: { checkRedactionPassed: () => ({ ok: true }) } },
+      },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/metadata quality checks: title\/meta spam: near_me_stuffing/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('scheduler lane: rewritten meta failing the PII check parks before push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
+    const r = await runRemediationForPr(
+      { ...CTX, factContext: { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'Rodents' } },
+      {
+        db: makeDb(), gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+        titleMetaSpamGate: { evaluateTitleMetaSpam: () => ({ ok: true, hard_failures: [], soft_failures: [] }) },
+        contentQualityGate: { _internals: { checkRedactionPassed: () => ({ ok: false, reason: 'email_in_meta_description' }) } },
+      },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/pii: email_in_meta_description/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('validateRewrittenMeta passes clean copy through the REAL spam + PII gates', () => {
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const res = rem.validateRewrittenMeta(VALID_META, { title: 'Florida Spiders: Which Ones Matter', city: 'Sarasota', keyword: 'florida spiders', tag: 'pest-control' });
+    expect(res.ok).toBe(true);
+    // A legacy title with pre-existing spam issues must NOT park a clean
+    // meta rewrite — the whitelist can never change the title, so only the
+    // rewritten meta is graded (Codex r3 on #2757).
+    const spammyTitle = 'Best Pest Control Near Me Sarasota | Pest Control Sarasota | ' + 'Pest Control '.repeat(6);
+    const resLegacy = rem.validateRewrittenMeta(VALID_META, { title: spammyTitle, city: 'Sarasota', keyword: 'pest control', tag: 'pest-control' });
+    expect(resLegacy.ok).toBe(true);
+    // And a meta carrying an obvious non-Waves email fails the real gate.
+    const bad = 'Email john.doe@gmail.com for spider help across Sarasota, Bradenton and Venice — identification, prevention and treatment for Southwest Florida homes.';
+    const resBad = rem.validateRewrittenMeta(bad, { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'pest-control' });
+    expect(resBad.ok).toBe(false);
+  });
+});
+
+// PR left the open state → its remediation row must stop reading as a live
+// park. markPrTerminal is fail-soft bookkeeping called from finalizeMerged/
+// finalizeClosed (autonomous poller) and applyMergeEffect (scheduler/admin
+// mergeAstro path).
+describe('markPrTerminal', () => {
+  test('retires a parked row to merged; already-terminal rows stay put', async () => {
+    const db = makeDb({
+      codex_remediation_state: [
+        { pr_number: 377, status: 'parked', park_reason: 'x', rounds: 2 },
+        { pr_number: 375, status: 'closed' },
+      ],
+    });
+    const r1 = await rem.markPrTerminal(377, 'merged', db);
+    expect(r1.updated).toBe(1);
+    expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 377).status).toBe('merged');
+
+    // closed → merged is the one sanctioned terminal upgrade (a reopened
+    // PR can merge); merged stays permanent.
+    const r2 = await rem.markPrTerminal(375, 'merged', db);
+    expect(r2.updated).toBe(1);
+    expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 375).status).toBe('merged');
+    expect((await rem.markPrTerminal(377, 'closed', db)).updated).toBe(0);
+    expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 377).status).toBe('merged');
+  });
+
+  test('tombstones a missing row so an in-flight round cannot recreate live telemetry', async () => {
+    const db = makeDb({ codex_remediation_state: [] });
+    await rem.markPrTerminal(999, 'merged', db);
+    expect(db._tables.codex_remediation_state).toHaveLength(1);
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ pr_number: 999, status: 'merged' });
+    // …and the racing round's first saveState now loses to the tombstone.
+    const { saveState } = rem._internals;
+    expect(await saveState(db, 999, { status: 'remediating', branch: 'b' })).toBe(false);
+    expect(db._tables.codex_remediation_state[0].status).toBe('merged');
+  });
+
+  test('rejects junk input and never throws (fail-soft)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 1, status: 'active' }] });
+    expect((await rem.markPrTerminal('not-a-number', 'merged', db)).updated).toBe(0);
+    expect((await rem.markPrTerminal(1, 'exploded', db)).updated).toBe(0);
+    const throwingDb = () => { throw new Error('db down'); };
+    throwingDb.raw = async () => { throw new Error('db down'); };
+    await expect(rem.markPrTerminal(1, 'merged', throwingDb)).resolves.toMatchObject({ updated: 0 });
+  });
+});
+
+// Terminal rows must be immutable to saveState: a remediation round that
+// began while the PR was open can finish AFTER markPrTerminal and would
+// otherwise write status back to remediating/parked (codex r-local finding).
+describe('saveState vs terminal rows', () => {
+  const { saveState } = rem._internals;
+
+  test('saveState cannot overwrite a merged/closed row', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 42, status: 'merged', rounds: 1 }] });
+    const wrote = await saveState(db, 42, { status: 'remediating', branch: 'b' });
+    expect(wrote).toBe(false);
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ status: 'merged', rounds: 1 });
+  });
+
+  test('saveState still writes normally to non-terminal rows and inserts fresh ones', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 43, status: 'active', rounds: 0 }] });
+    expect(await saveState(db, 43, { status: 'remediating' })).toBe(true);
+    expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
+    expect(await saveState(db, 44, { status: 'active', rounds: 0 })).toBe(true);
+    expect(db._tables.codex_remediation_state).toHaveLength(2);
+  });
+
+  test('a round whose PR went terminal aborts BEFORE gh.putFile', async () => {
+    // The PR merged after this round's getPr but before its state write —
+    // the terminal row must stop the round with nothing pushed.
+    const db = makeDb({ codex_remediation_state: [{ pr_number: CTX.prNumber, status: 'merged', rounds: 1 }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toContain('terminal');
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].status).toBe('merged');
+  });
+});
+
+// codex r-local final: the PR can merge/close between the pre-push guard and
+// gh.putFile — the push is inert, but post-commit sync would mirror content
+// into portal state that never landed in main. The post-push revalidation
+// must catch it.
+describe('post-push PR revalidation', () => {
+  test('PR merged during the push → sync and comment are skipped, row stamped merged', async () => {
+    const db = makeDb();
+    let calls = 0;
+    const gh = makeGh({
+      gh: {
+        async getPr() {
+          calls += 1;
+          // First call (round entry): open. Second call (post-push): merged.
+          if (calls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+          return { state: 'closed', merged: true, merged_at: '2026-07-16T00:00:00Z', head: { sha: 'newcommit999aaa' } };
+        },
+      },
+    });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr(
+      { ...CTX, onRemediated },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toContain('post-push check');
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber).status).toBe('merged');
+  });
+
+  test('PR head moved past our push (parallel update) → sync and comment are skipped', async () => {
+    const db = makeDb();
+    let calls = 0;
+    const gh = makeGh({
+      gh: {
+        async getPr() {
+          calls += 1;
+          if (calls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+          return { state: 'open', head: { sha: 'someoneelses111', ref: 'content/blog-x' } };
+        },
+        // A REAL parallel push moves the branch ref too — the ref no longer
+        // reads our commit (a ref still at our push is the stale-getPr case).
+        async getBranchSha() { return 'someoneelses111'; },
+      },
+    });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr(
+      { ...CTX, onRemediated },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toContain('head moved');
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    // Parked on OUR pushed head — the newer head re-arms on the next tick.
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber);
+    expect(row.status).toBe('parked');
+    expect(row.parked_head_sha).toBe('newcommit999aaa');
+  });
+
+  test('a GitHub error during revalidation fails CLOSED — parks with sync withheld', async () => {
+    const db = makeDb();
+    let calls = 0;
+    const gh = makeGh({
+      gh: {
+        async getPr() {
+          calls += 1;
+          if (calls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+          throw new Error('gh 502');
+        },
+      },
+    });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr(
+      { ...CTX, onRemediated },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toContain('revalidation failed');
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber);
+    expect(row.status).toBe('parked');
+    // Parked on the PUSHED head so our own commit can't self-re-arm the loop.
+    expect(row.parked_head_sha).toBe('newcommit999aaa');
+  });
+});
+
+// PRs can be REOPENED: a 'closed' tombstone must not permanently disable
+// remediation for a PR that is verifiably open again (codex r-local).
+describe('closed-tombstone reopen re-arm', () => {
+  test('a remediation round on a reopened PR re-arms the closed row and proceeds', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: CTX.prNumber, status: 'closed', rounds: 2, park_reason: 'x' }],
+    });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(r.round).toBe(1); // fresh rounds after re-arm
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber);
+    expect(row.status).toBe('remediating');
   });
 });

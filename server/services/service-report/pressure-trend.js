@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
-const { formatVisitLabel, normalizeDate } = require('./time-format');
+const { dateOnlyToNoonUtc, formatVisitLabel, normalizeDate } = require('./time-format');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 const SEVERITY_RANK = {
@@ -20,9 +20,11 @@ function pressureNumber(value) {
 }
 
 function serviceStartedAt(row) {
+  // service_date is DATE-only: anchored at noon UTC so the NY-formatted
+  // visit label can't roll back a day for rows without a real timestamp.
   const date = normalizeDate(row?.started_at)
     || normalizeDate(row?.ended_at)
-    || normalizeDate(row?.service_date)
+    || dateOnlyToNoonUtc(row?.service_date)
     || normalizeDate(row?.created_at);
   return date || new Date(0);
 }
@@ -146,6 +148,7 @@ async function buildPressureTrendContext({
   currentPressureIndexOverride,
   limit = 4,
   beforeDate,
+  beforeStartedAt,
   knex = db,
 } = {}) {
   if (!record?.id || !record.customer_id) return undefined;
@@ -154,9 +157,22 @@ async function buildPressureTrendContext({
     .select('id', 'started_at', 'ended_at', 'service_date', 'created_at', 'pressure_index')
     .where({ customer_id: record.customer_id, status: 'completed' })
     .whereNot({ id: record.id })
-    // Optional: restrict the trend to visits strictly before a given service date,
-    // so a backfilled/late report doesn't fold in later visits. Default: no bound.
-    .modify((q) => { if (beforeDate) q.where('service_date', '<', beforeDate); })
+    // Optional: restrict the trend to visits before a given service date, so a
+    // permanent token doesn't fold in later visits. beforeStartedAt keeps
+    // legitimate same-day EARLIER visits (a morning visit before an afternoon
+    // revisit) via the same started_at tie-break since-last-visit uses
+    // (codex P2 #2797). Default: no bound.
+    .modify((q) => {
+      if (!beforeDate) return;
+      q.where(function beforeBoundary() {
+        this.where('service_date', '<', beforeDate);
+        if (beforeStartedAt) {
+          this.orWhere(function sameDayEarlier() {
+            this.where('service_date', beforeDate).where('started_at', '<', beforeStartedAt);
+          });
+        }
+      });
+    })
     .whereNotNull('pressure_index')
     .where(function sameServiceLine() {
       this.where({ service_line: serviceLine })

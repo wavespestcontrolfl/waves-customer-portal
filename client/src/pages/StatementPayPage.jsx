@@ -20,8 +20,15 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useGlassSurface } from '../glass/glass-engine';
 import { useParams } from "react-router-dom";
-import { COLORS, FONTS } from "../theme-brand";
+// COLORS is used ONLY inside the Stripe Elements appearance config — the
+// Stripe iframe can't resolve our CSS vars, so it needs literals (same
+// pattern as PayPageV2). All inline page styles use theme-doc roles.
+import { COLORS } from "../theme-brand";
+import { DOC, DOC_FONT, FS, FW, LH, SP, RADIUS, SHADOW } from "../theme-doc";
 import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
+import PublicLoadError from '../components/PublicLoadError';
+import BrandFooter from "../components/BrandFooter";
+import DocumentActionBar from "../components/DocumentActionBar";
 import { getStripe } from "../lib/stripeLoader";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -34,7 +41,7 @@ const fmtDate = (d) =>
 
 function SummaryRow({ label, value, strong }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "6px 0", fontSize: strong ? 17 : 15, color: strong ? COLORS.navy : COLORS.textBody, fontWeight: strong ? 700 : 400 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", gap: SP.sm, padding: "6px 0", fontSize: strong ? FS.lead : FS.bodyLg, color: strong ? DOC.ink : DOC.muted, fontWeight: strong ? FW.bold : FW.regular }}>
       <span>{label}</span>
       <span style={{ fontVariantNumeric: "tabular-nums" }}>{value}</span>
     </div>
@@ -49,6 +56,15 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
   const selectedMethodRef = useRef("card");
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
+  // Synchronous mirror of `processing` for the submit/finalize single-flight
+  // guards — state alone lags a double-tap in the same frame (both reads see
+  // the stale false), so the ref flips before any await. Mirrors PayPageV2's
+  // ref-based tender-lock pattern; kept in lockstep via setProcessingSync.
+  const processingRef = useRef(false);
+  const setProcessingSync = (value) => {
+    processingRef.current = value;
+    setProcessing(value);
+  };
   const [elementError, setElementError] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [selectedMethod, setSelectedMethod] = useState("card");
@@ -75,13 +91,39 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
           appearance: {
             theme: "stripe",
             variables: {
-              colorPrimary: COLORS.blueDeeper,
+              colorPrimary: COLORS.glassNavy,
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
-              fontFamily: FONTS.body,
-              borderRadius: "8px",
+              fontFamily: DOC_FONT,
+              borderRadius: `${RADIUS.input}px`,
               spacingUnit: "4px",
+            },
+            // Mirrors PayPageV2's primary Elements config so statement card
+            // fields render identically to invoice card fields.
+            rules: {
+              ".Input": {
+                border: "1px solid #E2E8F0",
+                boxShadow: "none",
+                padding: "12px 14px",
+              },
+              ".Input:focus": {
+                border: `1px solid ${DOC.navyLiteral}`,
+                boxShadow: SHADOW.focusRing,
+              },
+              ".Label": {
+                fontSize: `${FS.body}px`,
+                fontWeight: `${FW.medium}`,
+                color: COLORS.textBody,
+              },
+              ".Tab": {
+                border: "1px solid #E2E8F0",
+                borderRadius: `${RADIUS.input}px`,
+              },
+              ".Tab--selected": {
+                borderColor: COLORS.glassNavy,
+                backgroundColor: "rgba(4,57,94,0.08)",
+              },
             },
           },
         });
@@ -123,8 +165,8 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
 
   // Card: submit → createPaymentMethod → /quote → show surcharge. ACH: confirm now.
   const handleSubmit = useCallback(async () => {
-    if (!stripeRef.current || !elementsRef.current || processing) return;
-    setProcessing(true);
+    if (!stripeRef.current || !elementsRef.current || processing || processingRef.current) return;
+    setProcessingSync(true);
     setElementError(null);
 
     // ACH — no surcharge; confirm the base-amount PI directly.
@@ -140,13 +182,13 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
           confirmParams: { return_url: returnUrl },
           redirect: "if_required",
         });
-        if (error) { setElementError(error.message); setProcessing(false); return; }
+        if (error) { setElementError(error.message); setProcessingSync(false); return; }
         if (pi && (pi.status === "succeeded" || pi.status === "processing")) onSuccess?.(pi);
-        else if (pi?.status === "requires_action") { setElementError("Additional verification required."); setProcessing(false); }
+        else if (pi?.status === "requires_action") { setElementError("Additional verification required."); setProcessingSync(false); }
         else onSuccess?.(pi);
       } catch (err) {
         setElementError(err.message || "Payment failed.");
-        setProcessing(false);
+        setProcessingSync(false);
       }
       return;
     }
@@ -154,10 +196,10 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
     // Card — Step 1: create the PaymentMethod, then quote the surcharge.
     try {
       const { error: submitError } = await elementsRef.current.submit();
-      if (submitError) { setElementError(submitError.message); setProcessing(false); return; }
+      if (submitError) { setElementError(submitError.message); setProcessingSync(false); return; }
 
       const { error: pmError, paymentMethod } = await stripeRef.current.createPaymentMethod({ elements: elementsRef.current });
-      if (pmError) { setElementError(pmError.message); setProcessing(false); return; }
+      if (pmError) { setElementError(pmError.message); setProcessingSync(false); return; }
 
       const res = await fetch(`${API_BASE}/pay/statement/${token}/quote`, {
         method: "POST",
@@ -168,10 +210,10 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
       if (!res.ok) throw new Error(q.error || "Could not get a surcharge quote.");
       setQuote(q);
       setAwaitingConfirm(true);
-      setProcessing(false);
+      setProcessingSync(false);
     } catch (err) {
       setElementError(err.message || "Payment failed.");
-      setProcessing(false);
+      setProcessingSync(false);
     }
   }, [processing, token, onSuccess]);
 
@@ -185,8 +227,8 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
   // back to a fresh BASE-amount PaymentIntent (re-running /setup) before another
   // attempt. We do NOT reset on quote/ACH failures — those never mutate the PI.
   const handleFinalize = useCallback(async () => {
-    if (!quote || processing) return;
-    setProcessing(true);
+    if (!quote || processing || processingRef.current) return;
+    setProcessingSync(true);
     setElementError(null);
     const fail = (message) => onFinalizeFailed?.(message || "Payment was not completed. Please try again.");
     try {
@@ -221,7 +263,7 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
 
   if (loadFailed) {
     return (
-      <p style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55 }}>
+      <p style={{ fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
         We couldn&rsquo;t load the secure payment form. Please refresh, or call us — <HelpPhoneLink tone="dark" inline /> — to pay by phone.
       </p>
     );
@@ -231,26 +273,26 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
     <div>
       <div ref={mountRef} />
       {selectedMethod !== "us_bank_account" && pct && !awaitingConfirm && (
-        <p style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 10 }}>
+        <p style={{ fontSize: FS.body, color: DOC.muted, marginTop: SP.sm }}>
           Credit cards add up to {pct}% to cover processing. Debit cards and bank transfers have no added fee.
         </p>
       )}
 
       {awaitingConfirm && quote && (
-        <div style={{ marginTop: 14, padding: 14, borderRadius: 8, background: COLORS.blueSurface || "rgba(27,44,91,0.05)" }}>
+        <div style={{ marginTop: SP.md, padding: SP.md, borderRadius: RADIUS.input, background: DOC.soft }}>
           <SummaryRow label="Statement total" value={fmtCurrency(quote.base)} />
           {quote.surcharge > 0 && <SummaryRow label={`Card surcharge (${pct}%)`} value={fmtCurrency(quote.surcharge)} />}
-          <div style={{ borderTop: `1px solid ${COLORS.grayLight || "#E2E8F0"}`, marginTop: 6, paddingTop: 6 }}>
+          <div style={{ borderTop: `1px solid ${DOC.border}`, marginTop: 6, paddingTop: 6 }}>
             <SummaryRow label="Amount to charge" value={fmtCurrency(quote.total)} strong />
           </div>
         </div>
       )}
 
       {elementError && (
-        <p style={{ fontSize: 14, color: COLORS.red, marginTop: 12 }}>{elementError}</p>
+        <p role="alert" style={{ fontSize: FS.body, color: DOC.danger, marginTop: SP.sm }}>{elementError}</p>
       )}
 
-      <div style={{ marginTop: 16 }}>
+      <div style={{ marginTop: SP.md }}>
         <BrandButton
           variant="primary"
           fullWidth
@@ -269,13 +311,15 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
 }
 
 export default function StatementPayPage() {
-  // Liquid-glass 'pro' variant (visual only).
+  // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
+  // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'pro');
+  useGlassSurface(true, 'full');
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState(null); // null | notfound | temporary
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [setup, setSetup] = useState(null);
   const [setupError, setSetupError] = useState(null);
   // A benign in-flight state (ACH debit processing, or a micro-deposit
@@ -308,12 +352,19 @@ export default function StatementPayPage() {
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setError(null);
     fetch(`${API_BASE}/pay/statement/${token}`)
-      .then((r) => { if (!r.ok) throw new Error("not found"); return r.json(); })
+      .then((r) => {
+        if (r.status === 404 || r.status === 410) {
+          const err = new Error('not found'); err.notFound = true; throw err;
+        }
+        if (!r.ok) throw new Error('temporary');
+        return r.json();
+      })
       .then((d) => { if (alive) { setData(d); setLoading(false); } })
-      .catch(() => { if (alive) { setError(true); setLoading(false); } });
+      .catch((err) => { if (alive) { setError(err.notFound ? 'notfound' : 'temporary'); setLoading(false); } });
     return () => { alive = false; };
-  }, [token]);
+  }, [token, loadAttempt]);
 
   // Resolve a Stripe redirect return by RETRIEVING the PaymentIntent (its real
   // status is authoritative — the statement's GET status lags the webhook, and a
@@ -411,17 +462,28 @@ export default function StatementPayPage() {
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ maxWidth: 560, margin: "48px auto", padding: "0 16px" }}>{children}</div>
+      {/* Standard 760px document column (owner ruling, PR #2527) — replaces
+          the outlier 792px/48px shell so /pay/statement matches its siblings. */}
+      <div className="waves-receipt-page">
+        {children}
+        {/* Newsletter signup lives only on the newsletter pages (owner
+            2026-07-09, supersedes the 2026-07-08 glass-footer ruling). */}
+        <BrandFooter />
+      </div>
     </WavesShell>
   );
 
-  if (loading) return shell(<BrandCard><p style={{ margin: 0, color: COLORS.textBody }}>Loading…</p></BrandCard>);
+  if (loading) return shell(<BrandCard><p style={{ margin: 0, color: DOC.muted }}>Loading…</p></BrandCard>);
 
-  if (error || !data) {
+  if (error === 'temporary') {
+    return shell(<BrandCard><PublicLoadError resource="statement" onRetry={() => setLoadAttempt(a => a + 1)} /></BrandCard>);
+  }
+
+  if (error === 'notfound' || !data) {
     return shell(
       <BrandCard>
-        <SerifHeading style={{ marginBottom: 12 }}>We couldn&rsquo;t find that statement</SerifHeading>
-        <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
+        <SerifHeading style={{ marginBottom: SP.sm }}>We couldn&rsquo;t find that statement</SerifHeading>
+        <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
           The link may have expired or been mistyped. Give us a call and we&rsquo;ll sort it out — <HelpPhoneLink tone="dark" inline />.
         </p>
       </BrandCard>,
@@ -435,8 +497,8 @@ export default function StatementPayPage() {
   if (hasRedirect && (redirectCheck === null || redirectCheck === "checking")) {
     return shell(
       <BrandCard>
-        <SerifHeading style={{ marginBottom: 12 }}>Confirming your payment…</SerifHeading>
-        <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
+        <SerifHeading style={{ marginBottom: SP.sm }}>Confirming your payment…</SerifHeading>
+        <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
           One moment while we confirm your payment for statement {statement.number}.
         </p>
       </BrandCard>,
@@ -449,8 +511,8 @@ export default function StatementPayPage() {
   if (redirectCheck === "unverified") {
     return shell(
       <BrandCard>
-        <SerifHeading style={{ marginBottom: 12 }}>We couldn&rsquo;t confirm your payment</SerifHeading>
-        <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
+        <SerifHeading style={{ marginBottom: SP.sm }}>We couldn&rsquo;t confirm your payment</SerifHeading>
+        <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
           If you just submitted a payment for statement {statement.number}, it may still be going
           through — you&rsquo;ll get a receipt by email, so please don&rsquo;t pay again. Otherwise,
           refresh this page to try again, or call us — <HelpPhoneLink tone="dark" inline />.
@@ -476,8 +538,8 @@ export default function StatementPayPage() {
   if (submitted) {
     return shell(
       <BrandCard>
-        <SerifHeading style={{ marginBottom: 12 }}>Thank you — your payment is in</SerifHeading>
-        <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
+        <SerifHeading style={{ marginBottom: SP.sm }}>Thank you — your payment is in</SerifHeading>
+        <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
           We&rsquo;ve received your payment for statement {statement.number}. A receipt will follow by
           email once it finishes processing. Questions? <HelpPhoneLink tone="dark" inline />.
         </p>
@@ -490,8 +552,8 @@ export default function StatementPayPage() {
   if (!statement.payable && !(hasRedirect && redirectCheck === "retry")) {
     return shell(
       <BrandCard>
-        <SerifHeading style={{ marginBottom: 12 }}>Nothing to pay right now</SerifHeading>
-        <p style={{ margin: 0, fontSize: 16, color: COLORS.textBody, lineHeight: 1.55 }}>
+        <SerifHeading style={{ marginBottom: SP.sm }}>Nothing to pay right now</SerifHeading>
+        <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
           Statement {statement.number} isn&rsquo;t open for payment. Questions? <HelpPhoneLink tone="dark" inline />.
         </p>
       </BrandCard>,
@@ -501,17 +563,20 @@ export default function StatementPayPage() {
   const dueLabel = statement.due_date ? fmtDate(statement.due_date) : null;
 
   return shell(
-    <BrandCard padding={28}>
+    <>
+      {/* No server-side statement PDF render — Share + Print only. */}
+      <DocumentActionBar shareTitle={`Waves statement ${statement.number || ''}`.trim()} />
+      <BrandCard padding={28}>
       <SerifHeading style={{ marginBottom: 6 }}>Pay statement {statement.number}</SerifHeading>
-      <p style={{ margin: "0 0 18px", fontSize: 14, color: COLORS.textCaption }}>
+      <p style={{ margin: "0 0 20px", fontSize: FS.body, color: DOC.muted }}>
         {billTo?.company ? `Billed to ${billTo.company}. ` : ""}
         {statement.terms ? `${termLabel(statement.terms)}. ` : ""}
         {dueLabel ? `Due ${dueLabel}.` : ""}
       </p>
 
-      <div style={{ marginBottom: 18 }}>
+      <div style={{ marginBottom: SP.lg }}>
         {(lines || []).map((l, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "6px 0", borderBottom: `1px solid ${COLORS.grayLight || "#EEF2F6"}`, fontSize: 14, color: COLORS.textBody }}>
+          <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: SP.sm, padding: "6px 0", borderBottom: `1px solid ${DOC.border}`, fontSize: FS.body, color: DOC.ink }}>
             <span style={{ minWidth: 0 }}>
               {fmtDate(l.service_date)} · {l.service_type || "Service"}
               {l.service_address ? ` · ${l.service_address}` : ""}
@@ -521,27 +586,27 @@ export default function StatementPayPage() {
         ))}
       </div>
 
-      <div style={{ marginBottom: 18 }}>
+      <div style={{ marginBottom: SP.lg }}>
         <SummaryRow label="Subtotal" value={fmtCurrency(statement.subtotal)} />
         {Number(statement.tax_amount) > 0 && <SummaryRow label="Tax" value={fmtCurrency(statement.tax_amount)} />}
-        <div style={{ borderTop: `1px solid ${COLORS.grayLight || "#E2E8F0"}`, marginTop: 6, paddingTop: 6 }}>
+        <div style={{ borderTop: `1px solid ${DOC.border}`, marginTop: 6, paddingTop: 6 }}>
           <SummaryRow label="Amount due" value={fmtCurrency(statement.total)} strong />
         </div>
       </div>
 
       {payNotice && (
-        <p style={{ fontSize: 14, color: COLORS.red, marginBottom: 12, lineHeight: 1.5 }}>{payNotice}</p>
+        <p style={{ fontSize: FS.body, color: DOC.danger, marginBottom: SP.sm, lineHeight: LH.body }}>{payNotice}</p>
       )}
       {setupNotice ? (
-        <p style={{ fontSize: 15, color: COLORS.textBody, lineHeight: 1.55 }}>
+        <p style={{ fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
           {setupNotice} Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
         </p>
       ) : setupError ? (
-        <p style={{ fontSize: 15, color: COLORS.red, lineHeight: 1.55 }}>
+        <p style={{ fontSize: FS.bodyLg, color: DOC.danger, lineHeight: LH.body }}>
           {setupError} Please refresh, or call us — <HelpPhoneLink tone="dark" inline />.
         </p>
       ) : !setup ? (
-        <p style={{ fontSize: 14, color: COLORS.textCaption }}>Preparing secure payment…</p>
+        <p style={{ fontSize: FS.body, color: DOC.muted }}>Preparing secure payment…</p>
       ) : (
         <StatementPaymentForm
           token={token}
@@ -557,10 +622,11 @@ export default function StatementPayPage() {
         />
       )}
 
-      <p style={{ marginTop: 20, fontSize: 14, color: COLORS.textCaption, lineHeight: 1.5 }}>
+      <p style={{ marginTop: SP.lg, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
         Questions about this statement? <HelpPhoneLink tone="dark" inline /> or reply to the email it came from.
       </p>
-    </BrandCard>,
+      </BrandCard>
+    </>,
   );
 }
 

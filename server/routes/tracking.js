@@ -52,7 +52,8 @@ function parseFiniteCoordinate(value) {
 
 async function attachTechPhoto(tracker, tech) {
   if (!tracker?.technician || !tech?.id) return tracker;
-  tracker.technician.photoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url).catch((err) => {
+  const { CUSTOMER_DWELL_TTL_SECONDS } = require('../services/photos');
+  tracker.technician.photoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url, CUSTOMER_DWELL_TTL_SECONDS).catch((err) => {
     logger.warn(`[tracking] tech photo resolve failed for ${tech.id}: ${err.message}`);
     return null;
   });

@@ -19,21 +19,53 @@ const STALE_CLAIM_MINUTES = 30;
 // Email twin of the welcome, sent directly at the same delivery moment.
 const TEMPLATE_EMAIL_KEY = 'welcome.new_recurring';
 
-async function isNewRecurringSignupCandidate(customerId) {
+// "New recurring customer" = no recurring series and no serviced visit
+// anywhere in their history. Visit history is checked in BOTH tables:
+// service_records is only written by the modern completion flow, so
+// imported/legacy customers carry their history solely as completed/on_site
+// scheduled_services rows (2026-07-16 misfire: two long-standing customers
+// with empty service_records were welcomed as new).
+//
+// excludeServiceId scopes the check for callers that run AFTER the booking
+// exists (the appointment tagger fires on the just-created appointment):
+// every row of one booking insert shares its transaction's created_at, so
+// requiring created_at strictly before the triggering row's excludes the
+// whole new batch — without it the new series would always disqualify
+// itself. Pre-insert callers (estimate converter, admin schedule route)
+// omit it.
+async function isNewRecurringSignupCandidate(customerId, { excludeServiceId = null } = {}) {
   if (!customerId) return false;
 
   try {
-    const [priorRecurringSeries, priorCompletedService] = await Promise.all([
-      db('scheduled_services')
-        .where({ customer_id: customerId, is_recurring: true })
-        .first('id'),
+    let createdBefore = null;
+    if (excludeServiceId) {
+      const triggering = await db('scheduled_services')
+        .where({ id: excludeServiceId })
+        .first('created_at');
+      if (!triggering) return false;
+      createdBefore = triggering.created_at;
+    }
+
+    const priorRecurringSeriesQuery = db('scheduled_services')
+      .where({ customer_id: customerId, is_recurring: true });
+    const priorServicedVisitQuery = db('scheduled_services')
+      .where({ customer_id: customerId })
+      .whereIn('status', ['completed', 'on_site']);
+    if (createdBefore) {
+      priorRecurringSeriesQuery.where('created_at', '<', createdBefore);
+      priorServicedVisitQuery.where('created_at', '<', createdBefore);
+    }
+
+    const [priorRecurringSeries, priorServicedVisit, priorCompletedService] = await Promise.all([
+      priorRecurringSeriesQuery.first('id'),
+      priorServicedVisitQuery.first('id'),
       db('service_records')
         .where({ customer_id: customerId })
         .whereNot('status', 'cancelled')
         .first('id'),
     ]);
 
-    return !priorRecurringSeries && !priorCompletedService;
+    return !priorRecurringSeries && !priorServicedVisit && !priorCompletedService;
   } catch (err) {
     logger.warn(`[new-recurring-welcome] prior service lookup failed for customer ${customerId}: ${err.message}`);
     return false;

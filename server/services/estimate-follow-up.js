@@ -8,6 +8,10 @@
  *   - Started the deposit payment step but never completed it (2-72h after
  *     the last pending PaymentIntent; gated by
  *     GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS — shadow-logs counts until on)
+ *   - Reached the save-a-card accept step (Auto Pay card / one-time hold)
+ *     but never accepted (2-72h after the last estimate_checkout_events
+ *     touch; email-only; gated by GATE_PAYMENT_STEP_FOLLOWUP —
+ *     shadow-logs counts until on)
  *
  * Runs via cron every 2 hours. SMS is primary, email is a second channel —
  * each stage's flag flips once either channel attempts so we don't re-nudge.
@@ -33,6 +37,47 @@ const { customerConvertedSince } = require("./estimate-conversion-guard");
 // Centralized so the behavior stays consistent across all four stages.
 
 const TERMINAL_STATUSES = new Set(["declined", "accepted", "expired", "void"]);
+
+const LEGACY_STAGE_TEMPLATES = Object.freeze({
+  unviewed: { sms: "estimate_followup_unviewed", email: "estimate.unviewed_followup" },
+  viewed: { sms: "estimate_followup_viewed", email: "estimate.viewed_followup" },
+  final: { sms: "estimate_followup_final", email: "estimate.followup_final" },
+  expiring: { sms: "estimate_followup_expiring", email: "estimate.expiring_notice" },
+});
+
+async function legacyStageDeliveryAvailability(stage, templates) {
+  let smsEnabled = true;
+  let emailEnabled = true;
+
+  try {
+    smsEnabled = await smsTemplatesRouter.isTemplateActive(templates.sms);
+  } catch (err) {
+    // Lookup uncertainty must not silently disable a customer channel. The
+    // normal renderer will audit/log the underlying defect if it persists.
+    logger.warn(`[est-followup] ${stage} SMS template status unavailable: ${err.message}`);
+  }
+
+  try {
+    const loaded = await EmailTemplateLibrary.loadTemplateByKey(templates.email);
+    // A missing row is a real configuration defect, not an operator kill
+    // switch. Leave it enabled so sendTemplate records the existing audit.
+    if (loaded?.template) {
+      emailEnabled = String(loaded.template.status || "active").toLowerCase() === "active";
+    }
+  } catch (err) {
+    logger.warn(`[est-followup] ${stage} email template status unavailable: ${err.message}`);
+  }
+
+  return { smsEnabled, emailEnabled, anyEnabled: smsEnabled || emailEnabled };
+}
+
+async function loadLegacyStageDelivery() {
+  const entries = await Promise.all(Object.entries(LEGACY_STAGE_TEMPLATES).map(async ([stage, templates]) => [
+    stage,
+    await legacyStageDeliveryAvailability(stage, templates),
+  ]));
+  return Object.fromEntries(entries);
+}
 
 // Engagement signal: if the customer opened the estimate within the last N
 // hours (default 2), skip the scheduled nudge. They're thinking about it
@@ -117,12 +162,39 @@ async function renderTemplate(templateKey, vars, context = {}) {
 // SMS/email to the customer. Re-checks archived_at at claim time: the
 // candidate queries filter on it, but a manual/sweep archive landing between
 // the read and this UPDATE must still block the send.
-async function claimStage(estId, flag) {
-  const affected = await db("estimates")
+// Shared-lane minimum spacing, mirroring the engine's knob (both lanes bump
+// last_follow_up_at, so this is ONE inbox budget).
+const LANE_MIN_SPACING_HOURS = parseFloat(process.env.ESTIMATE_ENGAGEMENT_MIN_SPACING_HOURS) || 12;
+
+async function claimStage(estId, flag, { excludeEngineRuleKeys = [] } = {}) {
+  const q = db("estimates")
     .where({ id: estId })
     .whereNull("archived_at")
-    .where((q) => q.where(flag, false).orWhereNull(flag))
-    .update({ [flag]: true });
+    .where((qq) => qq.where(flag, false).orWhereNull(flag))
+    // Shared-lane spacing INSIDE the atomic claim (codex 2736 r13): the
+    // engine's 5-min processor bumps last_follow_up_at on its sends, but
+    // the legacy stages only checked their own booleans — a
+    // return_visit_hot email could be chased by the viewed/final nudge a
+    // couple of hours later. Legacy stages sit ≥24h apart by their own
+    // windows, so this only blocks CROSS-lane stacking; a blocked claim
+    // leaves the flag unset and the next 2h tick retries.
+    .where((qq) => qq.whereNull("last_follow_up_at")
+      .orWhere("last_follow_up_at", "<", new Date(Date.now() - LANE_MIN_SPACING_HOURS * 3600000)));
+  // Cross-lane dedupe INSIDE the atomic claim (codex 2736 r3): the legacy
+  // cron and the engagement engine run under different advisory locks, so
+  // the candidate-query whereNotExists alone leaves a read-then-claim race
+  // at the 2h boundary. Re-checking the engine ledger in the same UPDATE
+  // closes it — if the engine's send landed after our candidate read, this
+  // claim affects 0 rows and the stage skips.
+  if (excludeEngineRuleKeys.length) {
+    q.whereNotExists(function excludeEngineSends() {
+      this.select(db.raw("1"))
+        .from("estimate_followup_sends")
+        .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+        .whereIn("estimate_followup_sends.rule_key", excludeEngineRuleKeys);
+    });
+  }
+  const affected = await q.update({ [flag]: true });
   return affected === 1;
 }
 
@@ -135,15 +207,34 @@ async function releaseStage(estId, flag) {
 }
 
 function moneySummary(est = {}) {
+  // Residential estimate emails never restate a monthly or annual total
+  // (owner 2026-07-11) — the linked estimate page leads with per-application
+  // pricing, so the email defers to it. One-time totals stay (with cents).
+  // Authored commercial proposals are owner-EXEMPT (boards budget annually)
+  // and keep their totals in follow-ups too (codex 2642 r2: the drip jobs
+  // don't exclude proposal estimates).
   const monthlyTotal = parseFloat(est.monthly_total || est.monthlyTotal || 0);
   const annualTotal = parseFloat(est.annual_total || est.annualTotal || 0);
   const oneTimeTotal = parseFloat(est.onetime_total || est.oneTimeTotal || est.onetimeTotal || 0);
+  const proposalEnabled = (() => {
+    try {
+      const data = typeof est.estimate_data === "string"
+        ? JSON.parse(est.estimate_data)
+        : (est.estimate_data || est.estimateData);
+      return !!data?.proposal?.enabled;
+    } catch {
+      return false;
+    }
+  })();
   if (monthlyTotal > 0) {
-    return annualTotal > 0
-      ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr`
-      : `$${monthlyTotal.toFixed(0)}/mo`;
+    if (proposalEnabled) {
+      return annualTotal > 0
+        ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
+        : `$${monthlyTotal.toFixed(2)}/mo`;
+    }
+    return "Priced per application — full breakdown inside";
   }
-  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
+  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
   return "";
 }
 
@@ -247,6 +338,15 @@ async function sendDualChannel(est, { sms, email }) {
     }
   }
   if (est.customer_email && email?.templateKey) {
+    // Optional lifecycle suffix (codex 2736 r10): a stage that can
+    // legitimately re-fire for the same estimate (an expiring reminder
+    // re-armed by an extension's new deadline) scopes its key per lifecycle
+    // so the re-send isn't deduped against the old lifecycle's email —
+    // while double-fires within ONE lifecycle still dedupe. Categories and
+    // stage stay stable (unbounded per-deadline category values would
+    // pollute analytics).
+    const idempotencyKey = `estimate_followup_${email.stage}:${est.id}`
+      + (email.idempotencySuffix ? `:${email.idempotencySuffix}` : "");
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
@@ -254,8 +354,8 @@ async function sendDualChannel(est, { sms, email }) {
         payload: email.payload || {},
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
-        triggerEventId: `estimate_followup_${email.stage}:${est.id}`,
-        idempotencyKey: `estimate_followup_${email.stage}:${est.id}`,
+        triggerEventId: idempotencyKey,
+        idempotencyKey,
         categories: ["estimate_followup", `estimate_followup_${email.stage}`],
         // SendGrid rejection bodies can echo the recipient address — keep
         // them out of the provider log; the catch below redacts too.
@@ -274,9 +374,16 @@ async function sendDualChannel(est, { sms, email }) {
         attempted = true;
       }
     } catch (e) {
-      logger.error(
-        `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${EmailTemplateLibrary.redactEmailAddresses(e.message)}`,
-      );
+      const message = EmailTemplateLibrary.redactEmailAddresses(e.message);
+      if (e.code === "EMAIL_TEMPLATE_DISABLED") {
+        logger.info(
+          `[est-followup] Email skipped for estimate ${est.id} (${email.stage}): ${message}`,
+        );
+      } else {
+        logger.error(
+          `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${message}`,
+        );
+      }
     }
   }
   return attempted;
@@ -469,13 +576,435 @@ async function checkDepositAbandoned(now = new Date()) {
   return sent;
 }
 
+// ── Stage 6: reached the save-a-card step but never accepted ────────────
+// The card-on-file accept flow (recurring Auto Pay card / one-time card
+// hold) replaced the retired deposit step. Its SetupIntents live only in
+// Stripe; the two intent endpoints stamp estimate_checkout_events, and that
+// row's updated_at ("last time the customer touched the payment step") is
+// this stage's 2–72h window anchor — same semantics the deposit stage got
+// from PaymentIntent reuse. EMAIL-ONLY: the estimate follow-up SMS lane is
+// owner-paused. Gated by GATE_PAYMENT_STEP_FOLLOWUP; until it's on,
+// candidates are shadow-counted and nothing is claimed or sent.
+const PAYMENT_STEP_FOLLOWUP_WINDOW = { minAgeHours: 2, maxAgeHours: 72 };
+const PAYMENT_STEP_RULE_KEY = "payment_step_abandoned";
+const PAYMENT_STEP_TEMPLATE_KEY = "estimate.payment_step_abandoned";
+
+// Atomic claim on the estimate_followup_sends ledger: the unique
+// (estimate_id, rule_key) index means exactly one concurrent cron wins the
+// insert. The INSERT selects FROM estimates gated on archived_at, so an
+// archive landing between the candidate read and this claim blocks the send
+// in the same statement — the same at-claim-time re-check the boolean
+// claimStage path does (codex 2729 r2). A send failure deletes the row so
+// the next tick retries — the ledger row is the claim AND the attribution
+// record.
+// Optional atomic guards (codex 2736 r3): blockLegacyFlags re-checks the
+// legacy cron's boolean claim columns inside the same statement (closes the
+// cross-lane race at the 2h boundary — column names are allowlisted, never
+// caller-interpolated), and blockRuleKeys blocks sibling rules that share a
+// send budget (e.g. the two expiring variants = one expiry reminder).
+// The claim also re-checks active status + a live link (codex 2736 r7):
+// accepting an estimate flips status WITHOUT archiving the row, so a
+// customer accepting between the caller's current-state checks and this
+// claim would otherwise still get followed up. Every caller (engine rules
+// AND the payment-step stage) only ever emails sent/viewed estimates with
+// an unexpired link, so the guard lives here as the final race-closer.
+const CLAIM_LEGACY_FLAG_COLUMNS = new Set([
+  "followup_unviewed_sent",
+  "followup_expiring_sent",
+]);
+
+async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger, options = {}) {
+  const legacyFlags = (options.blockLegacyFlags || []).filter((col) => CLAIM_LEGACY_FLAG_COLUMNS.has(col));
+  const siblingKeys = options.blockRuleKeys || [];
+  const bindings = [ruleKey, templateKey, JSON.stringify(trigger || {}), estimateId];
+  // Deadline pin (codex 2736 r12): an extension can move expires_at (and
+  // delete the expiring job/ledger rows for the re-arm) between the
+  // processor's fresh read and this claim — pinning the claim to the
+  // deadline the copy was validated against makes that race a lost-claim
+  // skip instead of an email describing a deadline that no longer exists.
+  // Millisecond-truncated comparison: the pin value round-tripped through a
+  // JS Date (ms precision) while timestamptz stores microseconds — a raw
+  // equality would silently never match rows whose expiry carries sub-ms
+  // digits (pg-verified).
+  let expiryPinClause = "";
+  if (options.requireExpiresAt) {
+    expiryPinClause = "AND date_trunc('milliseconds', expires_at) = date_trunc('milliseconds', ?::timestamptz)";
+    bindings.push(new Date(options.requireExpiresAt));
+  }
+  const flagClause = legacyFlags.map((col) => `AND estimates.${col} IS NOT TRUE`).join("\n     ");
+  let siblingClause = "";
+  if (siblingKeys.length) {
+    siblingClause = `AND NOT EXISTS (
+       SELECT 1 FROM estimate_followup_sends s2
+       WHERE s2.estimate_id = estimates.id
+         AND s2.rule_key IN (${siblingKeys.map(() => "?").join(", ")})
+     )`;
+    bindings.push(...siblingKeys);
+  }
+  const result = await db.raw(
+    `INSERT INTO estimate_followup_sends (estimate_id, rule_key, template_key, trigger)
+     SELECT id, ?, ?, ?::jsonb FROM estimates
+     WHERE id = ? AND archived_at IS NULL
+     AND status IN ('sent', 'viewed')
+     AND (expires_at IS NULL OR expires_at > now())
+     ${expiryPinClause}
+     ${flagClause}
+     ${siblingClause}
+     ON CONFLICT (estimate_id, rule_key) DO NOTHING
+     RETURNING id`,
+    bindings,
+  );
+  return (result?.rows?.length || 0) === 1;
+}
+
+async function releaseFollowupSend(estimateId, ruleKey) {
+  await db("estimate_followup_sends")
+    .where({ estimate_id: estimateId, rule_key: ruleKey })
+    .del();
+}
+
+// Atomic post-send bookkeeping (codex 2736 r6): stamping the ledger row's
+// counted_at and bumping the estimate's counters happen in ONE statement,
+// so a transient failure leaves a clean uncounted row (healable by
+// repairFollowupCounters) instead of a half-applied state. Idempotent: an
+// already-counted row makes the whole statement a no-op.
+async function bumpFollowupCounters(estimateId, ruleKey) {
+  await db.raw(
+    `WITH counted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE estimate_id = ? AND rule_key = ? AND counted_at IS NULL
+       RETURNING 1
+     )
+     UPDATE estimates SET
+       follow_up_count = COALESCE(follow_up_count, 0) + 1,
+       last_follow_up_at = now()
+     WHERE id = ? AND EXISTS (SELECT 1 FROM counted)`,
+    [estimateId, ruleKey, estimateId],
+  );
+}
+
+// Estimate-wide counter heal: applies every uncounted ledger row (any rule,
+// payment_step_abandoned included) to follow_up_count/last_follow_up_at in
+// one atomic statement. Exact — counts rows rather than guessing from
+// timestamps, so a newer successful send can't mask an older lost bump.
+// Returns the healed counters (null when nothing was uncounted) so callers
+// can overlay a stale in-memory row before judging caps/spacing.
+// olderThanMinutes (codex 2736 r14): callers OUTSIDE the follow-up advisory
+// lock (the extension re-arm) must not count a seconds-old claim a live
+// processor inserted pre-send — a deadline-moved abort would release it,
+// leaving a phantom touch on the counters. Cron-side callers run under the
+// shared lock, where an uncounted row is always a genuinely lost bump.
+async function repairFollowupCounters(estimateId, { olderThanMinutes = 0 } = {}) {
+  const result = await db.raw(
+    `WITH uncounted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE estimate_id = ? AND counted_at IS NULL
+       AND sent_at <= now() - (? * interval '1 minute')
+       RETURNING sent_at
+     )
+     UPDATE estimates SET
+       follow_up_count = COALESCE(follow_up_count, 0) + (SELECT count(*) FROM uncounted),
+       last_follow_up_at = GREATEST(COALESCE(last_follow_up_at, '-infinity'::timestamptz), (SELECT max(sent_at) FROM uncounted))
+     WHERE id = ? AND EXISTS (SELECT 1 FROM uncounted)
+     RETURNING follow_up_count, last_follow_up_at`,
+    [estimateId, olderThanMinutes, estimateId],
+  );
+  return result?.rows?.[0] || null;
+}
+
+// Global heal for lost bumps (codex 2736 r15): a delivered email whose
+// counter bump failed leaves counted_at NULL, and the per-estimate repairs
+// only run when the engagement engine or an extension later touches that
+// estimate — a payment-step-only estimate could stay stale forever, letting
+// later follow-ups ignore a real touch. Runs at the START of the legacy 2h
+// cron, under the shared advisory lock, where any uncounted row is a
+// genuinely lost bump (both sending lanes claim under this lock, and a
+// claim released on failure deletes its row).
+async function repairAllFollowupCounters() {
+  const result = await db.raw(
+    `WITH uncounted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE counted_at IS NULL
+       RETURNING estimate_id, sent_at
+     ), agg AS (
+       SELECT estimate_id, count(*) AS cnt, max(sent_at) AS max_sent
+       FROM uncounted GROUP BY estimate_id
+     )
+     UPDATE estimates e SET
+       follow_up_count = COALESCE(e.follow_up_count, 0) + agg.cnt,
+       last_follow_up_at = GREATEST(COALESCE(e.last_follow_up_at, '-infinity'::timestamptz), agg.max_sent)
+     FROM agg WHERE e.id = agg.estimate_id`,
+  );
+  return result?.rowCount || 0;
+}
+
+// Fail-CLOSED re-check that the abandoned payment step is still the thing
+// standing between this customer and acceptance. Runs the SAME policy
+// resolvers the intent endpoints ran (lazy-required to avoid loading the
+// route module at boot): an estimate that expired, went invoice-mode,
+// gained a saved consented card, or otherwise no longer owes a card must
+// not get a "finish saving your card" email. Any resolver error skips the
+// send — an unprompted email is never sent on unverifiable policy.
+async function paymentStepStillRequiresCard(est, checkoutKind) {
+  try {
+    const {
+      isEstimateAcceptActive,
+      isStructuralOneTimeOnlyEstimate,
+      resolveEstimateInvoiceMode,
+      buildPricingBundle,
+      resolveEstimateQuoteRequirement,
+      estimateTrenchingReviewRequired,
+      reconcileFrozenMembershipSnapshot,
+      resolveAcceptOneTimeTotal,
+      commercialAcceptDepositExempt,
+      isCommercialAutoAcceptEstimate,
+      matchAcceptCustomerByPhone,
+    } = require("../routes/estimate-public");
+    const { commercialLowConfidenceRange } = require("./estimate-delivery-options");
+    const { resolveRecurringCardPolicyForEstimate } = require("./recurring-card-on-file");
+    const { resolveCardHoldPolicy } = require("./estimate-card-holds");
+    const { buildEstimateMembershipContext } = require("./estimate-membership-context");
+
+    if (!isEstimateAcceptActive(est)) return false;
+    // Both intent endpoints reconcile the frozen membership snapshot before
+    // any pricing/policy read (codex 2729 r3): a stale "existing customer"
+    // snapshot would make this re-check disagree with the live endpoint in
+    // either direction (skip a customer the endpoint would still card, or
+    // vice versa). Mutates est.estimate_data in place, so estData parses
+    // AFTER it — same order as the endpoints.
+    await reconcileFrozenMembershipSnapshot(est);
+    let estData = {};
+    try {
+      estData = typeof est.estimate_data === "string"
+        ? JSON.parse(est.estimate_data)
+        : (est.estimate_data || {});
+    } catch {
+      estData = {};
+    }
+    // Mirror the intent endpoints' self-serve gates (codex 2729 r2): an
+    // estimate edited into quote-required or trenching-review state after
+    // the customer touched the payment step can no longer be accepted
+    // online — the endpoints 409 before minting, so don't email the
+    // customer back into a card step that's now a dead end.
+    if (estimateTrenchingReviewRequired(estData)) return false;
+    const pricingBundle = await buildPricingBundle(est);
+    if (resolveEstimateQuoteRequirement(pricingBundle, estData).quoteRequired) return false;
+    // Contact gate, BOTH lanes (codex 2729 r2 + r3): recurring accept is
+    // phone-keyed (CUSTOMER_CONTACT_REQUIRED), and a required hold binds a
+    // slot/appointment, which accept also refuses without a customer/phone.
+    // Don't nudge an email-only estimate into a card step that can't
+    // complete online.
+    if (!est.customer_id && !est.customer_phone) return false;
+    const billByInvoice = resolveEstimateInvoiceMode(est, estData);
+    // The event kind records which accept lane the customer was in; a
+    // structurally one-time-only estimate can only ever be the hold lane.
+    const structurallyOneTime = isStructuralOneTimeOnlyEstimate(estData, est);
+    const oneTimeLane = checkoutKind === "card_hold" || structurallyOneTime;
+    if (oneTimeLane) {
+      // One-time availability (codex 2729 r3): the abandoned intent was a
+      // one_time request (the event kind proves it), and /card-hold-intent
+      // still 400s that request on a mixed estimate whose one-time choice
+      // is now hidden or unpriced — same predicate as the endpoint.
+      if (!structurallyOneTime) {
+        const oneTimeChoicePrice = resolveAcceptOneTimeTotal(est, pricingBundle);
+        const canChooseOneTime = !!est.show_one_time_option && oneTimeChoicePrice > 0;
+        if (!canChooseOneTime) return false;
+      }
+      const hold = resolveCardHoldPolicy({
+        treatAsOneTime: true,
+        billByInvoice,
+        paymentMethodPreference: null,
+      });
+      if (!hold.required) return false;
+      // Mirror the intent endpoint's saved-card auto-satisfy (codex 2729
+      // r1): resolveCardHoldPolicy is config-level only — the endpoints
+      // additionally 409 ('saved_method') when a consented chargeable card
+      // already covers the booking. A customer who gained a saved card
+      // after abandoning the hold step owes no capture, so never nudge
+      // them to save one. Customer resolution mirrors the endpoint
+      // (customer_id, else accept's phone match). Errors fall to the outer
+      // catch → fail closed.
+      const { findConsentedChargeableCard } = require("./payment-method-consents");
+      let holdCustomerId = est.customer_id || null;
+      if (!holdCustomerId && est.customer_phone) {
+        const { match } = await matchAcceptCustomerByPhone(est);
+        holdCustomerId = match?.id || null;
+      }
+      if (holdCustomerId) {
+        const savedCard = await findConsentedChargeableCard(holdCustomerId);
+        if (savedCard?.stripe_payment_method_id) return false;
+      }
+      return true;
+    }
+    // Commercial manual-billing exemption (codex 2729 r3): the SAME
+    // commercialAcceptDepositExempt predicate /recurring-card-intent 409s
+    // with 'commercial_manual_billing' — an estimate edited into an
+    // auto-priced commercial/manual-billing or site-confirmation-held state
+    // collects nothing at accept, so it owes no card nudge.
+    const lc = commercialLowConfidenceRange(estData);
+    if (commercialAcceptDepositExempt({
+      isCommercialAccept: isCommercialAutoAcceptEstimate(est),
+      siteConfirmationHold: lc.hasLowConfidence && !lc.forceSiteQuote,
+      treatAsOneTime: false,
+      billByInvoice,
+    })) return false;
+    const membership = await buildEstimateMembershipContext(est);
+    const policy = await resolveRecurringCardPolicyForEstimate({
+      estimate: est,
+      membership,
+      treatAsOneTime: false,
+      billByInvoice,
+      paymentMethodPreference: null,
+    });
+    return !!policy.required;
+  } catch (e) {
+    logger.warn(
+      `[est-followup] payment-step policy re-check failed for estimate ${est.id}: ${e.message}`,
+    );
+    return false;
+  }
+}
+
+async function checkPaymentStepAbandoned(now = new Date()) {
+  let sent = 0;
+  const nowMs = now.getTime();
+  // Latest touch per estimate. distinctOn keeps the row's kind (which accept
+  // lane the customer was in) — a plain groupBy/max would lose it.
+  const latestByEstimate = db("estimate_checkout_events")
+    .distinctOn("estimate_id")
+    .select("estimate_id", "kind", "updated_at")
+    .orderBy([
+      { column: "estimate_id" },
+      { column: "updated_at", order: "desc" },
+    ])
+    .as("ce");
+  const candidates = await db("estimates")
+    .join(latestByEstimate, "ce.estimate_id", "estimates.id")
+    .whereIn("estimates.status", ["sent", "viewed"])
+    .whereNull("estimates.archived_at")
+    // Email is this stage's ONLY channel.
+    .whereNotNull("estimates.customer_email")
+    .where("ce.updated_at", "<", new Date(nowMs - PAYMENT_STEP_FOLLOWUP_WINDOW.minAgeHours * 3600000))
+    .where("ce.updated_at", ">", new Date(nowMs - PAYMENT_STEP_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
+    .whereNotExists(function excludeAlreadySent() {
+      this.select(db.raw("1"))
+        .from("estimate_followup_sends")
+        .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+        .where("estimate_followup_sends.rule_key", PAYMENT_STEP_RULE_KEY);
+    })
+    .select("estimates.*", "ce.kind as checkout_kind", "ce.updated_at as checkout_last_touch_at");
+
+  if (!candidates.length) return 0;
+  if (!isEnabled("paymentStepFollowup")) {
+    logger.info(
+      `[est-followup] Payment-step shadow: ${candidates.length} candidate(s), gate off — no sends`,
+    );
+    return 0;
+  }
+
+  for (const est of candidates) {
+    let claimed = false;
+    try {
+      const gate = await safetyGate(est, now);
+      if (gate.skip) {
+        logger.info(
+          `[est-followup] Payment-step skip ${est.id}: ${gate.reason}`,
+        );
+        continue;
+      }
+      if (!(await paymentStepStillRequiresCard(est, est.checkout_kind))) {
+        logger.info(
+          `[est-followup] Payment-step skip ${est.id}: card-no-longer-required`,
+        );
+        continue;
+      }
+      // Portal-wide email opt-out for customer-linked estimates — same gate
+      // the deposit stage applies. Fails CLOSED: an unreadable pref means no
+      // send this tick (email is the only leg), retry next tick.
+      if (est.customer_id) {
+        try {
+          const prefs = await db("notification_prefs")
+            .where({ customer_id: est.customer_id })
+            .first("email_enabled");
+          if (prefs?.email_enabled === false) {
+            logger.info(
+              `[est-followup] Payment-step skip ${est.id}: email disabled in prefs`,
+            );
+            continue;
+          }
+        } catch (err) {
+          logger.warn(
+            `[est-followup] Payment-step skip ${est.id}: prefs unverifiable: ${err.message}`,
+          );
+          continue;
+        }
+      }
+      if (!(await claimFollowupSend(est.id, PAYMENT_STEP_RULE_KEY, PAYMENT_STEP_TEMPLATE_KEY, {
+        kind: est.checkout_kind,
+        last_touch_at: est.checkout_last_touch_at,
+      }))) {
+        logger.info(`[est-followup] Payment-step skip ${est.id}: lost-claim`);
+        continue;
+      }
+      claimed = true;
+      const firstName = (est.customer_name || "").split(" ")[0] || "there";
+      const { emailUrl } = await mintStageLinks(est, "estimate_followup_payment_step");
+      const ok = await sendDualChannel(est, {
+        email: {
+          templateKey: PAYMENT_STEP_TEMPLATE_KEY,
+          stage: "payment_step",
+          payload: estimateEmailPayload(est, firstName, emailUrl),
+        },
+      });
+      if (ok) {
+        // The email is SENT — the ledger row must survive a bookkeeping
+        // failure (releasing it would re-email on the next tick). The bump
+        // is atomic with the ledger's counted_at stamp; if it fails, the
+        // row stays uncounted and repairFollowupCounters heals it before
+        // the engine next judges this estimate's caps.
+        claimed = false;
+        await bumpFollowupCounters(est.id, PAYMENT_STEP_RULE_KEY);
+        sent++;
+      }
+    } catch (e) {
+      logger.error(`[est-followup] Payment-step send failed: ${e.message}`);
+    } finally {
+      if (claimed) {
+        try {
+          await releaseFollowupSend(est.id, PAYMENT_STEP_RULE_KEY);
+        } catch (e) {
+          logger.error(
+            `[est-followup] Payment-step release failed: ${e.message}`,
+          );
+        }
+      }
+    }
+  }
+  return sent;
+}
+
 const EstimateFollowUp = {
   async checkAll() {
     let sent = 0;
 
+    // Heal lost counter bumps BEFORE any stage judges spacing/caps
+    // (codex 2736 r15) — non-fatal: a failed heal just means this tick
+    // judges the same slightly-stale counters the previous one did.
+    try {
+      const healed = await repairAllFollowupCounters();
+      if (healed > 0) logger.info(`[est-followup] healed lost counter bumps on ${healed} estimate(s)`);
+    } catch (e) {
+      logger.warn(`[est-followup] global counter heal failed (continuing): ${e.message}`);
+    }
+
+    const delivery = await loadLegacyStageDelivery();
+
     // 1. Sent but NOT viewed after 24 hours
     try {
-      const unviewed = await db("estimates")
+      if (!delivery.unviewed.anyEnabled) {
+        logger.info("[est-followup] Unviewed stage disabled — SMS and email templates inactive");
+      }
+      const unviewed = delivery.unviewed.anyEnabled ? await db("estimates")
         .where({ status: "sent" })
         .whereNull("archived_at")
         .whereNull("viewed_at")
@@ -488,7 +1017,17 @@ const EstimateFollowUp = {
           q
             .where("followup_unviewed_sent", false)
             .orWhereNull("followup_unviewed_sent"),
-        );
+        )
+        // Engagement-engine dedupe (codex 2736 r2): the engine's
+        // delivery_unopened_24h rule targets the same non-view — one
+        // unopened nudge per estimate across both lanes. (The engine's
+        // sweep/predicate mirror this via followup_unviewed_sent.)
+        .whereNotExists(function excludeEngineUnopened() {
+          this.select(db.raw("1"))
+            .from("estimate_followup_sends")
+            .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+            .where("estimate_followup_sends.rule_key", "delivery_unopened_24h");
+        }) : [];
 
       for (const est of unviewed) {
         let claimed = false;
@@ -500,33 +1039,35 @@ const EstimateFollowUp = {
             );
             continue;
           }
-          if (!(await claimStage(est.id, "followup_unviewed_sent"))) {
+          if (!(await claimStage(est.id, "followup_unviewed_sent", {
+            excludeEngineRuleKeys: ["delivery_unopened_24h"],
+          }))) {
             logger.info(`[est-followup] Unviewed skip ${est.id}: lost-claim`);
             continue;
           }
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_unviewed");
-          const smsBody = await renderTemplate("estimate_followup_unviewed", {
+          const smsBody = delivery.unviewed.smsEnabled ? await renderTemplate("estimate_followup_unviewed", {
             first_name: firstName,
             estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
             entity_id: est.id,
-          });
-          if (!smsBody) {
+          }) : null;
+          if (delivery.unviewed.smsEnabled && !smsBody) {
             logger.warn(
               `[est-followup] estimate_followup_unviewed template missing/disabled — continuing without SMS for est ${est.id}`,
             );
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: {
+            email: delivery.unviewed.emailEnabled ? {
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            },
+            } : null,
           });
           if (ok) {
             await db("estimates")
@@ -559,7 +1100,10 @@ const EstimateFollowUp = {
 
     // 2. Viewed but NOT accepted after 48 hours
     try {
-      const viewedNotAccepted = await db("estimates")
+      if (!delivery.viewed.anyEnabled) {
+        logger.info("[est-followup] Viewed stage disabled — SMS and email templates inactive");
+      }
+      const viewedNotAccepted = delivery.viewed.anyEnabled ? await db("estimates")
         .where({ status: "viewed" })
         .whereNull("archived_at")
         .whereNotNull("viewed_at")
@@ -572,7 +1116,7 @@ const EstimateFollowUp = {
           q
             .where("followup_viewed_sent", false)
             .orWhereNull("followup_viewed_sent"),
-        );
+        ) : [];
 
       for (const est of viewedNotAccepted) {
         let claimed = false;
@@ -589,26 +1133,26 @@ const EstimateFollowUp = {
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_viewed");
-          const smsBody = await renderTemplate("estimate_followup_viewed", {
+          const smsBody = delivery.viewed.smsEnabled ? await renderTemplate("estimate_followup_viewed", {
             first_name: firstName,
             estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
             entity_id: est.id,
-          });
-          if (!smsBody) {
+          }) : null;
+          if (delivery.viewed.smsEnabled && !smsBody) {
             logger.warn(
               `[est-followup] estimate_followup_viewed template missing/disabled — continuing without SMS for est ${est.id}`,
             );
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: {
+            email: delivery.viewed.emailEnabled ? {
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            },
+            } : null,
           });
           if (ok) {
             await db("estimates")
@@ -642,7 +1186,10 @@ const EstimateFollowUp = {
 
     // 3. Viewed but NOT accepted after 5 days (final nudge)
     try {
-      const finalNudge = await db("estimates")
+      if (!delivery.final.anyEnabled) {
+        logger.info("[est-followup] Final stage disabled — SMS and email templates inactive");
+      }
+      const finalNudge = delivery.final.anyEnabled ? await db("estimates")
         .where({ status: "viewed" })
         .whereNull("archived_at")
         .whereNotNull("viewed_at")
@@ -655,7 +1202,7 @@ const EstimateFollowUp = {
           q
             .where("followup_final_sent", false)
             .orWhereNull("followup_final_sent"),
-        );
+        ) : [];
 
       for (const est of finalNudge) {
         let claimed = false;
@@ -672,26 +1219,26 @@ const EstimateFollowUp = {
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_final");
-          const smsBody = await renderTemplate("estimate_followup_final", {
+          const smsBody = delivery.final.smsEnabled ? await renderTemplate("estimate_followup_final", {
             first_name: firstName,
             estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
             entity_id: est.id,
-          });
-          if (!smsBody) {
+          }) : null;
+          if (delivery.final.smsEnabled && !smsBody) {
             logger.warn(
               `[est-followup] estimate_followup_final template missing/disabled — continuing without SMS for est ${est.id}`,
             );
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: {
+            email: delivery.final.emailEnabled ? {
               templateKey: "estimate.followup_final",
               stage: "final",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            },
+            } : null,
           });
           if (ok) {
             await db("estimates")
@@ -721,7 +1268,10 @@ const EstimateFollowUp = {
 
     // 4. Expiring in 1-3 days
     try {
-      const expiring = await db("estimates")
+      if (!delivery.expiring.anyEnabled) {
+        logger.info("[est-followup] Expiring stage disabled — SMS and email templates inactive");
+      }
+      const expiring = delivery.expiring.anyEnabled ? await db("estimates")
         .whereIn("status", ["sent", "viewed"])
         .whereNull("archived_at")
         .whereNotNull("expires_at")
@@ -736,7 +1286,19 @@ const EstimateFollowUp = {
           q
             .where("followup_expiring_sent", false)
             .orWhereNull("followup_expiring_sent"),
-        );
+        )
+        // Engagement-engine dedupe (codex 2736 r2): the engine's expiring_*
+        // rules target the same deadline — one expiry reminder per estimate
+        // across both lanes. (The engine mirrors via followup_expiring_sent.)
+        .whereNotExists(function excludeEngineExpiring() {
+          this.select(db.raw("1"))
+            .from("estimate_followup_sends")
+            .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+            .whereIn("estimate_followup_sends.rule_key", [
+              "expiring_engaged",
+              "expiring_never_viewed",
+            ]);
+        }) : [];
 
       for (const est of expiring) {
         let claimed = false;
@@ -748,7 +1310,9 @@ const EstimateFollowUp = {
             );
             continue;
           }
-          if (!(await claimStage(est.id, "followup_expiring_sent"))) {
+          if (!(await claimStage(est.id, "followup_expiring_sent", {
+            excludeEngineRuleKeys: ["expiring_engaged", "expiring_never_viewed"],
+          }))) {
             logger.info(`[est-followup] Expiring skip ${est.id}: lost-claim`);
             continue;
           }
@@ -761,7 +1325,7 @@ const EstimateFollowUp = {
             year: "numeric",
             timeZone: "America/New_York",
           });
-          const smsBody = await renderTemplate("estimate_followup_expiring", {
+          const smsBody = delivery.expiring.smsEnabled ? await renderTemplate("estimate_followup_expiring", {
             first_name: firstName,
             estimate_url: smsUrl,
             expires_at: expDate,
@@ -769,22 +1333,22 @@ const EstimateFollowUp = {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
             entity_id: est.id,
-          });
-          if (!smsBody) {
+          }) : null;
+          if (delivery.expiring.smsEnabled && !smsBody) {
             logger.warn(
               `[est-followup] estimate_followup_expiring template missing/disabled — continuing without SMS for est ${est.id}`,
             );
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: {
+            email: delivery.expiring.emailEnabled ? {
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
               payload: {
                 ...estimateEmailPayload(est, firstName, emailUrl),
                 expires_at: expDate,
               },
-            },
+            } : null,
           });
           if (ok) {
             await db("estimates")
@@ -821,6 +1385,13 @@ const EstimateFollowUp = {
       /* columns may not exist */
     }
 
+    // 6. Reached the save-a-card step but never accepted
+    try {
+      sent += await checkPaymentStepAbandoned();
+    } catch {
+      /* tables may not exist */
+    }
+
     if (sent > 0)
       logger.info(`[est-followup] Sent ${sent} follow-ups (SMS+email)`);
     return { sent };
@@ -833,7 +1404,19 @@ module.exports._private = {
   estimateEmailPayload,
   renderTemplate,
   checkDepositAbandoned,
+  checkPaymentStepAbandoned,
+  paymentStepStillRequiresCard,
+  claimFollowupSend,
+  releaseFollowupSend,
+  bumpFollowupCounters,
+  repairFollowupCounters,
   safetyGate,
   claimStage,
+  repairAllFollowupCounters,
+  legacyStageDeliveryAvailability,
+  loadLegacyStageDelivery,
+  LEGACY_STAGE_TEMPLATES,
   mintStageLinks,
+  hasRepliedRecently,
+  wasRecentlyOpened,
 };

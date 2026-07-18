@@ -35,7 +35,7 @@ function normalizeAuthError(error) {
 }
 
 export default function LoginPage() {
-  const { sendCode, verifyCode, error, isAuthenticated, loading } = useAuth();
+  const { sendCode, verifyCode, clearError, error, isAuthenticated, loading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const nextPath = safeNextPath(location.search);
@@ -43,7 +43,7 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
-  useGlassSurface(true, 'full');
+  useGlassSurface(true, 'full', 'app');
 
   useEffect(() => {
     if (isAuthenticated) navigate(nextPath, { replace: true });
@@ -95,10 +95,11 @@ export default function LoginPage() {
   if (isAuthenticated) return null;
 
   return (
+    <>
     <main
       className="portal-login-page"
       style={{
-        '--login-blue': B.blueDeeper,
+        '--login-blue': B.glassNavy,
         '--login-brand': B.wavesBlue,
         '--login-text': '#3F4A65',
         '--login-muted': CUSTOMER_SURFACE.muted,
@@ -139,6 +140,8 @@ export default function LoginPage() {
           display: inline-flex;
           align-items: center;
           gap: 10px;
+          /* 44px touch-target floor — the 42px logo mark alone fell short */
+          min-height: 44px;
           text-decoration: none;
           color: var(--login-blue);
         }
@@ -391,7 +394,7 @@ export default function LoginPage() {
           background: var(--login-soft);
           border: 1px solid var(--login-soft-border);
           color: var(--login-blue);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.45;
           font-weight: 700;
           display: flex;
@@ -420,7 +423,7 @@ export default function LoginPage() {
           gap: 8px;
         }
         .portal-login-help a {
-          min-height: 42px;
+          min-height: 44px;
           border-radius: 10px;
           border: 1px solid var(--login-border);
           color: var(--login-blue);
@@ -625,7 +628,7 @@ export default function LoginPage() {
                   <button
                     type="button"
                     className="portal-login-secondary"
-                    onClick={() => { setStep('phone'); setCode(''); }}
+                    onClick={() => { clearError(); setStep('phone'); setCode(''); }}
                   >
                     Use Different Number
                   </button>
@@ -666,7 +669,7 @@ export default function LoginPage() {
               <div style={{ fontSize: 12, fontWeight: 850, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
                 The Waves App
               </div>
-              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
+              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
                 Your home team, one tap away.
               </div>
               <div style={{ marginTop: 6, fontSize: 14, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>
@@ -685,5 +688,12 @@ export default function LoginPage() {
         </section>
       </div>
     </main>
+    {/* Logo-only sign-off (owner 2026-07-09): the login screen drops the
+        BrandFooter identity block + TrustFooter legal strip — just the
+        mascot below the support links, styled like BrandFooter's logo row. */}
+    <div style={{ textAlign: 'center', marginTop: 32, padding: '20px 16px', borderTop: `1px solid ${B.grayLight}` }}>
+      <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: 0.6 }} />
+    </div>
+    </>
   );
 }

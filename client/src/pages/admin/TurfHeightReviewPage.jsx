@@ -77,7 +77,7 @@ export default function TurfHeightReviewPage() {
       {error && <div style={{ color: M.red }}>{error}</div>}
       {!loading && !error && items.length === 0 && (
         <div style={{ background: M.card, border: `1px solid ${M.line}`, borderRadius: 12, padding: 28, textAlign: "center", color: M.muted }}>
-          Nothing to review — every captured reading agrees with its gauge photo. 🌱
+          Nothing to review — every captured reading agrees with its gauge photo.
         </div>
       )}
 

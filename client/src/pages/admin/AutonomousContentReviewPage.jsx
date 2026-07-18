@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Search,
   Sparkles,
+  TrendingUp,
   UploadCloud,
   XCircle,
 } from "lucide-react";
@@ -61,7 +62,10 @@ function formatDate(value) {
 
 function gateTag(summary) {
   if (!summary) return { tone: "neutral", label: "—" };
-  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false) {
+  // comparison_ok === false means the comparison-table gate failed (named
+  // competitors); it previously wasn't checked here, so a failing draft
+  // could show "Gate passed".
+  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false || summary.comparison_ok === false) {
     return { tone: "alert", label: "Needs fix" };
   }
   if ((summary.soft_failures || []).length > 0) return { tone: "neutral", label: "Soft flags" };
@@ -100,6 +104,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [ideaData, setIdeaData] = useState(null);
   const [ideaLoading, setIdeaLoading] = useState(true);
   const [ideaActionPending, setIdeaActionPending] = useState("");
+  const [impactData, setImpactData] = useState(null);
+  const [impactLoading, setImpactLoading] = useState(true);
   // On phones the list and the detail can't share the screen — tapping a row
   // opens the detail; "Back" returns to the list. Desktop shows both columns.
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
@@ -132,6 +138,19 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     }
   };
 
+  const loadImpact = async () => {
+    setImpactLoading(true);
+    setError("");
+    try {
+      const next = await adminFetch("/admin/content/autonomous/impact?limit=100");
+      setImpactData(next);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setImpactLoading(false);
+    }
+  };
+
   const loadIdeas = async () => {
     setIdeaLoading(true);
     setError("");
@@ -159,38 +178,48 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     load();
     loadLinks();
     loadIdeas();
+    loadImpact();
   }, []);
 
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
-      return;
+      return undefined;
     }
+    // Stale-response guard: clicking row A then B can resolve A's fetch last,
+    // leaving A's draft rendered while B is highlighted (decisions were
+    // already safe server-side via the run-id 409; this fixes the display).
+    let stale = false;
     setDetail(null);
     setDetailLoading(true);
     adminFetch(`/admin/content/autonomous/review/${selectedId}`)
       .then((next) => {
+        if (stale) return;
         setDetail(next.item);
         setReviewNote("");
       })
-      .catch((err) => setError(err.message))
-      .finally(() => setDetailLoading(false));
+      .catch((err) => { if (!stale) setError(err.message); })
+      .finally(() => { if (!stale) setDetailLoading(false); });
+    return () => { stale = true; };
   }, [selectedId]);
 
   useEffect(() => {
     if (!selectedLinkId) {
       setLinkDetail(null);
-      return;
+      return undefined;
     }
+    let stale = false;
     setLinkDetail(null);
     setLinkDetailLoading(true);
     adminFetch(`/admin/content/internal-links/${selectedLinkId}`)
       .then((next) => {
+        if (stale) return;
         setLinkDetail(next.item);
         setLinkReviewNote("");
       })
-      .catch((err) => setError(err.message))
-      .finally(() => setLinkDetailLoading(false));
+      .catch((err) => { if (!stale) setError(err.message); })
+      .finally(() => { if (!stale) setLinkDetailLoading(false); });
+    return () => { stale = true; };
   }, [selectedLinkId]);
 
   const submitDecision = async (decision) => {
@@ -261,17 +290,21 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const hardFailures = gateSummary?.hard_failures || [];
   const softFailures = gateSummary?.soft_failures || [];
   const uniquenessFailures = gateSummary?.uniqueness_failures || [];
+  const comparisonFindings = gateSummary?.comparison_findings || [];
   const seoCompletion = selected?.run?.seo_completion;
   const seoFindings = seoCompletion?.findings || [];
   const recommendedLinks = seoCompletion?.recommended_links || [];
+  const remediation = selected?.run?.remediation;
   const pendingCount = counts.pending_review || 0;
   const shadowCount = useMemo(() => items.filter((item) => item.run?.shadow_mode).length, [items]);
   const reviewActions = selected?.review_actions || {};
   const ideaPosts = ideaData?.posts || [];
   const ideaCounts = ideaData?.counts || {};
-  const busy = loading || linkLoading || ideaLoading;
+  const impactItems = impactData?.items || [];
+  const impactTotals = impactData?.totals || {};
+  const busy = loading || linkLoading || ideaLoading || impactLoading;
 
-  const refreshAll = () => { load(); loadLinks(); loadIdeas(); };
+  const refreshAll = () => { load(); loadLinks(); loadIdeas(); loadImpact(); };
   const changeView = (next) => { setView(next); setMobileDetailOpen(false); };
   const openContent = (id) => { setSelectedId(id); setMobileDetailOpen(true); };
   const openLink = (id) => { setSelectedLinkId(id); setMobileDetailOpen(true); };
@@ -305,6 +338,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
               <PillTab active={view === "content"} onClick={() => changeView("content")}>Content</PillTab>
               <PillTab active={view === "links"} onClick={() => changeView("links")}>Links</PillTab>
               <PillTab active={view === "ideas"} onClick={() => changeView("ideas")}>Ideas</PillTab>
+              <PillTab active={view === "impact"} onClick={() => changeView("impact")}>Impact</PillTab>
             </div>
           </div>
           {/* iPhone mockup — desktop only (decorative; hidden on phones where it'd waste the screen) */}
@@ -340,7 +374,11 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
               {loading ? (
                 <Empty>Loading…</Empty>
               ) : items.length === 0 ? (
-                <Empty>No pending review rows.</Empty>
+                <Empty>
+                  {data?.unavailable
+                    ? "Review queue unavailable — the review tables are missing or the query failed. Check server logs."
+                    : "No pending review rows."}
+                </Empty>
               ) : (
                 <div className="flex flex-col gap-2.5">
                   {items.map((item) => {
@@ -398,6 +436,34 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                       <Field label="Run" value={selected.run?.outcome || "—"} />
                     </div>
 
+                    {selected.run?.astro_pr_url && <ExternalAnchor href={selected.run.astro_pr_url} label="Open Astro PR" />}
+
+                    {(selected.run?.poll_pending_reason || remediation) && (
+                      <Section
+                        icon={selected.run?.poll_pending_reason || remediation?.status === "parked" ? AlertTriangle : CheckCircle2}
+                        ok={!selected.run?.poll_pending_reason && remediation?.status !== "parked"}
+                        title="Pipeline status"
+                      >
+                        <div className="grid gap-1 text-13 text-zinc-600">
+                          {selected.run?.poll_pending_reason && (
+                            <div>
+                              Auto-merge waiting on <span className="font-medium text-zinc-900">{selected.run.poll_pending_reason}</span>
+                              {selected.run.poll_pending_since ? ` since ${formatDate(selected.run.poll_pending_since)}` : ""}
+                            </div>
+                          )}
+                          {remediation && (
+                            <div>
+                              Codex remediation: <span className="font-medium text-zinc-900">{remediation.status}</span>
+                              {Number.isFinite(remediation.rounds) ? ` · ${remediation.rounds} round(s)` : ""}
+                            </div>
+                          )}
+                          {remediation?.park_reason && (
+                            <div className="text-[#B42318]">Parked: {remediation.park_reason}</div>
+                          )}
+                        </div>
+                      </Section>
+                    )}
+
                     {selected.status === "pending_review" && (
                       <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
                         <Textarea
@@ -432,8 +498,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                     )}
 
                     <Section
-                      icon={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false ? CheckCircle2 : AlertTriangle}
-                      ok={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false}
+                      icon={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false && gateSummary?.comparison_ok !== false ? CheckCircle2 : AlertTriangle}
+                      ok={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false && gateSummary?.comparison_ok !== false}
                       title="Gate summary"
                     >
                       <div className="grid gap-1 text-13 text-zinc-600">
@@ -442,8 +508,22 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                         <div>Soft: {softFailures.length ? softFailures.join(", ") : "none"}</div>
                         <div>Uniqueness: {uniquenessFailures.length ? uniquenessFailures.join(", ") : (gateSummary?.uniqueness_ok === false ? "failed" : "none")}</div>
                         <div>SEO completion: {seoCompletion?.available ? `P0 ${seoCompletion.p0} / P1 ${seoCompletion.p1} / P2 ${seoCompletion.p2}` : "not run"}</div>
+                        <div>Comparison: {gateSummary?.comparison_ok == null ? "not run" : gateSummary.comparison_ok ? "ok" : "failed"}</div>
+                        {gateSummary?.comparison_ok === false && comparisonFindings.slice(0, 4).map((finding, i) => (
+                          <div key={`${finding.code}-${i}`} className="text-[#B42318]">
+                            <span className="font-medium">{finding.severity} {finding.code}</span>: {finding.message}
+                          </div>
+                        ))}
                       </div>
                     </Section>
+
+                    {selected.run?.reviewer_notes && (
+                      <Section title="Run notes">
+                        <div className="max-h-48 overflow-y-auto whitespace-pre-wrap text-13 leading-relaxed text-zinc-600">
+                          {selected.run.reviewer_notes}
+                        </div>
+                      </Section>
+                    )}
 
                     {seoCompletion?.available && (
                       <Section icon={seoCompletion.p0 === 0 ? CheckCircle2 : AlertTriangle} ok={seoCompletion.p0 === 0} title="SEO completion">
@@ -668,8 +748,94 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
           </p>
         </div>
       )}
+
+      {/* ── Ranking Impact ── */}
+      {view === "impact" && (
+        <div className="pt-4">
+          <KpiRow>
+            <Kpi label="Articles tracked" value={impactTotals.tracked || 0} />
+            <Kpi label="Improved" value={impactTotals.verdicts?.improved || 0} emphasize={(impactTotals.verdicts?.improved || 0) > 0} />
+            <Kpi label="Regressed" value={impactTotals.verdicts?.regressed || 0} />
+            <Kpi label="Clicks (measured windows)" value={impactTotals.window_clicks || 0} />
+          </KpiRow>
+
+          <ListHeader icon={TrendingUp} title="Proof of ranking" count={impactItems.length} />
+          {impactLoading ? (
+            <Empty>Loading…</Empty>
+          ) : impactItems.length === 0 ? (
+            <Empty>No published optimizations tracked yet. A row appears when an engine publish goes live; positions are measured 14 and 21 days after Google recrawls it.</Empty>
+          ) : (
+            <div className="flex flex-col gap-2.5">
+              {impactItems.map((it) => (
+                <div key={it.id} className="rounded-2xl border border-zinc-200 bg-white p-3 sm:p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-14 font-medium text-zinc-900">{it.title || it.page_url}</div>
+                      <a
+                        href={it.page_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-0.5 block truncate text-12 text-zinc-500 hover:text-zinc-700"
+                      >
+                        {it.page_url}
+                      </a>
+                    </div>
+                    <Tag tone={verdictTone(it.verdict, !!it.latest_window)} className="shrink-0">
+                      {it.latest_window ? (it.verdict || "measuring") : "awaiting data"}
+                    </Tag>
+                  </div>
+
+                  {(it.target_queries?.length ? it.target_queries : it.target_query ? [{ query: it.target_query }] : []).map((tq) => (
+                    <div key={tq.query} className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-13 text-zinc-600">
+                      <span className="truncate font-medium text-zinc-800">“{tq.query}”</span>
+                      {tq.after_position != null || tq.before_position != null ? (
+                        <span className="tabular-nums">
+                          {tq.before_position != null ? `#${Math.round(tq.before_position)}` : "not ranking"}
+                          {" → "}
+                          {tq.after_position != null ? `#${Math.round(tq.after_position)}` : "not ranking"}
+                        </span>
+                      ) : (
+                        <span className="text-zinc-400">no query data yet</span>
+                      )}
+                      {tq.position_delta != null && tq.position_delta !== 0 && (
+                        <span className={cn("tabular-nums", tq.position_delta > 0 ? "text-[#2E7D20]" : "text-[#B42318]")}>
+                          {tq.position_delta > 0 ? `↑${tq.position_delta}` : `↓${Math.abs(tq.position_delta)}`}
+                        </span>
+                      )}
+                      {tq.clicks != null && <span className="text-12 text-zinc-500">{tq.clicks} clicks · {tq.impressions} impr</span>}
+                    </div>
+                  ))}
+
+                  <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-12 text-zinc-500">
+                    {it.bucket && <Tag>{it.bucket}</Tag>}
+                    <span>Live {formatDate(it.deployed_at)}</span>
+                    {it.latest_window && (
+                      <span className="tabular-nums">
+                        Page: {it.baseline.position != null ? `#${Math.round(it.baseline.position)}` : "—"} → {it.latest_window.position != null ? `#${Math.round(it.latest_window.position)}` : "—"} · {it.latest_window.clicks} clicks / {it.latest_window.impressions} impr in {it.latest_window.days}d
+                      </span>
+                    )}
+                    {it.estimated_lift_position != null && (
+                      <span className="tabular-nums">Control-adjusted lift: {it.estimated_lift_position > 0 ? "+" : ""}{it.estimated_lift_position} pos · {it.estimated_lift_clicks_pct > 0 ? "+" : ""}{it.estimated_lift_clicks_pct}% clicks</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 text-12 leading-relaxed text-zinc-500">
+            Position before → after is the article’s target query in Search Console (impressions-weighted). “Control-adjusted lift” subtracts the movement of similar unoptimized pages, so it credits the article only with movement the publish caused — stricter than a raw before/after.
+          </p>
+        </div>
+      )}
     </div>
   );
+}
+
+function verdictTone(verdict, measured) {
+  if (!measured) return "neutral";
+  if (verdict === "improved") return "green";
+  if (verdict === "regressed") return "alert";
+  return "neutral";
 }
 
 // ── Presentational helpers (TruGreen-inspired: forest header, kelly-green accents) ──

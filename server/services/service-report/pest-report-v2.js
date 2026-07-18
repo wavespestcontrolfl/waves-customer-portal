@@ -23,6 +23,7 @@
  */
 
 const { validateCustomerCopy } = require('./premium-experience');
+const { detectServiceLine } = require('./service-line-configs');
 
 // propertyDefenseStatus.overallLabel → the customer-facing protection status.
 // tone drives the client accent (good = green, watch = amber, attention = red).
@@ -95,13 +96,19 @@ function buildBugFiles(bugFiles) {
 function buildSupportingMetric({ pestPressure, activity }) {
   if (pestPressure && pestPressure.showOnCustomerReport !== false && pestPressure.enabled !== false) {
     const score = pestPressure.displayScore ?? pestPressure.score;
-    if (score != null) {
+    // A visible-but-insufficient pressure view (score still null) can still
+    // carry the one-shot client-rating calibration. Since the dashboard
+    // suppresses the standalone PestPressureCard, the rating prompt must
+    // ride this metric or first/insufficient reports lose the calibration
+    // flow entirely (parity with the same codex finding on Mosquito V2).
+    // The client hides the score pill when score is null.
+    if (score != null || pestPressure.canCaptureClientRating) {
       return {
         kind: 'pressure',
-        score: String(score),
+        score: score != null ? String(score) : null,
         max: pestPressure.maxScore || 5,
-        label: pestPressure.label || null,
-        trend: pestPressure.trend || null,
+        label: score != null ? (pestPressure.label || null) : null,
+        trend: score != null ? (pestPressure.trend || null) : null,
         caption: 'Pest pressure',
         // Keep the one-shot client-rating calibration flow that the suppressed
         // legacy PestPressureCard used to own.
@@ -174,12 +181,16 @@ function buildForecast(forecast) {
  * @param {object}  pestPressure       data.pestPressure (recurring view) | null
  * @param {object}  activity           data.activity (typed view) | null
  * @param {object}  forecast           raw pest-forecast payload (caller-fetched) | null
+ * @param {string}  technicianReport   tech-reviewed AI report copy (caller passes
+ *                                     data.summary only when summarySource is
+ *                                     'technician_report') | null
  */
 function buildPestReportV2({
   premiumExperience,
   pestPressure = null,
   activity = null,
   forecast = null,
+  technicianReport = null,
 } = {}) {
   if (!premiumExperience) return null;
   const defenseStatus = premiumExperience.propertyDefenseStatus;
@@ -187,7 +198,16 @@ function buildPestReportV2({
   const primaryMove = buildPrimaryMove(premiumExperience.primaryMove);
   const bugFiles = buildBugFiles(premiumExperience.bugFiles);
   const supportingMetric = buildSupportingMetric({ pestPressure, activity });
-  const aiSummary = buildAiSummary(premiumExperience.aiSummaryPersonality);
+  // The tech-reviewed AI report copy is the most visit-specific summary we
+  // have — it takes the hero's summary slot over the deterministic
+  // personality copy. Re-screened here so this pure module never trusts the
+  // caller's validation.
+  const technicianCopy = technicianReport && validateCustomerCopy(String(technicianReport).trim())
+    ? String(technicianReport).trim()
+    : null;
+  const aiSummary = technicianCopy
+    ? { headline: null, body: technicianCopy }
+    : buildAiSummary(premiumExperience.aiSummaryPersonality);
   const forecastCard = buildForecast(forecast);
 
   // Nothing meaningful to show → don't render an empty V2 shell.
@@ -216,8 +236,25 @@ function buildPestReportV2({
   };
 }
 
+// PDF cache-key component (mirrors mosquitoReportV2PdfSignature — see that
+// function's comment). PEST_REPORT_V2 was never part of the key, so pest
+// PDFs cached before the pest V2 flip still serve the pre-dashboard render
+// on permanent links; including the gate re-renders each once on next view.
+// Scoped to pest-line records so nothing else mass-invalidates.
+function pestReportV2PdfSignature(service = {}) {
+  if (process.env.PEST_REPORT_V2 !== 'true') return '';
+  const line = service.service_line || detectServiceLine(service.service_type);
+  // 'b' = the typed-activity composition (owner ruling 2026-07-14): typed
+  // pest PDFs now render the ActivityCard alongside the dashboard, so PDFs
+  // cached under '-pestv2' would keep hiding the gauge/chart/progress chip
+  // on permanent links (codex P2). Bump this suffix whenever the pest-line
+  // report COMPOSITION changes — each pest PDF re-renders once on next view.
+  return line === 'pest' ? '-pestv2b' : '';
+}
+
 module.exports = {
   buildPestReportV2,
+  pestReportV2PdfSignature,
   // exported for tests
   stripZoneLetter,
   buildForecast,

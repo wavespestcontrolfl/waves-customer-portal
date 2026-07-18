@@ -239,13 +239,13 @@ class BalanceReminder {
         "balance reminder payment-link SMS skipped: no unpaid invoice id found",
       );
     }
-    const datePretty = new Date(
-      service.scheduled_date + "T12:00:00",
-    ).toLocaleDateString("en-US", {
+    // scheduled_date arrives as a JS Date (pg `date` column), not a string —
+    // string concatenation here rendered "Invalid Date" into customer SMS.
+    const datePretty = formatDateOnly(service.scheduled_date, {
       weekday: "long",
       month: "long",
       day: "numeric",
-      timeZone: "America/New_York",
+      year: undefined,
     });
     const link = await shortenOrPassthrough(balance.oldestInvoiceUrl, {
       kind: "invoice",
@@ -481,21 +481,10 @@ class BalanceReminder {
       );
       const invoiceTitle =
         oldestInvoice?.title || oldestInvoice?.service_type || "your service";
-      let completedOn = "";
-      if (oldestInvoice?.service_date) {
-        try {
-          completedOn = new Date(
-            oldestInvoice.service_date + "T12:00:00",
-          ).toLocaleDateString("en-US", {
-            month: "long",
-            day: "numeric",
-            year: "numeric",
-            timeZone: "America/New_York",
-          });
-        } catch {
-          completedOn = "";
-        }
-      }
+      // service_date is a JS Date (pg `date` column); the old string concat
+      // produced "Invalid Date" (toLocaleDateString never throws, so the
+      // try/catch was dead code) and the SMS guard blocked the send.
+      const completedOn = formatDateOnly(oldestInvoice?.service_date);
       const dateClause = completedOn ? ` completed on ${completedOn}` : "";
 
       let message;

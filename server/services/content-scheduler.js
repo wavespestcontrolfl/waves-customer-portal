@@ -62,21 +62,40 @@ async function sharePublishedBlog(blog) {
   try {
     const SocialMediaService = require('./social-media');
     const link = blog.astro_live_url || blog.url || `https://www.wavespestcontrol.com/${blog.slug}`;
-    const result = await SocialMediaService.publishToAll({
+    // shareUrlOnce (not publishToAll directly): the advisory-lock +
+    // source_url dedupe serializes this against the RSS backstop AND the
+    // pages-poll live-flip share — two lanes can observe the same live row
+    // in the same window and must not double-post. shareUrlOnce opts into
+    // every platform incl. Twitter and runs publishToAll's blog-hero
+    // resolve (og:image re-hosted as JPEG, brand-card fallback, never AI).
+    const once = await SocialMediaService.shareUrlOnce({
       title: blog.title,
       description: blog.meta_description || (blog.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300),
       link,
-      guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
-      // Blog shares opt into every platform incl. Twitter — the omitted-
-      // channels default deliberately excludes it (admin preview flow).
-      channels: SocialMediaService.PUBLISH_PLATFORMS,
-      // No imageUrl: publishToAll's blog-hero branch resolves the live page's
-      // og:image and re-hosts it as JPEG (Instagram rejects the raw .webp hero
-      // the old publicBlogImageUrl handed it), falling back to the brand card
-      // on a miss — never an AI image.
       noAiImage: true,
     });
+    if (once?.skipped === 'already_posted') {
+      // Same blocker distinction as the pages-poll live-flip path: only a
+      // published/scheduled row means the URL definitively went out (stamp,
+      // done). A studio DRAFT blocker means an admin has copy in flight for
+      // this URL and NOTHING has posted — don't stamp; return false so the
+      // caller parks the row at pending_review for the human who owns it.
+      if (['published', 'scheduled'].includes(once.blocking_status)) {
+        await db('blog_posts').where('id', blog.id).update({
+          shared_to_social: true,
+          shared_at: new Date(),
+        });
+        return true;
+      }
+      logger.info(`[content-scheduler] Social share for blog ${blog.id} blocked by a studio ${once.blocking_status || 'draft'} row for the same URL — leaving unshared for the admin to resolve`);
+      return false;
+    }
+    if (once?.skipped) {
+      logger.info(`[content-scheduler] Social share skipped for blog ${blog.id} — ${once.skipped}`);
+      return true;
+    }
+    const result = once;
     if (result?.dryRun) {
       logger.info(`[content-scheduler] Social share dry-run for blog ${blog.id} — not marking as shared`);
       return true;
@@ -469,6 +488,32 @@ const ContentScheduler = {
         claimed = (await db('blog_posts')
           .where('id', blog.id)
           .where('publish_status', blog.publish_status)
+          // Mutual exclusion with the manual /publish-astro lane: a live
+          // publish_claimed_at means an admin's publishAstro is mid-flight —
+          // claiming now would run two publishers over the same row and
+          // cross-wire their PR markers. Stale (>30m) claims are crashed
+          // publishes and don't block.
+          .where((q) => q.whereNull('publish_claimed_at')
+            .orWhere('publish_claimed_at', '<', new Date(Date.now() - 30 * 60 * 1000)))
+          // Re-check eligibility ATOMICALLY (mirrors the pending SELECT): a
+          // manual publish that FINISHED between the SELECT and this CAS
+          // left pr_open + a cleared lease with publish_status untouched —
+          // claiming from that stale snapshot would pair the manual PR with
+          // 'publishing', which pages-poll reads as auto-merge authorization
+          // (bypassing the Approve & Go Live click). Two lanes: the
+          // first-publish lane requires zero external progress (no PR, no
+          // branch, no in-flight astro state — 'draft' and other settled
+          // states pass); the pending_review+live lane is the social-share
+          // finish for an already-live post and keeps its markers.
+          .where((q) => q
+            .where((first) => first
+              .whereNull('astro_pr_number')
+              .whereNull('astro_branch_name')
+              .where((m) => m.whereNull('astro_status')
+                .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'publish_failed', 'merged', 'live', 'unpublish_pending'])))
+            .orWhere((share) => share
+              .where('publish_status', 'pending_review')
+              .where('astro_status', 'live')))
           .update({ publish_status: 'publishing', updated_at: new Date() })) > 0;
         if (!claimed) {
           logger.info(`[content-scheduler] blog ${blog.id} already claimed by a concurrent tick — skipping`);

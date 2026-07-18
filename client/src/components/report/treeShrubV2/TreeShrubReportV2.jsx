@@ -24,10 +24,10 @@ export const PrintContext = createContext(false);
 function usePrint() { return useContext(PrintContext); }
 
 // ── Surface tokens (shared with the lawn/pest V2 + public estimate surface) ─────
-const TEXT = CUSTOMER_SURFACE.text;
-const BODY = CUSTOMER_SURFACE.body;
+const TEXT = 'var(--text)'; // report ink var — resolves per theme (glass navy / doc ink); was CUSTOMER_SURFACE.text (old marketing navy)
+const BODY = 'var(--text)'; // prose uses the same ink as the rest of the report body
 // muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
-const MUTED = CUSTOMER_SURFACE.muted;
+const MUTED = 'var(--muted)'; // single supporting gray, matches the page
 const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
@@ -75,25 +75,70 @@ function useMounted(delay = 40) {
   return m;
 }
 
+
+// Scroll-triggered variant: flips true when the element scans into view, so
+// gauges fill as the customer reaches them (owner ask 2026-07-09). Print and
+// reduced-motion render the final frame immediately.
+function useInViewOnce(threshold = 0.35) {
+  const print = usePrint();
+  const reduce = print || (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const ref = useRef(null);
+  const [inView, setInView] = useState(reduce);
+  useEffect(() => {
+    if (reduce || inView) return undefined;
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') { setInView(true); return undefined; }
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) { setInView(true); obs.disconnect(); }
+    }, { threshold });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [reduce, inView, threshold]);
+  return [ref, inView];
+}
+
+// Counts the displayed number up in step with the ring draw-in; snaps straight
+// to the final value for print / reduced motion.
+function useCountUp(target, run, duration = 900) {
+  const print = usePrint();
+  const reduce = print || (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const [shown, setShown] = useState(reduce ? target : 0);
+  useEffect(() => {
+    if (!Number.isFinite(target)) return undefined;
+    if (reduce || !run) { setShown(reduce ? target : 0); return undefined; }
+    let raf;
+    const t0 = performance.now();
+    const tick = (t) => {
+      const p = Math.min(1, (t - t0) / duration);
+      setShown(target * (1 - Math.pow(1 - p, 3)));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, run, reduce, duration]);
+  return shown;
+}
+
 // ── Primitives ──────────────────────────────────────────────────────────────────
 export function ScoreRing({ value, size = 120, stroke = 10, status }) {
-  const mounted = useMounted();
+  const [ringRef, ringInView] = useInViewOnce(0.4);
   const n = toScore(value);
   const known = Number.isFinite(n);
+  const shown = useCountUp(known ? Math.round(n) : 0, known && ringInView);
   const meta = statusMeta(status || (known ? scoreStatus(n) : 'tracking'));
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const pct = known ? clamp(n) / 100 : 0;
   const offset = c * (1 - pct);
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img"
+    <svg ref={ringRef} width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img"
          aria-label={known ? `Score ${Math.round(n)} of 100` : 'Not yet scored'}>
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={BORDER} strokeWidth={stroke} />
       {known && (
         <circle
           cx={size / 2} cy={size / 2} r={r} fill="none"
           stroke={meta.color} strokeWidth={stroke} strokeLinecap="round"
-          strokeDasharray={c} strokeDashoffset={mounted ? offset : c}
+          strokeDasharray={c} strokeDashoffset={ringInView ? offset : c}
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
           style={{ transition: 'stroke-dashoffset 0.9s cubic-bezier(0.4,0,0.2,1)' }}
         />
@@ -101,7 +146,7 @@ export function ScoreRing({ value, size = 120, stroke = 10, status }) {
       <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle"
             style={{ fontFamily: FONTS.heading, fontWeight: 800, fill: known ? TEXT : MUTED }}
             fontSize={size * 0.3}>
-        {known ? Math.round(n) : '—'}
+        {known ? Math.round(shown) : '—'}
       </text>
     </svg>
   );
@@ -126,7 +171,7 @@ function Card({ children, style }) {
   // data-glass is inert without html[data-glass-theme] (set unconditionally on
   // the live report view) — glass-theme.css supplies all material.
   return (
-    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 16, padding: 24, marginBottom: 20, ...style }}>
       {children}
     </section>
   );
@@ -135,7 +180,7 @@ function CardTitle({ children, sub }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <h2 style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: 0 }}>{children}</h2>
-      {sub ? <div style={{ fontSize: 13, color: MUTED, marginTop: 3 }}>{sub}</div> : null}
+      {sub ? <div style={{ fontSize: 14, color: MUTED, marginTop: 3 }}>{sub}</div> : null}
     </div>
   );
 }
@@ -182,9 +227,9 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
           <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Landscape Plant Health
           </div>
-          <h1 style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
+          <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
             {statusHeadline || statusMeta(status).label}
-          </h1>
+          </h2>
           {scoreExplanation ? (
             <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{scoreExplanation}</p>
           ) : null}
@@ -216,11 +261,11 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
       ) : null}
 
       <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BORDER}`, display: 'grid', gap: 10 }}>
-        {wavesNext ? <KeyLine label="What Waves will do next" value={wavesNext} dot={COLORS.teal} /> : null}
+        {wavesNext ? <KeyLine label="What Waves will do next" value={wavesNext} dot={'#0A7EC2'} /> : null}
         {customerAction
           ? <KeyLine label="Your next step" value={customerAction} dot={COLORS.green} />
           : (noActionNeeded ? <KeyLine label="Your next step" value="No action is needed from you right now — we completed today’s treatment and did not identify an urgent plant health issue." dot={COLORS.green} /> : null)}
-        {nextVisitText ? <KeyLine label="Next visit" value={nextVisitText} dot={COLORS.blueDeeper} /> : null}
+        {nextVisitText ? <KeyLine label="Next visit" value={nextVisitText} dot={COLORS.glassNavy} /> : null}
       </div>
     </Card>
   );
@@ -296,13 +341,14 @@ const CATEGORY_DETAIL = {
 
 export function TreeShrubVisualDiagnosisBars({ categories = [] }) {
   const print = usePrint();
+  const [barsRef, mounted] = useInViewOnce(0.25);
   const cats = categories.filter(Boolean);
   if (!cats.length) return null;
   return (
     <Card>
       <CardTitle sub="What our cameras and AI scored from today’s photos. Tap a row for the details.">Photo Diagnosis</CardTitle>
-      <div style={{ display: 'grid', gap: 8 }}>
-        {cats.map((c) => {
+      <div ref={barsRef} style={{ display: 'grid', gap: 8 }}>
+        {cats.map((c, i) => {
           const status = c.status || scoreStatus(c.score);
           const meta = statusMeta(status);
           const known = Number.isFinite(toScore(c.score));
@@ -321,7 +367,7 @@ export function TreeShrubVisualDiagnosisBars({ categories = [] }) {
                     <StatusPill status={status} small />
                   </div>
                   <div style={{ marginTop: 10, height: 7, borderRadius: 999, background: '#F1EEE6', overflow: 'hidden' }}>
-                    {known ? <div style={{ width: `${pct}%`, height: '100%', background: meta.color, borderRadius: 999 }} /> : null}
+                    {known ? <div style={{ width: mounted ? `${pct}%` : '0%', height: '100%', background: meta.color, borderRadius: 999, transition: `width 0.8s cubic-bezier(0.34,1.56,0.64,1) ${0.15 + i * 0.09}s` }} /> : null}
                   </div>
                 </div>
               </div>
@@ -360,7 +406,7 @@ export function PlantGroupStatusCards({ plantGroups = [] }) {
                 <StatusPill status={g.status || 'stable'} small />
               </div>
               {g.finding ? <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>{g.finding}</div> : null}
-              {g.wavesAction ? <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5, marginTop: 5 }}><strong style={{ color: BODY }}>Waves:</strong> {g.wavesAction}</div> : null}
+              {g.wavesAction ? <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, marginTop: 5 }}><strong style={{ color: BODY }}>Waves:</strong> {g.wavesAction}</div> : null}
             </div>
           );
         })}
@@ -373,7 +419,9 @@ export function PlantGroupStatusCards({ plantGroups = [] }) {
 function inchLabel(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0) return null;
-  return `${String(Number(n.toFixed(2))).replace(/\.?0+$/, '')}"`;
+  // Number() already drops trailing decimal zeros; the old /\.?0+$/ regex
+  // also ate integer zeros — 0 rendered as a bare '"' and 10 as '1"'.
+  return `${Number(n.toFixed(2))}"`;
 }
 // Server water vocabulary (surplus/deficit/balanced/unknown) → status pill word.
 const WATER_PILL = { surplus: 'watch', deficit: 'watch', balanced: 'stable', unknown: 'tracking' };
@@ -404,7 +452,7 @@ export function LandscapeWaterContextCard({ water = null }) {
 
 // ── 5b. What Waves did today (products applied) ─────────────────────────────────
 const KIND_DOT = {
-  fungicide: COLORS.teal, insecticide: COLORS.red, miticide: COLORS.orange,
+  fungicide: '#0A7EC2', insecticide: COLORS.red, miticide: COLORS.orange,
   systemic: COLORS.red, fertilizer: COLORS.green, supplement: COLORS.green, other: COLORS.grayMid,
 };
 export function TreeShrubTreatmentCard({ treatment = {} }) {
@@ -459,10 +507,12 @@ export function TreeShrubPhotoCards({ photos = [], summary = null }) {
       <div style={{ display: 'grid', gridTemplateColumns: print ? '1fr 1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
         {pics.map((p, i) => (
           <figure key={i} style={{ margin: 0 }}>
-            <img src={p.url} alt={p.label || 'Plant photo'} loading="lazy"
+            {/* Eager: presigned URLs — lazy deferred fetches past expiry
+                (same class as the lawn strip; owner-reported). */}
+            <img src={p.url} alt={p.label || 'Plant photo'}
               style={{ width: '100%', height: 180, objectFit: 'cover', borderRadius: 12, border: `1px solid ${BORDER}`, display: 'block' }} />
-            {p.label ? <figcaption style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 13, color: TEXT, marginTop: 7 }}>{p.label}</figcaption> : null}
-            {p.caption ? <div style={{ fontSize: 13, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{p.caption}</div> : null}
+            {p.label ? <figcaption style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT, marginTop: 7 }}>{p.label}</figcaption> : null}
+            {p.caption ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{p.caption}</div> : null}
           </figure>
         ))}
       </div>
@@ -472,7 +522,7 @@ export function TreeShrubPhotoCards({ photos = [], summary = null }) {
 }
 
 // ── 7. Trends across visits ─────────────────────────────────────────────────────
-function TrendChart({ title, sub, points = [], accent = COLORS.teal, compact = false }) {
+function TrendChart({ title, sub, points = [], accent = '#0A7EC2', compact = false }) {
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const pts = (points || []).map((p) => ({ label: p.label, value: toScore(p.value) })).filter((p) => Number.isFinite(p.value));
@@ -527,7 +577,10 @@ export function TreeShrubTrends({ trends = {} }) {
   const minis = [
     foliage && { key: 'foliage', title: 'Foliage Fullness', sub: 'higher is better', points: foliage },
     color && { key: 'color', title: 'Leaf Color & Vigor', sub: 'higher is better', points: color },
-    pest && { key: 'pest', title: 'Pest Pressure', sub: 'higher is better', points: pest },
+    // the series is the INVERTED pest_activity cleanliness score (higher =
+    // cleaner) — titled "Pest Pressure" it read as rising pests being good;
+    // named honestly like lawn's "Weed Cleanliness" (audit 2026-07-16)
+    pest && { key: 'pest', title: 'Pest Cleanliness', sub: 'higher is better', points: pest },
     water && { key: 'water', title: 'Water / Heat Stress', sub: 'higher is better', points: water },
   ].filter(Boolean).filter((m) => (m.points || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2);
   if (!hasOverall && !minis.length) return null;

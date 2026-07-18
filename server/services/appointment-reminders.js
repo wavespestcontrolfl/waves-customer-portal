@@ -42,6 +42,10 @@ const { buildRescheduleLink } = require('./reschedule-link');
 const SELF_HEAL_TERMINAL_STATUSES = new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
 const REMINDER_BLOCKING_STATUSES = new Set([...SELF_HEAL_TERMINAL_STATUSES, 'rescheduled']);
 
+// Per-run cap for the registration self-heal sweep (selfHealMissingReminderRows).
+// Bounds each 15-min cron run; a large backlog drains within a few hours.
+const SELF_HEAL_REGISTRATION_LIMIT = 25;
+
 // ── SMS → email fallback ──
 // Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
 // carrier-undeliverable / no mobile / blocked) we send the same information by
@@ -74,10 +78,45 @@ function looksLikeEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
 }
 
+// True when at least one of the appointment's SMS recipients (the same set
+// getAppointmentContacts routes sends to) has a delivered SMS in the last 60
+// days AND could still receive one today: SMS not disabled at the customer
+// level and no active suppression (STOP / wrong number / DNC / carrier
+// landline) on that number. Checking the recipient set — not just the primary
+// phone — matters when the notice routes to a distinct service contact; the
+// owner's phone being reachable doesn't reach the person the appointment
+// notifies. Best-effort — DB misses fail open per leg but never throw.
+async function hasTextReachableApptRecipient(customer) {
+  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  // sms_enabled=false blocks every SMS to this customer at send time, so a
+  // past delivery can't make them text-reachable today.
+  if (prefs?.sms_enabled === false) return false;
+
+  for (const contact of getAppointmentContacts(customer, prefs || {})) {
+    const digits = lastTenDigits(contact.phone);
+    if (!digits) continue;
+    const delivered = await db('sms_log')
+      .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+      .where('status', 'delivered')
+      .where('created_at', '>=', db.raw("now() - interval '60 days'"))
+      .first('id')
+      .catch(() => null);
+    if (!delivered) continue;
+    // An active suppression blocks every send now, regardless of history.
+    const suppressed = await db('messaging_suppression')
+      .whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+      .where('active', true)
+      .first('phone')
+      .catch(() => null);
+    if (!suppressed) return true;
+  }
+  return false;
+}
+
 // Raise a single admin alert when an appointment notice can reach the customer
 // by neither SMS nor email, so a human can call them or add an email. Deduped to
 // one bell entry per customer+occurrence per 24h.
-async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = null }) {
+async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = null, emailReason = 'missing' }) {
   try {
     if (!customerId) return;
     const dedupeKey = `appt-no-channel:${customerId}:${scheduledServiceId || kind}`;
@@ -90,14 +129,37 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
     if (existing) return;
 
     const customer = await db('customers').where({ id: customerId }).first().catch(() => null);
+
+    // False-positive guard: this alert claims the customer is reachable by
+    // "neither text nor email". But a one-off Twilio 30006 permanently caches the
+    // primary phone as landline, and a suppressed email (hard bounce / spam
+    // complaint) blocks the email leg — so a customer whose mobile actually
+    // DELIVERS texts can wrongly trip this bell. Before ringing it, confirm there
+    // is genuinely no working text channel — judged against the numbers this
+    // appointment actually notifies AND their current eligibility, so an old
+    // delivery to an opted-out number (or to the owner when the notice routes
+    // to a service contact) doesn't swallow a real alert.
+    if (customer && await hasTextReachableApptRecipient(customer)) {
+      logger.info(`[appt-remind] Suppressed no-channel alert for customer ${customerId} (${kind}) — recent delivered SMS to an appointment recipient proves text-reachable`);
+      return;
+    }
+
     const name = customer
       ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || customer.company_name || 'Customer')
       : 'Customer';
     const label = FALLBACK_KIND_LABEL[kind] || 'appointment notice';
+    // State the ACTUAL email failure. The old copy hardcoded "(landline / no
+    // mobile) and there is no email on file", which misreported suppressed
+    // addresses as missing ones (prod 2026-07-07: customer HAD an email on
+    // file — it was hard-bounced) and asserted a landline diagnosis this
+    // code never made. SMS failure detail isn't available here; don't guess.
+    const emailClause = emailReason === 'suppressed'
+      ? 'the email address on file is suppressed (hard bounce / do-not-email) — collect a working address'
+      : 'there is no email on file';
     await NotificationService.notifyAdmin(
       'alert',
       'Appointment notice undeliverable — no text or email',
-      `${name}: the ${label} could not be delivered by text (landline / no mobile) and there is no email on file. Call the customer or add an email address.`,
+      `${name}: the ${label} could not be delivered by text, and ${emailClause}. Call the customer.`,
       {
         link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
         metadata: { dedupeKey, customer_id: customerId, scheduled_service_id: scheduledServiceId, kind },
@@ -158,7 +220,12 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
     // No usable channel: the SMS failed and email is either unavailable (no
     // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
     // which block even transactional sends). Alert a human to reach the customer.
-    await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    await alertNoReachableChannel({
+      customerId,
+      kind,
+      scheduledServiceId,
+      emailReason: res?.blocked ? 'suppressed' : 'missing',
+    });
   } else if (res?.reason !== 'unsupported_kind') {
     logger.warn(`[appt-remind] ${kind} email fallback not sent for customer ${customerId}: ${res?.reason || res?.error || 'unknown'}`);
   }
@@ -190,13 +257,17 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     }
   };
 
+  // The no-channel alert copy states the ACTUAL email failure — carry it
+  // from whichever email result this path saw (suppressed vs missing).
+  const emailReasonOf = (res) => (res?.blocked ? 'suppressed' : 'missing');
+
   if (ch === 'email') {
     const res = await sendAppointmentNoticeEmail(emailArgs);
     if (res?.ok) return true;
     // No usable email (none on file / suppressed) — reach them by text instead.
     logger.info(`[appt-remind] ${kind} email channel unavailable for ${customerId} (${res?.reason || res?.error || 'unknown'}) — falling back to SMS`);
     const smsOk = await runSms();
-    if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(res) });
     return smsOk;
   }
 
@@ -206,7 +277,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     const emailOk = !!emailRes?.ok;
     // Neither channel reached the customer — raise the same human-follow-up
     // alert the SMS-only path uses.
-    if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(emailRes) });
     return smsOk || emailOk;
   }
 
@@ -400,9 +471,17 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
   // string split corrupts them. Suppressed sibling rows keep their
   // scheduled_service_id, which joins to the untouched source name;
   // ar.service_type is only the fallback for legacy rows with no link.
+  // Only services the customer will actually receive at this slot belong in
+  // the label: a 'rescheduled' pending-rebook placeholder or terminal row
+  // parked on the slot must not be advertised in confirmations/reminders.
+  // Suppressed-but-sendable siblings stay — the owner texts on their behalf.
+  // Legacy rows with no linked service keep their fallback label.
   const rows = await conn('appointment_reminders as ar')
     .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
     .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
+    .andWhere(function liveServiceSendableOrLegacy() {
+      this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+    })
     .orderBy('ar.created_at', 'asc')
     .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
 
@@ -746,10 +825,48 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
   }
 }
 
+// A reminder-registration failure used to be logger.error-only, so the
+// customer silently got NO confirmation and NO 72h/24h reminder texts.
+// Surface it on the admin notification feed, deduped per visit so replays
+// (regenerate-brief, sweeps) don't stack cards. Best-effort by contract:
+// an alert failure must never throw back into the registration path.
+async function alertRegistrationFailure({ scheduledServiceId, customerId, source, errorMessage }) {
+  try {
+    const NotificationService = require('./notification-service');
+    const dedupeKey = `reminder-registration-failed:${scheduledServiceId || customerId || 'unknown'}`;
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .where('created_at', '>=', db.raw("now() - interval '72 hours'"))
+      .first('id');
+    if (existing) return;
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Appointment reminders not registered',
+      `Reminder registration failed for visit ${scheduledServiceId || '(unknown)'}${source ? ` (${source})` : ''} — the customer will get no confirmation or 72h/24h reminder texts unless the visit is re-saved.${errorMessage ? ` Error: ${errorMessage}` : ''}`,
+      {
+        link: '/admin/dispatch',
+        metadata: {
+          dedupeKey,
+          scheduled_service_id: scheduledServiceId || null,
+          customer_id: customerId || null,
+          source: source || null,
+        },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[appt-remind] registration-failure alert failed: ${err.message}`);
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
 const AppointmentReminders = {
+
+  // Exposed for route-level registration wrappers (spawned-visit path in
+  // admin-schedule) that catch their own errors outside registerAppointment.
+  alertRegistrationFailure,
 
   /**
    * Durably register a reminder row for a freshly-created visit using the
@@ -763,13 +880,17 @@ const AppointmentReminders = {
    * roll back the visit/payment it rides with. Unlike registerAppointment() this
    * takes the caller's conn rather than opening its own transaction.
    */
-  async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source }) {
+  async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source, createdAt }) {
     if (!conn || !scheduledServiceId || !customerId) return null;
     const apptTime = parseETDateTime(appointmentTime);
     if (isNaN(apptTime.getTime())) return null;
     const now = new Date();
     const serviceLabel = smsServiceLabelStored(serviceType) || serviceType || null;
     const reminderSource = source || 'system_seed';
+    // Optional booking-time override (self-heal passes the visit's real
+    // created_at): the 72h pass reads created_at as the booking time, so a
+    // late-registered row must not look freshly booked. Default DB now().
+    const createdAtOverride = createdAt ? { created_at: createdAt } : {};
 
     // Serialize against concurrent registrations for the same customer+time
     // (mirrors registerAppointment) so the same-time check below can't race.
@@ -787,8 +908,22 @@ const AppointmentReminders = {
     // a seed can collide with another service's reminder on the same date. Merge
     // the label into the existing row and insert THIS one fully suppressed (all
     // flags sent) so checkAndSendReminders() never sends two texts for one slot.
+    // Only a real OWNER counts (non-suppressed row the cron will deliver
+    // for) — a 'rescheduled' pending-rebook placeholder or terminal row
+    // parked on the slot must not swallow the new registration, or the
+    // real appointment would get no notifications at all. Unlinked legacy
+    // rows (NULL scheduled_service_id) DO own: the cron skips its
+    // live-status guard for them, so they send.
     const sameAppointment = await conn('appointment_reminders')
-      .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false })
+      .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false, suppressed_by_sibling: false })
+      .andWhere(function ownerDeliverable() {
+        this.whereNull('scheduled_service_id').orWhereExists(function ownerServiceSendable() {
+          this.select(1)
+            .from('scheduled_services')
+            .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']);
+        });
+      })
       .orderBy([
         { column: 'reminder_72h_sent', order: 'asc' },
         { column: 'reminder_24h_sent', order: 'asc' },
@@ -818,6 +953,11 @@ const AppointmentReminders = {
           reminder_24h_sent: true,
           reminder_24h_sent_at: now,
           cancelled: false,
+          // Durable marker — sibling suppression must be distinguishable from
+          // genuinely delivered reminders (the DB sync trigger's departure
+          // promotion only re-arms marked rows).
+          suppressed_by_sibling: true,
+          ...createdAtOverride,
         })
         .returning('*');
       return suppressed;
@@ -845,6 +985,7 @@ const AppointmentReminders = {
         reminder_24h_sent: twentyFourMissed,
         reminder_24h_sent_at: twentyFourMissed ? now : null,
         cancelled: false,
+        ...createdAtOverride,
       })
       .returning('*');
     return record;
@@ -887,8 +1028,20 @@ const AppointmentReminders = {
           return { record: existing, serviceLabel: existing.service_type, inserted: false, reason: 'already_registered' };
         }
 
+        // Owner-only dedup — see registerVisitReminderInTx: a suppressed
+        // sibling or a cron-blocked ('rescheduled'/terminal) placeholder
+        // parked on the slot must not swallow this registration, while an
+        // unlinked legacy row (which the cron delivers for) still owns.
         const sameAppointment = await trx('appointment_reminders')
-          .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false })
+          .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false, suppressed_by_sibling: false })
+          .andWhere(function ownerDeliverable() {
+            this.whereNull('scheduled_service_id').orWhereExists(function ownerServiceSendable() {
+              this.select(1)
+                .from('scheduled_services')
+                .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
+                .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']);
+            });
+          })
           .orderBy([
             { column: 'reminder_72h_sent', order: 'asc' },
             { column: 'reminder_24h_sent', order: 'asc' },
@@ -918,6 +1071,8 @@ const AppointmentReminders = {
             reminder_72h_sent_at: now,
             reminder_24h_sent: true,
             reminder_24h_sent_at: now,
+            // Durable marker — see registerVisitReminderInTx.
+            suppressed_by_sibling: true,
           }).returning('*');
 
           return {
@@ -984,6 +1139,7 @@ const AppointmentReminders = {
       return record;
     } catch (err) {
       logger.error(`[appt-remind] registerAppointment failed: ${err.message}`);
+      await alertRegistrationFailure({ scheduledServiceId, customerId, source, errorMessage: err.message });
       return null;
     }
   },
@@ -1027,12 +1183,101 @@ const AppointmentReminders = {
   },
 
   /**
+   * Registration self-heal. Every cron / reschedule / cancel path in this
+   * service drives off appointment_reminders — but a visit inserted outside
+   * the booking paths (manual DB backfill, one-off script) never got a row
+   * registered, so that customer silently gets no confirmation and no
+   * 72h/24h reminders (2026-07-15: a customer's re-anchored quarterly series
+   * had no rows — no reminder would ever have fired). Register any future,
+   * non-terminal visit that lacks a row. registerVisitReminderInTx semantics
+   * apply: no confirmation SMS goes out (confirmation_sent=true),
+   * already-unreachable windows are pre-marked, and same-customer/same-time
+   * visits merge into one reminder. Capped per run; the 15-min cadence
+   * drains a backlog within hours. Never throws.
+   */
+  async selfHealMissingReminderRows() {
+    let healed = 0;
+    try {
+      const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+      const missing = await db('scheduled_services as ss')
+        .leftJoin('appointment_reminders as ar', 'ar.scheduled_service_id', 'ss.id')
+        .whereNull('ar.id')
+        .whereNotNull('ss.customer_id')
+        .whereNotIn('ss.status', [...SELF_HEAL_TERMINAL_STATUSES])
+        // scheduled_date is a DATE column — compare against the ET calendar
+        // day as a plain date string (a timestamptz bound would shift the
+        // boundary by the session offset).
+        .where('ss.scheduled_date', '>=', etDateString(new Date()))
+        // Dispatch-owned pending bookings (call follow-ups, outbound-review
+        // bookings) are left unarmed ON PURPOSE until the office confirms —
+        // arming them here would text the customer first. admin-schedule
+        // registers them at the office-confirm transition. NULL-safe on
+        // purpose: NOT (pending AND source_action IN (...)) is NULL — not
+        // true — for NULL source_action, which would silently drop ordinary
+        // pending visits with no source marker from the sweep.
+        .where(function () {
+          this.whereNot('ss.status', 'pending')
+            .orWhereNull('ss.source_action')
+            .orWhereNotIn('ss.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
+        })
+        .whereNotExists(function () {
+          this.select(1)
+            .from('customers')
+            .whereRaw('customers.id = ss.customer_id')
+            .whereNotNull('customers.deleted_at');
+        })
+        .orderBy('ss.scheduled_date', 'asc')
+        .limit(SELF_HEAL_REGISTRATION_LIMIT)
+        .select('ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.created_at');
+
+      for (const svc of missing) {
+        try {
+          // DATE columns hydrate as a JS Date at UTC midnight (TZ=UTC in
+          // prod) — take the UTC calendar day, same as scheduledServiceApptTime.
+          // Formatting that instant in ET would move the day back by one.
+          const datePart = svc.scheduled_date instanceof Date
+            ? svc.scheduled_date.toISOString().slice(0, 10)
+            : String(svc.scheduled_date || '').slice(0, 10);
+          const windowStart = String(svc.window_start || '').slice(0, 5) || '08:00';
+          const record = await db.transaction((trx) => AppointmentReminders.registerVisitReminderInTx(trx, {
+            scheduledServiceId: svc.id,
+            customerId: svc.customer_id,
+            appointmentTime: `${datePart}T${windowStart}`,
+            serviceType: svc.service_type,
+            source: 'cron_selfheal',
+            // Preserve the visit's real booking time: the 72h pass skips
+            // "booked < 72h before appointment" off created_at, and a healed
+            // row stamped with the cron time would wrongly skip that reminder.
+            createdAt: svc.created_at,
+          }));
+          if (record) healed += 1;
+        } catch (err) {
+          logger.error(`[appt-remind] Self-heal registration failed for ${svc.id}: ${err.message}`);
+        }
+      }
+      if (healed) {
+        logger.info(
+          `[appt-remind] Self-healed ${healed} missing reminder row(s)` +
+          (missing.length === SELF_HEAL_REGISTRATION_LIMIT ? ' (cap hit — more next run)' : '')
+        );
+      }
+    } catch (err) {
+      logger.error(`[appt-remind] Self-heal registration sweep failed: ${err.message}`);
+    }
+    return healed;
+  },
+
+  /**
    * Check and send 72h and 24h reminders.
    * Called by cron every 15 minutes.
    */
   async checkAndSendReminders() {
     const results = { sent72h: 0, sent24h: 0, skipped: 0, errors: 0 };
     const now = new Date();
+
+    // Registration self-heal first, so a visit missing its reminder row joins
+    // this same run's confirmation-recovery and reminder passes below.
+    await AppointmentReminders.selfHealMissingReminderRows();
 
     // Durability backstop for deferred confirmations. Admin saves insert the
     // reminder row with confirmation_sent=false and fire the Twilio send off the
@@ -1159,6 +1404,12 @@ const AppointmentReminders = {
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
+            // Card-hold fee policy clause (card-on-file spec Phase 1) — ''
+            // for non-held bookings so the template placeholder resolves
+            // clean. Lazy require: estimate-card-holds requires THIS module
+            // for appointment times, so a top-level import would cycle.
+            const cardHoldPolicyLine72 = await require('./estimate-card-holds')
+              .cardHoldReminderLine(r.scheduled_service_id);
             await deliverAppointmentNotice({
               channel: channel72,
               kind: '72h',
@@ -1171,7 +1422,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1223,6 +1474,9 @@ const AppointmentReminders = {
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
+            // Card-hold fee policy clause — see the 72h twin above.
+            const cardHoldPolicyLine24 = await require('./estimate-card-holds')
+              .cardHoldReminderLine(r.scheduled_service_id);
             await deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
@@ -1235,7 +1489,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_24h',
-                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line },
+                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1454,32 +1708,66 @@ const AppointmentReminders = {
         return record;
       }
 
-      // Send reschedule notice
-      const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-      if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
-        const day = formatDay(newApptTime);
-        const date = formatDate(newApptTime);
-        const time = formatTime(newApptTime);
+      // Send reschedule notice. Any unsent outcome — safeSendAppointment
+      // returning false, a missing customer, or a throw anywhere in the
+      // attempt — must re-arm the 72h window so the cron's fallback reminder
+      // still delivers the new time. Without this, the DB sync trigger's
+      // pre-covered flag survives (startMoved sees the already-synced
+      // appointment_time) and the customer would get only the 24h text.
+      let noticeSent = false;
+      try {
+        const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
+        if (customer) {
+          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+          const day = formatDay(newApptTime);
+          const date = formatDate(newApptTime);
+          const time = formatTime(newApptTime);
 
-        const serviceLabel = smsServiceLabelStored(record.service_type);
-        const sent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-          return renderRequiredTemplate('appointment_rescheduled', {
-            first_name: firstName,
-            service_type: serviceLabel,
-            day,
-            date,
-            time,
-          }, {
-            workflow: 'appointment_rescheduled',
-            entity_type: 'scheduled_service',
-            entity_id: scheduledServiceId,
-          });
-        }, 'appointment_rescheduled', 'appointment_confirmation');
-        if (sent) {
-          await this.markRescheduleNoticeSent(scheduledServiceId);
-          logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+          const serviceLabel = smsServiceLabelStored(record.service_type);
+          noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
+            const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
+            return renderRequiredTemplate('appointment_rescheduled', {
+              first_name: firstName,
+              service_type: serviceLabel,
+              day,
+              date,
+              time,
+            }, {
+              workflow: 'appointment_rescheduled',
+              entity_type: 'scheduled_service',
+              entity_id: scheduledServiceId,
+            });
+          }, 'appointment_rescheduled', 'appointment_confirmation');
+          if (noticeSent) {
+            await this.markRescheduleNoticeSent(scheduledServiceId);
+            logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+          }
+        }
+      } finally {
+        if (!noticeSent && (newApptTime.getTime() - Date.now()) / 3600000 > 24.25) {
+          // Re-arm ONLY while the appointment is still inside the 72h
+          // delivery band — the cron's 72h branch never fires once
+          // hoursUntil <= 24.25, so a false flag there would just keep the
+          // row in every 15-minute scan forever (the still-armed 24h window
+          // carries the fallback for those). Guarded three ways so a failed
+          // attempt only re-arms state it still owns:
+          //   • appointment_time — a newer reschedule to a different time
+          //     (which may have sent its own notice) makes this a no-op;
+          //   • updated_at = this invocation's own write — an overlapping
+          //     SAME-time attempt that succeeded afterward (its
+          //     markRescheduleNoticeSent bumps updated_at) is not clobbered;
+          //   • suppressed_by_sibling — a row the DB sync trigger suppressed
+          //     under a slot owner stays quiet; re-arming it would
+          //     double-text the customer.
+          await db('appointment_reminders')
+            .where({
+              id: record.id,
+              appointment_time: newApptTime,
+              updated_at: now,
+              suppressed_by_sibling: false,
+            })
+            .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() })
+            .catch((rearmErr) => logger.error(`[appt-remind] 72h re-arm after failed notice failed: ${rearmErr.message}`));
         }
       }
 
@@ -1499,11 +1787,15 @@ const AppointmentReminders = {
 
       const records = await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
-        .select('id', 'appointment_time');
+        .select('id', 'appointment_time', 'suppressed_by_sibling');
 
       const now = new Date();
       let updated = 0;
       for (const record of records || []) {
+        // A sibling-suppressed row must stay fully suppressed — recomputing
+        // its flags from the appointment time would put it back in the cron's
+        // send set alongside the slot's owner (duplicate reminders).
+        if (record.suppressed_by_sibling) continue;
         const { alreadyInside72hWindow, alreadyInside24hWindow } = reminderFlagsCoveredByNotice(record.appointment_time, now);
         await db('appointment_reminders')
           .where({ id: record.id })

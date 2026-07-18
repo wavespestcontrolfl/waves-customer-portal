@@ -92,7 +92,10 @@ router.get('/:token', async (req, res, next) => {
           .first('photo_s3_key', 'photo_url');
         if (tech) {
           const { resolveTechPhotoUrl } = require('../services/tech-photo');
-          techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
+          // Customer-dwell TTL: rate pages sit open for hours (the
+          // tech-photo helper's own docs sanction longer TTLs here).
+          const { CUSTOMER_DWELL_TTL_SECONDS } = require('../services/photos');
+          techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url, CUSTOMER_DWELL_TTL_SECONDS);
         }
       } catch (err) {
         logger.warn(`[review-gate] tech photo resolve failed: ${err.message}`);
@@ -419,10 +422,12 @@ Rules:
 
 Return ONLY the review body. No quotes, no preamble, no sign-off.`;
 
-    // Low-cost OpenAI first, Claude Sonnet backup; deterministic template last.
+    // VOICE-tier customer-voice copy — a warm natural voice beats raw
+    // reasoning for a real Google review — with cross-provider failover;
+    // deterministic template last.
     let reviewText = '';
     try {
-      const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
         text: prompt,
         jsonMode: false,
         maxTokens: 256,

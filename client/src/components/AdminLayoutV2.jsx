@@ -53,10 +53,9 @@ import {
   Send,
   Newspaper,
   Bot,
-  Leaf,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
-import { refetchFlags } from "../hooks/useFeatureFlag";
+import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { adminFetch } from "../utils/admin-fetch";
 import NotificationBell from "./NotificationBell";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
@@ -88,8 +87,10 @@ const NAV_SECTIONS = [
       { path: "/admin/pipeline", icon: ClipboardList, label: "Pipeline" },
       { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
       { path: "/admin/timetracking", icon: Clock, label: "Staff" },
-      { path: "/admin/service-library", icon: BookOpen, label: "Services" },
-      { path: "/admin/projects", icon: FileText, label: "Projects" },
+      { path: "/admin/service-library", icon: BookOpen, label: "Services", adminOnly: true },
+      // Ratified Q7 (universal one-time services): label-only rename —
+      // route and files stay /admin/projects.
+      { path: "/admin/projects", icon: FileText, label: "Jobs" },
       { path: "/admin/contracts", icon: FileText, label: "Contracts" },
     ],
   },
@@ -121,15 +122,15 @@ const NAV_SECTIONS = [
     section: "Agents",
     items: [
       { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
+      { path: "/admin/agent-estimate", icon: Sparkles, label: "Agent Estimate", flag: "agent_estimate" },
     ],
   },
   {
     section: "Field & Equipment",
     items: [
-      // The standalone photo-scoring flow (/admin/lawn-assessment) survived the
-      // V2 shell cutover as a route but lost its nav entry — restore it so the
-      // upload → analyze → review-scores area is reachable again.
-      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
+      // The field photo-scoring flow now lives on the Assessments hub
+      // (/admin/lawn-assessments?tab=field) under Marketing — one
+      // consolidated section instead of two assessment areas.
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
       { path: "/admin/price-match", icon: Tags, label: "Price Match" },
@@ -152,6 +153,7 @@ const NAV_SECTIONS = [
       { path: "/admin/banking", icon: Landmark, label: "Banking" },
       { path: "/admin/tax", icon: Receipt, label: "Taxes" },
       { path: "/admin/pricing-logic", icon: Calculator, label: "Pricing" },
+      { path: "/admin/price-change", icon: Megaphone, label: "Price Notices" },
     ],
   },
   {
@@ -182,14 +184,19 @@ export default function AdminLayoutV2() {
   const location = useLocation();
   const isMobile = useIsMobile();
   const [user, setUser] = useState(null);
+  const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
 
   // Restore route if we just returned from WavesPay (iOS often evicts the
   // tab during the hand-off, reloading the app to its default route).
   // See lib/tapToPayReturn.js.
   useEffect(() => {
     consumeSnapshotOnMount(navigate);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    // Mount-only by design (react-hooks/exhaustive-deps isn't configured in
+    // the errors-only lint config — a disable directive for it is itself an
+    // unknown-rule error).
+  }, []);
   const paletteRef = useRef(null);
 
   useEffect(() => {
@@ -198,16 +205,36 @@ export default function AdminLayoutV2() {
       navigate("/admin/login", { replace: true });
       return;
     }
-    const u = localStorage.getItem("waves_admin_user");
-    if (u) setUser(JSON.parse(u));
-    adminFetch("/admin/auth/me").catch((err) => {
-      if (err?.status === 401) {
-        localStorage.removeItem("waves_admin_token");
-        localStorage.removeItem("waves_admin_user");
-        refetchFlags();
-        navigate("/admin/login", { replace: true });
-      }
-    });
+    adminFetch("/admin/auth/me")
+      .then((profile) => {
+        if (!profile) {
+          setAuthStatus("error");
+          return;
+        }
+        if (profile.mustChangePassword) {
+          localStorage.removeItem("waves_admin_token");
+          localStorage.removeItem("waves_admin_user");
+          refetchFlags().catch(() => {});
+          navigate("/admin/forgot-password", {
+            replace: true,
+            state: { email: profile.email, resetRequired: true },
+          });
+          return;
+        }
+        setUser(profile);
+        setAuthStatus("ready");
+        localStorage.setItem("waves_admin_user", JSON.stringify(profile));
+      })
+      .catch((err) => {
+        if (err?.status === 401) {
+          localStorage.removeItem("waves_admin_token");
+          localStorage.removeItem("waves_admin_user");
+          refetchFlags().catch(() => {});
+          navigate("/admin/login", { replace: true });
+          return;
+        }
+        setAuthStatus("error");
+      });
   }, [navigate]);
 
   // Auto-close sidebar on route change (mobile) + when viewport grows to desktop.
@@ -228,7 +255,7 @@ export default function AdminLayoutV2() {
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
-    refetchFlags();
+    refetchFlags().catch(() => {});
     navigate("/admin/login", { replace: true });
   };
 
@@ -465,7 +492,10 @@ export default function AdminLayoutV2() {
               >
                 {section}
               </div>
-              {items.map(({ path, icon: Icon, label }) => {
+              {items
+                .filter((item) => !item.adminOnly || user?.role === "admin")
+                .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
+                .map(({ path, icon: Icon, label }) => {
                 const isActive =
                   location.pathname === path ||
                   (path === "/admin/schedule" &&
@@ -625,7 +655,15 @@ export default function AdminLayoutV2() {
         className="admin-main"
         ref={mainRef}
       >
-        <Outlet />
+        {authStatus === "ready" ? (
+          <Outlet context={{ user }} />
+        ) : (
+          <div role={authStatus === "error" ? "alert" : "status"}>
+            {authStatus === "error"
+              ? "Unable to verify staff access. Refresh to try again."
+              : "Verifying staff access…"}
+          </div>
+        )}
       </div>
 
       {/* Mobile bottom tab bar */}

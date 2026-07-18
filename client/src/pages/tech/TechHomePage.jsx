@@ -40,19 +40,31 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
-import CreateProjectModal from '../../components/tech/CreateProjectModal';
+import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
+import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
+import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
+
+// In-place report editor for project-backed visits (WDO, pre-treat cert —
+// owner ask 2026-07-13): tapping a visit whose report already exists opens
+// that report right here, like the pest completion, instead of re-opening
+// a create form (duplicate risk) or leaving the portal. Lazy so the admin
+// Jobs module stays out of the tech bundle until first use.
+const ProjectDetail = lazy(() =>
+  import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
+);
 
 const DARK = {
   bg: '#0f1923',
@@ -80,8 +92,22 @@ function isTypedFindingsService(service) {
   return !!service?.completionProfile?.findingsType;
 }
 
-function typedFindingsNotice() {
-  alert('This service completes through the Dispatch completion form (with its service-specific fields) — open Dispatch to finish the visit.');
+// C4 (universal one-time services, ratified Q9): instead of an alert telling
+// the tech to go find the job in Dispatch, deep-link straight into the
+// dispatch completion for this service — DispatchPageV2 consumes
+// ?completeService and opens the typed completion panel (the only tech is
+// the owner, so the admin surface is always reachable). Terminal visits
+// refuse the deep-link (Codex P1): the completion endpoint would accept a
+// re-submission with a fresh idempotency key, minting duplicate
+// artifacts/invoices/SMS.
+const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped", "no_show"]);
+function openTypedCompletion(service) {
+  const status = String(service?.status || "");
+  if (TERMINAL_SERVICE_STATUSES.has(status)) {
+    alert(`This visit is already ${status} — nothing to complete.`);
+    return;
+  }
+  window.location.assign(`/admin/dispatch?tab=schedule&completeService=${encodeURIComponent(service.id)}`);
 }
 
 // adminFetch-style helper for the tech portal: bearer-token fetch against
@@ -158,10 +184,12 @@ export default function TechHomePage() {
   const navigate = useNavigate();
   const [schedule, setSchedule] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
+  const [leadTarget, setLeadTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
@@ -181,17 +209,18 @@ export default function TechHomePage() {
 
   const fetchSchedule = useCallback(async () => {
     try {
+      setScheduleError('');
       const token = getAdminAuthToken();
       const today = etDateString();
       const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setSchedule(scheduleRowsFromResponse(data));
-      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
+      setSchedule(scheduleRowsFromResponse(data));
     } catch (err) {
       console.error('Failed to fetch schedule:', err);
+      setScheduleError(err.message || 'Your route could not be loaded.');
     } finally {
       setLoading(false);
     }
@@ -319,7 +348,16 @@ export default function TechHomePage() {
       customerId: service.customer_id || service.customerId || '',
       customerLabel: service.customer_name || service.customerName || '',
       scheduledServiceId: service.id || '',
-      projectDate: service.scheduled_date || etDateString(),
+      // The visit's own calendar date, NOT "today at tap time": the day-view
+      // payload is camelCase (scheduledDate, already 'YYYY-MM-DD'), so the
+      // old snake_case read always fell through to etDateString() and a
+      // report opened after midnight for yesterday's route stamped the wrong
+      // inspection date. slice(0,10) also guards a raw ISO-serialized DATE
+      // column from an alternate payload shape.
+      projectDate: String(service.scheduledDate || service.scheduled_date || '').slice(0, 10) || etDateString(),
+      // The WDO line's own net price (never the pre-discount base, never a
+      // multi-service group total) — see wdoFeeSeedFromVisit.
+      visitPrice: wdoFeeSeedFromVisit(service),
       // The linked service's own profile picks the project type (same as the
       // DispatchPageV2 path) — the explicit allowedProjectTypes override also
       // keeps project_required keys creatable after their project type became
@@ -328,22 +366,50 @@ export default function TechHomePage() {
     } : {});
     setShowCreateProject(true);
   }, []);
+  // A visit whose report already exists (linkedProject rides the schedule
+  // payload) CONTINUES that report in place — re-opening the create form
+  // would mint a duplicate project for the same visit.
+  const [continueProjectId, setContinueProjectId] = useState(null);
+  const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
+  useEffect(() => {
+    if (!continueProjectId || projectTypesRegistry) return;
+    fetch(`${API}/api/admin/projects/types`, {
+      headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
+    })
+      .then((r) => r.json())
+      .then((d) => setProjectTypesRegistry(d.types || {}))
+      .catch(() => setProjectTypesRegistry({}));
+  }, [continueProjectId, projectTypesRegistry]);
+  const openProjectOrContinue = useCallback((service) => {
+    // Terminal guard (Codex P1 + r3, stricter than DispatchPageV2's
+    // projectCompletionIsClosed on purpose): a completed visit, a closed
+    // report, or a SENT report is a delivered customer-facing compliance
+    // record — the field portal must not reopen it for editing. Admin
+    // corrections go through the Jobs page / dispatch.
+    const linkedStatus = service?.linkedProject?.status;
+    if (linkedStatus === 'closed' || linkedStatus === 'sent' || service?.status === 'completed') return;
+    if (service?.linkedProject?.id) {
+      setContinueProjectId(service.linkedProject.id);
+      return;
+    }
+    openProjectForService(service);
+  }, [openProjectForService]);
   const handleProjectQuickAction = useCallback(() => {
     if (myServices.length === 1) {
       const only = myServices[0];
       // Same routing as the row/picker handlers — a cut-over typed job must
       // not open CreateProjectModal through the quick action either.
       if (isTypedFindingsService(only)) {
-        typedFindingsNotice();
+        openTypedCompletion(only);
       } else if (isPestControlService(only)) {
         setRecapService(only);
       } else {
-        openProjectForService(only);
+        openProjectOrContinue(only);
       }
       return;
     }
     setShowProjectPicker(true);
-  }, [myServices, openProjectForService]);
+  }, [myServices, openProjectOrContinue]);
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
@@ -383,6 +449,21 @@ export default function TechHomePage() {
 
       {/* Field Assistant */}
       <TechIntelligenceBar />
+
+      <TechTimeTrackingCard nextStop={nextStop} />
+
+      {scheduleError && (
+        <div role="alert" style={{
+          background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
+          borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 13,
+        }}>
+          <div style={{ marginBottom: 8 }}>{scheduleError}</div>
+          <button type="button" onClick={fetchSchedule} style={{
+            border: '1px solid #ef4444', background: 'transparent', color: '#ef4444',
+            borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: 'pointer',
+          }}>Retry route</button>
+        </div>
+      )}
 
       {/* Quick Actions */}
       <h2 style={{
@@ -462,6 +543,32 @@ export default function TechHomePage() {
               {nextStop.time || nextStop.scheduled_time || 'Pending'}
             </span>
           </div>
+          {/* Property alerts — the server compiles gate codes, pets, chemical
+              sensitivities, access/parking notes, and the appointment note
+              into propertyAlerts (admin-schedule.js day view). Same data the
+              dispatch board chips show; without this the tech had to ask the
+              Intelligence Bar for the gate code. Objects here ({type, text});
+              tolerate plain strings for the dispatch-shaped payload. */}
+          {Array.isArray(nextStop.propertyAlerts) && nextStop.propertyAlerts.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {nextStop.propertyAlerts.map((a, i) => {
+                const text = typeof a === 'string' ? a : a?.text;
+                if (!text) return null;
+                const isChemical = a?.type === 'chemical';
+                return (
+                  <div key={i} style={{
+                    fontSize: 12,
+                    color: isChemical ? '#ef4444' : DARK.text,
+                    marginBottom: 3,
+                    paddingLeft: 8,
+                    borderLeft: `2px solid ${isChemical ? '#ef4444' : DARK.teal}`,
+                  }}>
+                    {text}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8 }}>
             <ActionBtn label="Navigate" icon="🗺️" onClick={() => {
               const addr = nextStop.address;
@@ -514,7 +621,9 @@ export default function TechHomePage() {
             {/* Only celebrate when every stop actually completed — a route
                 that ended on a no-show/cancelled/skipped stop has no next
                 stop but isn't a clean sweep, so don't flash the 🎉. */}
-            {total === 0
+            {scheduleError
+              ? 'Route unavailable — retry above.'
+              : total === 0
               ? 'No services scheduled today'
               : completed === total
                 ? 'All services completed! 🎉'
@@ -523,12 +632,8 @@ export default function TechHomePage() {
         </div>
       )}
 
-      {/* Today's Services — full list with Photos affordance per row.
-          Photos button hits POST /api/tech/services/:id/photos which
-          requires the service to be completed (server returns 409
-          otherwise; the modal surfaces that inline). Visible for all
-          statuses so techs can review/manage photos on any of their
-          day's stops, not just the next one. */}
+      {/* Today's Services — photos captured before completion are staged and
+          attached to the service record atomically when the visit closes. */}
       {!loading && myServices.length > 0 && (
         <>
           <h2 style={{
@@ -542,13 +647,14 @@ export default function TechHomePage() {
                 service={s}
                 onProject={() => (
                   isTypedFindingsService(s)
-                    ? typedFindingsNotice()
-                    : isPestControlService(s) ? setRecapService(s) : openProjectForService(s)
+                    ? openTypedCompletion(s)
+                    : isPestControlService(s) ? setRecapService(s) : openProjectOrContinue(s)
                 )}
                 onPhotos={() => setPhotoTarget({
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
                 })}
+                onLead={() => setLeadTarget(s)}
               />
             ))}
           </div>
@@ -559,15 +665,52 @@ export default function TechHomePage() {
 
       {showCreateProject && (
         <CreateProjectModal
+          presentation={projectDefaults?.scheduledServiceId ? 'sheet' : 'modal'}
           defaultCustomerId={projectDefaults?.customerId || ''}
           defaultCustomerLabel={projectDefaults?.customerLabel || ''}
           defaultScheduledServiceId={projectDefaults?.scheduledServiceId || ''}
           defaultProjectDate={projectDefaults?.projectDate || ''}
+          defaultInspectionFee={projectDefaults?.visitPrice ?? ''}
           defaultProjectType={projectDefaults?.projectType || ''}
           allowedProjectTypes={projectDefaults?.projectType ? [projectDefaults.projectType] : null}
           onClose={() => { setShowCreateProject(false); setProjectDefaults(null); }}
           onCreated={() => { setShowCreateProject(false); setProjectDefaults(null); }}
         />
+      )}
+
+      {continueProjectId && createPortal(
+        <div
+          /* Portaled to document.body at zIndex 50 so the stack lands right
+             (Codex P2): the overlay mounts AFTER #root, so it paints above
+             the TechLayout bottom nav (also z-50, inside #root) — and
+             ProjectDetail's confirmations use the shared Dialog portal
+             (z-50), which mounts LATER at body-end and therefore paints
+             above this scrim. A higher z here would bury the dialogs. */
+          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
+          onClick={() => { setContinueProjectId(null); fetchSchedule(); }}
+        >
+          {/* The report editor is a customer-document surface — it renders
+              light (V2) over the dark portal, same as the report preview. */}
+          <div
+            style={{ maxWidth: 900, margin: '20px auto', padding: '0 12px' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Suspense fallback={(
+              <div style={{ background: '#fff', borderRadius: 6, padding: 24, textAlign: 'center', color: '#71717A' }}>
+                Loading report…
+              </div>
+            )}>
+              <ProjectDetail
+                projectId={continueProjectId}
+                typesRegistry={projectTypesRegistry}
+                onClose={() => { setContinueProjectId(null); fetchSchedule(); }}
+                onChanged={() => fetchSchedule()}
+                canAdminActions={getAdminUser()?.role === 'admin'}
+              />
+            </Suspense>
+          </div>
+        </div>,
+        document.body,
       )}
 
       {showProjectPicker && (
@@ -576,9 +719,9 @@ export default function TechHomePage() {
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (isTypedFindingsService(service)) typedFindingsNotice();
+            if (isTypedFindingsService(service)) openTypedCompletion(service);
             else if (isPestControlService(service)) setRecapService(service);
-            else openProjectForService(service);
+            else openProjectOrContinue(service);
           }}
         />
       )}
@@ -602,6 +745,13 @@ export default function TechHomePage() {
           serviceId={photoTarget.id}
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
+        />
+      )}
+
+      {leadTarget && (
+        <FieldLeadModal
+          service={leadTarget}
+          onClose={() => setLeadTarget(null)}
         />
       )}
 
@@ -721,6 +871,7 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
 function TimecardSignoffCard({ techName }) {
   const [weekly, setWeekly] = useState(null);
   const [weekStart, setWeekStart] = useState(null);
+  const [reviewToken, setReviewToken] = useState(null);
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [signature, setSignature] = useState('');
@@ -741,10 +892,12 @@ function TimecardSignoffCard({ techName }) {
       if (!res.ok) {
         setWeekly(null);
         setPending(false);
+        setReviewToken(null);
       } else {
         const data = await res.json();
         setWeekly(data.weekly || null);
         setWeekStart(data.weekStart || null);
+        setReviewToken(data.reviewToken || null);
         setPending(data.pending === true);
         // Functional setter so we don't depend on `signature` here —
         // including it in the useCallback deps would cause this to
@@ -755,6 +908,7 @@ function TimecardSignoffCard({ techName }) {
       }
     } catch {
       setWeekly(null);
+      setReviewToken(null);
     } finally {
       // Always clear loading — a non-OK fetch used to early-return
       // before this line, leaving loading stuck true and the card
@@ -803,7 +957,11 @@ function TimecardSignoffCard({ techName }) {
       const r = await fetch(`${API}/api/tech/timetracking/sign-week`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ weekStart, signature: signature.trim() }),
+        body: JSON.stringify({
+          weekStart,
+          signature: signature.trim(),
+          reviewToken,
+        }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -869,7 +1027,7 @@ function TimecardSignoffCard({ techName }) {
   );
 }
 
-function ServiceRow({ service, onPhotos, onProject }) {
+function ServiceRow({ service, onPhotos, onProject, onLead }) {
   const status = service.status || 'pending';
   const statusColor = {
     completed: '#22c55e',
@@ -901,7 +1059,14 @@ function ServiceRow({ service, onPhotos, onProject }) {
           border: `1px solid ${DARK.border}`, background: 'transparent',
           color: DARK.teal, cursor: 'pointer',
         }}>
-          🗂️ Report
+          {/* A visit with an existing linked report continues it (in-place
+              editor) instead of creating a duplicate; a sent/closed report
+              or completed visit is terminal (openProjectOrContinue no-ops). */}
+          {service.linkedProject?.status === 'sent'
+            ? '🗂️ Sent'
+            : service.linkedProject?.status === 'closed' || service.status === 'completed'
+              ? '🗂️ Completed'
+              : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
         </button>
         <button onClick={onPhotos} style={{
           padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
@@ -909,6 +1074,13 @@ function ServiceRow({ service, onPhotos, onProject }) {
           color: DARK.teal, cursor: 'pointer',
         }}>
           📷 Photos
+        </button>
+        <button onClick={onLead} aria-label="Flag opportunity" style={{
+          padding: '6px 8px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+          border: `1px solid ${DARK.border}`, background: 'transparent',
+          color: '#f59e0b', cursor: 'pointer',
+        }}>
+          🚩
         </button>
       </div>
     </div>

@@ -45,7 +45,10 @@ const {
   buildOnSiteLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const {
+  promoteStagedPhotosForCompletedVisit,
+  sanitizeCustomerFacingPhotoCaption,
   uploadServicePhotoBuffer,
+  uploadStagedServicePhotoBuffer,
   VALID_PHOTO_TYPES,
 } = require('../services/service-photos');
 
@@ -129,6 +132,15 @@ router.post('/:id/en-route', async (req, res, next) => {
           });
         });
       } catch (err) {
+        // The shared writer's review-booking guard is an EXPECTED block here
+        // (this route allows 'pending' as a source status) — surface it as a
+        // conflict, not a 500.
+        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+          return res.status(409).json({
+            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+            code: 'outbound_review_unconfirmed',
+          });
+        }
         if (err && err.message && err.message.includes('not in state')) {
           return res.status(409).json({
             error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -221,6 +233,13 @@ router.post('/:id/on-site', async (req, res, next) => {
           });
         });
       } catch (err) {
+        // Same expected-block translation as the en-route leg above.
+        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+          return res.status(409).json({
+            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+            code: 'outbound_review_unconfirmed',
+          });
+        }
         if (err && err.message && err.message.includes('not in state')) {
           return res.status(409).json({
             error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -346,12 +365,8 @@ router.post('/:id/rain-out', async (req, res, next) => {
 
 // POST /api/tech/services/:id/photos — tech-portal field photo upload.
 //
-// Multipart upload. Tech attaches a photo to a completed service
-// they're assigned to. service_photos.service_record_id is NOT NULL
-// in the schema, so the service must already have a service_record
-// (i.e., the completion route POST /api/admin/dispatch/:serviceId/complete
-// from PR #330 must have run). 409 with a clear message if not — UI
-// surfaces "Complete the service first."
+// Multipart upload. Photos captured before completion are staged against the
+// scheduled visit; completed visits write directly to service_photos.
 //
 // Why service_record_id and not scheduled_service_id directly:
 //   service_records is the canonical "completion happened" audit
@@ -373,7 +388,6 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
         error: `Invalid photoType — must be one of: ${[...VALID_PHOTO_TYPES].join(', ')}`,
       });
     }
-
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
       .first('id', 'customer_id', 'technician_id', 'scheduled_date');
@@ -385,6 +399,7 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
     if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
+    const caption = sanitizeCustomerFacingPhotoCaption(req.body.caption);
 
     // Find the service_record for this scheduled_service via the
     // direct FK (migration 20260427000007). The completion route
@@ -398,9 +413,37 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       .first('id');
 
     if (!serviceRecord) {
-      return res.status(409).json({
-        error: 'Service must be completed before attaching photos',
+      const row = await uploadStagedServicePhotoBuffer({
+        scheduledServiceId: svc.id,
+        technicianId: req.technicianId,
+        buffer: req.file.buffer,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        photoType,
+        sortOrder: req.body.sortOrder,
+        caption,
+        gpsLat: req.body.gpsLat,
+        gpsLng: req.body.gpsLng,
+        capturedAt: req.body.capturedAt,
       });
+      logger.info(
+        `[tech-track] photo staged service=${svc.id} tech=${req.technicianId} ` +
+        `type=${photoType} size=${req.file.size}`
+      );
+      // Completion may have committed after the record lookup above. Recover
+      // immediately when visible; GET /photos repeats this recovery so an
+      // upload that raced an uncommitted completion cannot remain stranded.
+      const recovery = await promoteStagedPhotosForCompletedVisit({
+        scheduledServiceId: svc.id,
+      });
+      if (recovery) {
+        const promoted = recovery.photos.find((photo) => photo.s3_key === row.s3_key)
+          || await db('service_photos')
+            .where({ service_record_id: recovery.serviceRecordId, s3_key: row.s3_key })
+            .first();
+        return res.json({ photo: promoted || { ...row, staged: true } });
+      }
+      return res.json({ photo: { ...row, staged: true } });
     }
 
     const row = await uploadServicePhotoBuffer({
@@ -410,14 +453,16 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       mimeType: req.file.mimetype,
       photoType,
       sortOrder: req.body.sortOrder,
-      caption: req.body.caption,
+      caption,
       thumbnailKey: req.body.thumbnailKey,
       stateBadge: req.body.stateBadge,
       zoneId: req.body.zoneId,
       findingId: req.body.findingId,
       gpsLat: req.body.gpsLat,
       gpsLng: req.body.gpsLng,
-      capturedAt: req.body.capturedAt,
+      // Old camera-roll metadata would sort ahead of the existing hash-chain
+      // tail. Post-completion attachments use upload time instead.
+      capturedAt: undefined,
       device: req.body.device,
       appVersion: req.body.appVersion,
       aiTags: req.body.aiTags,
@@ -455,7 +500,25 @@ router.get('/:id/photos', async (req, res, next) => {
       .where({ scheduled_service_id: svc.id })
       .orderBy('created_at', 'desc')
       .first('id');
-    if (!serviceRecord) return res.json({ photos: [] });
+    if (!serviceRecord) {
+      const staged = await db('scheduled_service_photo_staging')
+        .where({ scheduled_service_id: svc.id })
+        .orderBy('captured_at', 'asc')
+        .orderBy('sort_order', 'asc');
+      if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
+      const photos = await Promise.all(staged.map(async (p) => ({
+        ...p,
+        staged: true,
+        url: await getSignedUrl(s3, new GetObjectCommand({
+          Bucket: config.s3.bucket, Key: p.s3_key,
+        }), { expiresIn: 3600 }),
+      })));
+      return res.json({ photos, staged: true });
+    }
+
+    // Recovery for the narrow race where completion inserted its record after
+    // POST /photos staged the file but had already passed its promotion step.
+    await promoteStagedPhotosForCompletedVisit({ scheduledServiceId: svc.id });
 
     const photos = await db('service_photos')
       .where({ service_record_id: serviceRecord.id })

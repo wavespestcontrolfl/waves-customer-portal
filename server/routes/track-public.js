@@ -42,6 +42,8 @@ const {
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
+const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -53,12 +55,11 @@ const TRACK_PUBLIC_GEOCODE_TIMEOUT_MS = 1500;
 // vehicle coords + ETA between transitions.
 const EN_ROUTE_POLL_SECONDS = 30;
 
-// Customer track page TTL — long enough that the page can be left open
-// on a phone for a tech's full visit window without 403'ing on photo
-// thumbnails, short enough that a leaked URL doesn't have indefinite
-// reach. resolveTechPhotoUrl defaults to 900 (15min); we match it here
-// so a single page-load presigns the whole bundle on one cadence.
-const SERVICE_PHOTO_TTL_SECONDS = 15 * 60;
+// Customer track page TTL — the page gets left open on a phone well past a
+// visit window (backgrounded tabs), and 15-minute links 403'd thumbnails on
+// re-render. Shared customer-dwell TTL (24h): long enough for any realistic
+// session, still bounded if a URL leaks.
+const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -78,21 +79,15 @@ function firstNameOf(fullName) {
   return trimmed.split(/\s+/)[0];
 }
 
-// Display masks for the tracker's client block: the token-only payload never
-// carries raw contact PII (a forwarded tracking SMS link must not become a
-// contact-info disclosure), but the customer still recognizes their own
-// details on the card.
-function maskEmail(email) {
-  const clean = String(email || '').trim();
-  const at = clean.indexOf('@');
-  if (at < 1) return null;
-  return `${clean[0]}•••@${clean.slice(at + 1)}`;
-}
-
-function maskPhone(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (digits.length < 4) return null;
-  return `(•••) •••-${digits.slice(-4)}`;
+// Full names of the configured service-contact slots (tenant, home buyer,
+// property manager) for the card's identity block.
+function serviceContactNamesOf(customerRow) {
+  return [...new Set(
+    getServiceContactSlots(customerRow)
+      .filter((slot) => slot.phone || slot.email)
+      .map((slot) => slot.name)
+      .filter(Boolean),
+  )];
 }
 
 function composeWindowIso(scheduledDate, windowTime) {
@@ -175,6 +170,12 @@ async function buildVehicle(service) {
 async function ensureEnRouteDestinationGeocoded(service) {
   if (!service || service.track_state !== 'en_route') return service;
   if (finiteNumber(service.latitude) != null && finiteNumber(service.longitude) != null) return service;
+  // ensureCustomerGeocoded resolves the PRIMARY address — when the visit's
+  // stamped service address diverges from the primary (secondary/rental
+  // booking) that would map/ETA the wrong house. No pin beats a wrong pin.
+  // A non-divergent stamp (ordinary primary-address phone booking) keeps
+  // the fallback: the primary IS the destination (codex round-4 P1).
+  if (service.stamped_address_diverges) return service;
   if (!service.customer_id) return service;
 
   try {
@@ -290,7 +291,17 @@ async function buildSummary(service) {
   };
 }
 
+// Same privacy headers as the other tokenized PII routes (prep-public.js,
+// card-public.js): the payload now carries full contact info, so shared
+// browser/proxy caches must never retain it past the request.
+const PRIVACY_HEADERS = {
+  'Cache-Control': 'private, no-store',
+  'X-Robots-Tag': 'noindex, nofollow',
+  'Referrer-Policy': 'no-referrer',
+};
+
 router.get('/:token', async (req, res, next) => {
+  res.set(PRIVACY_HEADERS);
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -317,17 +328,28 @@ router.get('/:token', async (req, res, next) => {
         's.cancelled_at',
         's.cancellation_reason',
         's.track_token_expires_at',
+        's.prep_token',
+        's.prep_sent_at',
         'c.first_name as cust_first_name',
         'c.last_name as cust_last_name',
-        'c.email as cust_email',
-        'c.phone as cust_phone',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip',
-        'c.latitude',
-        'c.longitude',
+        // Service-contact slots (unaliased — getServiceContactSlots reads
+        // the raw column names) supply the tenant / property-manager names
+        // for the identity block. Deliberately NOT selecting c.email or
+        // c.phone: contact PII never enters this tokenized payload.
+        ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+        // Stamped visits carry their own coords (property geocode stamped
+        // at booking) — read them first. The customer's primary coords are
+        // a valid fallback unless the stamp DIVERGES from the primary:
+        // every phone booking stamps, including primary-address bookings,
+        // so "stamped" alone must not blank the pin (codex round-4 P1).
+        db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
+        db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
+        db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
         't.name as tech_name',
         't.bouncie_imei as tech_bouncie_imei',
         't.photo_url as tech_photo_url',
@@ -352,7 +374,7 @@ router.get('/:token', async (req, res, next) => {
     // Business). Read-time presigning replaces the deleted public
     // proxy from PR #344 (P0 fix per Codex).
     const techPhotoUrl = row.technician_id
-      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url)
+      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url, SERVICE_PHOTO_TTL_SECONDS)
       : null;
 
     // A no-show is an operational-status flip (admin-dispatch) that does
@@ -408,15 +430,14 @@ router.get('/:token', async (req, res, next) => {
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
-      // Client identity block for the card. Name + address ride the same
-      // trusted track-token boundary the property address always used;
-      // email/phone are MASKED server-side (s•••@domain, last-4) so a
-      // forwarded or leaked tracking link never yields usable contact PII —
-      // the customer still recognizes their own details on the card.
+      // Client identity block for the card (owner 2026-07-13): names,
+      // address, and service ONLY — never email/phone. The en-route SMS
+      // sends this same tokenized link to the account's service contacts
+      // (tenant / home buyer / property manager), so contact PII stays off
+      // it entirely; their names render under the account holder's.
       customer: {
         name: [row.cust_first_name, row.cust_last_name].filter(Boolean).join(' ') || null,
-        email: maskEmail(row.cust_email),
-        phone: maskPhone(row.cust_phone),
+        serviceContactNames: serviceContactNamesOf(row),
       },
       prepToken: null,
       meta: {
@@ -424,13 +445,23 @@ router.get('/:token', async (req, res, next) => {
       },
     };
 
+    // Prep-guide link for the pre-visit cards: a project-based token wins
+    // (project prep guides are richer), else the visit's own token — but
+    // only once prep_sent_at proves a guide email actually went out. The
+    // token alone is minted BEFORE the send is confirmed, so an inactive
+    // automation or a rejected email leaves a token with no send; exposing
+    // it would show prep the customer never received. Visits that never
+    // had prep sent stay null — the card renders no link.
     if (row.id) {
       const linkedProject = await db('projects')
         .where({ scheduled_service_id: row.id })
         .whereNotNull('prep_token')
+        .whereNotNull('prep_sent_at')
         .orderBy('created_at', 'desc')
         .first('prep_token');
-      if (linkedProject) response.prepToken = linkedProject.prep_token;
+      response.prepToken = linkedProject?.prep_token
+        || (row.prep_sent_at ? row.prep_token : null)
+        || null;
     }
 
     res.json(response);

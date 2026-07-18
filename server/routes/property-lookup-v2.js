@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -43,7 +43,7 @@ const GOOGLE_GEOCODE = 'https://maps.googleapis.com/maps/api/geocode/json';
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
-const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-3.5-flash';
 const DEFAULT_LOOKUP_TOTAL_BUDGET_MS = 60000;
 const DEFAULT_LOOKUP_RESPONSE_MARGIN_MS = 2500;
 const DEFAULT_STORIES_MIN_REMAINING_MS = 12000;
@@ -59,6 +59,52 @@ const TURF_REVIEW_THRESHOLD_SQFT = 15000;
 const TURF_MANUAL_CONFIRMATION_SQFT = 20000;
 const TURF_HIGH_LOT_RATIO = 0.55;
 const TURF_PRICED_SERVICES = new Set(['LAWN', 'OT_LAWN', 'TOPDRESS', 'DETHATCH', 'PLUGGING']);
+// County-facts turf prior (2026-07-09 shadow-delta judgment, 95 paired prod
+// lookups): the vision estimate sits at ~half the deterministic county-facts
+// ceiling (lot − building footprint − assessed impervious) — vision/ceiling
+// median 0.54, IQR 0.45–0.66; vision exceeded the ceiling on only 4/95.
+// When vision produced NO turf number, seeding at this ratio beats the
+// pricing engine's lot-based fallback, which lands near the ceiling itself
+// (~2× what real lawns measure). Applied positively-eligible only —
+// residential, non-shared-turf type, ceiling big enough to be a real yard —
+// and always paired with a HIGH-priority verify flag.
+// Kill switch: TURF_COUNTY_PRIOR_DISABLED=1 (no deploy).
+const TURF_COUNTY_PRIOR_RATIO = 0.5;
+const TURF_COUNTY_PRIOR_MIN_CEILING_SF = 500;
+// Association-aggregate dimension ceiling — mirrors the lookup's own
+// building/lot caps (COMMERCIAL_BUILDING_SQFT_MAX / LOT_SQFT_MAX = 200k).
+const AGGREGATE_DIM_CAP_SQFT = 200000;
+const turfCountyPriorDisabled = () => ['1', 'true'].includes(String(process.env.TURF_COUNTY_PRIOR_DISABLED || '').toLowerCase());
+// Shared-turf residential types whose treatable lawn legitimately spans
+// beyond their own parcel — one pattern for the parcel turf cap and the
+// county prior so the exemptions can't drift apart.
+const SHARED_TURF_TYPE_RE = /CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/;
+
+// The county-facts ceiling, trusted for prior/review use only when it is
+// COUNTY-COMPLETE: the extra-features roll was actually parsed
+// (imperviousKnown — an unparsed table reads as 0 hardscape and inflates
+// the ceiling), the story count is real (a missing count defaults the
+// footprint to the full living area and shrinks it), and the lot/building
+// dimensions themselves won from county/cadastral/verified evidence — a
+// hybrid merge can carry listing-sourced dims with only the GIS impervious
+// backfilled (codex P2). Anything weaker returns null and callers stay on
+// the existing fallback/verify paths. The raw computeFootprintTurf value
+// still rides the profile as the untrusted SHADOW fields.
+const COUNTY_DIM_SOURCES = new Set(['county', 'cadastral', 'verified']);
+function trustedCountyTurfCeiling(rc) {
+  const ceiling = computeFootprintTurf(rc);
+  if (!ceiling || !ceiling.parts.imperviousKnown) return null;
+  if (!(firstNonNegativeNumber(rc?.stories) >= 1)) return null;
+  // Merged records carry { field: { sourceType } }; a raw single-source
+  // record carries { field: [items] } — accept either shape.
+  const dimSourced = (field) => {
+    const entry = rc?._fieldEvidence?.[field];
+    const sourceType = Array.isArray(entry) ? entry[0]?.sourceType : entry?.sourceType;
+    return COUNTY_DIM_SOURCES.has(String(sourceType || '').toLowerCase());
+  };
+  if (!dimSourced('lotSize') || !dimSourced('squareFootage')) return null;
+  return ceiling;
+}
 
 function positiveIntEnv(name, fallback) {
   const n = Number(process.env[name]);
@@ -114,6 +160,11 @@ function isTimeoutFailure(err, timeout) {
 // ─────────────────────────────────────────────
 async function performPropertyLookup(address, options = {}) {
   const t0 = Date.now();
+  // options.persist === false: read-everything, WRITE-NOTHING mode for
+  // replay/diagnostic callers (estimator-replay) — skips the cache-hit
+  // backfill patches and the final saveLookup so a documented read-only run
+  // truly leaves no rows behind.
+  const persist = options.persist !== false;
 
   // ── STEP -1: Cache ──
   // A verified-fresh row answers without re-running geocode/search/vision —
@@ -139,7 +190,7 @@ async function performPropertyLookup(address, options = {}) {
           .catch(() => null);
         if (floodZone) {
           cached.property_record._floodZone = floodZone;
-          await attachFloodZoneToCachedLookup(address, floodZone);
+          if (persist) await attachFloodZoneToCachedLookup(address, floodZone);
         }
       }
       // Permit-evidence backfill, same pattern: query once on hit, persist
@@ -156,7 +207,7 @@ async function performPropertyLookup(address, options = {}) {
         }).catch(() => null);
         if (permits) {
           cached.property_record._poolPermits = permits;
-          await attachPoolPermitsToCachedLookup(address, permits);
+          if (persist) await attachPoolPermitsToCachedLookup(address, permits);
         }
       }
       // House-number-audit backfill, same pattern: record-bearing rows cached
@@ -184,7 +235,7 @@ async function performPropertyLookup(address, options = {}) {
         if (marker) {
           if (cachedSnapped) marker.snappedRecord = cachedSnapped;
           cached.property_record._addressAudit = marker;
-          await attachAddressAuditToCachedLookup(address, marker);
+          if (persist) await attachAddressAuditToCachedLookup(address, marker);
         }
       }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
@@ -603,7 +654,7 @@ async function performPropertyLookup(address, options = {}) {
   result.meta.lookupMs = Date.now() - t0;
 
   // ── STEP 5: Persist ── (fail-open; never caches a failed lookup)
-  await saveLookup(address, result);
+  if (persist) await saveLookup(address, result);
 
   return result;
 }
@@ -1246,6 +1297,30 @@ function applySatelliteAttachmentType(rc, ai) {
 }
 
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null) {
+  // Association aggregate dimensions survive in _parcel even when a
+  // same-weight PAO record (a single condo unit) won the merge — prefer them
+  // for EVERY downstream read (footprint, turf ceiling, termite boxes), not
+  // just unitCount, or the commercial profile prices off one unit while
+  // showing the association's unit count (codex P2 r2 #2721). Capped like
+  // the lookup's own record caps.
+  if (rc?._parcel?.aggregated) {
+    const aggLiving = Math.min(Number(rc._parcel.livingAreaSqft) || 0, AGGREGATE_DIM_CAP_SQFT);
+    const aggLot = Math.min(Number(rc._parcel.lotSqft) || 0, AGGREGATE_DIM_CAP_SQFT);
+    // A tech-verified dimension outranks the county aggregate — this runs
+    // AFTER applyVerifiedOverrides, and taking the max here would silently
+    // undo a verified downward correction on every subsequent lookup
+    // (codex P2 #2721).
+    const isVerified = (field) => rc._fieldEvidence?.[field]?.sourceType === 'verified';
+    rc = {
+      ...rc,
+      squareFootage: isVerified('squareFootage')
+        ? rc.squareFootage
+        : Math.max(Number(rc.squareFootage) || 0, aggLiving) || rc.squareFootage,
+      lotSize: isVerified('lotSize')
+        ? rc.lotSize
+        : Math.max(Number(rc.lotSize) || 0, aggLot) || rc.lotSize,
+    };
+  }
   // Record-bearing lookups carry the audit on the cached record (_addressAudit,
   // like _floodZone); record-less lookups pass it alongside since there is no
   // record to ride.
@@ -1285,6 +1360,43 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       ? rc.propertyType
       : (visionPropertyType || 'Single Family');
 
+  // County-facts turf prior: vision produced no turf number (satellite miss,
+  // obstructed imagery, brand-new construction) but the county roll gave
+  // lot + building + assessed impervious. Seed the estimate at
+  // TURF_COUNTY_PRIOR_RATIO × that ceiling instead of leaving 0 — the
+  // pricing engine's lot-based fallback otherwise prices near the ceiling
+  // itself. Never silent: a HIGH-priority verify flag rides with it below.
+  // An EXPLICIT vision 0 (paved / artificial / no-lawn property) is a real
+  // measurement, not a miss — it must never be overwritten (codex P2).
+  const visionTurfSf = firstNonNegativeNumber(ai?.estimatedTurfSf);
+  const visionTurfKnown = visionTurfSf !== undefined;
+  // Trusted = county-complete AND county-sourced dimensions — see
+  // trustedCountyTurfCeiling. Anything weaker stays on the existing
+  // fallback/verify path (codex P2s).
+  const countyCeiling = trustedCountyTurfCeiling(rc);
+  // Commercial profiles get the same county-facts prior under the same trust
+  // bar: an association's or warehouse's grounds are the CUSTOMER'S grounds,
+  // and vision-only turf left commercial lawn/mosquito pricing with nothing
+  // when satellite imagery missed. The shared-turf type exclusion is a
+  // residential concern (a condo UNIT doesn't own the lawn) — a commercial
+  // profile IS the association/owner, so it doesn't apply there.
+  const countyTurfPriorSf = (
+    !visionTurfKnown
+    && !turfCountyPriorDisabled()
+    && countyCeiling
+    && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
+    && (commercialProfile || !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase()))
+  ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
+
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
+  if (countyTurfPriorSf) {
+    fieldVerifyFlags.push({
+      field: 'estimatedTurfSf',
+      reason: `No AI turf estimate — seeded ${countyTurfPriorSf.toLocaleString()} sq ft from county records (${Math.round(TURF_COUNTY_PRIOR_RATIO * 100)}% of lot − building − assessed hardscape). Verify treatable lawn area.`,
+      priority: 'HIGH',
+    });
+  }
+
   const landscapeComplexity = ai?.landscapeComplexity || 'MODERATE';
   const footprintSf = rc?.squareFootage
     ? Math.round(rc.squareFootage / (rc.stories || 1))
@@ -1295,9 +1407,35 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // estimator's Perimeter LF box; a field-measured value overrides it.
   const perimeterLayoutFactor =
     (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
-  const estimatedPerimeterLF = footprintSf > 0
-    ? Math.round(4 * Math.sqrt(footprintSf) * perimeterLayoutFactor)
+  // Multi-building complexes (stacked-parcel association aggregates): N
+  // buildings of footprint/N each have √N × the perimeter of one combined
+  // slab — one 104k sf square is ~1,290 LF, but three separate buildings of
+  // ~35k sf are ~2,235 LF of exterior wall to treat.
+  const buildingCount = Math.max(1, Math.round(Number(rc?._parcel?.buildingCount) || 1));
+  // An aggregate with UNKNOWN stories has footprintSf = the full summed
+  // living area (stories defaulted to 1), which would inflate the perimeter
+  // by ~sqrt(stories) on mid/high-rise associations — leave the box empty
+  // for a field measurement instead of prefilling a wrong number (codex P2
+  // #2721). Aggregates with a known story count (Manatee) still prefill.
+  const aggregateStoriesUnknown = Boolean(rc?._parcel?.aggregated)
+    && !(Number(rc?.stories) >= 1);
+  const estimatedPerimeterLF = footprintSf > 0 && !aggregateStoriesUnknown
+    ? Math.round(buildingCount * 4 * Math.sqrt(footprintSf / buildingCount) * perimeterLayoutFactor)
     : null;
+  if (aggregateStoriesUnknown && footprintSf > 0) {
+    // The profile must not CLAIM a ground-floor footprint it doesn't have —
+    // footprintSf here is the full summed living area (stories unknown), and
+    // profile.footprint feeds pricing's footprintSqFt directly (codex P1 r3
+    // #2721). Interior sqft (homeSqFt) stays: the association's total
+    // interior area is the real interior-treatment work measure regardless
+    // of floor count. Ground-geometry values (footprint / perimeter / attic
+    // / slab) all stay empty for a field measurement, flagged HIGH.
+    fieldVerifyFlags.push({
+      field: 'footprint',
+      reason: `Association aggregate with unknown story count — ground-floor footprint, perimeter, and slab/attic areas are not derivable from the summed ${footprintSf.toLocaleString()} sq ft interior area. Measure on site before termite/perimeter pricing.`,
+      priority: 'HIGH',
+    });
+  }
 
   const profile = {
     // ── ADDRESS ──
@@ -1313,17 +1451,37 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
-    unitCount: rc?.unitCount || 1,
+    // On an aggregate, the association total wins over the merge's
+    // unitCount (shapeAsPropertyRecord seeds every record with a truthy 1,
+    // so a plain fallback chain never reaches the aggregate figure when a
+    // PAO record won the merge — codex P2 #2721).
+    unitCount: (rc?._parcel?.aggregated
+      ? Math.max(Number(rc?.unitCount) || 0, Number(rc._parcel.residentialUnits) || 0)
+      : rc?.unitCount) || 1,
+    // Stacked-parcel association aggregate: distinct unit street numbers on
+    // the roll (1 when the whole association shares one address).
+    buildingCount,
 
     // ── DIMENSIONS ──
     homeSqFt: rc?.squareFootage || 0,
     lotSqFt: rc?.lotSize || 0,
+    // Machine-readable twin of the vacantParcel verify flag (vacant roll
+    // parcel, no building record — possibly new construction) — consumers
+    // that would otherwise trust the defaulted dimensions can see they're
+    // placeholders.
+    unassessedVacantParcel: detectUnassessedVacantParcel(rc) ? true : undefined,
     stories: rc?.stories || 1,
     // Provenance for the `stories` value so the client can decide whether to
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
     // record/search source; 'default' = nobody knew, we fell back to 1.
     storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
-    footprint: footprintSf,
+    footprint: aggregateStoriesUnknown ? 0 : footprintSf,
+    // Machine-readable twin of the HIGH footprint flag: BOTH the estimator's
+    // termite autofill and calculatePropertyProfile re-derive a footprint
+    // from homeSqFt/stories when footprint is 0, which would resurrect the
+    // summed-living-area slab this suppression exists to prevent (codex P1
+    // r4 #2721). Consumers skip derivation when this is set.
+    footprintUnknown: aggregateStoriesUnknown || undefined,
     // Rough pre-fills for the estimator's termite measurement boxes: the
     // attic deck and the slab both approximate the ground-floor footprint
     // (top floor ≈ footprint on equal-floor homes). Published under
@@ -1333,8 +1491,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // gates for trenching/pre-slab, and these reach pricing only through
     // the operator-visible, editable boxes (manual entries override).
     estimatedPerimeterLF,
-    estimatedAtticSqFt: footprintSf > 0 ? footprintSf : null,
-    estimatedSlabSqFt: footprintSf > 0 ? footprintSf : null,
+    // Same stories guard as the perimeter: an unknown-stories aggregate's
+    // footprintSf is the FULL summed living area — a 100k+ sf attic/slab
+    // prefill in the termite boxes would be wildly wrong (codex P2 r2).
+    estimatedAtticSqFt: footprintSf > 0 && !aggregateStoriesUnknown ? footprintSf : null,
+    estimatedSlabSqFt: footprintSf > 0 && !aggregateStoriesUnknown ? footprintSf : null,
 
     // ── CONSTRUCTION (merged property record + satellite AI) ──
     yearBuilt: rc?.yearBuilt || null,
@@ -1388,7 +1549,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // ── TURF ──
     imperviousSurfacePercent,
     imperviosSurfacePercent: imperviousSurfacePercent,
-    estimatedTurfSf: ai?.estimatedTurfSf || 0,
+    estimatedTurfSf: (visionTurfKnown ? visionTurfSf : countyTurfPriorSf) || 0,
+    // 'vision' = satellite estimate (including an explicit 0 — a measured
+    // no-lawn property); 'county_prior' = seeded from the county ceiling
+    // (see countyTurfPriorSf above); 'none' = no basis — pricing falls back
+    // to its lot-based estimate.
+    turfSource: visionTurfKnown ? 'vision' : (countyTurfPriorSf ? 'county_prior' : 'none'),
+    countyTurfPriorSf,
+    // TRUSTED ceiling (county-complete + county-sourced dims) — feeds the
+    // exceeds-ceiling review reason; null when the facts are too weak to
+    // judge against (codex P3).
+    countyTurfCeilingSf: countyCeiling ? countyCeiling.turfSf : null,
     // Shadow comparison fields — see computeFootprintTurf. Not a pricing
     // input; estimatedTurfSf above remains the engine's turf source.
     footprintTurfSf: footprintTurf ? footprintTurf.turfSf : null,
@@ -1514,7 +1685,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     propertyProviders: rc?._aiProviders || [],
     analysisNotes: ai?.analysisNotes || '',
     addressAudit,
-    fieldVerifyFlags: buildFieldVerifyFlags(rc, ai, addressAudit),
+    fieldVerifyFlags,
 
     // ── DATA SOURCE TRACKING ──
     dataSources: {
@@ -1526,16 +1697,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     }
   };
 
-  // Shadow signal for the footprint-turf rollout decision: how far the
-  // vision estimate sits from the deterministic county-facts ceiling.
+  // Shadow signal comparing the VISION estimate against the deterministic
+  // county-facts ceiling (a county-prior seed would compare the ceiling with
+  // itself and pollute the series). Judged 2026-07-09 across 95 lookups
+  // (median −46%) — kept running so the ratio can be re-checked over time.
   // Coarse fields only (no address/parcel values — PII rule).
-  if (footprintTurf && !commercialProfile && profile.estimatedTurfSf > 0) {
+  if (footprintTurf && !commercialProfile && visionTurfSf > 0) {
     const deltaPct = Math.round(
-      ((profile.estimatedTurfSf - footprintTurf.turfSf) / Math.max(footprintTurf.turfSf, 1)) * 1000,
+      ((visionTurfSf - footprintTurf.turfSf) / Math.max(footprintTurf.turfSf, 1)) * 1000,
     ) / 10;
     logger.info('[turf-footprint] shadow comparison', {
       footprintTurfSf: footprintTurf.turfSf,
-      estimatedTurfSf: profile.estimatedTurfSf,
+      estimatedTurfSf: visionTurfSf,
       deltaPct,
       imperviousKnown: footprintTurf.parts.imperviousKnown,
       county: profile.county || null,
@@ -1721,7 +1894,7 @@ function applyParcelTurfBound(aiAnalysis, propertyRecord) {
   const typeTrusted = String(typeEvidence?.sourceType || '').toLowerCase() === 'satellite'
     || recordCommercialSignalTrusted(propertyRecord);
   const propertyType = typeTrusted ? String(propertyRecord.propertyType || '').toUpperCase() : '';
-  if (/CONDO|HOA|APARTMENT|MULTIFAMILY|TOWNHOME|TOWNHOUSE/.test(propertyType)) return aiAnalysis;
+  if (SHARED_TURF_TYPE_RE.test(propertyType)) return aiAnalysis;
 
   const bound = parcelTurfBoundSqft(propertyRecord);
   if (!bound) return aiAnalysis;
@@ -1758,6 +1931,15 @@ function turfRiskReasons(source = {}) {
 
   if (lotSqFt && estimatedTurfSf && estimatedTurfSf / lotSqFt >= TURF_HIGH_LOT_RATIO) {
     reasons.push(`estimated turf is ${Math.round((estimatedTurfSf / lotSqFt) * 100)}% of lot`);
+  }
+  // Above the TRUSTED county-facts ceiling (county-complete + county-sourced
+  // dims only — trustedCountyTurfCeiling; an incomplete ceiling would flag
+  // spuriously). Observed on only 4/95 prod lookups, always an
+  // obstructed-imagery overshoot. Pricing already caps at its own plausible
+  // max; this surfaces the disagreement to the operator.
+  const countyCeilingSf = firstNonNegativeNumber(source.countyTurfCeilingSf);
+  if (countyCeilingSf > 0 && estimatedTurfSf && estimatedTurfSf > countyCeilingSf) {
+    reasons.push(`exceeds the county-facts ceiling of ${Math.round(countyCeilingSf).toLocaleString()} sq ft (lot − building − assessed hardscape)`);
   }
   if (aiConfidence !== undefined && aiConfidence < 60) reasons.push(`AI confidence ${aiConfidence}%`);
   if (treeDensity === 'HEAVY') reasons.push('heavy tree canopy');
@@ -2274,7 +2456,20 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
   // Address itself is suspect — first, because it explains every other
   // missing-data line on the panel. Only set when the county roll ANSWERED
   // (a GIS outage yields no audit at all, see auditAddressHouseNumber).
-  if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
+  if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch
+      && Array.isArray(addressAudit.numberInOtherZips) && addressAudit.numberInOtherZips.length) {
+    // The typed number DOES exist on this street — in a different ZIP. Grid
+    // street names repeat across cities, so this usually means the typed
+    // city/ZIP belongs to another premise, not a typo'd house number.
+    const nearest = addressAudit.nearestNumbers.length
+      ? ` — nearest on this street in ${addressAudit.typedZip}: ${addressAudit.nearestNumbers.join(', ')}`
+      : '';
+    flags.push({
+      field: 'address',
+      reason: `${addressAudit.houseNumber} ${addressAudit.streetLabel} is on the ${addressAudit.county} county roll only in ZIP ${addressAudit.numberInOtherZips.join(', ')}, not the typed ${addressAudit.typedZip}${nearest}. The street name repeats across cities — verify the city/ZIP before pricing`,
+      priority: 'HIGH',
+    });
+  } else if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
     const nearest = addressAudit.nearestNumbers.length
       ? ` — nearest existing: ${addressAudit.nearestNumbers.join(', ')}`
       : '';
@@ -2396,11 +2591,29 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
     });
   }
 
-  // Footprint estimated from lot
+  // Unassessed vacant parcel: the roll knows the parcel but carries no
+  // building. Could be an unbuilt lot OR new construction the roll hasn't
+  // caught up to — the roll alone can't split them (codex P1), so the copy
+  // presents both and every remote source is blind either way: the
+  // customer's answer is the only fix. One situation flag plus accurate
+  // per-field copy below.
+  const vacantParcel = detectUnassessedVacantParcel(rc);
+  if (vacantParcel) {
+    flags.push({
+      field: 'vacantParcel',
+      reason: `County roll shows ${vacantParcel.landUseDescription || 'vacant land'} with no building record — an unbuilt lot, or new construction the county hasn't assessed yet. If a home is standing or under way, ask the customer for plan sq ft and stories and save them as field-verified.`,
+      priority: 'HIGH',
+    });
+  }
+
+  // Home sq ft has no source (client + lead automation fall back to a flat
+  // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {
     flags.push({
       field: 'homeSqFt',
-      reason: 'Home sq ft missing from records — estimated from lot size',
+      reason: vacantParcel
+        ? 'Home sq ft not on the county roll (vacant parcel — possibly new construction) — estimator defaults to 2,000 sq ft; replace with the customer\'s plan sq ft'
+        : 'Home sq ft missing from records — estimator defaults to 2,000 sq ft; verify before pricing',
       priority: 'HIGH'
     });
   }
@@ -2460,6 +2673,10 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
     ...ai,
     lotSqFt: rc?.lotSize,
     aiConfidence: ai?.confidenceScore,
+    // TRUSTED county ceiling only (county-complete + county-sourced dims) —
+    // ai carries no county figures; the profile path passes its own
+    // countyTurfCeilingSf.
+    countyTurfCeilingSf: trustedCountyTurfCeiling(rc)?.turfSf,
   });
   if (estimatedTurfSf > 0 && turfReviewReasons.length > 0) {
     flags.push({
@@ -3025,7 +3242,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     stories,
     storiesSource: p.storiesSource || null,
     lotSqFt,
-    footprintSqFt: p.footprintSqFt ?? p.footprint,
+    // footprintUnknown wins over any explicit footprint in the payload — the
+    // admin client re-derives profile.footprint = homeSqFt / stories when
+    // building the request, and a positive value here would bypass the
+    // pricing-side derivation guard entirely (codex P1 #2721).
+    footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprintSqFt ?? p.footprint),
+    footprintUnknown: p.footprintUnknown === true || undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,
@@ -3038,6 +3260,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     mosquitoPressure,
     measuredTurfSf: p.measuredTurfSf,
     estimatedTurfSf: p.estimatedTurfSf,
+    // Turf provenance — a county-prior seed or a parcel-clamped vision number
+    // must stay distinguishable from a real satellite measurement all the way
+    // into the engine, so computeTurfArea can grade it (LOW + field-verify)
+    // instead of treating every estimatedTurfSf as vision-measured.
+    turfSource: p.turfSource || null,
+    countyTurfPriorSf: p.countyTurfPriorSf ?? null,
+    countyTurfCeilingSf: p.countyTurfCeilingSf ?? null,
+    turfCappedToParcel: p.turfCappedToParcel === true,
     imperviousSurfacePercent: p.imperviousSurfacePercent,
     imperviosSurfacePercent: p.imperviosSurfacePercent,
     estimatedBedAreaSf: p.estimatedBedAreaSf,

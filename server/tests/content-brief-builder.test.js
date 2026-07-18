@@ -16,8 +16,131 @@ const {
   SERVICE_HUB_LINKS,
   nextWeekday9amET,
   applyAeoTreatment,
+  applyListicleTreatment,
+  isListicleQuery,
 } = require('../services/content/content-brief-builder')._internals;
 const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
+
+describe('isListicleQuery — list-shaped query detection', () => {
+  test('matches leading counts and enumerable-noun keywords', () => {
+    expect(isListicleQuery('10 natural mosquito repellents')).toBe(true);
+    expect(isListicleQuery('signs of termite damage in florida')).toBe(true);
+    expect(isListicleQuery('plants that repel mosquitoes')).toBe(true);
+    expect(isListicleQuery('lawn care mistakes st augustine grass')).toBe(true);
+  });
+  test('does not match non-enumerable informational or empty queries', () => {
+    expect(isListicleQuery('how to get rid of ants in the kitchen')).toBe(false);
+    expect(isListicleQuery('termite inspection cost')).toBe(false);
+    expect(isListicleQuery('')).toBe(false);
+    expect(isListicleQuery(null)).toBe(false);
+  });
+  test('a leading digit with a time/cadence unit is service phrasing, not an item count', () => {
+    expect(isListicleQuery('24 hour pest control')).toBe(false);
+    expect(isListicleQuery('7 day lawn treatment plan')).toBe(false);
+    expect(isListicleQuery('30 minute mosquito treatment')).toBe(false);
+    // …but a real count followed by a content noun still matches.
+    expect(isListicleQuery('7 plants that repel mosquitoes')).toBe(true);
+  });
+  test('vendor/roundup intent never gets the overlay (voice notes forbid company rankings)', () => {
+    expect(isListicleQuery('10 best pest control companies')).toBe(false);
+    expect(isListicleQuery('top exterminators in sarasota')).toBe(false);
+    expect(isListicleQuery('5 cheapest lawn care services')).toBe(false);
+    expect(isListicleQuery('orkin vs terminix')).toBe(false);
+    // Conservative by design: "best" excludes even non-vendor lists.
+    expect(isListicleQuery('best plants for shade')).toBe(false);
+  });
+});
+
+describe('applyListicleTreatment', () => {
+  const base = (over = {}) => ({
+    enabled: true,
+    actionType: 'new_supporting_blog',
+    pageType: 'supporting-blog',
+    query: 'signs of chinch bugs in st augustine grass',
+    requiredSections: [...REQUIRED_SECTIONS['supporting-blog']],
+    schemaTypes: [...SCHEMA_TYPES['supporting-blog']],
+    voiceConstraints: { tone: 't', forbidden: [], required_phrases: [] },
+    ...over,
+  });
+
+  test('list-shaped supporting-blog query gets the citable-listicle sections + voice notes', () => {
+    const r = applyListicleTreatment(base());
+    expect(r.listicle).toBe(true);
+    // The full supporting-blog contract is preserved.
+    for (const s of REQUIRED_SECTIONS['supporting-blog']) expect(r.requiredSections).toContain(s);
+    expect(r.requiredSections.some((s) => /numbered H2 per item/i.test(s))).toBe(true);
+    expect(r.requiredSections.some((s) => /first 60 words/i.test(s))).toBe(true);
+    expect(r.requiredSections.some((s) => /how we put this list together/i.test(s))).toBe(true);
+    expect(r.requiredSections.some((s) => /Last updated/i.test(s))).toBe(true);
+    expect(r.voiceConstraints.listicle_notes.some((n) => /never a ranked vendor roundup/i.test(n))).toBe(true);
+    // Schema untouched — no ItemList/FAQPage injection here.
+    expect(r.schemaTypes).toEqual(SCHEMA_TYPES['supporting-blog']);
+  });
+
+  test('above-the-fold constraints lead the ORDERED section plan; methodology note trails', () => {
+    const r = applyListicleTreatment(base());
+    expect(r.requiredSections[0]).toMatch(/listicle structure/i);
+    expect(r.requiredSections[1]).toMatch(/first 60 words/i);
+    expect(r.requiredSections[2]).toMatch(/Last updated/i);
+    // Every original section comes after the above-the-fold constraints…
+    const firstOriginalIdx = r.requiredSections.indexOf(REQUIRED_SECTIONS['supporting-blog'][0]);
+    expect(firstOriginalIdx).toBe(3);
+    // …and the methodology note is the trailing entry.
+    expect(r.requiredSections[r.requiredSections.length - 1]).toMatch(/how we put this list together/i);
+  });
+
+  test('gate off → passthrough', () => {
+    const r = applyListicleTreatment(base({ enabled: false }));
+    expect(r.listicle).toBe(false);
+    expect(r.requiredSections).toEqual(REQUIRED_SECTIONS['supporting-blog']);
+    expect(r.voiceConstraints.listicle_notes).toBeUndefined();
+  });
+
+  test('non-list query, non-blog page type, or non-new-draft action → passthrough', () => {
+    expect(applyListicleTreatment(base({ query: 'how to get rid of ants' })).listicle).toBe(false);
+    expect(applyListicleTreatment(base({ pageType: 'city-service' })).listicle).toBe(false);
+    // refresh_existing_page whose SERP type normalized to supporting-blog must
+    // NOT get restructure mandates (preserve-slug/structure contract).
+    expect(applyListicleTreatment(base({ actionType: 'refresh_existing_page' })).listicle).toBe(false);
+  });
+
+  test('operator-pinned briefs (intercept/spoke-seed) are never restructured by the overlay', () => {
+    const r = applyListicleTreatment(base({ operatorPinned: true }));
+    expect(r.listicle).toBe(false);
+    expect(r.requiredSections).toEqual(REQUIRED_SECTIONS['supporting-blog']);
+  });
+
+  test('methodology note is plain-text sourced — never demands external links', () => {
+    const r = applyListicleTreatment(base());
+    const note = r.requiredSections.find((s) => /how we put this list together/i.test(s));
+    expect(note).toMatch(/PLAIN TEXT/);
+    expect(note).toMatch(/no external links/i);
+  });
+
+  test('stacks on top of the AEO overlay without losing its additions', () => {
+    const aeo = applyAeoTreatment({
+      isAeoGap: true,
+      pageType: 'supporting-blog',
+      requiredSections: [...REQUIRED_SECTIONS['supporting-blog']],
+      schemaTypes: [...SCHEMA_TYPES['supporting-blog']],
+      voiceConstraints: { tone: 't', forbidden: [], required_phrases: [] },
+    });
+    const r = applyListicleTreatment({
+      enabled: true,
+      actionType: 'new_supporting_blog',
+      pageType: 'supporting-blog',
+      query: '7 ways to keep mosquitoes off your lanai',
+      requiredSections: aeo.requiredSections,
+      schemaTypes: aeo.schemaTypes,
+      voiceConstraints: aeo.voiceConstraints,
+    });
+    expect(r.requiredSections.some((s) => /direct-answer/i.test(s))).toBe(true); // AEO kept
+    expect(r.requiredSections.some((s) => /numbered H2 per item/i.test(s))).toBe(true); // listicle added
+    expect(r.schemaTypes).toContain('FAQPage'); // AEO schema kept
+    expect(r.voiceConstraints.aeo_notes).toBeDefined();
+    expect(r.voiceConstraints.listicle_notes).toBeDefined();
+  });
+});
 
 describe('applyAeoTreatment', () => {
   const base = (pageType) => ({
@@ -294,5 +417,50 @@ describe('nextWeekday9amET', () => {
   test('returns at-least-6-hours from now', () => {
     const next = nextWeekday9amET();
     expect(next.getTime() - Date.now()).toBeGreaterThanOrEqual(6 * 3600 * 1000);
+  });
+});
+
+// The SEO completion gate P1s supporting-blog drafts without a body link to a
+// conversion path (/contact | quote | estimate | calculator), but the binding
+// internal_links_to_add checklist never carried one — the writer only passed
+// when it improvised a conversion link on its own.
+describe('_internalLinksFor conversion link', () => {
+  const builder = new ContentBriefBuilder();
+
+  test('supporting-blog pest checklist includes the calculator conversion link', () => {
+    const links = builder._internalLinksFor({ city: 'Bradenton', service: 'pest' }, 'supporting-blog');
+    expect(links).toContain('/pest-control-calculator/');
+    // Cap intact: 3 hubs + city + conversion fills exactly 5.
+    expect(links.length).toBeLessThanOrEqual(5);
+    expect(links).toContain('/pest-control-services/');
+    expect(links).toContain('/pest-control-bradenton-fl/');
+  });
+
+  test('lawn and tree-shrub use /contact/ (no calculator flow)', () => {
+    expect(builder._internalLinksFor({ city: 'Venice', service: 'lawn' }, 'supporting-blog')).toContain('/contact/');
+    expect(builder._internalLinksFor({ city: null, service: 'tree-shrub' }, 'supporting-blog')).toContain('/contact/');
+  });
+
+  test('verbatim facts-bank service ids resolve ALL link maps — hub, city, and conversion (codex r1+r2)', () => {
+    const pest = builder._internalLinksFor({ city: 'Bradenton', service: 'pest-control' }, 'supporting-blog');
+    expect(pest).toContain('/pest-control-calculator/');
+    expect(pest).toContain('/pest-control-services/');
+    expect(pest).toContain('/pest-control-bradenton-fl/');
+    expect(pest.length).toBeLessThanOrEqual(5);
+
+    const lawn = builder._internalLinksFor({ city: 'Venice', service: 'lawn-care' }, 'supporting-blog');
+    expect(lawn).toContain('/contact/');
+    expect(lawn).toContain('/lawn-care/');
+    expect(lawn).toContain('/lawn-care-venice-fl/');
+
+    const trees = builder._internalLinksFor({ city: null, service: 'tree-shrub-care' }, 'supporting-blog');
+    expect(trees).toContain('/contact/');
+    expect(trees).toContain('/tree-shrub-care/');
+  });
+
+  test('non-blog page types keep their existing link shape', () => {
+    const links = builder._internalLinksFor({ city: 'Bradenton', service: 'pest' }, 'customer-question');
+    expect(links).not.toContain('/pest-control-calculator/');
+    expect(links).not.toContain('/contact/');
   });
 });

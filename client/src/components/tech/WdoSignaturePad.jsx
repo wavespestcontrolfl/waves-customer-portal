@@ -7,22 +7,39 @@ import { adminFetch } from "../../lib/adminFetch";
  * can be sent, so this gates the send buttons upstream. Draws to a canvas,
  * exports a PNG data URL, and POSTs to /admin/projects/:id/wdo-signature.
  */
-export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", defaultSignerIdCard = "", onChanged }) {
+const CANVAS_CSS_HEIGHT = 160;
+
+// onBusyChange (optional): reports the in-flight save/clear mutation so a host
+// that can unmount this pad (the create sheet's sign step) can hold its exits
+// until the POST/DELETE settles — leaving mid-mutation strands the caller with
+// stale signed/unsigned state.
+export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", defaultSignerIdCard = "", onChanged, onBusyChange }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const hasDrawn = useRef(false);
   const [signerName, setSignerName] = useState(defaultSignerName);
   const [signerIdCard, setSignerIdCard] = useState(defaultSignerIdCard);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSavingState] = useState(false);
+  const setSaving = (v) => { setSavingState(v); onBusyChange?.(v); };
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(!signature?.signed);
 
   const initCanvas = useCallback(() => {
     const c = canvasRef.current;
     if (!c) return;
+    // Size the bitmap from the rendered box (× devicePixelRatio): a fixed
+    // 520×160 bitmap on a ~350px-wide phone box stretched the exported PNG
+    // horizontally relative to what was actually signed, and rendered blurry
+    // on Retina. Falls back to the width/height attributes pre-layout.
+    const rect = c.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    if (rect.width > 0) {
+      c.width = Math.round(rect.width * dpr);
+      c.height = Math.round(CANVAS_CSS_HEIGHT * dpr);
+    }
     const ctx = c.getContext("2d");
     ctx.clearRect(0, 0, c.width, c.height);
-    ctx.lineWidth = 2.2;
+    ctx.lineWidth = 2.2 * (rect.width > 0 ? dpr : 1);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.strokeStyle = "#0f172a";
@@ -31,6 +48,28 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
 
   useEffect(() => {
     if (editing) initCanvas();
+  }, [editing, initCanvas]);
+
+  // Re-size the bitmap when the rendered box changes (rotation, sheet
+  // resize): strokes drawn after a resize would otherwise map against the
+  // stale bitmap aspect and export distorted — the exact bug initCanvas
+  // fixes at mount. Re-initing clears any in-progress scribble; that beats
+  // silently stamping a stretched signature on an FDACS filing (the licensee
+  // just re-signs).
+  useEffect(() => {
+    if (!editing) return undefined;
+    const c = canvasRef.current;
+    if (!c || typeof ResizeObserver === "undefined") return undefined;
+    let lastWidth = c.getBoundingClientRect().width;
+    const ro = new ResizeObserver((entries) => {
+      const width = entries[entries.length - 1]?.contentRect?.width || 0;
+      if (width > 0 && Math.abs(width - lastWidth) > 1) {
+        lastWidth = width;
+        initCanvas();
+      }
+    });
+    ro.observe(c);
+    return () => ro.disconnect();
   }, [editing, initCanvas]);
 
   function pointFor(e) {
@@ -74,12 +113,20 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         method: "POST",
         body: { signature: dataUrl, signer_name: signerName.trim(), signer_id_card: signerIdCard.trim() },
       });
+      const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
         throw new Error(d.error || "Could not save signature");
       }
       setEditing(false);
-      onChanged?.();
+      // Pass the authoritative outcome (the POST response's metadata) and
+      // AWAIT the host's handler inside the busy window — a host that only
+      // refreshes on onChanged must not see busy end before it has the new
+      // signed state (it could exit with stale unsigned metadata).
+      await onChanged?.({
+        signed: true,
+        signer_name: d.signer_name || signerName.trim(),
+        signed_at: d.signed_at || new Date().toISOString(),
+      });
     } catch (e) {
       setError(e.message || "Could not save signature");
     } finally {
@@ -98,7 +145,8 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         throw new Error(d.error || "Could not clear signature");
       }
       setEditing(true);
-      onChanged?.();
+      // null = cleared; awaited for the same reason as save().
+      await onChanged?.(null);
     } catch (e) {
       setError(e.message || "Could not clear signature");
     } finally {
@@ -156,8 +204,8 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         <canvas
           ref={canvasRef}
           width={520}
-          height={160}
-          style={{ width: "100%", height: 160, border: "1px dashed #a1a1aa", borderRadius: 8, background: "#fff", touchAction: "none", cursor: "crosshair" }}
+          height={CANVAS_CSS_HEIGHT}
+          style={{ width: "100%", height: CANVAS_CSS_HEIGHT, border: "1px dashed #a1a1aa", borderRadius: 8, background: "#fff", touchAction: "none", cursor: "crosshair" }}
           onMouseDown={startDraw}
           onMouseMove={moveDraw}
           onMouseUp={endDraw}
@@ -165,6 +213,7 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
           onTouchStart={startDraw}
           onTouchMove={moveDraw}
           onTouchEnd={endDraw}
+          onTouchCancel={endDraw}
         />
       </div>
       {error ? <div style={{ color: "#dc2626", fontSize: 13, marginTop: 6 }}>{error}</div> : null}
