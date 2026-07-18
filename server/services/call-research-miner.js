@@ -242,9 +242,30 @@ async function extractResearchChunks(call, customer, { model = GEMINI_CALL_RESEA
   return { status: 'ok', chunks: redacted, dropped, model: res.model || model };
 }
 
-// Delete + reinsert + stamp, one transaction per call.
+// Delete + reinsert + stamp, one transaction per call. The stamp is a
+// GUARDED claim on the retranscribed_at we extracted from: if the hourly
+// re-transcription backfill replaced the transcript mid-extraction, an
+// unconditional stamp would bury the new transcript forever (its
+// retranscribed_at would no longer exceed research_mined_at). Zero rows
+// claimed → our chunks are stale → write nothing; the next run re-mines.
+// date_trunc to ms because node Dates drop Postgres microseconds.
 async function persistCallChunks(call, chunks, extractionModel) {
-  await db.transaction(async (trx) => {
+  return db.transaction(async (trx) => {
+    const claimed = await trx('call_log')
+      .where({ id: call.id })
+      .modify((q) => {
+        if (call.retranscribed_at) {
+          q.whereRaw("date_trunc('milliseconds', retranscribed_at) = ?", [new Date(call.retranscribed_at)]);
+        } else {
+          q.whereNull('retranscribed_at');
+        }
+      })
+      .update({
+        research_mined_at: new Date(),
+        research_prompt_version: PROMPT_HASH,
+        updated_at: new Date(),
+      });
+    if (!claimed) return false;
     await trx('call_research_chunks').where({ call_log_id: call.id }).del();
     if (chunks.length) {
       await trx('call_research_chunks').insert(chunks.map((c, i) => ({
@@ -264,11 +285,7 @@ async function persistCallChunks(call, chunks, extractionModel) {
         schema_version: RESEARCH_SCHEMA_VERSION,
       })));
     }
-    await trx('call_log').where({ id: call.id }).update({
-      research_mined_at: new Date(),
-      research_prompt_version: PROMPT_HASH,
-      updated_at: new Date(),
-    });
+    return true;
   });
 }
 
@@ -327,7 +344,11 @@ async function mineCallResearch({ limit = 150 } = {}) {
     if (result.status === 'unlabeled') bump('transcript_unlabeled');
     Object.entries(result.dropped || {}).forEach(([key, count]) => bump(key, count));
 
-    await persistCallChunks(call, result.chunks, result.model || GEMINI_CALL_RESEARCH_MODEL);
+    const persisted = await persistCallChunks(call, result.chunks, result.model || GEMINI_CALL_RESEARCH_MODEL);
+    if (!persisted) {
+      bump('retranscribed_mid_mine'); // fresh transcript re-selects next run
+      continue;
+    }
     mined += 1;
     chunksInserted += result.chunks.length;
     if (result.status === 'ok' && !result.chunks.length) bump('zero_chunks');
@@ -357,6 +378,7 @@ module.exports = {
     redactChunkText,
     buildRedactionContexts,
     mapSegmentRefs,
+    persistCallChunks,
     MAX_TRANSCRIPT_CHARS,
   },
 };
