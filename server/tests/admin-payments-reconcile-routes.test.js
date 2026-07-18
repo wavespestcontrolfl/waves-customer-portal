@@ -295,6 +295,10 @@ describe('Stripe-charge double-record guard', () => {
     id: 'ch_1',
     status: 'succeeded',
     amount: 10000,
+    currency: 'usd',
+    refunded: false,
+    amount_refunded: 0,
+    disputed: false,
     customer: null,
     metadata: {},
     payment_method_details: { type: 'card_present', card_present: { brand: 'visa', last4: '4242' } },
@@ -376,6 +380,10 @@ describe('concurrent reconcile race — advisory-lock serialized dedupe', () => 
     id: 'ch_race',
     status: 'succeeded',
     amount: 10000,
+    currency: 'usd',
+    refunded: false,
+    amount_refunded: 0,
+    disputed: false,
     customer: null,
     metadata: {},
     payment_method_details: { type: 'card_present', card_present: { brand: 'visa', last4: '4242' } },
@@ -453,6 +461,19 @@ describe('GET /recent-charges — reconcilable entries only', () => {
     ...overrides,
   });
 
+  test('excludes refunded, disputed, and non-USD charges — the /reconcile guard would 400 them', async () => {
+    mockChargesList.mockResolvedValue({ data: [
+      listedCharge('ch_refunded', { refunded: true, amount_refunded: 10000 }),
+      listedCharge('ch_partial', { amount_refunded: 500 }),
+      listedCharge('ch_disputed', { disputed: true }),
+      listedCharge('ch_eur', { currency: 'eur' }),
+      listedCharge('ch_free'),
+    ] });
+    const { status, body } = await get('/api/admin/payments-reconcile/recent-charges');
+    expect(status).toBe(200);
+    expect(body.charges.map((c) => c.id)).toEqual(['ch_free']);
+  });
+
   test('excludes ledger-booked charges as well as invoice-linked ones', async () => {
     mockChargesList.mockResolvedValue({ data: [
       listedCharge('ch_booked_ledger'),   // payments row, NO invoice stamp — the 409-guaranteed case
@@ -465,5 +486,85 @@ describe('GET /recent-charges — reconcilable entries only', () => {
     const { status, body } = await get('/api/admin/payments-reconcile/recent-charges');
     expect(status).toBe(200);
     expect(body.charges.map((c) => c.id)).toEqual(['ch_free']);
+  });
+});
+
+describe('charge validity guards (07-18 admin audit)', () => {
+  const { auditPaymentReconcile } = require('../services/audit-log');
+  const succeededCharge = (overrides = {}) => ({
+    id: 'ch_v1',
+    status: 'succeeded',
+    amount: 10000,
+    currency: 'usd',
+    refunded: false,
+    amount_refunded: 0,
+    disputed: false,
+    customer: null,
+    metadata: {},
+    payment_method_details: { type: 'card_present', card_present: { brand: 'visa', last4: '4242' } },
+    receipt_url: 'https://stripe.example/receipt',
+    ...overrides,
+  });
+
+  test('rejects a non-USD charge — the amount check is unit-blind', async () => {
+    mockChargesRetrieve.mockResolvedValue(succeededCharge({ currency: 'eur' }));
+    const { status, body } = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'tap_to_pay', stripeChargeId: 'ch_v1',
+    });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/currency is EUR/i);
+    expect(db.__state.invoice.status).toBe('sent');
+    expect(db.__state.payments).toHaveLength(0);
+  });
+
+  test('rejects a refunded charge even though Stripe keeps status succeeded', async () => {
+    mockChargesRetrieve.mockResolvedValue(succeededCharge({ refunded: true, amount_refunded: 10000 }));
+    const { status, body } = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'tap_to_pay', stripeChargeId: 'ch_v1',
+    });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/refunded or disputed/i);
+    expect(db.__state.invoice.status).toBe('sent');
+  });
+
+  test('rejects a partially refunded charge — the flat booking would overstate what was kept', async () => {
+    mockChargesRetrieve.mockResolvedValue(succeededCharge({ amount_refunded: 2500 }));
+    const { status, body } = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'tap_to_pay', stripeChargeId: 'ch_v1',
+    });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/refunded or disputed/i);
+  });
+
+  test('rejects a disputed charge', async () => {
+    mockChargesRetrieve.mockResolvedValue(succeededCharge({ disputed: true }));
+    const { status, body } = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'tap_to_pay', stripeChargeId: 'ch_v1',
+    });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/refunded or disputed/i);
+  });
+
+  test('audit row rides the reconcile transaction', async () => {
+    const { status } = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'cash', amount: 100,
+    });
+    expect(status).toBe(200);
+    expect(auditPaymentReconcile).toHaveBeenCalledTimes(1);
+    expect(auditPaymentReconcile).toHaveBeenCalledWith(expect.objectContaining({
+      invoice_id: 'inv-1',
+      collected_via: 'cash',
+      trx: expect.anything(),
+    }));
+  });
+
+  test('an audit-row failure rolls back the whole reconcile — no paid invoice behind a 500', async () => {
+    auditPaymentReconcile.mockRejectedValueOnce(new Error('audit_log unavailable'));
+    const { status } = await post('/api/admin/payments-reconcile/reconcile', {
+      invoiceId: 'inv-1', collectedVia: 'cash', amount: 100,
+    });
+    expect(status).toBe(500);
+    expect(db.__state.invoice.status).toBe('sent'); // NOT flipped
+    expect(db.__state.payments).toHaveLength(0);    // ledger rolled back too
   });
 });
