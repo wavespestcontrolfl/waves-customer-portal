@@ -174,9 +174,11 @@ async function parkClarifyAsk({
           this.whereIn('status', ['pending', 'approved', 'revised']).whereNull('sent_at');
         }).orWhere('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
       })
-      // An open draft (sent_at null) outranks a recently sent one for the
-      // merge path.
-      .orderByRaw('sent_at asc nulls first')
+      // An open draft (sent_at null) outranks sent ones for the merge
+      // path; among sent rows the NEWEST governs the cooldown — judging by
+      // an old consumed ask would bypass the no-nag window while a newer
+      // ask sits unanswered.
+      .orderByRaw('(sent_at is not null) asc, sent_at desc')
       .first();
     if (existing) {
       // Merge, don't discard: an unclaimed 'pending' draft is ALWAYS
