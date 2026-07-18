@@ -8,7 +8,10 @@ import AdminLayoutV2 from "./AdminLayoutV2";
 import { adminFetch } from "../utils/admin-fetch";
 
 vi.mock("../hooks/useIsMobile", () => ({ default: () => false }));
-vi.mock("../hooks/useFeatureFlag", () => ({ refetchFlags: vi.fn(() => Promise.resolve()) }));
+vi.mock("../hooks/useFeatureFlag", () => ({
+  refetchFlags: vi.fn(() => Promise.resolve()),
+  useFeatureFlag: vi.fn(() => false),
+}));
 vi.mock("../utils/admin-fetch", () => ({ adminFetch: vi.fn() }));
 vi.mock("./NotificationBell", () => ({ default: () => null }));
 vi.mock("./admin/GlobalCommandPalette", async () => {
