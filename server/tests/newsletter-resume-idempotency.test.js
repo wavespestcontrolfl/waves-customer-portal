@@ -66,16 +66,17 @@ function chain({ first, result, returning, count, updated, onUpdate, onWhereIn }
   return q;
 }
 
-function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate, heartbeatUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
+function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate, heartbeatUpdated = 1, finalUpdated = 1, truncateSendsQueueAfterHeartbeat = false } = {}) {
   const queues = {
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
       chain({ updated: 1, returning: [{ id: send?.id }] }),// atomic claim
-      chain({ updated: heartbeatUpdated }),                // per-chunk heartbeat (0 = claim lost to a reclaim)
+      chain({ updated: heartbeatUpdated }),                // pre-batch heartbeat (0 = claim lost to a reclaim)
       // A lost claim must consume nothing further from this queue.
       ...(truncateSendsQueueAfterHeartbeat ? [] : [
-        chain({ updated: 1 }),                             // final status update
-        chain({ first: null }),                            // social-share re-fetch (null → share skipped)
+        chain({ updated: finalUpdated }),                  // final status update (0 = claim rotated after last batch)
+        // Loser at finalization never re-fetches for the social share.
+        ...(finalUpdated ? [chain({ first: null })] : []),
       ]),
     ],
     newsletter_subscribers: [
@@ -271,6 +272,33 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
     // worker mails nothing (Codex r3: check before each batch, not after).
     expect(result.accepted).toBe(0);
     expect(mockSendBroadcast).not.toHaveBeenCalled();
+  });
+
+  test('a claim lost at FINALIZATION skips calendar/feature/social side effects', async () => {
+    let calendarTouched = false;
+    buildDb({
+      send: {
+        id: 'send-1',
+        status: 'draft',
+        html_body: '<p>Body</p>',
+        text_body: 'Body',
+        subject: 'Hello',
+        from_email: 'newsletter@wavespestcontrol.com',
+        from_name: 'Waves',
+        reply_to: 'contact@wavespestcontrol.com',
+        segment_filter: null,
+        subject_b: null,
+      },
+      subscribers: [{ id: 1, email: 'a@example.com', unsubscribe_token: 'tok-a', customer_id: null }],
+      deliveries: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }],
+      finalUpdated: 0, // token rotated between the last batch and finalization
+      onCalendarUpdate: () => { calendarTouched = true; },
+    });
+
+    const result = await sendCampaign('send-1');
+    expect(result.lostClaim).toBe(true);
+    expect(result.accepted).toBe(1); // the batch had already been accepted
+    expect(calendarTouched).toBe(false); // the reclaiming owner runs the lifecycle
   });
 
   test('does not overwrite deliveries recovered by processed webhooks when SendGrid rejects', async () => {

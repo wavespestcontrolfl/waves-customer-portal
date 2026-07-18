@@ -741,10 +741,18 @@ async function sendCampaign(sendId, opts = {}) {
     finalSendUpdate.sent_at = new Date();
   }
   // Only the worker that still owns the parent 'sending' claim may finalize.
-  // A late completion must not overwrite a newer recovery lifecycle.
-  await db('newsletter_sends')
+  // A late completion must not overwrite a newer recovery lifecycle — and a
+  // zero-row result means exactly that: the claim rotated after our last
+  // batch. The loser must also skip ALL first-send side effects (calendar
+  // advance, markEventsFeatured, social share) or both workers would run
+  // them and double-count featured events.
+  const finalized = await db('newsletter_sends')
     .where({ id: send.id, status: 'sending', sending_claim_token: claimToken })
     .update(finalSendUpdate);
+  if (!finalized) {
+    logger.error(`[newsletter] send ${send.id} claim lost at finalization — skipping lifecycle side effects; the reclaiming owner finalizes`);
+    return { recipients: recipientCount, accepted, failed, skipped_already_sent: skippedAlreadySent, lostClaim: true };
+  }
 
   if (finalSendUpdate.status === 'sent' && recipientCount > 0) {
     // Advance the calendar lifecycle (idempotent) so a sent newsletter's

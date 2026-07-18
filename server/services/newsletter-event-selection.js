@@ -11,6 +11,7 @@ const { FLAGSHIP_TYPE_KEY, isFlagshipType } = require('../config/newsletter-type
 const {
   isEligibleForFreshDigest,
   isEditoriallyNewEvent,
+  isSeriesDebutEvent,
   normalizeDigestTitle,
   excludeRepeatedDateIdentities,
   dedupeDigestEvents,
@@ -68,7 +69,12 @@ async function filterPreviouslyFeaturedIdentities(events, { knex = db, reference
   const rows = Array.isArray(events) ? events : [];
   if (!rows.length) return [];
   const history = await loadFeaturedIdentityHistory(knex);
-  return rows.filter((event) => !isPreviouslyFeaturedIdentity(event, history, reference));
+  // A starred row bypasses cross-row identity history — the operator is
+  // deliberately re-featuring an identity that shipped before, and the star
+  // is consumed on ship. (A DEBUT gets no such bypass here: prior shipped
+  // history for the same identity is proof it isn't a debut.)
+  return rows.filter((event) => event.admin_status === 'featured'
+    || !isPreviouslyFeaturedIdentity(event, history, reference));
 }
 
 function repeatedDateTitleKeys(events) {
@@ -112,7 +118,17 @@ async function filterRepeatedDateIdentities(
   if (!rows.length) return [];
   const pool = identityPool || await loadRoutineIdentityPool(knex, reference);
   const repeatedTitles = repeatedDateTitleKeys(pool);
-  return rows.filter((event) => !repeatedTitles.has(normalizeDigestTitle(event?.title)));
+  return rows.filter((event) => {
+    // Two carve-outs survive the repeated-title exclusion: an operator STAR
+    // (deliberate editorial override, consumed on ship) and the single-use
+    // series DEBUT — whose own later occurrences share its normalized title
+    // in the ±90-day pool, which is exactly what this filter keys on; an
+    // inaugural weekly market would otherwise never reach the digest. Both
+    // remain subject to every row-level gate (isEligibleForFreshDigest).
+    if (event?.admin_status === 'featured') return true;
+    if (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)) return true;
+    return !repeatedTitles.has(normalizeDigestTitle(event?.title));
+  });
 }
 
 function assessFlagshipEventSelection(
@@ -150,9 +166,16 @@ function assessFlagshipEventSelection(
     const inIssueWindow = start && !Number.isNaN(start.getTime())
       && start >= windowStart && start <= windowEnd;
     const approved = ['approved', 'featured'].includes(event.admin_status);
-    if (!approved || !inIssueWindow || repeatedTitles.has(normalizeDigestTitle(event.title))
+    // Same carve-outs as the planning filters, or the final proof/send gate
+    // would reject a lineup planning deliberately admitted: a STAR bypasses
+    // the repeated-title and identity-history checks; a series DEBUT
+    // bypasses repeated-title only (prior shipped history disproves debut).
+    const starred = event.admin_status === 'featured';
+    const debut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
+    if (!approved || !inIssueWindow
+        || (!starred && !debut && repeatedTitles.has(normalizeDigestTitle(event.title)))
         || !isEligibleForFreshDigest(event, reference)
-        || isPreviouslyFeaturedIdentity(event, featuredHistory, reference)) {
+        || (!starred && isPreviouslyFeaturedIdentity(event, featuredHistory, reference))) {
       errors.push(`Locked event is no longer eligible: ${event.title || event.id}.`);
       continue;
     }

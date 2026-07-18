@@ -5,6 +5,67 @@ const {
   filterRepeatedDateIdentities,
 } = require('../services/newsletter-event-selection');
 
+describe('star and debut carve-outs in the identity filters', () => {
+  const sibling = (id, overrides = {}) => ({
+    id, title: 'Downtown Night Market', start_at: '2026-08-01T22:00:00Z', ...overrides,
+  });
+
+  test('a repeated-title pool no longer drops a starred row or an explicit series debut', async () => {
+    const pool = [sibling('a'), sibling('b', { start_at: '2026-08-08T22:00:00Z' })];
+    const starred = sibling('a', { admin_status: 'featured' });
+    const debut = sibling('a', {
+      title: 'Downtown Night Market',
+      description: 'Grand opening of the new weekly market.',
+      freshness_status: 'fresh_series_launch',
+      times_featured: 0,
+      last_featured_at: null,
+    });
+    const plain = sibling('a', { admin_status: 'approved' });
+
+    expect(await filterRepeatedDateIdentities([starred, debut, plain], { identityPool: pool }))
+      .toEqual([starred, debut]);
+  });
+
+  test('the final gate accepts a starred locked event over identity history', async () => {
+    const starredEvent = {
+      id: '11111111-1111-4111-8111-111111111111',
+      title: 'Saturday Art Walk',
+      admin_status: 'featured',
+      start_at: '2026-07-25T22:00:00Z',
+      end_at: null,
+      event_url: 'https://events.example/starred',
+      event_type: 'one_time',
+      recurrence_type: 'none',
+      freshness_status: 'fresh_one_time',
+      times_featured: 1,
+      last_featured_at: '2026-07-01T10:00:00Z',
+      merged_into: null,
+    };
+    const priorShipped = {
+      id: '99999999-9999-4999-8999-999999999999',
+      title: 'Saturday Art Walk',
+      times_featured: 2,
+      last_featured_at: '2026-06-01T10:00:00Z',
+    };
+    const result = assessFlagshipEventSelection(
+      { newsletter_type: 'local-weekly-fresh-events', event_ids: [starredEvent.id] },
+      [starredEvent],
+      new Date('2026-07-20T12:00:00Z'),
+      [priorShipped],
+    );
+    expect(result.valid).toBe(true);
+
+    // Without the star, the same history rejects it.
+    const unstarred = assessFlagshipEventSelection(
+      { newsletter_type: 'local-weekly-fresh-events', event_ids: [starredEvent.id] },
+      [{ ...starredEvent, admin_status: 'approved' }],
+      new Date('2026-07-20T12:00:00Z'),
+      [priorShipped],
+    );
+    expect(unstarred.valid).toBe(false);
+  });
+});
+
 const REFERENCE = new Date('2026-07-20T12:00:00Z'); // Monday 8 AM EDT
 const ID_1 = '11111111-1111-4111-8111-111111111111';
 const ID_2 = '22222222-2222-4222-8222-222222222222';
