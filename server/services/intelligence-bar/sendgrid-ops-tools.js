@@ -24,16 +24,20 @@ const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 50;
 const MAX_REASON_LENGTH = 200;
 
-// The three suppression lists a normal send can land on, plus permanent
-// invalid addresses for the per-email check.
-const SUPPRESSION_LISTS = ['bounces', 'blocks', 'spam_reports'];
+// The suppression lists a normal send can land on (global unsubscribes are
+// /suppression/unsubscribes on the list API), plus permanent invalid
+// addresses for the per-email check. ASM group unsubscribes are a separate
+// API (/asm/suppressions) — the per-email check covers those too, since the
+// newsletter/service sends here use asm groups and a group unsubscribe
+// silently drops exactly those sends.
+const SUPPRESSION_LISTS = ['bounces', 'blocks', 'spam_reports', 'unsubscribes'];
 const PER_EMAIL_LISTS = ['bounces', 'blocks', 'spam_reports', 'invalid_emails'];
 
 const SENDGRID_OPS_TOOLS = [
   {
     name: 'get_email_suppressions',
-    description: `Recent SendGrid bounces, blocks, and spam reports (default last 7 days). Every address here silently swallows sends — the app reports success, the customer never sees the email.
-Use for: "any bounced emails this week?", "did our emails deliver?", "who reported us as spam?"`,
+    description: `Recent SendGrid bounces, blocks, spam reports, and global unsubscribes (default last 7 days). Every address here silently swallows sends — the app reports success, the customer never sees the email.
+Use for: "any bounced emails this week?", "did our emails deliver?", "who reported us as spam or unsubscribed?"`,
     input_schema: {
       type: 'object',
       properties: {
@@ -44,8 +48,8 @@ Use for: "any bounced emails this week?", "did our emails deliver?", "who report
   },
   {
     name: 'check_email_suppression',
-    description: `Check whether ONE email address is on any SendGrid suppression list (bounces, blocks, spam reports, invalid emails) — the "why does this customer never get our emails?" lookup.
-Use for: "is jane@example.com suppressed?", "why didn't the invoice email arrive?"`,
+    description: `Check whether ONE email address is on any SendGrid suppression list (bounces, blocks, spam reports, invalid emails, global unsubscribe, or an ASM group unsubscribe) — the "why does this customer never get our emails?" lookup.
+Use for: "is jane@example.com suppressed?", "why didn't the invoice email arrive?", "did they unsubscribe?"`,
     input_schema: {
       type: 'object',
       properties: {
@@ -125,12 +129,18 @@ async function checkEmailSuppression(input) {
   if (!email || !email.includes('@')) {
     return { error: 'A valid email address is required' };
   }
-  const results = await Promise.all(PER_EMAIL_LISTS.map(list =>
-    sendgridGet(`/suppression/${list}/${encodeURIComponent(email)}`)
-  ));
+  const [listResults, globalUnsub, asmGroups] = await Promise.all([
+    Promise.all(PER_EMAIL_LISTS.map(list =>
+      sendgridGet(`/suppression/${list}/${encodeURIComponent(email)}`)
+    )),
+    // Global unsubscribe: returns { recipient_email } when present, {} when not
+    sendgridGet(`/asm/suppressions/global/${encodeURIComponent(email)}`),
+    // ASM group memberships: { suppressions: [{ id, name, suppressed }] }
+    sendgridGet(`/asm/suppressions/${encodeURIComponent(email)}`),
+  ]);
   const listings = [];
   PER_EMAIL_LISTS.forEach((list, i) => {
-    const raw = results[i];
+    const raw = listResults[i];
     // Per-email endpoints return an array of matches (empty when absent);
     // blocks/invalid return {} on some accounts — normalize.
     const entries = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.result) ? raw.result : []);
@@ -139,13 +149,28 @@ async function checkEmailSuppression(input) {
       listings.push(mapSuppression({ ...entry, email }, list));
     }
   });
+  if (globalUnsub && !Array.isArray(globalUnsub) && globalUnsub.recipient_email) {
+    listings.push({ list: 'global_unsubscribe', email, created: null, reason: null, status: null });
+  }
+  const groupEntries = (asmGroups && Array.isArray(asmGroups.suppressions))
+    ? asmGroups.suppressions.filter(g => g && g.suppressed)
+    : [];
+  for (const group of groupEntries) {
+    listings.push({
+      list: 'asm_group_unsubscribe',
+      email,
+      created: null,
+      reason: `Unsubscribed from group "${group.name}" (id ${group.id})`,
+      status: null,
+    });
+  }
   return {
     email,
     suppressed: listings.length > 0,
     listings,
     note: listings.length > 0
-      ? 'This address will NOT receive emails until it is removed from the list(s) above (SendGrid dashboard or bounce-recovery flow).'
-      : 'Not on any SendGrid suppression list — if emails still fail, the problem is downstream (mailbox full, recipient-side filtering).',
+      ? 'This address will NOT receive the affected emails until it is removed from the list(s) above (SendGrid dashboard, bounce-recovery flow, or — for unsubscribes — the customer resubscribing). ASM group unsubscribes only block sends in that group.'
+      : 'Not on any SendGrid suppression list, not globally unsubscribed, and not unsubscribed from any ASM group — if emails still fail, the problem is downstream (mailbox full, recipient-side filtering).',
   };
 }
 

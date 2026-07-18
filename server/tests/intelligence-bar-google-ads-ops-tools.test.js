@@ -94,6 +94,31 @@ describe('intelligence bar Google Ads ops tools', () => {
     expect(result.truncated).toBe(false);
   });
 
+  test('numeric enum values resolve to names before reporting', async () => {
+    mockConfigured = true;
+    mockQuery.mockResolvedValueOnce([
+      {
+        campaign: {
+          id: 333, name: 'Mosquito Sarasota',
+          status: 3,                       // PAUSED
+          primary_status: 4,               // per CampaignPrimaryStatus table
+          primary_status_reasons: [2],
+        },
+        campaign_budget: {},
+      },
+    ]);
+
+    const { enums } = require('google-ads-api');
+    const result = await executeGoogleAdsOpsTool('get_google_ads_serving_status', {});
+    expect(result.error).toBeUndefined();
+    expect(result.campaigns[0].status).toBe(enums.CampaignStatus[3]);
+    expect(result.campaigns[0].status).toBe('PAUSED');
+    expect(result.campaigns[0].primary_status).toBe(enums.CampaignPrimaryStatus[4]);
+    expect(result.campaigns[0].primary_status_reasons).toEqual([enums.CampaignPrimaryStatusReason[2]]);
+    // Never an opaque number in the operator-facing output
+    expect(typeof result.campaigns[0].status).toBe('string');
+  });
+
   test('query failure surfaces as { error }, never a throw', async () => {
     mockConfigured = true;
     mockQuery.mockRejectedValueOnce(new Error('DEVELOPER_TOKEN_NOT_APPROVED'));

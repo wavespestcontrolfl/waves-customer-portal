@@ -16,8 +16,13 @@
 const TokenHealthService = require('../token-health');
 const logger = require('../logger');
 
-// Sort unhealthy first so the answer leads with what needs attention.
-const STATUS_RANK = { broken: 0, expired: 0, error: 0, expiring: 1, unknown: 2, unconfigured: 3, healthy: 4, valid: 4 };
+// Sort unhealthy first so the answer leads with what needs attention. The
+// service persists exactly: error / expired / healthy / not_configured
+// (plus the migration default 'unknown'). not_configured counts as
+// unhealthy — a required integration that was never authorized is exactly
+// what "is everything connected?" must surface.
+const STATUS_RANK = { error: 0, expired: 0, not_configured: 1, unknown: 2, healthy: 4 };
+const UNHEALTHY_RANK_CEILING = 2;
 
 const TOKEN_HEALTH_TOOLS = [
   {
@@ -47,7 +52,7 @@ async function getIntegrationTokenHealth() {
     const rank = (STATUS_RANK[a.status] ?? 2) - (STATUS_RANK[b.status] ?? 2);
     return rank !== 0 ? rank : a.platform.localeCompare(b.platform);
   });
-  const unhealthy = platforms.filter(p => (STATUS_RANK[p.status] ?? 2) < 2).length;
+  const unhealthy = platforms.filter(p => (STATUS_RANK[p.status] ?? 2) < UNHEALTHY_RANK_CEILING).length;
   return {
     platforms,
     total: platforms.length,

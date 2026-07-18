@@ -47,12 +47,17 @@ async function getDataforseoBalance() {
     const json = await res.json();
     const result = json?.tasks?.[0]?.result?.[0];
     if (!result) throw new Error('DataForSEO returned no account data');
+    // Schema notes: money.total is the lifetime amount DEPOSITED (not
+    // spend); per-day API limits live under rates.limits / money.limits.
     const money = result.money || {};
+    const rates = result.rates || {};
     return {
       balance: typeof money.balance === 'number' ? money.balance : null,
-      total_spent: typeof money.total === 'number' ? money.total : null,
-      rates_limits: result.limits?.day || null,
-      note: 'Balance is USD on a prepaid account — top-ups happen in the DataForSEO dashboard. Rank tracking and SERP audits stop silently at $0.',
+      total_deposited: typeof money.total === 'number' ? money.total : null,
+      rate_limits: rates.limits || null,
+      rate_usage: rates.current || null,
+      money_limits: money.limits || null,
+      note: 'Balance is USD on a prepaid account — top-ups happen in the DataForSEO dashboard. Rank tracking and SERP audits stop silently at $0. total_deposited is lifetime deposits, not spend.',
     };
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`DataForSEO API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);

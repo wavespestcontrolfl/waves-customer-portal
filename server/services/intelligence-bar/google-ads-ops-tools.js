@@ -13,11 +13,21 @@
  * the budget-manager's own controls.
  */
 
+const { enums } = require('google-ads-api');
 const { isConfigured, getCustomer } = require('../ads/google-ads');
 const logger = require('../logger');
 
 const MAX_DISAPPROVALS_SHOWN = 50;
 const MAX_POLICY_TOPICS_PER_AD = 10;
+
+// The client can return enum fields as numbers (the campaign sync's
+// mapStatus handles the same case) — resolve them to names so the operator
+// reads "PAUSED", never an opaque 3.
+function enumName(table, value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return table?.[value] ?? String(value);
+  return value;
+}
 
 const GOOGLE_ADS_OPS_TOOLS = [
   {
@@ -58,9 +68,10 @@ async function getServingStatus() {
   const campaigns = rows.map(row => ({
     id: String(row.campaign.id),
     name: row.campaign.name,
-    status: row.campaign.status,
-    primary_status: row.campaign.primary_status ?? null,
-    primary_status_reasons: row.campaign.primary_status_reasons || [],
+    status: enumName(enums.CampaignStatus, row.campaign.status),
+    primary_status: enumName(enums.CampaignPrimaryStatus, row.campaign.primary_status),
+    primary_status_reasons: (row.campaign.primary_status_reasons || [])
+      .map(reason => enumName(enums.CampaignPrimaryStatusReason, reason)),
     daily_budget: row.campaign_budget?.amount_micros != null
       ? Number(row.campaign_budget.amount_micros) / 1_000_000
       : null,
@@ -90,11 +101,11 @@ async function getDisapprovals() {
     campaign: row.campaign?.name || null,
     ad_group: row.ad_group?.name || null,
     ad_id: row.ad_group_ad?.ad?.id != null ? String(row.ad_group_ad.ad.id) : null,
-    status: row.ad_group_ad?.status ?? null,
-    approval_status: row.ad_group_ad?.policy_summary?.approval_status ?? null,
+    status: enumName(enums.AdGroupAdStatus, row.ad_group_ad?.status),
+    approval_status: enumName(enums.PolicyApprovalStatus, row.ad_group_ad?.policy_summary?.approval_status),
     policy_topics: (row.ad_group_ad?.policy_summary?.policy_topic_entries || [])
       .slice(0, MAX_POLICY_TOPICS_PER_AD)
-      .map(entry => ({ topic: entry.topic || null, type: entry.type ?? null })),
+      .map(entry => ({ topic: entry.topic || null, type: enumName(enums.PolicyTopicEntryType, entry.type) })),
   }));
   return {
     ads,

@@ -49,14 +49,15 @@ describe('intelligence bar DataForSEO ops tool', () => {
     expect(result.error).toMatch(/Unknown tool/);
   });
 
-  test('extracts balance, total spend, and daily limits', async () => {
+  test('extracts balance, lifetime deposits, and the real rates/money limit objects', async () => {
     process.env.DATAFORSEO_LOGIN = 'user';
     process.env.DATAFORSEO_PASSWORD = 'pass';
     global.fetch.mockResolvedValueOnce(jsonResponse({
       tasks: [{
         result: [{
-          money: { balance: 42.5, total: 310.75 },
-          limits: { day: { total_tasks: 2000 } },
+          // money.total is lifetime DEPOSITS; limits nest under rates/money
+          money: { balance: 42.5, total: 310.75, limits: { day: 100, minute: 5 } },
+          rates: { limits: { day: 2000, minute: 12 }, current: { day: 137, minute: 1 } },
         }],
       }],
     }));
@@ -64,8 +65,11 @@ describe('intelligence bar DataForSEO ops tool', () => {
     const result = await executeDataforseoOpsTool('get_dataforseo_balance');
     expect(result.error).toBeUndefined();
     expect(result.balance).toBe(42.5);
-    expect(result.total_spent).toBe(310.75);
-    expect(result.rates_limits).toEqual({ total_tasks: 2000 });
+    expect(result.total_deposited).toBe(310.75);
+    expect(result.total_spent).toBeUndefined();
+    expect(result.rate_limits).toEqual({ day: 2000, minute: 12 });
+    expect(result.rate_usage).toEqual({ day: 137, minute: 1 });
+    expect(result.money_limits).toEqual({ day: 100, minute: 5 });
     expect(String(global.fetch.mock.calls[0][0])).toContain('/v3/appendix/user_data');
   });
 

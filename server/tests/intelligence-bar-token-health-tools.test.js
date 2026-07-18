@@ -22,22 +22,25 @@ describe('intelligence bar token health tool', () => {
     expect(result.error).toMatch(/Unknown tool/);
   });
 
-  test('maps rows, sorts unhealthy first, and counts them', async () => {
+  test('maps rows, sorts unhealthy first, and counts not_configured as unhealthy', async () => {
     const verified = new Date('2026-07-17T08:00:00Z');
     mockGetAll.mockResolvedValueOnce([
       { platform: 'stripe', token_type: 'api_key', status: 'healthy', last_verified_at: verified, expires_at: null, last_error: null, env_var_name: 'STRIPE_SECRET_KEY' },
-      { platform: 'meta_ads', token_type: 'oauth', status: 'broken', last_verified_at: verified, expires_at: null, last_error: 'OAuth token expired', env_var_name: null },
-      { platform: 'gbp_venice', token_type: 'oauth', status: 'expiring', last_verified_at: verified, expires_at: new Date('2026-07-20T00:00:00Z'), last_error: null, env_var_name: null },
+      { platform: 'gbp_venice', token_type: 'oauth', status: 'error', last_verified_at: verified, expires_at: new Date('2026-07-20T00:00:00Z'), last_error: 'OAuth refresh failed', env_var_name: null },
+      // A never-authorized integration is exactly what "is everything
+      // connected?" must surface — not_configured counts as unhealthy.
+      { platform: 'meta_ads', token_type: 'oauth', status: 'not_configured', last_verified_at: null, expires_at: null, last_error: null, env_var_name: null },
+      { platform: 'twilio', token_type: 'api_key', status: 'expired', last_verified_at: verified, expires_at: null, last_error: null, env_var_name: 'TWILIO_AUTH_TOKEN' },
     ]);
 
     const result = await executeTokenHealthTool('get_integration_token_health');
     expect(result.error).toBeUndefined();
-    expect(result.platforms.map(p => p.platform)).toEqual(['meta_ads', 'gbp_venice', 'stripe']);
-    expect(result.platforms[0].last_error).toBe('OAuth token expired');
-    expect(result.platforms[2].last_verified_at).toBe('2026-07-17T08:00:00.000Z');
-    expect(result.platforms[1].expires_at).toBe('2026-07-20T00:00:00.000Z');
-    expect(result.total).toBe(3);
-    expect(result.unhealthy).toBe(2);
+    expect(result.platforms.map(p => p.platform)).toEqual(['gbp_venice', 'twilio', 'meta_ads', 'stripe']);
+    expect(result.platforms[0].last_error).toBe('OAuth refresh failed');
+    expect(result.platforms[0].expires_at).toBe('2026-07-20T00:00:00.000Z');
+    expect(result.platforms[3].last_verified_at).toBe('2026-07-17T08:00:00.000Z');
+    expect(result.total).toBe(4);
+    expect(result.unhealthy).toBe(3);
   });
 
   test('empty table returns a benign shape', async () => {
