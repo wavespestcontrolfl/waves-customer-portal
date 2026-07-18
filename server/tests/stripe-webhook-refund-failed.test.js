@@ -23,6 +23,9 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', webhookSecret: 'whsec_mock' }));
+// virtual is correct here and ONLY here: tests/stripe-webhook-helpers.js does
+// not exist (the real module is ../routes/stripe-webhook-helpers, mocked
+// below), so there is no real resolution for this name to bypass to.
 jest.mock('./stripe-webhook-helpers', () => ({ classifyExistingWebhookEvent: jest.fn(), STALE_CLAIM_WINDOW_MS: 60000 }), { virtual: true });
 jest.mock('../routes/stripe-webhook-helpers', () => ({
   classifyExistingWebhookEvent: jest.fn(),
