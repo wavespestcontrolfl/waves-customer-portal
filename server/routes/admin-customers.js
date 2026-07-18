@@ -113,6 +113,9 @@ const TECH_360_STRIPPED_KEYS = [
   'paymentMethodConsents', 'contracts', 'annualPrepayTerms', 'prepaidPlans',
   'notificationPrefs', 'referralInfo', 'customerDiscounts', 'healthScore',
   'tags',
+  // Sibling properties on the account: authorization is per-customer, so an
+  // assignment at ONE property must not expose the addresses of the others.
+  'accountProperties',
 ];
 const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'payerId', 'billingMode', 'monthlyRate', 'annualValue', 'lifetimeRevenue',
@@ -126,12 +129,6 @@ function techSafe360Payload(payload) {
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
   for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) delete out.customer[field];
-  out.accountProperties = (payload.accountProperties || []).map((p) => {
-    const row = { ...p };
-    delete row.monthlyRate;
-    delete row.pipelineStage;
-    return row;
-  });
   return out;
 }
 

@@ -375,8 +375,8 @@ describe('techSafe360Payload', () => {
     for (const key of TECH_360_STRIPPED_KEYS) expect(safe).not.toHaveProperty(key);
     for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) expect(safe.customer).not.toHaveProperty(field);
     expect(safe.customer).toEqual(expect.objectContaining({ id: 'c1', tier: 'gold' }));
-    expect(safe.accountProperties[0]).not.toHaveProperty('monthlyRate');
-    expect(safe.accountProperties[0]).not.toHaveProperty('pipelineStage');
+    // Sibling-property addresses never ride a per-customer authorization.
+    expect(safe).not.toHaveProperty('accountProperties');
     // Field-relevant context survives.
     expect(safe.preferences).toEqual({ gate_code: '1234' });
     expect(safe.services).toHaveLength(1);
