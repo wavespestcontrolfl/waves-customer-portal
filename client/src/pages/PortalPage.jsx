@@ -13026,6 +13026,9 @@ export default function PortalPage() {
       setVisitsSubTab(t === 'schedule' ? 'upcoming' : 'completed');
     } else {
       urlTab = t && allowed.includes(t) ? t : 'dashboard';
+      // Plain ?tab=visits means upcoming (the parser's default) — adopt it
+      // so the URL and the rendered sub-tab can never disagree on refresh.
+      if (urlTab === 'visits') setVisitsSubTab('upcoming');
     }
     const svc = params.get('service');
     setPlanFocusService(urlTab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null);
@@ -13042,7 +13045,9 @@ export default function PortalPage() {
     if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); syncTabUrl('services'); return; }
     if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
-    syncTabUrl(id);
+    // The plain Visits nav keeps whatever sub-tab is showing — encode it in
+    // the URL (services = completed) so a refresh restores the same view.
+    syncTabUrl(id === 'visits' && visitsSubTab === 'completed' ? 'services' : id);
   };
   const openPlanService = (svcId) => {
     setPlanFocusService(svcId);

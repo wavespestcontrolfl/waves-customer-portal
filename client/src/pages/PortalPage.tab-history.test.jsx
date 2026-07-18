@@ -116,6 +116,24 @@ describe('portal tab history sync', () => {
     expect(await screen.findByRole('button', { name: /lawn care program/i, expanded: true })).toBeInTheDocument();
   });
 
+  it('encodes the showing sub-tab when the plain Visits nav is used', async () => {
+    render(<BrowserRouter><PortalPage /></BrowserRouter>);
+    await screen.findByText(/hello pat/i);
+
+    // Land on Completed via the Documents shortcut, leave, come back via
+    // the plain Visits nav item — the URL must still say services.
+    fireEvent.click(screen.getAllByRole('button', { name: 'Documents' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: /open completed visits/i }));
+    await waitFor(() => expect(window.location.search).toBe('?tab=services'));
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Billing' })[0]);
+    await waitFor(() => expect(window.location.search).toBe('?tab=billing'));
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Visits' })[0]);
+    await waitFor(() => expect(window.location.search).toBe('?tab=services'));
+    expect(await screen.findByText(/no completed visits yet/i)).toBeInTheDocument();
+  });
+
   it('re-clicking the active tab does not stack duplicate history entries', async () => {
     render(<BrowserRouter><PortalPage /></BrowserRouter>);
     await screen.findByText(/hello pat/i);
