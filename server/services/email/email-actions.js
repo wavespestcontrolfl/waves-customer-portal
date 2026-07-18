@@ -478,12 +478,23 @@ async function handleLeadInquiry(email, classification) {
     // prevents double-drafting an already-quoted lead.
     let followUpDraft = null;
     const followUpConfidence = Number(classification.confidence);
+    // The SAME merged extraction feeds the customer guard and the draft:
+    // drafting backfills phone/address from the lead row, so the guard must
+    // see those too — a follow-up with no phone from a sender address that
+    // differs from the customer record would otherwise miss a live customer
+    // whose lead phone matches, and price them as a prospect.
+    const mergedExtracted = {
+      ...extracted,
+      phone: extracted.phone || existingLead.phone || null,
+      address: extracted.address || existingLead.address || null,
+      service_interest: extracted.service_interest || existingLead.service_interest || null,
+    };
     let followUpCustomerMatch = { live: null, inactive: null };
     if (emailQuoteDraftsEnabled()
       && Number.isFinite(followUpConfidence)
       && followUpConfidence >= leadMinConfidence()) {
       try {
-        followUpCustomerMatch = await findExistingCustomerForLead(email, extracted);
+        followUpCustomerMatch = await findExistingCustomerForLead(email, mergedExtracted);
       } catch (e) {
         // Unknown customer state must not price as a prospect — skip.
         followUpCustomerMatch = { live: true, inactive: null };
@@ -497,12 +508,7 @@ async function handleLeadInquiry(email, classification) {
       try {
         followUpDraft = await maybeDraftEstimateFromEmailLead({
           email,
-          extracted: {
-            ...extracted,
-            phone: extracted.phone || existingLead.phone || null,
-            address: extracted.address || existingLead.address || null,
-            service_interest: extracted.service_interest || existingLead.service_interest || null,
-          },
+          extracted: mergedExtracted,
           lead: existingLead,
         });
       } catch (e) {

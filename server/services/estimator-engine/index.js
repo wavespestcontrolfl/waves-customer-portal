@@ -190,10 +190,24 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         try {
           existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
         } catch { existingMeta = {}; }
-        // A prior estimator bell stands UNLESS this call now has a draft the
-        // old bell doesn't know about (transient red → later success): the
-        // stale "send it manually" text must upgrade to the draft link.
-        if (existingMeta.estimator_engine === true && (!estimateId || existingMeta.estimateId)) return true;
+        if (existingMeta.estimator_engine === true) {
+          if (callSid) {
+            // Same callSid = same request. A prior estimator bell stands
+            // UNLESS this run now has a draft the old bell doesn't know
+            // about (transient red → later success): the stale "send it
+            // manually" text must upgrade to the draft link.
+            if (!estimateId || existingMeta.estimateId) return true;
+          } else {
+            // A thread key spans REQUESTS on one phone, so only a true
+            // retry stands: the same draft again, or both sides still-open
+            // owed-quotes. A different draft (second property) or a fresh
+            // owed-quote after a completed one must re-ring — discarding
+            // those hid real work from the operator.
+            const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
+            const bothOpen = !estimateId && !existingMeta.estimateId;
+            if (sameDraft || bothOpen) return true;
+          }
+        }
         await db('notifications')
           .where({ id: existing.id })
           .update({
@@ -208,8 +222,12 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         return true;
       }
     }
-    await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
-    return true;
+    // notifyAdmin catches insert failures and returns null — that is NOT a
+    // durable bell, and callers gating detached work on durability (the SMS
+    // handoff) must hear about it. Intentional suppression returns a truthy
+    // sentinel and correctly counts as handled.
+    const created = await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
+    return !!created;
   } catch (err) {
     logger.warn(`[estimator-engine] admin notify failed: ${err.message}`);
     return false;
