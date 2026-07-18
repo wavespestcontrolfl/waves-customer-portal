@@ -74,6 +74,19 @@ const SEND_CLAIMABLE_STATUSES = [
 ];
 const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, "sending"];
 
+// Statuses the generic admin edit (InvoiceService.update) may rewrite.
+// sent/viewed/overdue joined draft/scheduled by owner ruling 2026-07-17
+// (edit a delivered invoice, then resend so the customer sees the new
+// version): a delivered-but-unpaid invoice is still collectible, and both
+// its pay page and a resent PDF render from the live row, so a rewrite is
+// consistent everywhere the customer can reach it — only the already-
+// delivered email/PDF goes stale, which the post-edit resend prompt exists
+// to fix. The money fences are unchanged: paid/prepaid/processing/void/
+// sending stay locked here, and the PaymentIntent / payment-plan /
+// prepay-term / credit guards in update() still block any invoice a
+// payment has actually touched.
+const EDIT_ALLOWED_STATUSES = [...SEND_CLAIMABLE_STATUSES];
+
 // Invoice statuses that are safe to auto-void when the underlying scheduled
 // service is cancelled. Mirrors assertInvoiceVoidable: paid / processing
 // money-states are off-limits (refund is the right path); 'scheduled' is
@@ -2886,12 +2899,14 @@ const InvoiceService = {
     // erase the audit trail. See INVOICE_UPDATE_ALLOWED_FIELDS export.
 
     // Editability guard. The generic update path can only safely rewrite an
-    // invoice that has not yet entered collection or accrued payment
-    // side-state. We re-read the CURRENT row here (not the one the editor was
-    // opened with) so a status race — the invoice gets sent/paid via the pay
-    // link, Charge in person, Add payment, or the scheduled-send cron after
-    // the edit form opened — is caught at the write:
-    //   - status must still be draft/scheduled (never rewrite sent/paid money)
+    // invoice that has not accrued payment side-state. We re-read the CURRENT
+    // row here (not the one the editor was opened with) so a status race — the
+    // invoice gets paid via the pay link, Charge in person, or Add payment
+    // after the edit form opened — is caught at the write:
+    //   - status must still be in EDIT_ALLOWED_STATUSES (draft/scheduled/
+    //     sent/viewed/overdue — see the constant for the owner ruling that
+    //     opened delivered-but-unpaid invoices to edits; paid money is never
+    //     rewritten)
     //   - no live Stripe PaymentIntent: /pay/:token /setup stamps
     //     stripe_payment_intent_id while the invoice stays collectible; a
     //     retotal here would leave a stale pay page able to confirm the old
@@ -2915,9 +2930,9 @@ const InvoiceService = {
       }
     }
     const currentStatus = String(existing.status || "").toLowerCase();
-    if (currentStatus !== "draft" && currentStatus !== "scheduled") {
+    if (!EDIT_ALLOWED_STATUSES.includes(currentStatus)) {
       throw new Error(
-        "Only draft or scheduled invoices can be edited — this invoice has already been sent or paid",
+        "Only unpaid invoices can be edited — this invoice has been paid, is collecting payment, or is voided",
       );
     }
     if (existing.stripe_payment_intent_id) {
@@ -2948,6 +2963,138 @@ const InvoiceService = {
       throw new Error(
         "This invoice has an active payment plan — cancel the plan before editing the invoice",
       );
+    }
+
+    // In-flight follow-up fence: a dun touch renders the invoice's amount,
+    // title, and pay link and sends externally without a transaction —
+    // fireStep stamps touch_claimed_at on the sequence row for the duration.
+    // Refuse edits while a fresh claim exists so the reminder the customer
+    // receives and the pay page it links can't diverge mid-send. Crashed
+    // senders self-heal past the 10-minute freshness window. Fail CLOSED on
+    // read errors, same as the payment-plan guard.
+    const touchClaimFreshCutoff = new Date(Date.now() - 10 * 60 * 1000);
+    let inFlightTouch = null;
+    try {
+      inFlightTouch = await db("invoice_followup_sequences")
+        .where({ invoice_id: id })
+        .where("touch_claimed_at", ">", touchClaimFreshCutoff)
+        .first("id");
+    } catch (err) {
+      throw new Error(
+        `Could not verify the follow-up send state — refusing to edit (${err.message})`,
+      );
+    }
+    if (inFlightTouch) {
+      throw new Error(
+        "A payment reminder for this invoice is sending right now — try again in a minute",
+      );
+    }
+
+    // Applied-money fence for retotals (mirrors voidInvoice). A delivered
+    // invoice can stay in sent/viewed/overdue with money already recorded
+    // against it:
+    //   - a partial in-person prepayment reduces `total`, stamps
+    //     payment_recorded_at, and books a paid ledger row while the invoice
+    //     stays collectible (admin-dispatch / admin-schedule completion);
+    //   - a charge dispute reopens the invoice as overdue and clears its PI
+    //     while the original payment sits in 'disputed'; the dispute-won
+    //     handler later restores that payment against whatever the invoice
+    //     then says.
+    // A line-item/tax retotal recomputes from the stored lines and would
+    // erase the partial-payment reduction (resent invoice demands collected
+    // money again) or let a dispute settle against edited amounts. Metadata
+    // edits (title/notes/email_message/due_date) stay allowed. Fail CLOSED
+    // if the ledger can't be read, same as the payment-plan guard.
+    const isRetotal = Boolean(updates.line_items) || updates.tax_rate !== undefined;
+    // Lock-window send guard applies to DELIVERED retotals only: dun
+    // sequences are created at send, so a draft/scheduled invoice has no
+    // touch that could race the edit (the claim fences still run for every
+    // edit as the cheap backstop). Keying on the pre-read status also keeps
+    // the WDO draft repricer and other draft-only retotal paths free of the
+    // extra aggregate read.
+    const sendWindowGuarded =
+      isRetotal && ["sent", "viewed", "overdue"].includes(currentStatus);
+    // Send-progress snapshot for runEdit's lock-window compare — see the
+    // in-transaction check for why the claim fences alone can't see a touch
+    // that claimed, delivered, and released entirely before the row lock.
+    let preSendState = null;
+    if (isRetotal) {
+      if (existing.payment_recorded_at) {
+        throw new Error(
+          "Cannot edit amounts on an invoice with payment already applied — refund it or issue a new invoice instead",
+        );
+      }
+      let appliedMoneyRow = null;
+      try {
+        // All three supported payment→invoice linkage keys (mirrors the
+        // webhook's findInvoiceForPayment): the dispute handler stamps
+        // dispute_invoice_id — checking only invoice_id would let a
+        // dispute-reopened invoice slip through this fence.
+        appliedMoneyRow = await db("payments")
+          .whereIn("status", ["paid", "processing", "disputed"])
+          .whereRaw(
+            "(metadata::jsonb ->> 'invoice_id' = ? OR metadata::jsonb ->> 'dispute_invoice_id' = ? OR metadata::jsonb ->> 'waves_invoice_id' = ?)",
+            [id, id, id],
+          )
+          .first("id", "status");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the payment ledger — refusing to edit (${err.message})`,
+        );
+      }
+      if (appliedMoneyRow) {
+        throw new Error(
+          appliedMoneyRow.status === "disputed"
+            ? "Cannot edit amounts on an invoice with a payment dispute in progress — resolve the dispute first"
+            : `Cannot edit amounts on an invoice with payment already applied (payment ${appliedMoneyRow.id}) — refund it or issue a new invoice instead`,
+        );
+      }
+      // Saved-card (charge-card) attempts commit a durable claimed/ambiguous
+      // row BEFORE the charge reconciles — in that window there may be no
+      // payments row and no invoice PI yet, but an off-session charge may
+      // still settle. A retotal would let the webhook/reconciler bind
+      // collected money to a different live total. Same unresolved-attempt
+      // shape the pay page's cross-rail fence uses.
+      let unresolvedChargeAttempt = null;
+      try {
+        unresolvedChargeAttempt = await db("stripe_invoice_charge_attempts")
+          .where({ invoice_id: id })
+          .whereNull("resolved_at")
+          .whereIn("status", ["claimed", "ambiguous"])
+          .first("id");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the saved-card charge state — refusing to edit (${err.message})`,
+        );
+      }
+      if (unresolvedChargeAttempt) {
+        throw new Error(
+          "A saved-card charge for this invoice is still processing or awaiting reconciliation — wait for it to resolve before editing amounts",
+        );
+      }
+      // Snapshot the invoice's aggregate send progress BEFORE the retotal
+      // work below. fireStep's progression write (touches_sent+1,
+      // last_touch_at) commits before its finally-block releases the
+      // claim, so any touch delivered after this read leaves evidence one
+      // of the runEdit checks will see: claim still fresh → the in-txn
+      // claim re-check; claim already released → this snapshot no longer
+      // matches. Aggregated across the invoice's sequence rows (SUM/MAX)
+      // so duplicate cadences can't hide a send. Fail CLOSED, same as the
+      // claim read above.
+      if (sendWindowGuarded) {
+        try {
+          preSendState = await db("invoice_followup_sequences")
+            .where({ invoice_id: id })
+            .first(
+              db.raw("COALESCE(SUM(touches_sent), 0) AS touches_sent"),
+              db.raw("MAX(last_touch_at) AS last_touch_at"),
+            );
+        } catch (err) {
+          throw new Error(
+            `Could not verify the follow-up send state — refusing to edit (${err.message})`,
+          );
+        }
+      }
     }
 
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
@@ -3082,7 +3229,88 @@ const InvoiceService = {
     // transactions. Left as-is on purpose: it needs two admins on the SAME
     // draft within a sub-second window, the already-exists cases are blocked
     // above, and any resulting total mismatch is visible and recoverable.
+    // A changed due date must re-anchor the follow-up sequence ATOMICALLY
+    // with the edit (inside runEdit): committing the new due date first
+    // would leave a gap where a cron worker claims the still-due sequence
+    // and sends the old reminder. Compared as calendar dates (the column is
+    // a DATE; the editor sends YYYY-MM-DD) so an unchanged date doesn't
+    // re-anchor a send-anchored cadence. The comparison itself happens
+    // inside runEdit against the LOCKED row — comparing against the
+    // pre-lock `existing` snapshot would let a second admin's stale form
+    // write an older due date back without moving the sequence.
+    const asDateOnly = (v) => {
+      if (!v) return "";
+      const d = new Date(v);
+      return Number.isNaN(d.getTime())
+        ? String(v)
+        : d.toISOString().slice(0, 10);
+    };
+
     const runEdit = async (client) => {
+      // Serialize against in-flight dun sends: lock the invoice row FIRST.
+      // fireStep's claim transaction locks this same row before stamping
+      // touch_claimed_at, so one of the two strictly precedes the other —
+      // then the claim re-check below runs on a fresh statement that can
+      // see the winner's commit (the pre-check alone could read a snapshot
+      // taken before a concurrent claim committed).
+      const lockedRow = await client("invoices")
+        .where({ id })
+        .forUpdate()
+        .first();
+      if (!lockedRow) {
+        throw new Error(
+          "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
+        );
+      }
+      const inFlightNow = await client("invoice_followup_sequences")
+        .where({ invoice_id: id })
+        .where("touch_claimed_at", ">", touchClaimFreshCutoff)
+        .first("id");
+      if (inFlightNow) {
+        throw new Error(
+          "A payment reminder for this invoice is sending right now — try again in a minute",
+        );
+      }
+      // Lock-window send detection (retotals): the claim fences only see a
+      // claim that is STILL fresh. A touch that claimed, delivered, and
+      // released entirely between the guard reads above and this row lock
+      // left no claim — committing the retotal would put a new total
+      // behind the pay link the customer was just texted. The cycle can't
+      // hide: fireStep commits its progression write (touches_sent+1,
+      // last_touch_at) before its finally-block clears the claim, so under
+      // this lock either the claim is still visible (caught above) or the
+      // aggregates have moved past the pre-check snapshot. Sends that
+      // completed before the snapshot are the ordinary edit-after-send
+      // case, mitigated by the invoice_edited_after_send resend trail.
+      // Fail closed; the admin re-applies against the post-send state.
+      if (sendWindowGuarded) {
+        let nowSendState = null;
+        try {
+          nowSendState = await client("invoice_followup_sequences")
+            .where({ invoice_id: id })
+            .first(
+              db.raw("COALESCE(SUM(touches_sent), 0) AS touches_sent"),
+              db.raw("MAX(last_touch_at) AS last_touch_at"),
+            );
+        } catch (err) {
+          throw new Error(
+            `Could not verify the follow-up send state — refusing to edit (${err.message})`,
+          );
+        }
+        const touchesBefore = Number(preSendState?.touches_sent) || 0;
+        const touchesNow = Number(nowSendState?.touches_sent) || 0;
+        const lastBefore = preSendState?.last_touch_at
+          ? new Date(preSendState.last_touch_at).getTime()
+          : 0;
+        const lastNow = nowSendState?.last_touch_at
+          ? new Date(nowSendState.last_touch_at).getTime()
+          : 0;
+        if (touchesNow > touchesBefore || lastNow > lastBefore) {
+          throw new Error(
+            "A payment reminder for this invoice just went out — re-check the invoice and try again",
+          );
+        }
+      }
       // Accrued: lock the parent statement and re-verify it's still OPEN inside
       // this transaction, so a concurrent close can't finalize between the
       // pre-check above and this write.
@@ -3095,9 +3323,21 @@ const InvoiceService = {
           throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by editing a billed line");
         }
       }
-      const [edited] = await client("invoices")
+      // Extending an overdue invoice's due date into the future makes it
+      // current again — restore the delivered status ('viewed' if the
+      // customer ever opened it, else 'sent') so the stats bucket and the
+      // red list badge stop reporting it overdue. Server-decided
+      // transition: `status` stays banned from INVOICE_UPDATE_ALLOWED_FIELDS.
+      if (
+        String(lockedRow.status || "").toLowerCase() === "overdue" &&
+        data.due_date !== undefined &&
+        asDateOnly(data.due_date) >= etDateString(new Date())
+      ) {
+        data.status = lockedRow.viewed_at ? "viewed" : "sent";
+      }
+      let editQuery = client("invoices")
         .where({ id })
-        .whereIn("status", ["draft", "scheduled"])
+        .whereIn("status", EDIT_ALLOWED_STATUSES)
         .whereNull("stripe_payment_intent_id")
         .whereNull("annual_prepay_term_id")
         .whereNotExists(function () {
@@ -3106,11 +3346,53 @@ const InvoiceService = {
             .whereRaw("payment_plans.invoice_id = invoices.id")
             .where("payment_plans.status", "active");
         })
-        .update(data)
-        .returning("*");
+        // In-flight-touch fence re-asserted at write time: a dun send that
+        // claimed the sequence between the guard read and this write must
+        // fail the edit closed, not race the reminder it's rendering.
+        .whereNotExists(function () {
+          this.select(db.raw("1"))
+            .from("invoice_followup_sequences")
+            .whereRaw("invoice_followup_sequences.invoice_id = invoices.id")
+            .where(
+              "invoice_followup_sequences.touch_claimed_at",
+              ">",
+              touchClaimFreshCutoff,
+            );
+        });
+      // Retotals also re-assert the applied-money fences at write time so a
+      // partial payment, dispute, or auto-applied account credit recorded
+      // between the guard read and this write fails closed instead of
+      // rewriting collected money (a dun's autoApplyAccountCreditIfEnabled
+      // can stamp credit_applied while the invoice stays sent).
+      if (isRetotal) {
+        editQuery = editQuery
+          .whereNull("payment_recorded_at")
+          .whereRaw("COALESCE(credit_applied, 0) = 0")
+          .whereNotExists(function () {
+            this.select(db.raw("1"))
+              .from("payments")
+              .whereRaw(
+                "(payments.metadata::jsonb ->> 'invoice_id' = invoices.id::text OR payments.metadata::jsonb ->> 'dispute_invoice_id' = invoices.id::text OR payments.metadata::jsonb ->> 'waves_invoice_id' = invoices.id::text)",
+              )
+              .whereIn("payments.status", ["paid", "processing", "disputed"]);
+          })
+          .whereNotExists(function () {
+            this.select(db.raw("1"))
+              .from("stripe_invoice_charge_attempts")
+              .whereRaw(
+                "stripe_invoice_charge_attempts.invoice_id = invoices.id",
+              )
+              .whereNull("stripe_invoice_charge_attempts.resolved_at")
+              .whereIn("stripe_invoice_charge_attempts.status", [
+                "claimed",
+                "ambiguous",
+              ]);
+          });
+      }
+      const [edited] = await editQuery.update(data).returning("*");
       if (!edited) {
         throw new Error(
-          "Only draft or scheduled invoices can be edited — its status or payment state changed while you were editing",
+          "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
       }
       // Phase 2: an edited accrued invoice changes the statement total — reroll in
@@ -3119,11 +3401,53 @@ const InvoiceService = {
       if (edited.payer_statement_id) {
         await require("./payer-statements").rollupStatement(edited.payer_statement_id, client);
       }
+      if (
+        data.due_date !== undefined &&
+        asDateOnly(lockedRow.due_date) !== asDateOnly(data.due_date)
+      ) {
+        // In the SAME transaction (and under the invoice row lock): a cron
+        // worker's claim can't interleave between the committed due date and
+        // the moved sequence, and a reschedule failure aborts the edit
+        // rather than leaving the old dunning timeline against the new date.
+        // Delta from the LOCKED row's due date, so a concurrent edit that
+        // already moved it (and its anchor) is shifted back correctly.
+        await require("./invoice-followups").rescheduleForInvoiceEdit(
+          id,
+          { previousDueDate: lockedRow.due_date, newDueDate: data.due_date },
+          client,
+        );
+      }
       return edited;
     };
-    // An accrued invoice's edit + statement reroll must commit atomically; other
-    // invoices keep the existing single-statement write (no transaction).
-    return existing.payer_statement_id ? db.transaction(runEdit) : runEdit(db);
+    // Every edit runs in a transaction now: the invoice row lock at the top
+    // of runEdit is the serialization point against fireStep's claim, and
+    // the statement reroll / follow-up re-anchor must commit atomically
+    // with the edit.
+    const edited = await db.transaction(runEdit);
+    // Audit trail: a delivered invoice was rewritten after the customer could
+    // have seen it — the emailed PDF is now stale until it's resent. Keyed on
+    // the SAVED row's status, not the pre-read one: a scheduled send can
+    // complete between the guard read and the atomic write (the predicate
+    // deliberately allows that edit in its new 'sent' state), and that rewrite
+    // must leave the same trail. Outside the write on purpose (best-effort; a
+    // logging failure must not roll back or fail a committed edit).
+    const editedStatus = String(edited?.status || "").toLowerCase();
+    if (["sent", "viewed", "overdue"].includes(editedStatus)) {
+      await db("activity_log")
+        .insert({
+          customer_id: existing.customer_id,
+          action: "invoice_edited_after_send",
+          description:
+            `Invoice ${existing.invoice_number} was edited after delivery — ` +
+            "resend it so the customer sees the updated version",
+        })
+        .catch((err) =>
+          logger.warn(
+            `[invoice:update] activity_log insert failed: ${err.message}`,
+          ),
+        );
+    }
+    return edited;
   },
 
   async voidInvoice(id) {

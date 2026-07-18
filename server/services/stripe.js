@@ -3309,6 +3309,22 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice.status);
+        // Stale-render fence, rechecked against the LOCKED row: the route's
+        // version check reads unlocked, so an edit committing between that
+        // check and this lock would price and stamp the PI from the edited
+        // row while the page still renders the pre-edit line items. The
+        // echoed version must match the row the PI is actually minted from.
+        if (
+          opts.expectedVersion != null
+          && lockedInvoice.updated_at
+          && String(new Date(lockedInvoice.updated_at).getTime()) !== String(opts.expectedVersion)
+        ) {
+          const staleErr = new Error('This invoice was just updated — refreshing to the latest version.');
+          staleErr.statusCode = 409;
+          staleErr.inProgress = false;
+          staleErr.staleInvoice = true;
+          throw staleErr;
+        }
         try {
           // Route preflight is intentionally duplicated under the invoice lock:
           // a saved-card owner can claim after the public request's unlocked
