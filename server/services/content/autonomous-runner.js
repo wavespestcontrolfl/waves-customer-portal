@@ -672,14 +672,22 @@ class AutonomousRunner {
       if (!comparisonResult.pass) {
         const blocking = comparisonResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
         const notes = `Comparison-table gate failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
-        // A THROWN evaluator (COMPARISON_TABLE_GATE_ERROR) is an engine
-        // fault, not a draft problem — a redraft can't fix it. Park for a
-        // human, same fail-closed posture as the *_unavailable paths.
-        if (blocking.some((f) => f.code === 'COMPARISON_TABLE_GATE_ERROR')) {
+        // Two comparison findings are NOT writer mistakes and must stay
+        // reviewable rather than retry/skip: a THROWN evaluator
+        // (COMPARISON_TABLE_GATE_ERROR — engine fault a redraft can't fix)
+        // and COMPARISON_NAMED_COMPETITOR_DISABLED (a clean draft naming an
+        // allowlisted competitor while the namedCompetitorComparison gate is
+        // off — a legal/brand decision the owner approves via the
+        // named-competitor review flow, not a defect).
+        const nonRetryable = blocking.find((f) => f.code === 'COMPARISON_TABLE_GATE_ERROR' || f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED');
+        if (nonRetryable) {
+          const parkNote = nonRetryable.code === 'COMPARISON_TABLE_GATE_ERROR'
+            ? 'evaluator threw (engine fault); parked for review, not retried.'
+            : 'named-competitor comparisons are gated off — review/approve via the named-competitor flow, not a redraft.';
           const finalized = await finalize(run, t0, {
             outcome: 'skipped_gate_fail',
             skip_reason: 'comparison_table_failed',
-            reviewer_notes: `${notes} — evaluator threw (engine fault); parked for review, not retried.`,
+            reviewer_notes: `${notes} — ${parkNote}`,
           });
           await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken });
           return finalized;
@@ -1299,7 +1307,10 @@ class AutonomousRunner {
     const review = real.filter((r) => r.outcome === 'completed_pending_review').length;
     const gated = real.filter((r) => r.outcome === 'skipped_gate_fail').length;
     const failed = real.filter((r) => String(r.outcome || '').startsWith('failed')).length;
-    if (published + review + gated + failed === 0) return; // nothing notable today
+    const deferred = real.filter((r) => String(r.outcome || '').startsWith('deferred')).length;
+    // Deferrals count as notable: an all-deferred batch (caps full, gate
+    // retry pending) did real work the operator should hear about.
+    if (published + review + gated + failed + deferred === 0) return; // nothing notable today
 
     const reasons = {};
     for (const r of real) {
@@ -1313,7 +1324,6 @@ class AutonomousRunner {
       .join(', ');
     const liveUrls = real.map((r) => r.published_url).filter(Boolean);
 
-    const deferred = real.filter((r) => String(r.outcome || '').startsWith('deferred')).length;
     const parts = [`Waves content engine: ${published} published, ${review} to review, ${gated} gated, ${failed} failed${deferred ? `, ${deferred} deferred` : ''}.`];
     if (topReasons) parts.push(`Why: ${topReasons}.`);
     if (liveUrls.length) parts.push(`Live: ${liveUrls.slice(0, 2).join(' ')}`);

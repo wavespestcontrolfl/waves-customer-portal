@@ -38,9 +38,27 @@ exports.up = async function up(knex) {
       updated_at: knex.fn.now(),
     });
 
+  // Rows whose run history shows a gate INFRA failure (thrown evaluator,
+  // unavailable module/corpus, PII scanner down, missing previous version) or
+  // the gated named-competitor state are genuine exceptions the operator
+  // should still see — exclude them from the skip (Codex PR r1). ANY matching
+  // run keeps the row parked (conservative).
+  const INFRA_MARKERS_SQL = `(
+        ar.reviewer_notes ILIKE '%gate_error%'
+        OR ar.reviewer_notes ILIKE '%unavailable%'
+        OR ar.reviewer_notes ILIKE '%evaluator_threw%'
+        OR ar.reviewer_notes ILIKE '%no_previous_version_to_compare%'
+        OR ar.reviewer_notes ILIKE '%load fail%'
+        OR ar.reviewer_notes ILIKE '%named_competitor_disabled%'
+      )`;
   const gateRows = await knex('opportunity_queue')
     .where('status', 'pending_review')
     .whereIn('skip_reason', ['content_guardrails_failed', 'comparison_table_failed', 'gate_fail'])
+    .whereRaw(`NOT EXISTS (
+      SELECT 1 FROM autonomous_runs ar
+      WHERE ar.opportunity_id = opportunity_queue.id
+        AND ${INFRA_MARKERS_SQL}
+    )`)
     .update({ status: 'skipped', updated_at: knex.fn.now() });
 
   const protectedRows = await knex('opportunity_queue')

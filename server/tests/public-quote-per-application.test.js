@@ -444,5 +444,11 @@ describe('unitOnMultiUnitParcelForcesSiteQuote — unit address on a multi-unit 
   test('multi-unit parcel WITHOUT a unit line is a whole-building request and prices normally (#2721)', () => {
     expect(unitOnMultiUnitParcelForcesSiteQuote({ line2: null }, { unitCount: 32 })).toBe(false);
     expect(unitOnMultiUnitParcelForcesSiteQuote({}, { unitCount: 32 })).toBe(false);
+    expect(unitOnMultiUnitParcelForcesSiteQuote({ line1: '123 Main St', line2: '' }, { unitCount: 32 })).toBe(false);
+  });
+
+  test('an INLINE unit in line1 (free-form input, no dedicated unit field) still forces the site quote', () => {
+    expect(unitOnMultiUnitParcelForcesSiteQuote({ line1: '123 Main St Apt 4', line2: '' }, { unitCount: 12 })).toBe(true);
+    expect(unitOnMultiUnitParcelForcesSiteQuote({ line1: '204 3rd Street West Unit 408' }, { unitCount: 32 })).toBe(true);
   });
 });
