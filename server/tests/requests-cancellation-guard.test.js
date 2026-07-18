@@ -39,7 +39,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/annual-prepay-renewals', () => ({
   coveredTermsAsOf: jest.fn(() => ({
     where: jest.fn(function where() { return this; }),
-    first: jest.fn(async () => (state.annual_prepay_terms || [])[0] || null),
+    first: jest.fn(async () => (mockState.annual_prepay_terms || [])[0] || null),
   })),
 }));
 
@@ -48,8 +48,8 @@ const db = require('../models/db');
 const { processCancellationRequest } = require('../services/cancellation-processor');
 const router = require('../routes/requests');
 
-// Per-table state the fake db serves. Reset in beforeEach.
-let state;
+// Per-table mockState the fake db serves. Reset in beforeEach.
+let mockState;
 
 // Condition-honoring fake builder: the guard's three eligibility queries hit
 // the same tables with different predicates, so equality/op/whereIn/grouped
@@ -64,7 +64,7 @@ function colCond(col, opOrVal, maybeVal) {
 function builderFor(table) {
   const b = {};
   const conds = [];
-  const rows = () => (state[table] || []).filter((r) => conds.every((c) => c(r)));
+  const rows = () => (mockState[table] || []).filter((r) => conds.every((c) => c(r)));
   b.where = jest.fn((criteria, opOrVal, maybeVal) => {
     if (typeof criteria === 'function') {
       // Grouped disjunction (scheduled_date >= today OR status='rescheduled').
@@ -101,8 +101,8 @@ function builderFor(table) {
   b.count = jest.fn(() => b);
   b.insert = jest.fn((row) => ({
     returning: jest.fn(async () => {
-      const inserted = { id: `req-${(state.service_requests_inserted ??= []).length + 1}`, created_at: new Date().toISOString(), ...row };
-      state.service_requests_inserted.push(inserted);
+      const inserted = { id: `req-${(mockState.service_requests_inserted ??= []).length + 1}`, created_at: new Date().toISOString(), ...row };
+      mockState.service_requests_inserted.push(inserted);
       return [inserted];
     }),
   }));
@@ -133,7 +133,7 @@ function postCancellation(baseUrl, body = {}) {
 }
 
 beforeEach(() => {
-  state = {
+  mockState = {
     // dupe check + prior-cancellation lookup both read service_requests.
     service_requests: [],
     scheduled_services: [],
@@ -151,18 +151,18 @@ describe('POST /api/requests cancellation guard', () => {
     const body = await res.json();
     expect(body.code).toBe('nothing_to_cancel');
     expect(processCancellationRequest).not.toHaveBeenCalled();
-    expect(state.service_requests_inserted).toBeUndefined();
+    expect(mockState.service_requests_inserted).toBeUndefined();
   }));
 
   test('ongoing recurring series → allowed, processor runs', () => withServer(async (baseUrl) => {
-    state.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(201);
     expect(processCancellationRequest).toHaveBeenCalledTimes(1);
   }));
 
   test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {
-    state.customers = [{ id: 'cust-1', monthly_rate: '89.00', waveguard_tier: 'Gold', billing_mode: null, next_charge_date: null }];
+    mockState.customers = [{ id: 'cust-1', monthly_rate: '89.00', waveguard_tier: 'Gold', billing_mode: null, next_charge_date: null }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(201);
     expect(processCancellationRequest).toHaveBeenCalledTimes(1);
@@ -171,14 +171,14 @@ describe('POST /api/requests cancellation guard', () => {
   test('a lingering rate on an explicit non-monthly lane is NOT live dues', () => withServer(async (baseUrl) => {
     // billing-lane rule: per_visit/one_time customers retain old tier/rate
     // fields that must never count as membership dues.
-    state.customers = [{ id: 'cust-1', monthly_rate: '89.00', waveguard_tier: 'Gold', billing_mode: 'per_visit', next_charge_date: null }];
+    mockState.customers = [{ id: 'cust-1', monthly_rate: '89.00', waveguard_tier: 'Gold', billing_mode: 'per_visit', next_charge_date: null }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('nothing_to_cancel');
   }));
 
   test('an armed charge on a membership lane (unpriced member) → allowed', () => withServer(async (baseUrl) => {
-    state.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'monthly_membership', next_charge_date: '2026-08-01' }];
+    mockState.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'monthly_membership', next_charge_date: '2026-08-01' }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(201);
   }));
@@ -187,20 +187,20 @@ describe('POST /api/requests cancellation guard', () => {
     // Auto Pay disables never clear the column — on a non-billing lane the
     // date is decoration, and counting it re-opened the empty-account
     // self-churn this guard exists to prevent.
-    state.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'one_time', next_charge_date: '2026-08-01' }];
+    mockState.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'one_time', next_charge_date: '2026-08-01' }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('nothing_to_cancel');
   }));
 
   test('upcoming cancellable visit alone → allowed', () => withServer(async (baseUrl) => {
-    state.scheduled_services = [{ id: 'svc-2', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-01-01' }];
+    mockState.scheduled_services = [{ id: 'svc-2', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-01-01' }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(201);
   }));
 
   test('a live-track visit alone is NOT cancellable work — the sweep would never touch it', () => withServer(async (baseUrl) => {
-    state.scheduled_services = [{ id: 'svc-3', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-01-01', track_state: 'en_route' }];
+    mockState.scheduled_services = [{ id: 'svc-3', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2099-01-01', track_state: 'en_route' }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(400);
     const body = await res.json();
@@ -209,8 +209,8 @@ describe('POST /api/requests cancellation guard', () => {
   }));
 
   test('a live annual-prepay term alone → allowed (coverage rows are not recurring_ongoing)', () => withServer(async (baseUrl) => {
-    state.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'annual_prepay', next_charge_date: null }];
-    state.annual_prepay_terms = [{ id: 'term-1' }];
+    mockState.customers = [{ id: 'cust-1', monthly_rate: null, waveguard_tier: null, billing_mode: 'annual_prepay', next_charge_date: null }];
+    mockState.annual_prepay_terms = [{ id: 'term-1' }];
     const res = await postCancellation(baseUrl);
     expect(res.status).toBe(201);
     expect(processCancellationRequest).toHaveBeenCalledTimes(1);
