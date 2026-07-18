@@ -124,20 +124,24 @@ const GEMINI_EXTRACTION_MODEL = process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2
 // failing the call. Defaults are PINNED per provider (never tier or
 // report-writer aliases — an ops change to another lane's model env must not
 // silently swap the extractor). Kill switch: CALL_EXTRACTION_PROVIDER=gemini
-// restores the Gemini leg (via llm/call.js, same greedy temp-0 JSON mode).
+// ALONE restores the Gemini leg (via llm/call.js, same greedy temp-0 JSON
+// mode) — model overrides are PER-PROVIDER (CALL_EXTRACTION_MODEL = the
+// OpenAI leg only, MODEL_CALL_EXTRACTION_ANTHROPIC = the Claude leg,
+// GEMINI_EXTRACTION_MODEL = the Gemini leg), so a lingering OpenAI model
+// override can never ride along into another provider during a rollback.
 const CALL_EXTRACTION_PROVIDER = process.env.CALL_EXTRACTION_PROVIDER || 'openai';
-const CALL_EXTRACTION_DEFAULT_MODEL_FOR = {
-  openai: 'gpt-5.6-sol',
+const CALL_EXTRACTION_MODEL_FOR = {
+  openai: process.env.CALL_EXTRACTION_MODEL || 'gpt-5.6-sol',
   anthropic: MODELS.CALL_EXTRACTION_ANTHROPIC,
   gemini: GEMINI_EXTRACTION_MODEL,
 };
 const CALL_EXTRACTION_ROUTE = Object.freeze({
   primary: Object.freeze({
     provider: CALL_EXTRACTION_PROVIDER,
-    model: process.env.CALL_EXTRACTION_MODEL || CALL_EXTRACTION_DEFAULT_MODEL_FOR[CALL_EXTRACTION_PROVIDER] || 'gpt-5.6-sol',
+    model: CALL_EXTRACTION_MODEL_FOR[CALL_EXTRACTION_PROVIDER] || CALL_EXTRACTION_MODEL_FOR.openai,
   }),
   fallback: CALL_EXTRACTION_PROVIDER === 'anthropic'
-    ? Object.freeze({ provider: 'openai', model: 'gpt-5.6-sol' })
+    ? Object.freeze({ provider: 'openai', model: CALL_EXTRACTION_MODEL_FOR.openai })
     : Object.freeze({ provider: 'anthropic', model: MODELS.CALL_EXTRACTION_ANTHROPIC }),
 });
 // V1 (legacy) extractor model — historically hardcoded in the request URL,

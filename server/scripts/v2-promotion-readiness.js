@@ -87,13 +87,21 @@ async function main() {
   const liveCatalogNames = (await loadBookableCallServices(db)).map((s) => s.name).filter(Boolean);
   const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
   const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
-  const rows = await baseQuery()
+  const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
-    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction');
+    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model');
 
-  const staleExcluded = totalAttempted - rows.length;
-  console.log(`Current extractor route: models=${CURRENT_ROUTE_MODELS.join(', ')} prompt=${CURRENT_PROMPT_VERSION}`);
+  // The GATE scores the PRIMARY leg alone — pooling both legs would let a
+  // healthy primary mask a small failing fallback cohort, or pass a route
+  // whose fallback has zero assessed rows. The fallback cohort is reported
+  // separately below and is never silently folded into the gate.
+  const fallbackModel = CURRENT_ROUTE_MODELS.find((m) => m !== CURRENT_PRIMARY) || null;
+  const fallbackRows = fallbackModel ? allRouteRows.filter((r) => r.ai_extraction_model === fallbackModel) : [];
+  const rows = allRouteRows.filter((r) => r.ai_extraction_model === CURRENT_PRIMARY);
+
+  const staleExcluded = totalAttempted - allRouteRows.length;
+  console.log(`Current extractor route: primary=${CURRENT_PRIMARY} fallback=${fallbackModel || 'n/a'} prompt=${CURRENT_PROMPT_VERSION}`);
   if (staleExcluded > 0) {
     console.log(`Excluded ${staleExcluded} shadow row(s) from older extractor versions (not counted toward the gate).`);
   }
@@ -184,8 +192,16 @@ async function main() {
 
   const pass = (b) => (b ? 'PASS ✅' : 'FAIL ❌');
   console.log('\n══════════ v2 ROUTING PROMOTION READINESS ══════════\n');
-  console.log(`Shadow extractions on record: ${rows.length}`);
+  console.log(`Shadow extractions on record (primary leg ${CURRENT_PRIMARY}): ${rows.length}`);
   console.log('Status breakdown:', JSON.stringify(statusCounts));
+  if (fallbackModel) {
+    const fbValid = fallbackRows.filter((r) => r.v2_extraction_status === 'valid').length;
+    if (fallbackRows.length === 0) {
+      console.log(`Fallback leg ${fallbackModel}: 0 shadow rows — UNASSESSED. An outage failover would run an untested model; bake it off (or eyeball its first shadow rows) before relying on it.`);
+    } else {
+      console.log(`Fallback leg ${fallbackModel}: ${fallbackRows.length} row(s), ${fbValid} valid (${Math.round((fbValid / fallbackRows.length) * 100)}% schema-pass) — reported only, NOT gated.`);
+    }
+  }
   console.log('');
   console.log(`1. Sample size ≥ ${MIN_CALLS}          : ${pass(rows.length >= MIN_CALLS)}  (${rows.length})`);
   console.log(`2. Schema validation ≥ ${SCHEMA_PASS_THRESHOLD * 100}%     : ${pass(schemaPassRate >= SCHEMA_PASS_THRESHOLD)}  (${(schemaPassRate * 100).toFixed(1)}% — ${validCount}/${rows.length})`);

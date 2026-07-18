@@ -132,6 +132,25 @@ describe('v2 extraction function (extractCallDataV2)', () => {
     expect(CALL_EXTRACTION_ROUTE.fallback.provider).not.toBe(CALL_EXTRACTION_ROUTE.primary.provider);
   });
 
+  test('gemini kill switch ignores a lingering OpenAI model override', () => {
+    jest.resetModules();
+    const saved = { p: process.env.CALL_EXTRACTION_PROVIDER, m: process.env.CALL_EXTRACTION_MODEL };
+    process.env.CALL_EXTRACTION_PROVIDER = 'gemini';
+    process.env.CALL_EXTRACTION_MODEL = 'gpt-5.6-sol'; // stale override from the Sol era
+    try {
+      const fresh = require('../services/call-recording-processor');
+      const route = fresh._test.CALL_EXTRACTION_ROUTE;
+      // One-variable rollback: the gemini leg must run a GEMINI model.
+      expect(route.primary.provider).toBe('gemini');
+      expect(route.primary.model).toMatch(/^gemini-/);
+      expect(route.fallback.provider).toBe('anthropic');
+    } finally {
+      if (saved.p === undefined) delete process.env.CALL_EXTRACTION_PROVIDER; else process.env.CALL_EXTRACTION_PROVIDER = saved.p;
+      if (saved.m === undefined) delete process.env.CALL_EXTRACTION_MODEL; else process.env.CALL_EXTRACTION_MODEL = saved.m;
+      jest.resetModules();
+    }
+  });
+
   test('report-writer env overrides must not move the extraction default', () => {
     jest.resetModules();
     const prev = process.env.MODEL_OPENAI_REPORT_WRITER;
