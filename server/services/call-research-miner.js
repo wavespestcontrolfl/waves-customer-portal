@@ -48,26 +48,29 @@ const { buildCallResearchPrompt, validateResearchOutput, PROMPT_HASH } = require
 // (scripts/bakeoff-call-research.js) at major model GAs; bump only on a win.
 const PRIMARY_PROVIDER = process.env.CALL_RESEARCH_PROVIDER || MODELS.PROVIDER.OPENAI;
 // A provider-only override must never inherit another provider's model id —
-// each provider gets its own bake-off-informed default.
+// each provider gets its own bake-off-informed default. Defaults are PINNED
+// (literal / registry-pinned), never tier or report-writer aliases: an ops
+// change to another lane's model env must not silently swap the extraction
+// model mid-corpus. CALL_RESEARCH_MODEL is the only override for the
+// primary; MODEL_CALL_RESEARCH_ANTHROPIC for the Anthropic leg.
 const DEFAULT_MODEL_FOR = {
-  [MODELS.PROVIDER.OPENAI]: MODELS.OPENAI_REPORT_WRITER,
-  [MODELS.PROVIDER.ANTHROPIC]: MODELS.FLAGSHIP,
+  [MODELS.PROVIDER.OPENAI]: 'gpt-5.6-sol',
+  [MODELS.PROVIDER.ANTHROPIC]: MODELS.CALL_RESEARCH_ANTHROPIC,
   [MODELS.PROVIDER.GEMINI]: 'gemini-2.5-pro',
 };
 const CALL_RESEARCH_PRIMARY = Object.freeze({
   provider: PRIMARY_PROVIDER,
-  model: process.env.CALL_RESEARCH_MODEL || DEFAULT_MODEL_FOR[PRIMARY_PROVIDER] || MODELS.OPENAI_REPORT_WRITER,
+  model: process.env.CALL_RESEARCH_MODEL || DEFAULT_MODEL_FOR[PRIMARY_PROVIDER] || 'gpt-5.6-sol',
 });
 const CALL_RESEARCH_ROUTE = Object.freeze({
   primary: CALL_RESEARCH_PRIMARY,
   fallback: CALL_RESEARCH_PRIMARY.provider === MODELS.PROVIDER.ANTHROPIC
-    ? Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_REPORT_WRITER })
-    : Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.FLAGSHIP }),
+    ? Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: DEFAULT_MODEL_FOR[MODELS.PROVIDER.OPENAI] })
+    : Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.CALL_RESEARCH_ANTHROPIC }),
 });
 
 const MAX_TRANSCRIPT_CHARS = 24000;
 const MAX_CONSECUTIVE_FAILURES = 3;
-const EXTRACTION_TIMEOUT_MS = 120000;
 const MAX_SEGMENT_REFS = 5;
 
 function normalizeForMatch(text) {
@@ -226,20 +229,27 @@ async function extractResearchChunks(call, customer, { route = CALL_RESEARCH_ROU
 
   // Schema validation runs INSIDE the dispatcher so contract-invalid primary
   // output (valid JSON, wrong shape) triggers the fallback leg instead of
-  // failing the call outright.
+  // failing the call outright. No explicit timeoutMs: an explicit budget is
+  // a SHARED deadline whose first leg gets the full remainder — a stalled
+  // primary would starve the Claude leg. The dispatcher's default budget
+  // splits evenly across legs, which is exactly what a nightly job wants.
   const res = await dispatchWithFallback(route, {
     text: buildCallResearchPrompt(transcript),
     jsonMode: true,
     maxTokens: 8192,
     temperature: 0, // closed-enum structured extraction — greedy decode
-    timeoutMs: EXTRACTION_TIMEOUT_MS,
   }, {
     validate: (result) => (result.json && validateResearchOutput(result.json).valid ? null : 'research_schema_invalid'),
   });
   if (!res.ok || !res.json) {
-    const schemaReject = (res.failures || []).some((f) => f.reason === 'research_schema_invalid');
-    return schemaReject
-      ? { status: 'schema_failed', errors: res.failures, chunks: [], dropped: {} }
+    // schema_failed ONLY when every leg failed on the output contract —
+    // a mixed outcome (schema-invalid primary + transport/no-key fallback)
+    // counts as request_failed so the consecutive-failure abort still
+    // engages during a provider outage instead of walking the backlog.
+    const failures = res.failures || [];
+    const allSchema = failures.length > 0 && failures.every((f) => f.reason === 'research_schema_invalid');
+    return allSchema
+      ? { status: 'schema_failed', errors: failures, chunks: [], dropped: {} }
       : { status: 'request_failed', reason: res.reason || 'empty_json', chunks: [], dropped: {} };
   }
 

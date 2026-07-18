@@ -60,6 +60,8 @@ describe('call-research prompt contract', () => {
 
   test('provider-only override never inherits a foreign default model', () => {
     jest.resetModules();
+    const prevProvider = process.env.CALL_RESEARCH_PROVIDER;
+    const prevModel = process.env.CALL_RESEARCH_MODEL;
     process.env.CALL_RESEARCH_PROVIDER = 'anthropic';
     delete process.env.CALL_RESEARCH_MODEL;
     try {
@@ -68,9 +70,52 @@ describe('call-research prompt contract', () => {
       expect(route.primary.model).not.toMatch(/^gemini-/);
       expect(route.fallback.provider).toBe('openai');
     } finally {
-      delete process.env.CALL_RESEARCH_PROVIDER;
+      if (prevProvider === undefined) delete process.env.CALL_RESEARCH_PROVIDER;
+      else process.env.CALL_RESEARCH_PROVIDER = prevProvider;
+      if (prevModel === undefined) delete process.env.CALL_RESEARCH_MODEL;
+      else process.env.CALL_RESEARCH_MODEL = prevModel;
       jest.resetModules();
     }
+  });
+
+  test('call-research default is pinned — report-writer env overrides must not move it', () => {
+    jest.resetModules();
+    const prev = process.env.MODEL_OPENAI_REPORT_WRITER;
+    process.env.MODEL_OPENAI_REPORT_WRITER = 'gpt-hypothetical-new-writer';
+    try {
+      const { CALL_RESEARCH_ROUTE: route } = require('../services/call-research-miner');
+      expect(route.primary.model).toBe('gpt-5.6-sol');
+    } finally {
+      if (prev === undefined) delete process.env.MODEL_OPENAI_REPORT_WRITER;
+      else process.env.MODEL_OPENAI_REPORT_WRITER = prev;
+      jest.resetModules();
+    }
+  });
+
+  test('mixed leg failures classify as request_failed so the outage abort engages', async () => {
+    jest.resetModules();
+    const outcomes = [
+      { failures: [{ reason: 'research_schema_invalid' }, { reason: 'anthropic_429' }], expected: 'request_failed' },
+      { failures: [{ reason: 'research_schema_invalid' }, { reason: 'research_schema_invalid' }], expected: 'schema_failed' },
+      { failures: [], expected: 'request_failed' },
+    ];
+    for (const { failures, expected } of outcomes) {
+      jest.resetModules();
+      jest.doMock('../services/llm/call', () => ({
+        dispatchWithFallback: jest.fn(async () => ({ ok: false, reason: 'all_providers_failed', failures })),
+      }));
+      try {
+        const miner = require('../services/call-research-miner');
+        const res = await miner.extractResearchChunks(
+          { transcription: 'Agent: Waves.\nCaller: I have ants everywhere.' },
+          null,
+        );
+        expect(res.status).toBe(expected);
+      } finally {
+        jest.dontMock('../services/llm/call');
+      }
+    }
+    jest.resetModules();
   });
 
   test('schema validation runs inside the dispatcher so bad primary output triggers fallback', async () => {
