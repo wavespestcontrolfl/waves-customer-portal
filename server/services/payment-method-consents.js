@@ -13,6 +13,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
+const { isExpiredCardMethod } = require('./autopay-eligibility');
 
 const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'portal_add_bank', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept', 'appointment_card_request']);
 
@@ -125,7 +126,11 @@ async function findConsentedChargeableCard(customerId) {
     .whereNotNull('stripe_payment_method_id')
     .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }]);
   for (const pm of rows) {
-     
+    // An expired card is never promoted into Auto Pay: the retry sweep
+    // charges whatever is default+enabled with no expiry re-check, so
+    // promoting one points collection at a dead card. Junk expiry data
+    // reads as expired — same fail-closed rule as the portal enable gate.
+    if (isExpiredCardMethod(pm)) continue;
     if (await hasEnrollmentScopedConsent(customerId, pm.stripe_payment_method_id)) return pm;
   }
   return null;
