@@ -227,8 +227,8 @@ async function main() {
     }
   }
   console.log('');
-  console.log(`1. Sample size ≥ ${MIN_CALLS}          : ${pass(rows.length >= MIN_CALLS)}  (${rows.length})`);
-  console.log(`2. Schema validation ≥ ${SCHEMA_PASS_THRESHOLD * 100}%     : ${pass(schemaPassRate >= SCHEMA_PASS_THRESHOLD)}  (${(schemaPassRate * 100).toFixed(1)}% — ${validCount}/${rows.length})`);
+  console.log(`1. Sample size ≥ ${MIN_CALLS}          : ${pass(primaryAttempts >= MIN_CALLS)}  (${primaryAttempts} attempts)`);
+  console.log(`2. Schema validation ≥ ${SCHEMA_PASS_THRESHOLD * 100}%     : ${pass(schemaPassRate >= SCHEMA_PASS_THRESHOLD)}  (${(schemaPassRate * 100).toFixed(1)}% — ${validCount}/${primaryAttempts})`);
   console.log(`3. v1↔v2 agreement ≥ ${AGREEMENT_THRESHOLD * 100}%     : ${pass(agreementRate >= AGREEMENT_THRESHOLD)}  (${(agreementRate * 100).toFixed(1)}% — ${agree}/${agree + disagree})`);
   console.log(`4. 0 SMS-without-consent auto-routes : ${pass(smsWithoutConsent === 0)}  (${smsWithoutConsent})`);
   console.log(`5. 0 phantom-appointment risks      : ${pass(phantomRisks.length === 0)}  (${phantomRisks.length})`);
@@ -276,7 +276,7 @@ async function main() {
     && fbValidCount / fbAttempts >= SCHEMA_PASS_THRESHOLD;
   console.log(`6. Fallback leg assessed (≥ ${MIN_FALLBACK_ROWS} attempts @ ≥ ${SCHEMA_PASS_THRESHOLD * 100}% valid): ${pass(fallbackAssessed)}  (${fbValidCount}/${fbAttempts}${failedFallbackAttempts ? ` incl. ${failedFallbackAttempts} failed attempt(s)` : ''})`);
 
-  const allPass = rows.length >= MIN_CALLS && schemaPassRate >= SCHEMA_PASS_THRESHOLD &&
+  const allPass = primaryAttempts >= MIN_CALLS && schemaPassRate >= SCHEMA_PASS_THRESHOLD &&
     agreementRate >= AGREEMENT_THRESHOLD && smsWithoutConsent === 0 && phantomRisks.length === 0 &&
     fallbackAssessed;
   console.log(`\n${allPass ? '✅ ALL CRITERIA PASS — safe to flip CALL_EXTRACTION_V2_DRIVES_ROUTING=true (after reviewing disagreements).' : '⛔ NOT READY — criteria above still failing.'}\n`);
