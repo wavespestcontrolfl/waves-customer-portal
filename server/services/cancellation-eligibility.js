@@ -55,18 +55,20 @@ async function hasCancellableWork(customerId) {
   // (per_visit / one_time / per_application / annual_prepay) retain
   // lingering tier/rate fields that are NOT live dues (billing-lane.js), so
   // resolve the lane with the same classifier billing uses before counting
-  // the rate. next_charge_date is likewise only meaningful on a lane whose
-  // billing machinery actually consumes it (monthly dues cron /
-  // annual-prepay renewal) — the column is not cleared by an Auto Pay
-  // disable, so on a one_time/per_visit account a stale date is decoration,
-  // not something to cancel. The membership/prepay armed-date leg still
-  // covers an unpriced member (NULL rate = manual quote pending) with a
-  // charge armed.
+  // the rate. next_charge_date is likewise only meaningful on the ONE lane
+  // whose billing machinery consumes it — the monthly dues cron (the
+  // annual-prepay renewal reads term state, never this column, and the
+  // cron skips that lane entirely; annual members are covered by their
+  // recurring series / upcoming-visit legs). The column is not cleared by
+  // an Auto Pay disable, so on any other lane a lingering date is
+  // decoration, not something to cancel. The membership armed-date leg
+  // still covers an unpriced member (NULL rate = manual quote pending):
+  // an explicit monthly_membership lane IS a plan to cancel.
   const lane = billingRow ? resolveBillingLane(billingRow) : null;
   const liveDues = lane?.mode === 'monthly_membership'
     && Number(billingRow?.monthly_rate) > 0;
   const armedCharge = billingRow?.next_charge_date != null
-    && (lane?.mode === 'monthly_membership' || lane?.mode === 'annual_prepay');
+    && lane?.mode === 'monthly_membership';
   return !!recurringRow
     || !!upcomingRow
     || liveDues
