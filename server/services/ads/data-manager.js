@@ -313,18 +313,33 @@ function candidateMatchScore(candidate) {
   let score = 0;
   if (candidate.gclid) score += 8;
   if (candidate.wbraid || candidate.gbraid) score += 6;
-  // Meta click keys count too: candidates feed BOTH lanes, and a sibling
-  // carrying only fbc/fbclid (or the weaker fbp cookie) must outrank a
-  // consent-stripped row whose leftover value/leadId points would otherwise
-  // win the dedupe and cost CAPI its click-ID-only measurement path.
-  if (candidate.fbc || candidate.fbclid) score += 6;
-  if (candidate.fbp) score += 3;
   if (normalizeEmail(candidate.email)) score += 4;
   if (normalizePhone(candidate.phone)) score += 4;
   if (number(candidate.conversionValue) > 0) score += 2;
   if (candidate.eventTimestamp) score += 1;
   if (candidate.leadId) score += 1;
   return score;
+}
+
+const CLICK_KEY_FIELDS = ['gclid', 'wbraid', 'gbraid', 'fbclid', 'fbc', 'fbp'];
+
+// Duplicates of one transaction are the same person's conversion seen through
+// different join rows — their click identifiers all attribute that one event.
+// The dedupe winner therefore carries the UNION of every sibling's click keys:
+// no lane can lose its click ID to the dedupe (the winner keeps gclid even
+// when a Meta-keyed sibling loses, and fbc/fbp even when the Google-keyed row
+// wins), and a consent-stripped winner still measures click-only. PII is
+// NEVER merged across siblings — consent stripping nulled it for a reason,
+// and the scorer already prefers the row whose own PII survived.
+function mergeClickKeys(into, from) {
+  let out = into;
+  for (const key of CLICK_KEY_FIELDS) {
+    if (!out[key] && from[key]) {
+      if (out === into) out = { ...into };
+      out[key] = from[key];
+    }
+  }
+  return out;
 }
 
 function dedupeCandidatesByTransaction(candidates = []) {
@@ -346,7 +361,9 @@ function dedupeCandidatesByTransaction(candidates = []) {
 
     const existing = byTransaction.get(transactionId);
     if (candidateMatchScore(candidate) > candidateMatchScore(existing)) {
-      byTransaction.set(transactionId, candidate);
+      byTransaction.set(transactionId, mergeClickKeys(candidate, existing));
+    } else {
+      byTransaction.set(transactionId, mergeClickKeys(existing, candidate));
     }
   }
 
@@ -379,6 +396,12 @@ function mapLeadCandidate(row) {
     fbp: row.fbp || null,
     email: row.email || null,
     phone: row.phone || null,
+    // EVERY linked contact identifier, for person-level consent checks —
+    // same contract as mapCompletedJobCandidate. Never uploaded itself.
+    consentIdentifiers: [
+      { email: row.email || null, phone: row.phone || null },
+      { email: row.customer_email || null, phone: row.customer_phone || null },
+    ],
     metadata: {
       leadSource: row.source_name || null,
       sourceType: row.source_type || null,
@@ -447,6 +470,10 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
   const eventTimestampSql = 'COALESCE(l.converted_at, l.first_contact_at, l.created_at)';
   const rows = await db('leads as l')
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
+    // Linked customer's CURRENT identifiers ride along for consent checks —
+    // an opt-out under the customer record must suppress the lead's (possibly
+    // stale) contact data too. See consentIdentifiers on the mappers.
+    .leftJoin('customers as c', 'l.customer_id', 'c.id')
     .whereNull('l.deleted_at')
     .whereRaw(`${eventTimestampSql} >= ?::timestamptz`, [since])
     .whereRaw(`${eventTimestampSql} < ?::timestamptz`, [addDateStringDays(endDate, 1)])
@@ -470,6 +497,8 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
       'l.fbclid',
       'l.fbc',
       'l.fbp',
+      'c.email as customer_email',
+      'c.phone as customer_phone',
       'ls.name as source_name',
       'ls.source_type',
       'ls.channel',
@@ -577,15 +606,36 @@ async function applyMarketingConsent(conversionType, candidates) {
   const personSuppressed = (candidate) => sup.isSuppressed(candidate)
     || (Array.isArray(candidate.consentIdentifiers)
       && candidate.consentIdentifiers.some((id) => sup.isSuppressed(id)));
-  const cleaned = candidates.map((candidate) => {
-    if (personSuppressed(candidate)) {
+  // ...and the opt-out propagates across TRANSACTION SIBLINGS: duplicate join
+  // rows of one transaction are the same person seen through different links
+  // (lead vs customer). If ANY sibling matches an opt-out, every sibling's
+  // CRM identifiers must strip — otherwise a sibling carrying different
+  // stale contact data (absent from the suppression lists) survives, wins
+  // the dedupe on its intact PII score, and uploads that person's PII.
+  const flags = candidates.map(personSuppressed);
+  const suppressedTransactions = new Set();
+  candidates.forEach((candidate, i) => {
+    if (flags[i] && candidate.transactionId) suppressedTransactions.add(candidate.transactionId);
+  });
+  const cleaned = candidates.map((candidate, i) => {
+    if (flags[i] || (candidate.transactionId && suppressedTransactions.has(candidate.transactionId))) {
       suppressed += 1;
       return { ...candidate, email: null, phone: null, consentSuppressed: true };
     }
     const ph = consentNormPhone(candidate.phone);
     if (ph && sup.invalidPhones.has(ph)) {
       strippedPhones += 1;
-      return { ...candidate, phone: null };
+      // The invalid number reaches a STRANGER — but a different clean linked
+      // phone (e.g. the customer's, when the lead's was the wrong number)
+      // still identifies this person, so promote the first clean alternative
+      // instead of dropping match coverage. Person-level opt-out was ruled
+      // out above, so every linked identifier here is consent-clean.
+      let promoted = null;
+      for (const id of candidate.consentIdentifiers || []) {
+        const altPh = consentNormPhone(id.phone);
+        if (altPh && altPh !== ph && !sup.invalidPhones.has(altPh)) { promoted = id.phone; break; }
+      }
+      return { ...candidate, phone: promoted };
     }
     return candidate;
   });

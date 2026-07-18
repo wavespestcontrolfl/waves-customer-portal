@@ -189,10 +189,19 @@ describe('Google Data Manager upload helpers', () => {
       email: 'lead@example.com',
       phone: '9415550100',
       gclid: 'GCLID',
+      customer_email: 'current@example.com',
+      customer_phone: '9415550199',
       source_name: 'Google Ads',
       source_type: 'google_ads',
       channel: 'paid',
     });
+
+    // The linked customer's CURRENT identifiers ride along for person-level
+    // consent checks (same contract as mapCompletedJobCandidate).
+    expect(candidate.consentIdentifiers).toEqual([
+      { email: 'lead@example.com', phone: '9415550100' },
+      { email: 'current@example.com', phone: '9415550199' },
+    ]);
 
     expect(candidate).toEqual(expect.objectContaining({
       conversionType: 'qualified_lead',
@@ -468,14 +477,14 @@ describe('conversion-lane marketing-consent suppression', () => {
     expect(cleaned.consentSuppressed).toBeUndefined();
   });
 
-  test('a Meta-click-only sibling outranks a consent-stripped duplicate in the dedupe', async () => {
+  test('a Meta click key survives the dedupe onto a consent-stripped winner (click-key union)', async () => {
     mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
     const base = {
       conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S2',
       eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
     };
-    // Stripped row keeps value+timestamp+leadId points; the sibling has ONLY a
-    // Meta click key (never scored before this fix) — it must still win, for
+    // Whichever duplicate wins the score, the winner must carry the sibling's
+    // Meta click key so CAPI keeps its click-ID-only measurement path — for
     // both the fbc and the weaker fbp variants.
     for (const metaKeys of [{ fbc: 'fb.1.1.click-1' }, { fbp: 'fb.1.1.99' }]) {
       const cleaned = await applyMarketingConsent('completed_job_revenue', [
@@ -483,9 +492,80 @@ describe('conversion-lane marketing-consent suppression', () => {
         { ...base, email: null, phone: null, ...metaKeys },
       ]);
       const [winner] = dedupeCandidatesByTransaction(cleaned);
-      expect(winner.consentSuppressed).toBeUndefined();
       expect(winner.fbc || winner.fbp).toBeTruthy();
+      expect(winner.email).toBeNull(); // stripped PII never resurfaces
+      expect(winner.phone).toBeNull();
     }
+  });
+
+  test('dedupe unions click keys BOTH ways without letting Meta keys outrank gclid for Google', () => {
+    const base = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S3',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
+    };
+    // Google-keyed row must WIN (gclid dominance — the Google lane keeps its
+    // strongest attribution) while inheriting the Meta sibling's keys, so the
+    // same deduped candidate serves both lanes.
+    const [winner] = dedupeCandidatesByTransaction([
+      { ...base, email: null, phone: null, fbc: 'fb.1.1.click-1', fbp: 'fb.1.1.99' },
+      { ...base, email: null, phone: null, gclid: 'g-1' },
+    ]);
+    expect(winner.gclid).toBe('g-1');
+    expect(winner.fbc).toBe('fb.1.1.click-1');
+    expect(winner.fbp).toBe('fb.1.1.99');
+    expect(skipReason(winner)).toBeNull();
+  });
+
+  test('wrong_number on the collapsed phone promotes a clean linked phone instead of dropping it', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ invalid: ['9415550100'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:S4',
+      email: null, phone: '+19415550100', // stale lead phone — a stranger's
+      consentIdentifiers: [
+        { email: null, phone: '+19415550100' },
+        { email: null, phone: '+19415550199' }, // customer's clean phone
+      ],
+    }]);
+    expect(cleaned.phone).toBe('+19415550199');
+    expect(cleaned.consentSuppressed).toBeUndefined();
+  });
+
+  test('wrong_number with no clean alternative still strips to null', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ invalid: ['9415550100', '9415550199'] }));
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [{
+      transactionId: 'waves_completed_job:S5',
+      email: null, phone: '+19415550100',
+      consentIdentifiers: [
+        { email: null, phone: '+19415550100' },
+        { email: null, phone: '+19415550199' }, // also a wrong number
+      ],
+    }]);
+    expect(cleaned.phone).toBeNull();
+  });
+
+  test('opt-out propagates to transaction SIBLINGS carrying different unsuppressed PII', async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
+    // Two join rows, one transaction, same person: sibling A matches the
+    // opt-out; sibling B carries different stale contact data absent from the
+    // suppression lists. B must strip too — otherwise B wins the dedupe on
+    // its intact PII score and uploads the person's PII anyway.
+    const base = {
+      conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:S6',
+      eventTimestamp: '2026-07-01T12:00:00Z', conversionValue: 100,
+    };
+    const cleaned = await applyMarketingConsent('completed_job_revenue', [
+      { ...base, email: 'optout@example.com', phone: null },
+      { ...base, email: 'old-address@example.com', phone: '+19415550177', gclid: 'g-1' },
+    ]);
+    for (const c of cleaned) {
+      expect(c.email).toBeNull();
+      expect(c.phone).toBeNull();
+      expect(c.consentSuppressed).toBe(true);
+    }
+    const [winner] = dedupeCandidatesByTransaction(cleaned);
+    expect(winner.gclid).toBe('g-1'); // click-only measurement survives
+    const event = buildEvent(winner);
+    expect(event.userData).toBeUndefined();
   });
 
   test('fails CLOSED — a suppression-load error propagates and aborts the run', async () => {
