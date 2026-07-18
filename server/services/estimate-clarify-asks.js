@@ -313,7 +313,9 @@ function extractAddressReply(body) {
   if (/^\s*\d{1,6}\s+[A-Za-z]/.test(text) && text.length <= 160) {
     const clause = text.split(/[.;!?\n]/)[0];
     const cut = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
-    if (cut.length >= 6) return cut;
+    // Suffix required even on whole-body replies — "2 dogs and pest
+    // control" starts with digits but is not an address.
+    if (cut.length >= 6 && CLARIFY_STREET_SUFFIX_RE.test(cut)) return cut;
   }
   // Embedded ("it's 123 Main St, Sarasota") — suffix required, latest wins.
   let best = null;

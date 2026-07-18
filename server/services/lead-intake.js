@@ -111,6 +111,9 @@ async function createOrUpdateDraftEstimate(customer, interest) {
     .where(function noOnetime() {
       this.whereNull('onetime_total').orWhere('onetime_total', 0);
     })
+    .where(function noAnnual() {
+      this.whereNull('annual_total').orWhere('annual_total', 0);
+    })
     .orderBy('created_at', 'desc')
     .first();
 
@@ -365,6 +368,9 @@ async function handleIntakeReply(customer, body) {
       })
       .where(function noOnetime() {
         this.whereNull('onetime_total').orWhere('onetime_total', 0);
+      })
+      .where(function noAnnual() {
+        this.whereNull('annual_total').orWhere('annual_total', 0);
       })
       .orderBy('created_at', 'desc')
       .first();

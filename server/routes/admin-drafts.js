@@ -348,7 +348,7 @@ function draftMessageType(draft, legacyValue) {
 // flows treat it as terminal, and a clarify question is by definition a
 // response request the contact has already stopped answering.
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive']);
-async function guardClarifySend(draft, res, releaseFields = {}) {
+async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = false } = {}) {
   if (draft.intent !== 'estimate_clarify') return { blocked: false };
   if (!isEnabled('estimateClarifyAsks')) {
     await releaseDraftClaim(draft.id, releaseFields);
@@ -424,6 +424,17 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
         draft_response: rewritten,
         flags: JSON.stringify(rewrittenFlags),
       });
+      if (isRevision) {
+        // The owner's revision was typed against the stale multi-question
+        // copy — it must not go out as-is. Claim released; the queue now
+        // shows the rewritten single question.
+        await releaseDraftClaim(draft.id, releaseFields);
+        res.status(409).json({
+          error: 'The customer already supplied part of this — the draft was rewritten to what is still missing. Review the new copy and try again.',
+          code: 'CLARIFY_UPDATED',
+        });
+        return { blocked: true };
+      }
       draft.draft_response = rewritten;
       draft.flags = JSON.stringify(rewrittenFlags);
     }
@@ -777,7 +788,7 @@ router.put('/:id/revise', async (req, res, next) => {
     if (campaignGuard.blocked) return;
 
     // Gate recheck for clarify-ask drafts only.
-    const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null });
+    const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
     if (clarifyGuard.blocked) return;
 
     const recipient = await resolveDraftRecipient(draft);
