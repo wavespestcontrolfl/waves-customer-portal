@@ -796,6 +796,20 @@ finding and warns on P1. Reviewers must return JSON matching
   `setup_intent.succeeded` webhook backstop are mutually exclusive;
   failures revert and stay retryable). Treat the token, the verification
   gates, and the claim mechanics as security-critical).
+  `/api/mcp` (POST; machine-to-machine JSON-RPC — a minimal read-only MCP
+  server exposing the knowledge index (hybrid search, catalog service +
+  static protocol lookups, corpus stats) to MCP clients such as Claude Code
+  sessions and agents. Fail-closed in three ordered layers: 403 unless
+  `GATE_MCP_READ_TOOLS=true`, 503 unless `MCP_SERVICE_TOKEN` is configured,
+  401 unless the `Authorization: Bearer` / `X-MCP-Token` credential matches
+  via constant-time compare — the endpoint is unusable until deliberately
+  armed in an environment. Tools are READ-ONLY and free of generative LLM
+  calls by construction (the only model call is the query embedding, which
+  degrades to FTS-only when unavailable); no customer-PII tools and no write
+  tools may be added here — the write surface stays IB-only behind
+  write-gates. JSON-RPC batches are capped at 20; GET returns 405 (stateless
+  server, no SSE). Treat the auth ordering and the read-only tool surface as
+  security-critical).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

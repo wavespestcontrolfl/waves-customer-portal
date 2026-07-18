@@ -82,6 +82,13 @@ const gates = {
   // no-ops, and existing embeddings stay in place for a later re-enable.
   hybridKnowledge: process.env.GATE_HYBRID_KNOWLEDGE === 'true',
 
+  // MCP read-only knowledge tools (lane C): the /api/mcp machine endpoint
+  // exposing hybrid knowledge search + catalog/protocol lookups to MCP
+  // clients (Claude Code sessions, agents) under MCP_SERVICE_TOKEN.
+  // Read-only by construction; opt-in in EVERY environment. Kill switch:
+  // unset — the endpoint 403s.
+  mcpReadTools: process.env.GATE_MCP_READ_TOOLS === 'true',
+
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
 

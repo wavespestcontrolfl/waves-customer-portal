@@ -613,6 +613,8 @@ app.use('/api/admin/analytics', require('./routes/admin-analytics'));
 app.use('/api/admin/token-health', require('./routes/admin-token-health'));
 app.use('/api/admin/integrations', require('./routes/admin-integrations'));
 app.use('/api/integrations/backlink-worker', require('./routes/integrations-backlink-worker'));
+// MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
+app.use('/api/mcp', require('./routes/mcp'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
