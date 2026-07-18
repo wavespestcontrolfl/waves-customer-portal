@@ -408,26 +408,38 @@ export function buildSettledAccum({ width, height, points, closed, mistColor }) 
   return accum;
 }
 
-// Composite the satellite photo + settled mist band into one PNG data URL.
+// Composite the satellite photo + settled mist band into one PNG Blob.
+// toBlob, NOT toDataURL + fetch(dataUrl): the deployed CSP's connect-src
+// does not allow data: URLs (only img-src does), so fetching a data URL
+// would be blocked in production before the upload ever fired.
 // The map <img> loads with crossOrigin="anonymous"; if the canvas still
-// taints, re-fetch the tile via fetch() (CORS-checked) and retry once.
+// taints, re-fetch the tile via fetch() (CORS-checked) and compose on a
+// FRESH canvas — a tainted canvas stays tainted no matter what is drawn
+// onto it afterwards.
 export async function composeSnapshot(mapImage, accum, mapUrl) {
-  const c = document.createElement('canvas');
-  c.width = MAP_WIDTH;
-  c.height = MAP_HEIGHT;
-  const ctx = c.getContext('2d');
-  const draw = (img) => {
-    ctx.clearRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
+  const compose = (img) => {
+    const c = document.createElement('canvas');
+    c.width = MAP_WIDTH;
+    c.height = MAP_HEIGHT;
+    const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0, MAP_WIDTH, MAP_HEIGHT);
     ctx.drawImage(accum, 0, 0);
+    return new Promise((resolve, reject) => {
+      try {
+        c.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error('Snapshot export produced no image'))),
+          'image/png'
+        );
+      } catch (err) {
+        reject(err);
+      }
+    });
   };
-  draw(mapImage);
   try {
-    return c.toDataURL('image/png');
+    return await compose(mapImage);
   } catch {
     const res = await fetch(mapUrl);
     const bitmap = await createImageBitmap(await res.blob());
-    draw(bitmap);
-    return c.toDataURL('image/png');
+    return compose(bitmap);
   }
 }

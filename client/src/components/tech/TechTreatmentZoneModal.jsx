@@ -168,8 +168,7 @@ export default function TechTreatmentZoneModal({
     setSaveState('saving');
     try {
       const { center, zoom, url, image } = mapState;
-      const dataUrl = await composeSnapshot(image, accum, url);
-      const blob = await (await fetch(dataUrl)).blob();
+      const blob = await composeSnapshot(image, accum, url);
       const fd = new FormData();
       fd.append('snapshot', blob, 'treatment-zone.png');
       fd.append('payload', JSON.stringify({
@@ -426,11 +425,22 @@ export default function TechTreatmentZoneModal({
                 {saveState}
               </div>
             )}
+            {/* Back/Replay lock while the upload is in flight: re-tracing or
+                replaying mid-save could let the OLDER request land last and
+                overwrite the newer perimeter on the report. */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button style={btnStyle('ghost', false)} onClick={() => setStep('trace')}>
+              <button
+                style={btnStyle('ghost', saveState === 'saving')}
+                disabled={saveState === 'saving'}
+                onClick={() => setStep('trace')}
+              >
                 Back to trace
               </button>
-              <button style={btnStyle('ghost', false)} onClick={() => setRunKey((k) => k + 1)}>
+              <button
+                style={btnStyle('ghost', saveState === 'saving')}
+                disabled={saveState === 'saving'}
+                onClick={() => setRunKey((k) => k + 1)}
+              >
                 Replay
               </button>
               <button
