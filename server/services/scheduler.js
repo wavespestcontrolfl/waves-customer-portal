@@ -1095,6 +1095,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:05AM ET — Call-research miner (voice-of-customer corpus).
+  // Extracts verbatim (double-redacted) quote chunks from call transcripts
+  // into call_research_chunks, tagged with the fixed research taxonomy.
+  // Runs after the 2:40 knowledge sync + 2:45 voice-corpus miner; chunks
+  // embed via the NEXT night's knowledge-index sync. Claims via
+  // call_log.research_mined_at — a prompt-version bump re-mines the whole
+  // corpus over successive nights; failed extractions retry nightly.
+  // =========================================================================
+  cron.schedule('5 3 * * *', async () => {
+    if (!isEnabled('callResearchMiner')) return;
+    logger.info('Running: Call-research miner');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { mineCallResearch } = require('./call-research-miner');
+      await runExclusive('call-research-miner', () => mineCallResearch({ limit: 150 }));
+    } catch (err) {
+      logger.error(`Call-research miner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :40 — Call re-transcription backfill (voice-corpus training).
   // Upgrades consented legacy recordings to diarized transcripts (batch-
   // capped); the nightly miner then folds them into the voice corpus. One

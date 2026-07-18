@@ -240,6 +240,28 @@ async function loadResolutions() {
   }));
 }
 
+// ── call_research: voice-of-customer quote chunks ──────────────────
+// Text is already PII-redacted at mine time (call-research-miner).
+// occurredAt rides metadata for recency decay — what customers said is
+// observational and expires like resolutions do. Re-mines replace rows
+// under fresh ids, so absent sourceIds prune on sync like any connector.
+async function loadCallResearch() {
+  const rows = await db('call_research_chunks')
+    .select('id', 'speaker', 'quote', 'context', 'tag', 'topics', 'service_mentioned', 'occurred_at', 'created_at');
+  return rows.map((r) => ({
+    sourceId: r.id,
+    title: `${r.tag}: ${String(r.quote).slice(0, 80)}`,
+    content: joinParts([`${r.speaker === 'agent' ? 'Agent' : 'Caller'}: "${r.quote}"`, r.context]),
+    metadata: {
+      tag: r.tag,
+      topics: typeof r.topics === 'string' ? JSON.parse(r.topics) : r.topics,
+      serviceMentioned: r.service_mentioned || null,
+      occurredAt: r.occurred_at ? new Date(r.occurred_at).toISOString() : null,
+    },
+    sourceUpdatedAt: r.created_at,
+  }));
+}
+
 // ── ops_rule: static wiki/*.md operating rules ─────────────────────
 function loadOpsRules() {
   const wikiDir = path.join(__dirname, '..', '..', '..', 'wiki');
@@ -275,6 +297,7 @@ const CONNECTORS = [
   { source: 'prep_guide', load: loadPrepGuides },
   { source: 'ops_rule', load: loadOpsRules },
   { source: 'resolution', load: loadResolutions },
+  { source: 'call_research', load: loadCallResearch },
 ];
 
 async function loadCorpus(connector) {

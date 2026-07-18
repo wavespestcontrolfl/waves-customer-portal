@@ -249,6 +249,10 @@ module.exports = {
 //                                  default: gpt-5-mini (falls back to OPENAI_MODEL)
 //   GEMINI_EXTRACTION_MODEL        call extraction pipeline
 //                                  default: gemini-2.5-pro
+//   GEMINI_CALL_RESEARCH_MODEL     call-research corpus miner (voice-of-customer,
+//                                  server/services/call-research-miner.js)
+//                                  default: gemini-3.5-flash (pre-backfill bake-off
+//                                  vs 2.5-pro locks the winner)
 //
 // Do NOT move these into the tier registry without also updating that
 // processor's provider-specific validation, fallback, and output-shape
