@@ -409,13 +409,31 @@ async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
 
     const phone = normalizePhoneE164(to || row.to_phone);
     if (!phone) return { handled: false, reason: 'no_phone' };
-    const lead = await db('leads')
-      .where('phone', phone)
-      .where('status', 'new')
-      .whereNull('deleted_at')
-      .where('created_at', '>=', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000))
-      .orderBy('created_at', 'desc')
-      .first('id', 'next_follow_up_at');
+    // Correlate through the one-shot claim row (phone PK → the exact lead
+    // this text went to), not phone+recency — duplicate/reopened leads can
+    // share a number and the newest 'new' lead may not be the originator
+    // (Codex pre-push P1). The claim row persists on consumed outcomes
+    // (sent/scheduled), which are the only ones that can bounce.
+    const claim = await db('voicemail_sms_claims').where({ phone }).first('lead_id');
+    let lead = null;
+    if (claim?.lead_id) {
+      lead = await db('leads')
+        .where('id', claim.lead_id)
+        .where('status', 'new')
+        .whereNull('deleted_at')
+        .first('id', 'next_follow_up_at');
+    }
+    if (!lead) {
+      // No usable claim row (pre-claims-table sends) — newest still-new
+      // recent lead on this phone as the fallback.
+      lead = await db('leads')
+        .where('phone', phone)
+        .where('status', 'new')
+        .whereNull('deleted_at')
+        .where('created_at', '>=', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000))
+        .orderBy('created_at', 'desc')
+        .first('id', 'next_follow_up_at');
+    }
     if (!lead) return { handled: false, reason: 'no_open_lead' };
 
     const now = new Date();

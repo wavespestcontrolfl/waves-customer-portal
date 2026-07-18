@@ -35,7 +35,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, parseETDateTime, etWeekStart } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime, etWeekStart, addETDays } = require('../../utils/datetime-et');
 const { WAVES_LOCATIONS, CITY_TO_LOCATION } = require('../../config/locations');
 const { THRESHOLDS } = require('./scoring-config');
 
@@ -3183,18 +3183,17 @@ function startOfEtWeek(date = new Date()) {
 }
 
 function nextEtDayStart(date = new Date()) {
-  // Tomorrow's ET midnight: jump a calendar day, then normalize through the
-  // ET formatter so DST transitions can't skew the boundary.
-  const next = new Date(date.getTime() + 24 * 60 * 60 * 1000);
-  return parseETDateTime(`${etDateString(next)}T00:00`);
+  // Tomorrow's ET midnight via ET-calendar arithmetic (addETDays), not a
+  // +24h jump — during the fall-back transition a 25-hour ET day means
+  // +24h can land on the SAME ET calendar date, which would produce a
+  // midnight already in the past (Codex pre-push P1).
+  return parseETDateTime(`${etDateString(addETDays(date, 1))}T00:00`);
 }
 
 function nextEtWeekStart(date = new Date()) {
-  // Next ET week's Monday 00:00: land safely inside next week (+7.5 days
-  // from this week's start absorbs DST hour shifts), then re-normalize to
-  // that week's ET start.
-  const inNextWeek = new Date(startOfEtWeek(date).getTime() + 7.5 * 24 * 60 * 60 * 1000);
-  return startOfEtWeek(inNextWeek);
+  // Next ET week's Monday 00:00: hop 7 ET calendar days from this week's
+  // start (DST-safe), then re-normalize to that week's start.
+  return startOfEtWeek(addETDays(startOfEtWeek(date), 7));
 }
 
 async function queueInternalLinkTaskForDryRun(task, opportunityId) {

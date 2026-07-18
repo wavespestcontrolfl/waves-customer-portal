@@ -45,6 +45,10 @@ afterEach(() => jest.clearAllMocks());
 describe('handleUndeliveredQuoteLink', () => {
   test('30006 bounce on a quote-link sid pulls the lead follow-up to now and logs a call-instead note', async () => {
     const smsChain = chainFor({ id: 'sms1', to_phone: '+19412268022' });
+    // The one-shot claim row names the EXACT lead this text went to —
+    // correlation must go through it, never phone+recency (a newer lead
+    // sharing the number must not be stamped instead).
+    const claimChain = chainFor({ lead_id: 'lead1' });
     const leadLookup = chainFor({ id: 'lead1', next_follow_up_at: null });
     const leadUpdate = chainFor(null);
     const stampChain = chainFor(null);
@@ -52,6 +56,7 @@ describe('handleUndeliveredQuoteLink', () => {
     const leadChains = [leadLookup, leadUpdate, stampChain];
     db.mockImplementation((table) => {
       if (table === 'sms_log') return smsChain;
+      if (table === 'voicemail_sms_claims') return claimChain;
       if (table === 'leads') return leadChains.shift() || chainFor(null);
       if (table === 'lead_activities') return activityChain;
       return chainFor(null);
@@ -63,8 +68,9 @@ describe('handleUndeliveredQuoteLink', () => {
 
     expect(result).toMatchObject({ handled: true, leadId: 'lead1' });
     expect(smsChain._wheres[0][0]).toMatchObject({ twilio_sid: 'SMabc', message_type: 'voicemail_quote_link' });
-    // Open-lead predicate: still 'new', not deleted.
+    // Resolved by the claim's lead_id, guarded by the open-lead predicate.
     expect(leadLookup._wheres).toEqual(expect.arrayContaining([
+      ['id', 'lead1'],
       ['status', 'new'],
       ['null', 'deleted_at'],
     ]));
