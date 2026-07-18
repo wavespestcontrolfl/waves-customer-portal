@@ -369,9 +369,14 @@ async function computeReadiness({ intents, dbi = db } = {}) {
     }
     // Intents ALREADY at auto_send get the send-time gate's view too, so the
     // UI can't show a no-blocker Auto-send chip while sends are blocked.
-    const autoSendHealth = !locked && verdict.currentMode === 'auto_send'
+    // The exam blockers fold in here as well — evaluateAutoSendEligibility
+    // (the executor's gate) applies them, so the health chip must mirror it.
+    let autoSendHealth = !locked && verdict.currentMode === 'auto_send'
       ? evaluateAutoSendHealth({ judge, suggest, judgeAvailable })
       : null;
+    if (autoSendHealth && examBlockers && examBlockers.length) {
+      autoSendHealth = { sendReady: false, blockers: [...autoSendHealth.blockers, ...examBlockers] };
+    }
     out.set(intent, {
       ...verdict,
       autoSendHealth,
@@ -446,6 +451,25 @@ async function evaluateAutoSendEligibility({ intent, dbi = db } = {}) {
   // this stays true while the intent sits at auto_send, and flips false the
   // moment the data stops clearing the bar.
   const verdict = evaluateRung({ mode: 'suggest', locked: false, judge, suggest, judgeAvailable: true });
+
+  // Sealed-exam requirement must bind HERE, not only in computeReadiness:
+  // this is the gate the auto-send EXECUTOR re-checks on every send and the
+  // mode-flip route consults — an advisory-only check would let an intent
+  // keep auto-sending on a version that failed (or never sat) the exam.
+  // Fail closed, same as the judge signal.
+  if (process.env.GRAD_REQUIRE_SEALED_EXAM === 'true') {
+    let examBlockers;
+    try {
+      examBlockers = await require('./sms-sealed-eval').evaluateExamGate({ dbi });
+    } catch (err) {
+      logger.warn(`[sms-graduation] sealed-exam gate fetch failed (${intent}): ${err.message}; auto-send blocked`);
+      examBlockers = ['Sealed exam signal unavailable — auto-send blocked while GRAD_REQUIRE_SEALED_EXAM is on.'];
+    }
+    if (examBlockers.length) {
+      return { eligible: false, blockers: [...verdict.blockers, ...examBlockers], judge, suggest };
+    }
+  }
+
   const eligible = verdict.eligible && verdict.nextRung === 'auto_send';
   return { eligible, blockers: verdict.blockers, judge, suggest };
 }

@@ -476,6 +476,20 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
     // them beneath the old label — refuse and start a fresh run instead.
     const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
     if (run.prompt_version !== currentVersion) {
+      // A run stranded 'running' across the prompt-bump deploy must be
+      // retired here, not just refused: the one-running unique index blocks
+      // every new create while it sits, and resume is the only path the UI
+      // offers for a running row — refusing without retiring would wedge
+      // the exam permanently.
+      if (run.status === 'running') {
+        await dbi('sms_sealed_eval_runs')
+          .where({ id: runId, status: 'running' })
+          .update({
+            status: 'failed',
+            error: `superseded: drafter moved to ${currentVersion} mid-run`,
+            finished_at: new Date(),
+          });
+      }
       throw new Error(`sealed-eval run ${runId} examined ${run.prompt_version} but the drafter is now ${currentVersion} — start a new run`);
     }
     if (run.status === 'failed') {

@@ -313,12 +313,26 @@ describe('runSealedExam — replay loop', () => {
     expect(dbi.state.runPatches.some((p) => p.id === 'r1' && p.patch.status === 'complete')).toBe(true);
   });
 
-  test('resume refuses a run from a superseded drafter version (one run = one version)', async () => {
+  test('resume refuses a run from a superseded drafter version AND retires a stranded running row', async () => {
     const dbi = makeRunnerDb({
       runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v8_old' }],
     });
     await expect(sealedEval.runSealedExam({ runId: 'r1', dbi }))
       .rejects.toThrow(/start a new run/);
+    // Without this the one-running unique index would block every new run
+    // forever — the stale row must flip to failed as part of the refusal.
+    const retired = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'failed');
+    expect(retired).toBeTruthy();
+    expect(retired.patch.error).toMatch(/superseded/);
+  });
+
+  test('a stale FAILED run is refused without touching its status (already unwedged)', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'failed', provider_leg: 'openai', prompt_version: 'house_voice_v8_old' }],
+    });
+    await expect(sealedEval.runSealedExam({ runId: 'r1', dbi }))
+      .rejects.toThrow(/start a new run/);
+    expect(dbi.state.runPatches).toHaveLength(0);
   });
 
   test('a create that loses the insert race surfaces RUN_IN_PROGRESS (one-running unique index)', async () => {
