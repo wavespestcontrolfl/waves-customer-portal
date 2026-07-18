@@ -108,19 +108,25 @@ describe('free-text gating and default fee', () => {
         { findings: {} },
       ]),
     };
-    // the helper returns RAW snapshot values only — callers merge in their
-    // own live fee (stored row, unsaved edit state, or request body) before
-    // resolveFeeValuesForScrub, so no default is added here
-    expect(projectArchivedFeeValues(project)).toEqual(['325']);
+    // the helper returns RAW values only — callers merge in their own live
+    // fee (stored row, unsaved edit state, or request body) before
+    // resolveFeeValuesForScrub. EVERY filing contributes an entry: '' for a
+    // blank/omitted snapshot fee (that filing billed at the flat default)
+    expect(projectArchivedFeeValues(project)).toEqual(['325', '']);
     expect(projectArchivedFeeValues({ findings: { inspection_fee: '175' } })).toEqual([]);
-    // full egress set = live + archived; a digit-free (or absent) live fee
-    // bills at the flat default, so the default stays a scrub target even
-    // when an archived fee is numeric — it is never displaced
-    expect(projectRecordedFeeValues(project)).toEqual(['175', '325']);
+    // full egress set = live + archived; ANY digit-free entry (live or
+    // archived) keeps the flat default in the set — it is never displaced
+    expect(projectRecordedFeeValues(project)).toEqual(['175', '325', WDO_DEFAULT_INSPECTION_FEE]);
     expect(projectRecordedFeeValues({ ...project, findings: { inspection_fee: 'waived' } }))
       .toEqual(['325', WDO_DEFAULT_INSPECTION_FEE]);
     expect(projectRecordedFeeValues({ ...project, findings: {} }))
       .toEqual(['325', WDO_DEFAULT_INSPECTION_FEE]);
+    // codex scenario: filing archived with a BLANK fee (billed the default),
+    // live fee later edited to a different number — the default survives
+    expect(projectRecordedFeeValues({
+      findings: { inspection_fee: '175' },
+      wdo_sent_filings: JSON.stringify([{ findings: {} }]),
+    })).toEqual(['175', WDO_DEFAULT_INSPECTION_FEE]);
   });
 });
 
@@ -179,6 +185,16 @@ describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
     expect(redactSpecificAmounts('Serviced 250 this quarter.', ['250']))
       .toBe('Serviced 250 this quarter.');
   });
+  test('a directly-attached money subject owns its amount even inside WDO context', () => {
+    // fee context elsewhere in the clause never overrides direct attachment
+    expect(redactSpecificAmounts('The WDO inspection found repair cost $250 today.', ['250']))
+      .toBe('The WDO inspection found repair cost $250 today.');
+    expect(redactSpecificAmounts('WDO report: a $250 repair was completed.', ['250']))
+      .toBe('WDO report: a $250 repair was completed.');
+    // the fee's own paraphrase still redacts — "inspection" is not an owner noun
+    expect(redactSpecificAmounts('The WDO inspection costs $250 today.', ['250']))
+      .toBe('The WDO inspection costs [fee removed] today.');
+  });
   test('the shared package contains no lookbehind — it must construct on every supported browser', () => {
     // the admin preview constructs these regexes in the browser; lookbehind
     // throws a SyntaxError at construction on Safari < 16.4 (codex #2817)
@@ -189,6 +205,16 @@ describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
 });
 
 describe('redactProjectTitleForWrite', () => {
+  test('the write guards run the value pass too — a paraphrase cannot be persisted', () => {
+    const { redactProjectFreeTextForWrite } = require('../services/project-types');
+    expect(redactProjectTitleForWrite('Buyer asked about the quoted $250 charge', 'wdo_inspection', ['250']))
+      .toBe('Buyer asked about the quoted [fee removed] charge');
+    expect(redactProjectFreeTextForWrite('We will collect the $250 charge at closing.', 'wdo_inspection', ['250']))
+      .toBe('We will collect the [fee removed] charge at closing.');
+    // non-fee types never get the value pass — the amount is legitimate text
+    expect(redactProjectFreeTextForWrite('We will collect the $250 charge at closing.', 'termite_inspection', ['250']))
+      .toBe('We will collect the $250 charge at closing.');
+  });
   test('a scrubbed title never exceeds the varchar(200) column', () => {
     const nearLimit = `${'x'.repeat(180)} inspection fee $1`;
     const scrubbed = redactProjectTitleForWrite(nearLimit, 'wdo_inspection');

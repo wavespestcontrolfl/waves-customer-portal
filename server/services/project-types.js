@@ -1065,9 +1065,27 @@ function redactInspectionFeeCuesForType(text, projectTypeKey) {
 // otherwise a near-limit title aborts the write (or the backfill migration)
 // on the column constraint (codex #2817).
 const PROJECT_TITLE_MAX_LENGTH = 200;
-function redactProjectTitleForWrite(title, projectTypeKey) {
-  const scrubbed = redactInspectionFeeCuesForType(title, projectTypeKey);
+function redactProjectTitleForWrite(title, projectTypeKey, feeValues) {
+  let scrubbed = redactInspectionFeeCuesForType(title, projectTypeKey);
+  if (typeof scrubbed === 'string' && projectTypeHasInternalFindingKeys(projectTypeKey)
+    && feeValues && feeValues.length) {
+    scrubbed = redactSpecificAmounts(scrubbed, feeValues);
+  }
   return typeof scrubbed === 'string' ? scrubbed.slice(0, PROJECT_TITLE_MAX_LENGTH) : scrubbed;
+}
+
+// Value-pass variant of the write guard for free text (recommendations): cue
+// scrub plus the recorded-value scrub with the fee set this save produces —
+// a paraphrase with no literal cue ("the quoted $250 charge") must not be
+// PERSISTED by a post-deploy save; the migration only cleans rows at rest
+// (codex #2817). Callers pass projectRecordedFeeValues over the incoming
+// findings merged with the existing row's filings.
+function redactProjectFreeTextForWrite(text, projectTypeKey, feeValues) {
+  if (!projectTypeHasInternalFindingKeys(projectTypeKey)) return text;
+  if (typeof text !== 'string') return text;
+  let safe = redactInspectionFeeCues(text);
+  if (feeValues && feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+  return safe;
 }
 
 // Every fee amount a project ever recorded: the live structured field plus
@@ -1092,9 +1110,13 @@ function projectArchivedFeeValues(project) {
   if (Array.isArray(filings)) {
     for (const filing of filings) {
       const snap = parseJsonish(filing?.findings) || filing?.findings;
-      if (snap && typeof snap === 'object' && snap.inspection_fee != null) {
-        values.push(snap.inspection_fee);
-      }
+      // EVERY filing contributes its fee entry — '' when the field was
+      // blank/omitted: that filing BILLED at the flat default, so the
+      // default must stay a scrub target even after the live fee is edited
+      // to a different number (codex #2817).
+      values.push(snap && typeof snap === 'object' && snap.inspection_fee != null
+        ? snap.inspection_fee
+        : '');
     }
   }
   return values;
@@ -1269,6 +1291,7 @@ module.exports = {
   customerSafeServiceNotes,
   redactInspectionFeeCuesForType,
   redactProjectTitleForWrite,
+  redactProjectFreeTextForWrite,
   PROJECT_TITLE_MAX_LENGTH,
   WDO_DEFAULT_INSPECTION_FEE,
   projectTypeFreeTextKeys,

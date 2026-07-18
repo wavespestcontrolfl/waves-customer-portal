@@ -330,6 +330,18 @@ const VALUE_SCRUB_AFTER_SUBJECTS =
 // Deliberately NOT the bare word "fee" — "$250 permit fee" is the permit's
 // fee, not the inspection fee.
 const VALUE_SCRUB_FEE_CONTEXT = /\b(?:inspection|wdo)\b/i;
+// A money subject DIRECTLY attached to the amount owns it ABSOLUTELY — fee
+// context elsewhere in the clause never overrides direct attachment: "The
+// WDO inspection found repair cost $250" is the repair's amount even though
+// "wdo" appears nearby (codex #2817). The before form is a subject-noun +
+// money-noun pair ("repair cost", "treatment estimate of"); "inspection
+// costs $250" stays redactable because "inspection" is not an owner noun.
+const VALUE_SCRUB_OWNED_BEFORE =
+  /\b(?:repairs?|re-?treatments?|treatments?|permits?|damages?|estimates?|deductibles?|discounts?|credits?|purchase|escrow|deposits?|homes?|propert(?:y|ies))\s+(?:costs?|prices?|charges?|estimates?|totals?|values?|amounts?|fees?)\s*(?:of|is|was|at|[:=])?\s*$/i;
+// The amount-first form: "$250 repair" directly names its owner after the
+// amount — same absolute skip.
+const VALUE_SCRUB_OWNED_AFTER =
+  /^\s*(?:repairs?|re-?treatments?|treatments?|permits?|damages?|estimates?|deductibles?|discounts?|credits?|escrow|deposits?)\b/i;
 // A number directly after an identifier noun is a unit/room/document NUMBER,
 // never the fee — absolute skip, like the street guard ("Condo Unit 250"
 // survives even inside a WDO clause) (codex #2817 r32).
@@ -388,6 +400,8 @@ function redactSpecificAmounts(text, values) {
       const before = whole.slice(clauseStart, amountStart).split(/[.;!?\n]/).pop() || '';
       const after = (whole.slice(offset + match.length, offset + match.length + 40).split(/[.;!?\n]/)[0] || '');
       if (VALUE_SCRUB_STREET_AFTER.test(after)) return match;
+      if (VALUE_SCRUB_OWNED_BEFORE.test(before)) return match;
+      if (VALUE_SCRUB_OWNED_AFTER.test(after)) return match;
       if (isBare) {
         if (VALUE_SCRUB_ID_BEFORE.test(before)) return match;
         if (!VALUE_SCRUB_BARE_BEFORE.test(before) && !VALUE_SCRUB_BARE_AFTER.test(after)) return match;

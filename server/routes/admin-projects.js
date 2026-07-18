@@ -40,6 +40,7 @@ const {
   projectTypeConfigFreeTextKeys,
   redactInspectionFeeCuesForType,
   redactProjectTitleForWrite,
+  redactProjectFreeTextForWrite,
   projectTypeConfigHasInternalFindingKeys,
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
@@ -1690,6 +1691,12 @@ router.post('/', async (req, res, next) => {
       }
     }
 
+    // Cue + recorded-value write scrub for the customer-facing free text —
+    // no filings can exist yet, so the fee set is the incoming findings
+    // resolved against the flat default (codex #2817).
+    const createFeeValues = projectTypeHasInternalFindingKeys(project_type)
+      ? projectRecordedFeeValues({ findings: findings || {} })
+      : [];
     let row;
     try {
       [row] = await db('projects').insert({
@@ -1699,14 +1706,14 @@ router.post('/', async (req, res, next) => {
         // title is customer-facing headline text — same write-time fee scrub
         // as recommendations, clamped to the varchar(200) column since the
         // scrub can lengthen text (codex #2817)
-        title: title ? redactProjectTitleForWrite(title, project_type) : null,
+        title: title ? redactProjectTitleForWrite(title, project_type, createFeeValues) : null,
         findings: findings || null,
         // inspection fee must never be customer-facing — sanitized on WRITE
         // (durable for new rows; migration 20260717000001 cleaned legacy rows
         // at rest, codex #2817). Type-gated: only WDO carries the internal
         // fee field; on other types "inspection fee" prose is a legitimate
         // customer disclosure.
-        recommendations: recommendations ? redactInspectionFeeCuesForType(recommendations, project_type) : null,
+        recommendations: recommendations ? redactProjectFreeTextForWrite(recommendations, project_type, createFeeValues) : null,
         service_record_id: service_record_id || null,
         // Persist the DERIVED link too (record-only callers): the linked-only
         // gate accepted this create because the record resolved to a scheduled
@@ -2092,9 +2099,19 @@ router.put('/:id', async (req, res, next) => {
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
     // Durable inspection-fee guard: an admin-saved narrative/title can't
     // persist the internal fee (legacy rows cleaned at rest by migration
-    // 20260717000001, codex #2817). Type-gated — see the create path.
-    if (updates.recommendations != null) updates.recommendations = redactInspectionFeeCuesForType(updates.recommendations, project.project_type);
-    if (updates.title != null) updates.title = redactProjectTitleForWrite(updates.title, project.project_type);
+    // 20260717000001, codex #2817). Cue AND recorded-value passes — a
+    // paraphrase without the literal cue must not be re-persisted either.
+    // The fee set is what THIS save produces: incoming findings (falling
+    // back to the stored row) merged with the archived filing snapshots.
+    // Type-gated — see the create path.
+    const writeFeeValues = projectTypeHasInternalFindingKeys(project.project_type)
+      ? projectRecordedFeeValues({
+        findings: updates.findings !== undefined ? updates.findings : project.findings,
+        wdo_sent_filings: project.wdo_sent_filings,
+      })
+      : [];
+    if (updates.recommendations != null) updates.recommendations = redactProjectFreeTextForWrite(updates.recommendations, project.project_type, writeFeeValues);
+    if (updates.title != null) updates.title = redactProjectTitleForWrite(updates.title, project.project_type, writeFeeValues);
     dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
