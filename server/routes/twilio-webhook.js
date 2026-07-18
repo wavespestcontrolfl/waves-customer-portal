@@ -352,6 +352,20 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
+    // ESTIMATOR SMS DRAFTS (GATE_ESTIMATOR_SMS_DRAFTS, default OFF): a
+    // quote-flavored inbound text runs the estimator engine against the
+    // thread — priced DRAFT + one phone-scoped bell, never a send. Cheap by
+    // construction (regex prefilter → FAST classifier → engine) and
+    // fire-and-forget so TwiML latency is untouched. Intake-machine replies
+    // return above and draft through lead-intake's own engine handoff.
+    try {
+      const { smsThreadDraftsEnabled, maybeDraftEstimateForSmsThread } = require('../services/estimator-engine/sms-thread');
+      if (smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+        maybeDraftEstimateForSmsThread({ phone: From, triggerBody: Body })
+          .catch((e) => logger.warn(`[estimator-sms] thread draft failed: ${e.message}`));
+      }
+    } catch (e) { logger.warn(`[estimator-sms] trigger setup failed: ${e.message}`); }
+
     // DOMAIN TRACKING — new lead from a domain-specific number
     if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {
       const leadSource = TWILIO_NUMBERS.getLeadSourceFromNumber(To);

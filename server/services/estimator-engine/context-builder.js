@@ -304,8 +304,51 @@ async function buildCallContext(callLogId) {
   };
 }
 
+// SMS-origin context: the thread IS the conversation, so it becomes the
+// transcript (and smsThread stays empty — duplicating it would double-weight
+// the same evidence in the composer prompt). Ambiguous shared-phone lines
+// error out entirely: unlike a call, there is no independent transcript —
+// the thread history itself cannot be attributed to one profile, and no
+// caller-name extraction exists to disambiguate.
+async function buildSmsThreadContext({ phone, triggerAt = new Date() }) {
+  if (!last10(phone)) return { error: 'no_usable_phone' };
+  const customerMatch = await loadCustomerByPhone(phone, null);
+  if (customerMatch.ambiguous) return { error: 'ambiguous_phone' };
+  const customer = customerMatch.customer;
+  const before = new Date(triggerAt);
+  const smsSince = new Date(before.getTime() - 30 * 86400000);
+  const [leadMatch, smsThread, priorEstimates] = await Promise.all([
+    // call=null: skips the sid + reused-lead branches; pure phone fallback.
+    loadLeadForCall(null, phone, { phoneFallback: true }),
+    loadSmsThread(phone, { limit: 40, before, since: smsSince }),
+    loadPriorEstimates(phone),
+  ]);
+  const transcript = smsThread
+    .map((m) => `[${m.direction === 'inbound' ? 'Customer' : 'Waves'}] ${m.body}`)
+    .join('\n');
+  if (transcript.trim().length < 40) return { error: 'no_usable_thread' };
+  return {
+    call: null,
+    transcript,
+    extraction: null,
+    // 'none' keeps the lane classifier's non-enriched flag — an SMS draft
+    // can never land green, which is the right floor for text-only evidence.
+    extractionSource: 'none',
+    phone,
+    customer: customer || null,
+    customerPhoneAmbiguous: false,
+    lead: leadMatch.lead || null,
+    leadIsForThisCall: false,
+    smsThread: [],
+    priorEstimates,
+    isExistingCustomer: !!(customer
+      && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)),
+  };
+}
+
 module.exports = {
   buildCallContext,
+  buildSmsThreadContext,
   existingDraftForCall,
   // Origin-specific context builders reuse these reads so call, web-lead,
   // and SMS sessions all resolve contacts/history with the same shared-line

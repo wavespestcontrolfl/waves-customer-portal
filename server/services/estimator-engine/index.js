@@ -143,13 +143,14 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   const link = estimateId
     ? '/admin/estimates'
     : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications');
   const metadata = {
     callSid,
+    ...(threadKey ? { smsThreadKey: threadKey } : {}),
     estimator_engine: true,
     // Only a real agent commitment counts as an owed quote — a mere pricing
     // question must not create a false "send it" task.
@@ -157,14 +158,20 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
     lane: lane || null,
     estimateId,
   };
+  // SMS-origin bells dedupe on the phone-scoped thread key the way call
+  // bells dedupe on callSid — repeated quote-flavored texts upgrade ONE
+  // bell instead of ringing per message.
+  const dedupe = callSid
+    ? { clause: "metadata->>'callSid' = ?", value: callSid }
+    : (threadKey ? { clause: "metadata->>'smsThreadKey' = ?", value: threadKey } : null);
   try {
-    if (callSid) {
+    if (dedupe) {
       // Any prior bell for this call counts: the generic promised bell OR a
       // prior estimator bell (request-only bells carry quote_promised=false
       // but still have the estimator_engine marker — matching only promised
       // bells would duplicate on every reprocess).
       const existing = await db('notifications')
-        .whereRaw("metadata->>'callSid' = ?", [callSid])
+        .whereRaw(dedupe.clause, [dedupe.value])
         .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
         .orderBy('created_at', 'desc')
         .first();
@@ -203,6 +210,23 @@ function callerLabel(intent, context) {
     || [context?.customer?.first_name, context?.customer?.last_name].filter(Boolean).join(' ')
     || 'Unknown caller';
 }
+
+// Origin descriptor for the call channel. The strings are byte-identical to
+// the pre-refactor call-only pipeline — the refactor into runDraftPipeline
+// must not change one character of the live call bells.
+const CALL_ORIGIN = {
+  channel: 'call',
+  noun: 'call',
+  threadKey: null,
+  strings: {
+    redTitle: 'Quote promised on call — send it',
+    redBody: (label, reasons) => `${label}: quote promised, no auto-draft (${reasons}). Send it manually before end of day.`,
+    composerFailBody: (label) => `${label}: a quote was promised but the estimator engine could not compose a draft. Send it manually before end of day.`,
+    errorBody: 'A quote was promised on a call but the estimator engine hit an error. Send the estimate manually before end of day.',
+    blockedTitle: 'Quote promised on call — estimate already open',
+    blockedBody: (label) => `${label}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
+  },
+};
 
 /**
  * Main entry. Non-throwing by contract: every path resolves to a result
@@ -269,7 +293,36 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
         return result;
       }
     }
+  } catch (err) {
+    logger.error(`[estimator-engine] unexpected failure: ${err.message}`);
+    result.lane = LANES.RED;
+    result.reasons = [`engine error: ${err.message}`];
+    if (!dryRun && context?.call && quotePromised) {
+      await notify({
+        call: context.call,
+        context,
+        lane: LANES.RED,
+        quotePromised,
+        title: CALL_ORIGIN.strings.redTitle,
+        body: CALL_ORIGIN.strings.errorBody,
+      });
+    }
+    return result;
+  }
+  return runDraftPipeline({ context, origin: CALL_ORIGIN, result, dryRun, refreshLookup, quotePromised });
+}
 
+/**
+ * Channel-agnostic draft pipeline: property signals → composed intent →
+ * deterministic pricing → lane classification → draft + one bell. `origin`
+ * carries the channel's dedupe key and notification strings — the call
+ * origin's strings are byte-identical to the pre-refactor call pipeline.
+ * Non-throwing: same red-lane degradation contract as the entries above it.
+ */
+async function runDraftPipeline({ context, origin, result, dryRun = false, refreshLookup = false, quotePromised = true }) {
+  const S = origin.strings;
+  const threadKey = origin.threadKey || null;
+  try {
     const { address, propertyRecord, enriched, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
     result.addressUsed = address;
 
@@ -297,8 +350,9 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           context,
           lane: LANES.RED,
           quotePromised,
-          title: 'Quote promised on call — send it',
-          body: `${callerLabel(null, context)}: a quote was promised but the estimator engine could not compose a draft. Send it manually before end of day.`,
+          threadKey,
+          title: S.redTitle,
+          body: S.composerFailBody(callerLabel(null, context)),
         });
       }
       return result;
@@ -442,8 +496,9 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           context,
           lane,
           quotePromised,
-          title: 'Quote promised on call — send it',
-          body: `${callerLabel(intent, context)}: quote promised, no auto-draft (${reasons.join('; ')}). Send it manually before end of day.`,
+          threadKey,
+          title: S.redTitle,
+          body: S.redBody(callerLabel(intent, context), reasons.join('; ')),
         });
       }
       return result;
@@ -452,7 +507,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     const draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, comps, calibration, model, call: context.call, context,
-      membershipSnapshot, priorQualifyingServices,
+      membershipSnapshot, priorQualifyingServices, origin,
     });
 
     if (draft.blocked) {
@@ -465,8 +520,9 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           context,
           lane,
           quotePromised,
-          title: 'Quote promised on call — estimate already open',
-          body: `${callerLabel(intent, context)}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
+          threadKey,
+          title: S.blockedTitle,
+          body: S.blockedBody(callerLabel(intent, context)),
         });
       }
       return result;
@@ -480,28 +536,30 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       context,
       lane,
       quotePromised,
+      threadKey,
       estimateId: draft.estimate.id,
       title: `AI estimate draft ${lane === LANES.GREEN ? 'ready' : 'needs review'} — $${totals.monthly}/mo`,
-      body: `${callerLabel(intent, context)}: ${intent.service_interest_label || 'estimate'} drafted from the call (${lane.toUpperCase()} — ${laneWord}). `
+      body: `${callerLabel(intent, context)}: ${intent.service_interest_label || 'estimate'} drafted from the ${origin.noun} (${lane.toUpperCase()} — ${laneWord}). `
         + `$${totals.monthly}/mo · $${totals.annual}/yr${totals.oneTime ? ` · $${totals.oneTime} one-time` : ''}. `
         + `${lane === LANES.YELLOW ? `Flags: ${reasons.slice(0, 3).join('; ')}. ` : ''}Review in admin/estimates and send.`,
     });
     logger.info('[estimator-engine] draft created', {
-      estimateId: draft.estimate.id, lane, monthly: totals.monthly,
+      estimateId: draft.estimate.id, lane, monthly: totals.monthly, origin: origin.channel,
     });
     return result;
   } catch (err) {
     logger.error(`[estimator-engine] unexpected failure: ${err.message}`);
     result.lane = LANES.RED;
     result.reasons = [`engine error: ${err.message}`];
-    if (!dryRun && context?.call && quotePromised) {
+    if (!dryRun && (context?.call || threadKey) && quotePromised) {
       await notify({
-        call: context.call,
+        call: context?.call || null,
         context,
         lane: LANES.RED,
         quotePromised,
-        title: 'Quote promised on call — send it',
-        body: 'A quote was promised on a call but the estimator engine hit an error. Send the estimate manually before end of day.',
+        threadKey,
+        title: S.redTitle,
+        body: S.errorBody,
       });
     }
     return result;
@@ -517,5 +575,9 @@ function generateEstimateSafely(engineInput) {
 module.exports = {
   estimatorEngineEnabled,
   maybeDraftEstimateForCall,
+  // Origin-specific entries (sms-thread.js) reuse the shared pipeline and
+  // bell plumbing instead of re-implementing the lane/notify contract.
+  runDraftPipeline,
+  notify,
   _private: { addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality },
 };
