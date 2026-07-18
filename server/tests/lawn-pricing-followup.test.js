@@ -1204,6 +1204,24 @@ describe('lawn pricing production follow-up', () => {
     }
   });
 
+  test('the engine stamps its resolved cost-floor arm state into pricingMetadata', () => {
+    // The stamp is the authoritative record of what priced the saved result
+    // — estimate-public reads it first so a later global switch flip can't
+    // change how a sent quote replays (codex P2, round 8 on #2827).
+    const disarmed = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    }));
+    expect(disarmed.pricingMetadata.lawnCostFloorArmed).toBe(false);
+
+    const armed = generateEstimate(baseInput({
+      measuredTurfSf: 4500,
+      useLawnCostFloor: true,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+    }));
+    expect(armed.pricingMetadata.lawnCostFloorArmed).toBe(true);
+  });
+
   test('useLawnCostFloor defaults to false — cost-floor math is reporting-only (owner 2026-07-17)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });

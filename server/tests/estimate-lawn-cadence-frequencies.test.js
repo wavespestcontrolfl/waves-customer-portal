@@ -620,6 +620,29 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     }
   });
 
+  test('the result pricingMetadata arm stamp beats the global switch in both directions', () => {
+    // Stamped true + global off: a save the global switch armed keeps its
+    // clamp after the switch is turned back off…
+    const armedStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+      result: { pricingMetadata: { lawnCostFloorArmed: true } },
+    });
+    expect(Object.fromEntries(armedStamp.map((f) => [f.key, f])).standard.monthly)
+      .toBeCloseTo(53.34, 2);
+
+    // …and a stamped-disarmed save survives a later global re-arm.
+    const priorUseFloor = LAWN_PRICING_V2.useLawnCostFloor;
+    LAWN_PRICING_V2.useLawnCostFloor = true;
+    try {
+      const disarmedStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+        result: { pricingMetadata: { lawnCostFloorArmed: false } },
+      });
+      expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).standard.monthly)
+        .toBeCloseTo(49.5, 2);
+    } finally {
+      LAWN_PRICING_V2.useLawnCostFloor = priorUseFloor;
+    }
+  });
+
   test('a legacy pre-disarm estimate keeps its floor re-clamp via stored enforcement stamps', () => {
     // Pre-disarm saves never persisted the flag (the engine armed by
     // default) — the evidence is the enforcement stamps on the stored rows.

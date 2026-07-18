@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import {
   applyServerLawnPricingConfig,
+  applyServerPestPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -1224,18 +1225,37 @@ function EstimateToolView() {
   // A live DB re-arm of lawn_pricing_v2.programMinimumMonthly must reach it
   // too, or fallback estimates preview/save below-minimum rows the public
   // route then refuses to accept. Fetch failure leaves the disarmed default.
+  // Tracked as a settled promise so the FALLBACK generate path can await it
+  // — an operator generating before this resolves would price on the static
+  // disarmed defaults and persist a non-replayable client result below a
+  // re-armed floor (codex P2 round 8 on #2827). 5s abort keeps the await
+  // bounded; any failure leaves the disarmed defaults (fail-open, as
+  // before).
+  const pricingConfigReadyRef = useRef(Promise.resolve());
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch("/api/admin/pricing-config/lawn_pricing_v2", {
-          headers: authHeaders,
-        });
-        if (!r.ok) return;
-        const row = await r.json();
-        applyServerLawnPricingConfig(row?.data);
-      } catch {
-        /* disarmed default (0) stands */
-      }
+    pricingConfigReadyRef.current = (async () => {
+      const fetchConfigRow = async (key) => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 5000);
+        try {
+          const r = await fetch(`/api/admin/pricing-config/${key}`, {
+            headers: authHeaders,
+            signal: ctrl.signal,
+          });
+          if (!r.ok) return null;
+          return (await r.json())?.data ?? null;
+        } catch {
+          return null; /* disarmed defaults stand */
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      const [lawnRow, pestRow] = await Promise.all([
+        fetchConfigRow("lawn_pricing_v2"),
+        fetchConfigRow("pest_base"),
+      ]);
+      if (lawnRow) applyServerLawnPricingConfig(lawnRow);
+      if (pestRow) applyServerPestPricingConfig(pestRow);
     })();
   }, []);
 
@@ -2017,6 +2037,10 @@ function EstimateToolView() {
     }
 
     // Fallback: use v1 client-side calculation
+    // Wait for the live pricing-config load (bounded — 5s abort + fail-open
+    // inside the fetch) so a re-armed floor can't be raced by an early
+    // generate pricing on the static disarmed defaults.
+    await pricingConfigReadyRef.current;
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =

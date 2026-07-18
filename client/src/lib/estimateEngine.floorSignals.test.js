@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyServerLawnPricingConfig,
+  applyServerPestPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
 } from "./estimateEngine";
@@ -31,8 +32,9 @@ function lawnInput(overrides = {}) {
 }
 
 afterEach(() => {
-  // The setter mutates module state — restore the DISARMED default (0).
+  // The setters mutate module state — restore the DISARMED defaults.
   applyServerLawnPricingConfig(null);
+  applyServerPestPricingConfig(null);
 });
 
 describe("applyServerLawnPricingConfig — live lawn program minimum in the fallback engine", () => {
@@ -89,6 +91,62 @@ describe("applyServerLawnPricingConfig — live lawn program minimum in the fall
     const est = calculateEstimate(lawnInput({ measuredTurfSf: 4500 }));
     const nine = est.results.lawn.find((t) => t.v === 9);
     expect(nine.costFloorApplied).toBe(false);
+  });
+});
+
+describe("applyServerPestPricingConfig — live pest floor re-arm in the fallback engine", () => {
+  it("defaults disarmed: no floor metadata on pest tiers, WaveGuard applies in full", () => {
+    const est = calculateEstimate(lawnInput({ svcPest: true }));
+    expect(est.error).toBeUndefined();
+    const tier = est.results.pestTiers.find((t) => t.apps === 4);
+    expect(tier.floorAnn).toBeUndefined();
+    expect(est.recurring.pestProgramFloorApplied).toBe(false);
+  });
+
+  it("re-armed: stamps floorPa/floorAnn/floorMo and gives back the WaveGuard overshoot (codex P2 round 8 #2827)", () => {
+    // Small simple home prices pest near the $89 bottom ($95/visit here);
+    // Silver (pest + lawn) 10% would cut it below the $89-per-visit floor
+    // ($85.50), so the armed give-back holds the pest slice at the floor
+    // exactly like the server's applyMarginGuard lift.
+    expect(applyServerPestPricingConfig({ enforce_floor_post_discount: true })).toBe(true);
+    const est = calculateEstimate(lawnInput({
+      svcPest: true,
+      homeSqFt: 1000,
+      shrubDensity: "LIGHT",
+      landscapeComplexity: "SIMPLE",
+    }));
+    expect(est.error).toBeUndefined();
+    const tier = est.results.pestTiers.find((t) => t.apps === 4);
+    expect(tier.floorPa).toBeCloseTo(89, 2);
+    expect(tier.floorAnn).toBeCloseTo(356, 2);
+    expect(est.results.pest.pa).toBeLessThan(98.9);
+    expect(est.recurring.pestProgramFloorApplied).toBe(true);
+  });
+});
+
+describe("fallback lawn margin visibility — report-only WaveGuard breach warning", () => {
+  it("surfaces the below-margin lawn warning on a discounted fallback bundle and renders a review note", () => {
+    // 12,000 sqft standard/6x St. Augustine is a thin-margin cell; the
+    // Silver 10% (pest + lawn) drops collected margin under the 35% review
+    // floor. Nothing is capped — the warning is the visibility the ruling
+    // depends on (codex P2 round 8 #2827).
+    const est = calculateEstimate(lawnInput({ svcPest: true, measuredTurfSf: 12000, lawnFreq: "6" }));
+    expect(est.error).toBeUndefined();
+    const warning = (est.recurring.marginWarnings || []).find(
+      (w) => w.service === "lawn_care" && w.type === "waveguard_discount_below_margin_floor",
+    );
+    expect(warning).toBeTruthy();
+    expect(warning.margin).toBeLessThan(0.35);
+    const notes = collectMarginReviewNotes(est);
+    expect(notes.some((n) => n.includes("Lawn Care") && n.includes("35%"))).toBe(true);
+  });
+
+  it("stays silent without a WaveGuard discount (single-service lawn quote)", () => {
+    const est = calculateEstimate(lawnInput({ measuredTurfSf: 3000 }));
+    const warning = (est.recurring?.marginWarnings || []).find(
+      (w) => w.type === "waveguard_discount_below_margin_floor",
+    );
+    expect(warning).toBeUndefined();
   });
 });
 

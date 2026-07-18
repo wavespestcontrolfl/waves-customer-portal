@@ -381,6 +381,21 @@ export function applyServerLawnPricingConfig(config) {
   return LAWN_PRICING_V2.programMinimumMonthly;
 }
 
+// Mirrors server constants PEST enforceFloorPostDiscount (the pest_base
+// enforce_floor_post_discount DB key, in-code false). While armed, the
+// fallback engine stamps floorPa/floorAnn/floorMo on pest tiers and applies
+// the WaveGuard give-back — matching the server's applyMarginGuard lift —
+// so a no-enriched-profile pest estimate can't be saved/accepted below the
+// re-armed floor (codex P2 round 8 on #2827).
+const PEST_BASE = { enforceFloorPostDiscount: false };
+
+export function applyServerPestPricingConfig(config) {
+  PEST_BASE.enforceFloorPostDiscount = (
+    config?.enforce_floor_post_discount ?? config?.enforceFloorPostDiscount
+  ) === true;
+  return PEST_BASE.enforceFloorPostDiscount;
+}
+
 // Admin-facing low-margin review notes (owner ruling 2026-07-17: margins are
 // surfaced, never enforced). Reads the engine's report-only signals off a
 // mapped estimate result — the marginWarnings array plus the per-line
@@ -1807,14 +1822,23 @@ export function calculateEstimate(inputs) {
       const ann = Math.round(perApp * ft.f * 100) / 100;
       const mo = Math.round(ann / 12 * 100) / 100;
       // Post-discount program floor metadata (floorPa/floorAnn/floorMo) is
-      // no longer stamped — enforcement is DISARMED (owner ruling
-      // 2026-07-17: "forget all floors"), mirroring the server's snapshot
-      // semantics (service-pricing stamps floor metadata only while
-      // PEST.enforceFloorPostDiscount is on; normalizeClientPestFloorMetadata
-      // strips it from fallback saves while off).
-      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec });
+      // stamped only while the pest floor is re-armed (live pest_base
+      // enforce_floor_post_discount via applyServerPestPricingConfig) —
+      // mirroring the server's snapshot semantics (service-pricing stamps
+      // floor metadata only while PEST.enforceFloorPostDiscount is on;
+      // normalizeClientPestFloorMetadata strips it from fallback saves
+      // while off). Disarmed default (owner ruling 2026-07-17): no stamp.
+      const pestFloorMeta = PEST_BASE.enforceFloorPostDiscount === true
+        ? (() => {
+            const floorPa = Math.round(89 * ft.disc * 100) / 100;
+            const floorAnn = Math.round(floorPa * ft.f * 100) / 100;
+            const floorMo = Math.round(floorAnn / 12 * 100) / 100;
+            return { floorPa, floorAnn, floorMo };
+          })()
+        : {};
+      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, ...pestFloorMeta });
       if (ft.f === pestFreq) {
-        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label };
+        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, ...pestFloorMeta };
       }
     });
     R.pestRoachMod = roachMod;
@@ -2802,13 +2826,23 @@ export function calculateEstimate(inputs) {
     }
     da = Math.round((da - wgGiveBack) * 100) / 100;
   }
-  // Pest post-discount program floor give-back REMOVED (owner ruling
-  // 2026-07-17: "forget all floors") — the WaveGuard percent applies in
-  // full, matching the server's report-only applyMarginGuard. The flag
-  // stays in the return shape (always false) so stored payload consumers
-  // keep their field. Legacy stored rows that still carry floorAnn are
-  // ignored here; the server strips that metadata from fallback saves.
-  const pestProgramFloorApplied = false;
+  // Pest post-discount program floor give-back: DISARMED by default (owner
+  // ruling 2026-07-17: "forget all floors" — the WaveGuard percent applies
+  // in full, matching the server's report-only applyMarginGuard) but
+  // restored while the live pest_base enforce_floor_post_discount key is
+  // re-armed, mirroring the server's re-armed lift so the fallback save
+  // can't undercut the floor (codex P2 round 8 on #2827). The floorAnn
+  // metadata only exists on R.pest while armed (stamped above).
+  let pestProgramFloorApplied = false;
+  if (PEST_BASE.enforceFloorPostDiscount === true
+    && R.pest && Number.isFinite(Number(R.pest.floorAnn)) && wd > 0) {
+    const pestFloorAnn = Math.min(Number(R.pest.floorAnn), R.pest.ann);
+    const pestOvershoot = Math.round((R.pest.ann * wd - (R.pest.ann - pestFloorAnn)) * 100) / 100;
+    if (pestOvershoot > 0) {
+      da = Math.round((da - pestOvershoot) * 100) / 100;
+      pestProgramFloorApplied = true;
+    }
+  }
   const recurringAnnualAfterWaveGuard = Math.round((ra - da) * 100) / 100;
   const md = inputs.manualDiscount;
   let manualDiscountAmount = 0;
@@ -2850,6 +2884,34 @@ export function calculateEstimate(inputs) {
   // Discounts are reported as commercial terms only. They do not block or warn
   // estimates based on a hypothetical after-discount margin.
   const marginWarnings = [];
+  // …except the report-only lawn "looks low" signal (owner ruling
+  // 2026-07-17: margins surfaced, never enforced). Mirrors the server's
+  // WaveGuard below-margin warning so fallback (no-enriched-profile) lawn
+  // quotes still light up the Pricing Review Notes panel when the WaveGuard
+  // percent drops collected margin under the 35% review floor (codex P2
+  // round 8 on #2827). Same 1e-4 at-floor tolerance as the server.
+  if (selectedRecurringLawn && wd > 0) {
+    const lawnAnn = Number(selectedRecurringLawn.ann);
+    const lawnCostTotal = Number(selectedRecurringLawn.costs?.total);
+    if (Number.isFinite(lawnAnn) && lawnAnn > 0 && Number.isFinite(lawnCostTotal)) {
+      let lawnAfterWg = lawnAnn * (1 - wd);
+      if (lawnFloorAnnualGuard > 0) {
+        lawnAfterWg = Math.max(lawnAfterWg, Math.min(lawnAnn, lawnFloorAnnualGuard));
+      }
+      lawnAfterWg = Math.round(lawnAfterWg * 100) / 100;
+      const lawnMargin = lawnAfterWg > 0 ? (lawnAfterWg - lawnCostTotal) / lawnAfterWg : -1;
+      if (lawnMargin < 0.35 - 1e-4) {
+        marginWarnings.push({
+          service: 'lawn_care',
+          type: 'waveguard_discount_below_margin_floor',
+          margin: Math.round(lawnMargin * 1000) / 1000,
+          marginFloor: 0.35,
+          finalAnnual: lawnAfterWg,
+          message: `Lawn Care: WaveGuard discount drops collected margin to ${(lawnMargin * 100).toFixed(1)}% (below the 35% review floor) — price stands as discounted.`,
+        });
+      }
+    }
+  }
 
   let ot = 0;
   otItems.forEach(i => ot += i.price);

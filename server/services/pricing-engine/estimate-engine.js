@@ -600,6 +600,12 @@ function generateEstimate(input) {
     skippedServices: Array.isArray(inputPricingMetadata.skippedServices)
       ? [...inputPricingMetadata.skippedServices]
       : [],
+    // Resolved lawn cost-floor arm state for THIS pricing run — persisted
+    // with the result so view/accept replays clamp exactly as the estimate
+    // was priced even if the global switch flips between save and view
+    // (estimate-public estimateLawnFloorArmed reads it first; codex P2
+    // round 8 on #2827).
+    lawnCostFloorArmed,
     ...(inputPricingMetadata.skippedDuplicateRoachLine
       ? {
           skippedDuplicateRoachLine: true,

@@ -12641,6 +12641,15 @@ function isRetiredLawnTierKey(tierKey) {
 // silent and the caller falls back to the global switch / legacy evidence
 // (codex P2s, rounds 5-7 on the #2827 main-merge).
 function estimateLawnFloorArmed(estData = {}) {
+  // Highest priority: the engine stamps its RESOLVED arm state into
+  // pricingMetadata on every post-#2827 pricing run — the authoritative
+  // record of what actually priced the saved result, covering estimates the
+  // GLOBAL switch armed without any explicit per-request flag (a later
+  // global flip must not change how a sent quote replays).
+  const stamped = estData?.result?.pricingMetadata?.lawnCostFloorArmed
+    ?? estData?.pricingMetadata?.lawnCostFloorArmed
+    ?? estData?.result?.routingMetadata?.lawnCostFloorArmed;
+  if (typeof stamped === 'boolean') return stamped;
   // Admin V2 saves persist the exact /calculate-estimate payload under
   // engineRequest ({ profile, selectedServices, options }); the adapter maps
   // options.useLawnCostFloor into services.lawn.useLawnCostFloor at replay,
