@@ -14,6 +14,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { runExclusive } = require('../../utils/cron-lock');
+const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-audience-consent');
 
 let _googleapis;
 function getGoogle() {
@@ -236,7 +237,11 @@ function candidateHasUserData(candidate) {
 
 function skipReason(candidate) {
   if (!candidate.eventTimestamp) return 'missing_event_timestamp';
-  if (!candidateHasClickId(candidate) && !candidateHasUserData(candidate)) return 'missing_match_keys';
+  if (!candidateHasClickId(candidate) && !candidateHasUserData(candidate)) {
+    // Distinguish "we stripped the identifiers for consent" from "the source
+    // row never had match keys" — the counts mean different things.
+    return candidate.consentSuppressed ? 'consent_suppressed' : 'missing_match_keys';
+  }
   if (candidate.conversionType === 'completed_job_revenue' && !(number(candidate.conversionValue) > 0)) {
     return 'missing_conversion_value';
   }
@@ -316,6 +321,27 @@ function candidateMatchScore(candidate) {
   return score;
 }
 
+const CLICK_KEY_FIELDS = ['gclid', 'wbraid', 'gbraid', 'fbclid', 'fbc', 'fbp'];
+
+// Duplicates of one transaction are the same person's conversion seen through
+// different join rows — their click identifiers all attribute that one event.
+// The dedupe winner therefore carries the UNION of every sibling's click keys:
+// no lane can lose its click ID to the dedupe (the winner keeps gclid even
+// when a Meta-keyed sibling loses, and fbc/fbp even when the Google-keyed row
+// wins), and a consent-stripped winner still measures click-only. PII is
+// NEVER merged across siblings — consent stripping nulled it for a reason,
+// and the scorer already prefers the row whose own PII survived.
+function mergeClickKeys(into, from) {
+  let out = into;
+  for (const key of CLICK_KEY_FIELDS) {
+    if (!out[key] && from[key]) {
+      if (out === into) out = { ...into };
+      out[key] = from[key];
+    }
+  }
+  return out;
+}
+
 function dedupeCandidatesByTransaction(candidates = []) {
   const byTransaction = new Map();
   const order = [];
@@ -335,7 +361,9 @@ function dedupeCandidatesByTransaction(candidates = []) {
 
     const existing = byTransaction.get(transactionId);
     if (candidateMatchScore(candidate) > candidateMatchScore(existing)) {
-      byTransaction.set(transactionId, candidate);
+      byTransaction.set(transactionId, mergeClickKeys(candidate, existing));
+    } else {
+      byTransaction.set(transactionId, mergeClickKeys(existing, candidate));
     }
   }
 
@@ -368,6 +396,12 @@ function mapLeadCandidate(row) {
     fbp: row.fbp || null,
     email: row.email || null,
     phone: row.phone || null,
+    // EVERY linked contact identifier, for person-level consent checks —
+    // same contract as mapCompletedJobCandidate. Never uploaded itself.
+    consentIdentifiers: [
+      { email: row.email || null, phone: row.phone || null },
+      { email: row.customer_email || null, phone: row.customer_phone || null },
+    ],
     metadata: {
       leadSource: row.source_name || null,
       sourceType: row.source_type || null,
@@ -414,6 +448,15 @@ function mapCompletedJobCandidate(row) {
     fbp: row.fbp || null,
     email: leadEmail || customerEmail || null,
     phone: leadPhone || customerPhone || null,
+    // EVERY linked contact identifier, for person-level consent checks. The
+    // upload hashes only the collapsed email/phone pick above — but an
+    // opt-out on ANY linked identifier (e.g. the customer's current email
+    // when a stale lead email won the pick) opts the PERSON out, and the
+    // stale identifiers must not upload either. Never uploaded itself.
+    consentIdentifiers: [
+      { email: leadEmail, phone: leadPhone },
+      { email: customerEmail, phone: customerPhone },
+    ],
     metadata: {
       invoiceStatus: row.invoice_status || null,
       serviceLine: row.service_line || null,
@@ -427,6 +470,10 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
   const eventTimestampSql = 'COALESCE(l.converted_at, l.first_contact_at, l.created_at)';
   const rows = await db('leads as l')
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
+    // Linked customer's CURRENT identifiers ride along for consent checks —
+    // an opt-out under the customer record must suppress the lead's (possibly
+    // stale) contact data too. See consentIdentifiers on the mappers.
+    .leftJoin('customers as c', 'l.customer_id', 'c.id')
     .whereNull('l.deleted_at')
     .whereRaw(`${eventTimestampSql} >= ?::timestamptz`, [since])
     .whereRaw(`${eventTimestampSql} < ?::timestamptz`, [addDateStringDays(endDate, 1)])
@@ -450,6 +497,8 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
       'l.fbclid',
       'l.fbc',
       'l.fbp',
+      'c.email as customer_email',
+      'c.phone as customer_phone',
       'ls.name as source_name',
       'ls.source_type',
       'ls.channel',
@@ -457,7 +506,7 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
     .orderByRaw(`${eventTimestampSql} DESC NULLS LAST`)
     .limit(cap);
 
-  return rows.map(mapLeadCandidate);
+  return applyMarketingConsent('qualified_lead', rows.map(mapLeadCandidate));
 }
 
 function invoiceRollupSubquery() {
@@ -526,9 +575,86 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
     .orderBy('ea.service_date', 'desc')
     .limit(queryLimit);
 
-  return dedupeCandidatesByTransaction(rows.map(mapCompletedJobCandidate)).slice(0, cap);
+  // Consent must run BEFORE this dedupe (see the invariant on collectCandidates).
+  return dedupeCandidatesByTransaction(
+    await applyMarketingConsent('completed_job_revenue', rows.map(mapCompletedJobCandidate))
+  ).slice(0, cap);
 }
 
+// Consent-clean conversion candidates before either lane (Google Data Manager
+// or Meta CAPI — both build their events from these candidates) hashes any
+// identifier. A marketing opt-out means the person's CRM identifiers
+// (email/phone) never upload to an ad platform. The conversion itself can
+// still measure through the platform's OWN click identifier (gclid / wbraid /
+// gbraid / fbc / fbp / fbclid) — that came from the ad-click session, not our
+// CRM, so keeping it costs no privacy. Candidates left with no match key at
+// all are skipped downstream as 'consent_suppressed'. wrong_number phones
+// belong to a STRANGER and are stripped unconditionally (the person's email
+// remains usable — mirrors the audience lanes).
+//
+// Fail-closed: a suppression-load error propagates and aborts the whole
+// upload run (retried next cron) rather than uploading an unverified set.
+async function applyMarketingConsent(conversionType, candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return candidates || [];
+  const sup = await loadMarketingSuppression();
+  let suppressed = 0;
+  let strippedPhones = 0;
+  // Person-level check: the collapsed email/phone pick PLUS every linked
+  // identifier the mapper carried (consentIdentifiers) — an opt-out on the
+  // customer's current email opts the person out even when a stale lead
+  // email won the collapsed pick.
+  const personSuppressed = (candidate) => sup.isSuppressed(candidate)
+    || (Array.isArray(candidate.consentIdentifiers)
+      && candidate.consentIdentifiers.some((id) => sup.isSuppressed(id)));
+  // ...and the opt-out propagates across TRANSACTION SIBLINGS: duplicate join
+  // rows of one transaction are the same person seen through different links
+  // (lead vs customer). If ANY sibling matches an opt-out, every sibling's
+  // CRM identifiers must strip — otherwise a sibling carrying different
+  // stale contact data (absent from the suppression lists) survives, wins
+  // the dedupe on its intact PII score, and uploads that person's PII.
+  const flags = candidates.map(personSuppressed);
+  const suppressedTransactions = new Set();
+  candidates.forEach((candidate, i) => {
+    if (flags[i] && candidate.transactionId) suppressedTransactions.add(candidate.transactionId);
+  });
+  const cleaned = candidates.map((candidate, i) => {
+    if (flags[i] || (candidate.transactionId && suppressedTransactions.has(candidate.transactionId))) {
+      suppressed += 1;
+      return { ...candidate, email: null, phone: null, consentSuppressed: true };
+    }
+    const ph = consentNormPhone(candidate.phone);
+    if (ph && sup.invalidPhones.has(ph)) {
+      strippedPhones += 1;
+      // The invalid number reaches a STRANGER — but a different clean linked
+      // phone (e.g. the customer's, when the lead's was the wrong number)
+      // still identifies this person, so promote the first clean alternative
+      // instead of dropping match coverage. Person-level opt-out was ruled
+      // out above, so every linked identifier here is consent-clean.
+      let promoted = null;
+      for (const id of candidate.consentIdentifiers || []) {
+        const altPh = consentNormPhone(id.phone);
+        if (altPh && altPh !== ph && !sup.invalidPhones.has(altPh)) { promoted = id.phone; break; }
+      }
+      return { ...candidate, phone: promoted };
+    }
+    return candidate;
+  });
+  if (suppressed || strippedPhones) {
+    logger.info(`[ad-consent] ${conversionType} conversions: stripped identifiers from ${suppressed} opted-out contacts, ${strippedPhones} invalid phones`);
+  }
+  return cleaned;
+}
+
+// INVARIANT: consent stripping runs before EVERY dedupeCandidatesByTransaction
+// call, which is why applyMarketingConsent lives inside each collector (the
+// completed-job collector dedupes internally before capping). The dedupe picks
+// the duplicate with the richest match keys — scored on PRE-consent keys, an
+// opted-out email/phone row can beat a sibling that carries only a click ID,
+// then get stripped to nothing and skipped, silently discarding the
+// click-ID-only fallback that sibling could still have measured with.
+// Stripping first makes the scorer choose among post-consent keys, so that
+// fallback actually survives. A new collector (or a new dedupe site) must
+// keep this ordering.
 async function collectCandidates(conversionType, options = {}) {
   if (conversionType === 'qualified_lead') {
     return dedupeCandidatesByTransaction(await collectQualifiedLeadCandidates(options));
@@ -560,6 +686,7 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     missingMatchKeys: 0,
     missingConversionValue: 0,
     missingEventTimestamp: 0,
+    consentSuppressed: 0,
     skipped: 0,
   };
   const rows = candidates.map((candidate) => {
@@ -568,6 +695,7 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     const priorReason = priorUploadSkipReason(existing);
     if (priorReason === 'already_sent') counts.alreadySent += 1;
     if (priorReason === 'upload_pending') counts.pending += 1;
+    if (reason === 'consent_suppressed') counts.consentSuppressed += 1;
     if (reason === 'missing_match_keys') counts.missingMatchKeys += 1;
     if (reason === 'missing_conversion_value') counts.missingConversionValue += 1;
     if (reason === 'missing_event_timestamp') counts.missingEventTimestamp += 1;
@@ -957,6 +1085,7 @@ module.exports = {
     adIdentifiers,
     buildEvent,
     buildIngestRequest,
+    applyMarketingConsent,
     collectCandidates,
     candidateHasClickId,
     candidateHasUserData,

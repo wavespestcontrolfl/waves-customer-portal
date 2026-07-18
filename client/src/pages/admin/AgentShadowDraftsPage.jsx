@@ -399,6 +399,139 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
   );
 }
 
+// Sealed exam — the locked eval set. Frozen (inbound, day-of facts, human
+// reply) items replayed through the CURRENT drafter per provider leg and
+// graded by the live judge; a McNemar test against the baseline run decides
+// "real improvement or luck". Read-mostly: sealing is cheap and idempotent,
+// exam runs burn real LLM spend so both are deliberate button clicks.
+function significanceChip(sig) {
+  if (!sig) return null;
+  if (sig.significant && sig.direction === "improved") {
+    return <Chip tone={{ bg: "#DCFCE7", fg: D.green }}>✓ improved (p={sig.pValue})</Chip>;
+  }
+  if (sig.significant && sig.direction === "regressed") {
+    return <Chip tone={{ bg: "#FEE2E2", fg: D.red }}>✗ regressed (p={sig.pValue})</Chip>;
+  }
+  return <Chip tone={{ bg: D.bg, fg: D.muted }}>no significant change (p={sig.pValue})</Chip>;
+}
+
+const LEG_LABELS = { anthropic: "Claude leg", openai: "GPT leg" };
+
+function SealedRunRow({ run, runsById }) {
+  const pct = run.unsafeRate == null ? "-" : `${Math.round(run.unsafeRate * 100)}%`;
+  const baseline = run.baselineRunId ? runsById.get(run.baselineRunId) : null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, color: D.muted, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
+      <strong style={{ color: D.heading }}>{run.promptVersion}</strong>
+      <Chip tone={{ bg: D.bg, fg: D.zinc }}>{LEG_LABELS[run.providerLeg] || run.providerLeg}</Chip>
+      {run.status === "running" && <Chip tone={{ bg: "#DBEAFE", fg: D.blue }}>running… {run.itemsJudged}/{run.itemsTotal}</Chip>}
+      {run.status === "failed" && <Chip tone={{ bg: "#FEE2E2", fg: D.red }}>failed</Chip>}
+      {run.status === "complete" && (
+        <>
+          <span><strong style={{ color: run.unsafeRate > 0.08 ? D.red : D.heading }}>{pct}</strong> unsafe ({run.unsafeCount}/{run.itemsJudged})</span>
+          {run.avgSafety != null && <span>safety <strong style={{ color: D.heading }}>{run.avgSafety}</strong>/10</span>}
+          {significanceChip(run.significance)}
+          {baseline && <span>vs {baseline.promptVersion}</span>}
+        </>
+      )}
+      <span style={{ marginLeft: "auto" }}>{timeLabel(run.startedAt)}</span>
+    </div>
+  );
+}
+
+function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
+  if (!exam) return null;
+  const runs = exam.runs || [];
+  const runsById = new Map(runs.map((r) => [r.id, r]));
+  const inFlight = runs.find((r) => r.status === "running") || null;
+  // A failed run keeps every result already paid for — offer to resume it
+  // instead of re-billing a fresh run. Only current-version failures: the
+  // server refuses stale-version resumes (one run = one drafter version).
+  const resumableFailure = !inFlight
+    ? runs.find((r) => r.status === "failed" && r.promptVersion === exam.currentVersion) || null
+    : null;
+  const items = exam.items || { active: 0, total: 0 };
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Sealed exam</div>
+        <div style={{ fontSize: 12, color: D.muted }}>
+          A locked set of real past texts (with that day&apos;s facts frozen) the drafter never trains on. Each run replays the whole set on one provider and compares against the last examined version.
+        </div>
+      </div>
+      {exam.gateEnabled === false && (
+        <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 750 }}>
+          GATE_SMS_SEALED_EVAL is off — sealing and exam runs are disabled until the gate is enabled.
+        </div>
+      )}
+      <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, color: D.muted }}>
+          <span><strong style={{ color: D.heading }}>{items.active}</strong> sealed items</span>
+          <span>drafter <strong style={{ color: D.heading }}>{exam.currentVersion}</strong></span>
+          {exam.examRequiredForGraduation && (
+            <Chip tone={{ bg: "#DBEAFE", fg: D.blue }}>required for graduation</Chip>
+          )}
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              disabled={busy || exam.gateEnabled === false}
+              onClick={onSeal}
+              style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.zinc, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+            >
+              Top up sealed items
+            </button>
+            {inFlight ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onResume(inFlight)}
+                style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+              >
+                Resume stalled run
+              </button>
+            ) : (
+              <>
+                {resumableFailure && (
+                  <button
+                    type="button"
+                    disabled={busy || exam.gateEnabled === false}
+                    onClick={() => onResume(resumableFailure)}
+                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                  >
+                    Resume failed run ({LEG_LABELS[resumableFailure.providerLeg] || resumableFailure.providerLeg})
+                  </button>
+                )}
+                {Object.entries(LEG_LABELS).map(([leg, label]) => (
+                  <button
+                    key={leg}
+                    type="button"
+                    disabled={busy || exam.gateEnabled === false || !items.active}
+                    onClick={() => onRun(leg)}
+                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.blue}`, background: D.card, color: D.blue, fontSize: 12, fontWeight: 750, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                  >
+                    Run exam — {label}
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+        {/* Latest complete run per leg for the current version — the headline. */}
+        {Object.entries(exam.legs || {}).some(([, r]) => r) ? (
+          Object.entries(exam.legs).map(([leg, run]) => (run ? <SealedRunRow key={leg} run={run} runsById={runsById} /> : null))
+        ) : (
+          <div style={{ fontSize: 12, color: D.muted, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
+            No completed exam for {exam.currentVersion} yet{items.active ? " — run one per leg to baseline this version." : " — seal items first, then run each leg."}
+          </div>
+        )}
+        {/* History (already-shown current-leg headliners included for context). */}
+        {runs.filter((r) => r.status !== "complete" || !Object.values(exam.legs || {}).some((h) => h && h.id === r.id)).slice(0, 6)
+          .map((run) => <SealedRunRow key={run.id} run={run} runsById={runsById} />)}
+      </div>
+    </div>
+  );
+}
+
 // Failure pathology — the standing (harness surface × failure mode) ledger.
 // The nightly classifier buckets every unsafe judgment; cells with enough
 // fresh evidence earn a parked patch-proposal card. Accepting a proposal
@@ -497,9 +630,11 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   const [scores, setScores] = useState(null);
   const [modes, setModes] = useState(null);
   const [profiles, setProfiles] = useState(null);
+  const [exam, setExam] = useState(null);
   const [pathology, setPathology] = useState(null);
   const [modeBusy, setModeBusy] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
+  const [examBusy, setExamBusy] = useState(false);
   const [pathologyBusy, setPathologyBusy] = useState(false);
   const [intentFilter, setIntentFilter] = useState("");
   const [loading, setLoading] = useState(true);
@@ -526,6 +661,13 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
         setProfiles(await adminFetch("/admin/agents/voice-profiles"));
       } catch {
         setProfiles(null);
+      }
+      // Sealed exam is additive the same way — a failure (migration not yet
+      // run) degrades to "no section", never a blank tab.
+      try {
+        setExam(await adminFetch("/admin/agents/sealed-eval"));
+      } catch {
+        setExam(null);
       }
       // Pathology ledger is additive the same way — a failure (migration not
       // yet run) degrades to "no section", never a blank tab.
@@ -573,6 +715,84 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Light poll while an exam run is in flight so progress/aggregates update
+  // without a manual refresh. The section itself refetches ONLY the exam
+  // payload — the rest of the tab stays untouched.
+  const examRunning = Boolean((exam?.runs || []).some((r) => r.status === "running"));
+  useEffect(() => {
+    if (!examRunning) return undefined;
+    const timer = setInterval(async () => {
+      try {
+        setExam(await adminFetch("/admin/agents/sealed-eval"));
+      } catch {
+        /* transient poll miss — keep the last snapshot */
+      }
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [examRunning]);
+
+  const refreshExam = useCallback(async () => {
+    try {
+      setExam(await adminFetch("/admin/agents/sealed-eval"));
+    } catch {
+      /* section degrades to stale data; the next full load reconciles */
+    }
+  }, []);
+
+  const sealItems = useCallback(async () => {
+    const ok = window.confirm(
+      "Top up the sealed exam set?\n\nUp to the target count of judged past texts (with that day's frozen facts) are added permanently. Sealed items are excluded from drafter training forever."
+    );
+    if (!ok) return;
+    setExamBusy(true);
+    setError("");
+    try {
+      await adminFetch("/admin/agents/sealed-eval/seal", { method: "POST" });
+      await refreshExam();
+    } catch (err) {
+      setError(err.message || "Failed to seal eval items.");
+    } finally {
+      setExamBusy(false);
+    }
+  }, [refreshExam]);
+
+  const runExam = useCallback(async (providerLeg) => {
+    const n = exam?.items?.active || 0;
+    const ok = window.confirm(
+      `Run the sealed exam on the ${LEG_LABELS[providerLeg] || providerLeg}?\n\nReplays all ${n} sealed items through the current drafter and judges each one — roughly ${n * 2}–${n * 5} AI calls. Takes several minutes; progress shows here.`
+    );
+    if (!ok) return;
+    setExamBusy(true);
+    setError("");
+    try {
+      await adminFetch("/admin/agents/sealed-eval/runs", {
+        method: "POST",
+        body: JSON.stringify({ providerLeg }),
+      });
+      await refreshExam();
+    } catch (err) {
+      setError(err.message || "Failed to start the exam run.");
+    } finally {
+      setExamBusy(false);
+    }
+  }, [exam, refreshExam]);
+
+  const resumeExam = useCallback(async (run) => {
+    setExamBusy(true);
+    setError("");
+    try {
+      await adminFetch("/admin/agents/sealed-eval/runs", {
+        method: "POST",
+        body: JSON.stringify({ resumeRunId: run.id }),
+      });
+      await refreshExam();
+    } catch (err) {
+      setError(err.message || "Failed to resume the exam run.");
+    } finally {
+      setExamBusy(false);
+    }
+  }, [refreshExam]);
 
   const reviewProposal = useCallback(async (proposal, action) => {
     if (action === "accept") {
@@ -714,6 +934,8 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
         )}
 
         <VoiceProfileSection profiles={profiles} busy={profileBusy} onReview={reviewProfile} />
+
+        <SealedExamSection exam={exam} busy={examBusy} onSeal={sealItems} onRun={runExam} onResume={resumeExam} />
 
         {(scores?.intents || []).length > 0 && (
           <div className="shadow-scores-grid">

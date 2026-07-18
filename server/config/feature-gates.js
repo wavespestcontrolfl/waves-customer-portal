@@ -197,6 +197,15 @@ const gates = {
   // has to earn each intent.
   smsAutoSend: process.env.GATE_SMS_AUTO_SEND === 'true',
 
+  // SMS Sealed Eval (brand-voice loop measurement) — a locked exam for the
+  // house-voice drafter: frozen (inbound, day-of facts, human reply) items
+  // replayed through the current drafter per provider leg and graded by the
+  // live judge, with McNemar significance vs a baseline run. The weekly cron
+  // only tops up the item pool (pure selection, no LLM); exam RUNS are
+  // manual-trigger only (admin endpoint) because each burns items × several
+  // LLM calls. No sends, no customer-visible effect; prod opt-in per house
+  // pattern.
+  smsSealedEval: isProd ? process.env.GATE_SMS_SEALED_EVAL === 'true' : true,
 
   // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
   // replies for HISTORICAL inbound SMS that already have a human reply and
