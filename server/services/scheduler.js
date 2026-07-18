@@ -1182,6 +1182,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY SUN 3:05AM ET — Sealed-eval freezer top-up (brand-voice loop
+  // measurement). Pure selection, no LLM spend: freezes judged live drafts
+  // (inbound + day-of facts_block + human reply) into sms_sealed_eval_items
+  // until the pool reaches SEALED_EVAL_TARGET, so the locked exam keeps
+  // coverage as intents shift. Idempotent (anti-join + unique source draft);
+  // no-ops once full. Exam RUNS are never scheduled — manual endpoint only.
+  // =========================================================================
+  cron.schedule('5 3 * * 0', async () => {
+    if (!isEnabled('smsSealedEval')) return;
+    logger.info('Running: Sealed-eval freezer top-up');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sealEvalItems } = require('./sms-sealed-eval');
+      await runExclusive('sms-sealed-eval-seal', () => sealEvalItems());
+    } catch (err) {
+      logger.error(`Sealed-eval freezer failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :15 — Shadow backfill (brand-voice loop accelerator). Drafts
   // house-voice replies for HISTORICAL inbounds that already have a human
   // reply and judges them in the same pass — compresses months of

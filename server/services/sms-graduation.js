@@ -340,15 +340,43 @@ async function computeReadiness({ intents, dbi = db } = {}) {
     logger.warn(`[sms-graduation] judge-signal fetch failed: ${err.message}; graduation blocked until it recovers`);
   }
 
+  // Optional sealed-exam requirement (GRAD_REQUIRE_SEALED_EXAM=true, default
+  // OFF): before ANY intent may graduate a rung, the current PROMPT_VERSION
+  // must have passed the locked exam on both provider legs — a version-level
+  // gate layered over the per-intent live signals. Fail CLOSED like the judge
+  // signal: with the flag on, an errored exam fetch blocks graduation rather
+  // than silently waiving the requirement. Version-level by design: the exam
+  // measures the prompt/harness, the live signals measure each intent.
+  let examBlockers = null;
+  if (process.env.GRAD_REQUIRE_SEALED_EXAM === 'true') {
+    try {
+      // Lazy require — sealed-eval reaches the drafter, which reaches
+      // auto-send, which reaches this module.
+      examBlockers = await require('./sms-sealed-eval').evaluateExamGate({ dbi });
+    } catch (err) {
+      examBlockers = ['Sealed exam signal unavailable — graduation blocked while GRAD_REQUIRE_SEALED_EXAM is on.'];
+      logger.warn(`[sms-graduation] sealed-exam gate fetch failed: ${err.message}; graduation blocked until it recovers`);
+    }
+  }
+
   const out = new Map();
   for (const { intent, mode, locked, suggest } of intents) {
     const judge = judgeSignals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
     const verdict = evaluateRung({ mode, locked, judge, suggest, judgeAvailable });
+    if (examBlockers && examBlockers.length && !locked && verdict.nextRung) {
+      verdict.blockers = [...verdict.blockers, ...examBlockers];
+      verdict.eligible = false;
+    }
     // Intents ALREADY at auto_send get the send-time gate's view too, so the
     // UI can't show a no-blocker Auto-send chip while sends are blocked.
-    const autoSendHealth = !locked && verdict.currentMode === 'auto_send'
+    // The exam blockers fold in here as well — evaluateAutoSendEligibility
+    // (the executor's gate) applies them, so the health chip must mirror it.
+    let autoSendHealth = !locked && verdict.currentMode === 'auto_send'
       ? evaluateAutoSendHealth({ judge, suggest, judgeAvailable })
       : null;
+    if (autoSendHealth && examBlockers && examBlockers.length) {
+      autoSendHealth = { sendReady: false, blockers: [...autoSendHealth.blockers, ...examBlockers] };
+    }
     out.set(intent, {
       ...verdict,
       autoSendHealth,
@@ -423,6 +451,25 @@ async function evaluateAutoSendEligibility({ intent, dbi = db } = {}) {
   // this stays true while the intent sits at auto_send, and flips false the
   // moment the data stops clearing the bar.
   const verdict = evaluateRung({ mode: 'suggest', locked: false, judge, suggest, judgeAvailable: true });
+
+  // Sealed-exam requirement must bind HERE, not only in computeReadiness:
+  // this is the gate the auto-send EXECUTOR re-checks on every send and the
+  // mode-flip route consults — an advisory-only check would let an intent
+  // keep auto-sending on a version that failed (or never sat) the exam.
+  // Fail closed, same as the judge signal.
+  if (process.env.GRAD_REQUIRE_SEALED_EXAM === 'true') {
+    let examBlockers;
+    try {
+      examBlockers = await require('./sms-sealed-eval').evaluateExamGate({ dbi });
+    } catch (err) {
+      logger.warn(`[sms-graduation] sealed-exam gate fetch failed (${intent}): ${err.message}; auto-send blocked`);
+      examBlockers = ['Sealed exam signal unavailable — auto-send blocked while GRAD_REQUIRE_SEALED_EXAM is on.'];
+    }
+    if (examBlockers.length) {
+      return { eligible: false, blockers: [...verdict.blockers, ...examBlockers], judge, suggest };
+    }
+  }
+
   const eligible = verdict.eligible && verdict.nextRung === 'auto_send';
   return { eligible, blockers: verdict.blockers, judge, suggest };
 }
