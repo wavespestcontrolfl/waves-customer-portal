@@ -365,6 +365,13 @@ async function handleClarifyReply({ phone, body }) {
       .where(function pendingOrRecentlySent() {
         this.where(function pendingOpen() {
           this.where('status', 'pending').whereNull('sent_at');
+        }).orWhere(function claimedUnsent() {
+          // Mid-approval (claimed, not yet dispatched): the answer still
+          // records — stamp-only, never touching the claimed row's copy or
+          // status. Residual: the already-approved question may still
+          // deliver inside the seconds-wide claim→dispatch window; the
+          // recorded answer prevents any re-ask after it.
+          this.whereIn('status', ['approved', 'revised']).whereNull('sent_at');
         }).orWhere(function sentRecent() {
           this.whereNotNull('sent_at')
             .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
