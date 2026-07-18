@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('./report-data');
 const { renderServiceReportV1Pdf } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
@@ -115,6 +115,10 @@ async function renderAndStoreServiceReportPdf(recordId, {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig });
+    // Queued PDFs are cached snapshots — live-only schedule fields
+    // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
+    // into them (codex P2 r2: this path bypasses the route helper's strip).
+    stripLiveOnlyScheduleFields(data);
     data.dynamicContext = await buildServiceReportDynamicContext({
       recordId,
       mode: 'static',

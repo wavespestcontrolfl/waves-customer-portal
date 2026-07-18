@@ -8318,6 +8318,16 @@ router.put('/:token/accept', async (req, res, next) => {
             trx,
           });
           reservationCommitted = true;
+          // T&S tier accepts: stamp the accepted tier's catalog identity
+          // (see treeShrubTierCatalogStamp — codex P2 r2: this fresh-slotId
+          // path was missed by the r1 fix).
+          if (committedAppointment?.id) {
+            const tierStamp = await treeShrubTierCatalogStamp(trx, selectedFrequency);
+            if (tierStamp) {
+              await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
+              Object.assign(committedAppointment, tierStamp);
+            }
+          }
           if (committedAppointment?.id) {
             acceptedAppointmentsToRegister.push(committedAppointment);
           }
@@ -8357,21 +8367,11 @@ router.put('/:token/accept', async (req, res, next) => {
               trx,
             });
             reservationCommitted = true;
-            // T&S tier accepts: commitReservation canonicalizes the row to
-            // the generic reservation service text with no service_id, so
-            // the typed-profile resolver and the WaveGuard plan sync would
-            // misread a Light (4x) accept as the bimonthly program (codex
-            // P2 r1). Stamp the accepted tier's catalog identity in the
-            // same trx; seeded follow-ups copy service_id from the parent.
-            if (selectedFrequency?.serviceCategory === 'tree_shrub' && committedAppointment?.id) {
-              const tierMeta = treeShrubTierRuntimeMeta(selectedFrequency.key);
-              if (tierMeta) {
-                const tierStamp = { service_type: tierMeta.name };
-                const tierCatalogRow = await trx('services')
-                  .where({ service_key: tierMeta.serviceKey })
-                  .first('id')
-                  .catch(() => null);
-                if (tierCatalogRow) tierStamp.service_id = tierCatalogRow.id;
+            // T&S tier accepts: stamp the accepted tier's catalog identity
+            // (see treeShrubTierCatalogStamp).
+            if (committedAppointment?.id) {
+              const tierStamp = await treeShrubTierCatalogStamp(trx, selectedFrequency);
+              if (tierStamp) {
                 await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
                 Object.assign(committedAppointment, tierStamp);
               }
@@ -8402,25 +8402,11 @@ router.put('/:token/accept', async (req, res, next) => {
           if (visitEstimatedPrice != null && Number.isFinite(Number(visitEstimatedPrice))) {
             updates.estimated_price = Number(visitEstimatedPrice);
           }
-          // Reserved-slot T&S accepts adopt the reservation row, which
-          // commitReservation labels with the generic 'Tree & Shrub' text
-          // and no service_id — the converter's scheduleUnits catalog
-          // plumbing never runs for adopted rows, so typed-profile
-          // resolution and the WaveGuard plan sync misread a Light (4x)
-          // accept as the bimonthly program (codex P2 r1). Stamp the
-          // accepted tier's catalog identity on the row; seeded follow-ups
-          // copy service_id from the parent.
-          if (selectedFrequency?.serviceCategory === 'tree_shrub') {
-            const tierMeta = treeShrubTierRuntimeMeta(selectedFrequency.key);
-            if (tierMeta) {
-              updates.service_type = tierMeta.name;
-              const tierCatalogRow = await trx('services')
-                .where({ service_key: tierMeta.serviceKey })
-                .first('id')
-                .catch(() => null);
-              if (tierCatalogRow) updates.service_id = tierCatalogRow.id;
-            }
-          }
+          // T&S tier accepts adopting an existing (non-held) appointment:
+          // stamp the accepted tier's catalog identity (see
+          // treeShrubTierCatalogStamp).
+          const adoptedTierStamp = await treeShrubTierCatalogStamp(trx, selectedFrequency);
+          if (adoptedTierStamp) Object.assign(updates, adoptedTierStamp);
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
             .whereIn('status', ['pending', 'confirmed'])
@@ -11080,7 +11066,11 @@ function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
       .map((value) => normalizeRecurringPattern(value))
       .find(Boolean) || null;
     if (fieldPattern && !['bimonthly', 'quarterly'].includes(fieldPattern)) return true;
-    const visits = Number(svc?.visitsPerYear ?? svc?.visits ?? svc?.v);
+    // Same alias set the converter's visitsPerYearForRecurringService reads
+    // (codex P2 r2: a stale row shaped { appsPerYear: 9 } slipped through).
+    const visits = Number(
+      svc?.visitsPerYear ?? svc?.appsPerYear ?? svc?.visits ?? svc?.apps ?? svc?.treatmentsPerYear ?? svc?.v,
+    );
     if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6;
     const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
     return /\b(every\s*)?6\s*weeks?\b|\b(9|12)\s*(visits?|apps?|applications?)\b/.test(text);
@@ -13461,6 +13451,27 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
     row.appsPerYear = visits;
   }
   return row;
+}
+
+// Catalog identity for a T&S tier accept adopting a reserved/existing
+// scheduled row. commitReservation canonicalizes rows to the generic
+// reservation label with no service_id, so without this stamp typed-profile
+// resolution falls back to the generic report and the WaveGuard plan sync
+// misreads a Light (4x) accept as the bimonthly program (codex P2 r1/r2 —
+// ALL THREE adoption paths must stamp: fresh slotId reservation, held
+// existing appointment, and the direct-update branch). Returns null for
+// non-T&S accepts; seeded follow-ups copy service_id from the parent.
+async function treeShrubTierCatalogStamp(trx, selectedFrequency) {
+  if (selectedFrequency?.serviceCategory !== 'tree_shrub') return null;
+  const meta = treeShrubTierRuntimeMeta(selectedFrequency.key);
+  if (!meta) return null;
+  const stamp = { service_type: meta.name };
+  const catalogRow = await trx('services')
+    .where({ service_key: meta.serviceKey })
+    .first('id')
+    .catch(() => null);
+  if (catalogRow) stamp.service_id = catalogRow.id;
+  return stamp;
 }
 
 function rewriteTreeShrubRecurringServices(services = [], frequency = {}) {

@@ -236,6 +236,16 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     expect(treated.diagnosis.find((d) => d.key === 'pest_activity').explanation).toMatch(/treated today/);
   });
 
+  it('seaweed biostimulants classify supplement, never herbicide (codex P2 r2)', () => {
+    const healthy = { foliageFullness: 90, leafColorVigor: 88, pestActivity: 92, diseaseLeafSpot: 92, waterHeatStress: 90, overallScore: 90 };
+    const v2 = buildTreeShrubReportV2({
+      treeShrubAssessment: assessment({ scores: healthy, observations: 'All plant groups look healthy and full.' }),
+      applications: [{ product: { name: 'Seaweed Extract Biostimulant' } }],
+    });
+    expect(v2.treatment.products[0].kind).toBe('supplement');
+    expect(v2.treatment.products[0].whatItDoes).not.toMatch(/weed/i);
+  });
+
   it('a systemic HERBICIDE never satisfies the pest treatment gate (codex P2 r1)', () => {
     const severe = { foliageFullness: 80, leafColorVigor: 80, pestActivity: 20, diseaseLeafSpot: 80, waterHeatStress: 80, overallScore: 68 };
     const v2 = buildTreeShrubReportV2({

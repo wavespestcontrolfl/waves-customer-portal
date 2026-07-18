@@ -100,6 +100,14 @@ describe('recurringTreeShrubRowAtRetiredCadence — v4.5 six-visit mandate backs
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Bi-Monthly Tree & Shrub Care Service', frequency: 'bi_monthly', visitsPerYear: 6 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Quarterly Tree & Shrub Care Service', frequency: 'quarterly', visitsPerYear: 4 }))).toBe(false);
   });
+
+  test('every converter visit-count alias is checked (codex P2 r2)', () => {
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 9 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 12 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', treatmentsPerYear: 9 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 4 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 6 }))).toBe(false);
+  });
 });
 
 describe('rewriteTreeShrubRecurringServices — palm rows are never tier-rewritten', () => {

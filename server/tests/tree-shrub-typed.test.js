@@ -318,6 +318,18 @@ describe('ported closeout compliance (typed path)', () => {
     });
     expect(wrongProduct.blocks.map((b) => b.code)).toContain('tree_shrub_products_required');
 
+    // A SEAWEED biostimulant is not an herbicide (codex P2 r2 class —
+    // 'weed' must match as a word, never inside 'seaweed').
+    const seaweed = validateTreeShrubTypedCompliance({
+      service: manateeService,
+      serviceDate: '2026-12-15',
+      values: { ...BASE_VALUES, treatments_completed: 'Weed spot treatment' },
+      products: [product('p10', 'Seaweed Extract Biostimulant')],
+      productRows: [row('p10', 'Seaweed Extract Biostimulant')],
+      completionPhotos: photos,
+    });
+    expect(seaweed.blocks.map((b) => b.code)).toContain('tree_shrub_products_required');
+
     const withHerbicide = validateTreeShrubTypedCompliance({
       service: manateeService,
       serviceDate: '2026-12-15',

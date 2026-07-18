@@ -239,7 +239,10 @@ function isFungicideLikeProduct(productRef = {}) {
 
 function isHerbicideLikeProduct(productRef = {}) {
   const textValue = productText(productRef);
-  return /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weed|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(textValue);
+  // \bweeds?\b (via the group's leading \b): a 'Seaweed Extract'
+  // biostimulant must not satisfy the weed-chip product requirement
+  // (codex P2 r2 on the report classifier — same class here).
+  return /\b(herbicide|pre[\s-]?emergent|post[\s-]?emergent|weeds?|glyphosate|prodiamine|dithiopyr|isoxaben|oxadiazon|pendimethalin|indaziflam|barricade|dimension|gallery|ronstar|snapshot|specticle|marengo|freehand|roundup|finale|reward|sedgehammer)\b/.test(textValue);
 }
 
 function productNeedsIracFracLog(productRef = {}) {
