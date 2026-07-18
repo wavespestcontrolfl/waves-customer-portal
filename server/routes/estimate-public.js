@@ -6941,6 +6941,27 @@ async function handleEstimateView(req, res, next) {
     }
     await reconcileFrozenMembershipSnapshot(estimate);
 
+    // Centralized-viewability gate, SSR half. GET /:token/data owns this gate
+    // for the React path (isEstimateCustomerViewable); the legacy server-HTML
+    // renderer below prints contact details and pricing with NO staff auth, so
+    // the classes /data withholds must never reach it either: draft/scheduled
+    // (unpublished — a leaked bearer URL is pre-publication exposure), archived
+    // (office-retired), and send_failed. On the /estimate/ mount, fall through
+    // to the React shell — /data 404s these for customers and owns the ONLY
+    // sanctioned draft bypass (?adminPreview=1 + verifyStaffBearer), so the
+    // estimate tool's "Customer View" and the estimates list's Preview keep
+    // working. On the /api/estimates mount there is no SPA fallthrough, so
+    // serve the generic not-found shell (no PII, same as an unknown token).
+    // Expired PUBLISHED rows are deliberately NOT gated here: they keep the
+    // personalized SSR expired page below — the customer once legitimately
+    // held that link (the carve-out /data's 404 comment acknowledges).
+    if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      || estimate.archived_at
+      || estimate.status === 'send_failed') {
+      if (req.path.startsWith('/estimate/')) return next();
+      return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+    }
+
     // Parsed once here (post-reconcile) so the V2 gate's one-time check below
     // can read it; reused by the rest of the handler.
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
@@ -6996,26 +7017,18 @@ async function handleEstimateView(req, res, next) {
         billByInvoice: effectiveInvoiceMode,
         paymentMethodPreference: null,
       })).required;
-    // Staff can request the REAL React renderer for an unpublished row via
-    // ?adminPreview=1 (the estimate tool's "Customer View" + the estimates
-    // list's Preview). The param is NOT authorization — this route only
-    // serves the SPA shell; GET /:token/data does the staff-JWT check and
-    // still 404s the draft for anyone else, so a non-staff hit on the URL
-    // renders the React "link isn't valid" screen (strictly less exposure
-    // than the SSR draft page below).
+    // ?adminPreview=1 is the staff draft-preview param (the estimate tool's
+    // "Customer View" + the estimates list's Preview). The param is NOT
+    // authorization — GET /:token/data does the staff-JWT check. Unpublished
+    // rows never reach this point (the SSR viewability gate above already
+    // routed them to the React shell / not-found), so it no longer factors
+    // into the renderer decision; it still excludes staff preview hits from
+    // the GrowthBook experiment assignment below.
     const adminPreviewRequested = req.query.adminPreview === '1';
-    let shouldUseReactEstimateView = (estimate.use_v2_view === true
+    let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
-      || recurringCardForcesReactView)
-      // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
-      // renderer so office staff can still preview a draft via /estimate/<token>
-      // before it's sent — UNLESS the staff preview param asks for the React
-      // page (the renderer the customer actually gets once it's sent; the
-      // /:token/data staff gate makes that path draft-safe). The use_v2_view
-      // default flip otherwise only takes effect once the estimate is
-      // actually published.
-      && (!UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status) || adminPreviewRequested);
+      || recurringCardForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -10056,12 +10069,20 @@ router.put('/:token/decline', async (req, res, next) => {
     const declinedCount = await db('estimates')
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+      // Mirror the guard's archived check on the UPDATE itself (TOCTOU): an
+      // archive committed between the pre-read and this write must not be
+      // mutated back to life as a decline.
+      .whereNull('archived_at')
       .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
       .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
     if (!declinedCount) {
-      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at');
+      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at');
       const freshGuard = resolveEstimateDeclineGuard(fresh);
       if (freshGuard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
+      // Honor the guard's own status: a row archived mid-flight must return
+      // the same generic 404 as the pre-read path, not a "no longer active"
+      // hint that the token maps to a real estimate.
+      if (!freshGuard.ok) return res.status(freshGuard.status).json({ error: freshGuard.error });
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
 
@@ -11490,6 +11511,15 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
 
 function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   if (!estimate) {
+    return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  // Archived rows are office-retired and unpublished (draft/scheduled) rows
+  // were never the customer's to act on — every other public surface
+  // (/data, accept, tier-select, preferences) already withholds both, so the
+  // decline probe must not reveal or mutate them either. Generic 404, same
+  // contract as an unknown token; checked BEFORE alreadyDeclined so an
+  // archived declined row doesn't confirm its own existence.
+  if (estimate.archived_at || UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
   if (estimate.status === 'declined') {
