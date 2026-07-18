@@ -37,6 +37,21 @@ function isMembershipTier(value) {
   return !!key && !NON_MEMBERSHIP_TIER_KEYS.has(key);
 }
 
+// SQL mirror of the resolver's monthly_membership verdict, for audience /
+// eligibility queries that must target exactly the population the monthly
+// cron charges (GUARD 3b + 3c): explicit monthly_membership, or NULL mode
+// with a REAL (non-empty, non-sentinel) tier. Callers add their own
+// monthly_rate > 0 — the cron selects it separately. The key normalization
+// and sentinel list must stay byte-lockstep with isMembershipTier above
+// (and MEMBERSHIP_SQL in admin-automations.js).
+const MONTHLY_LANE_SQL = `
+  (billing_mode = 'monthly_membership' OR (
+    billing_mode IS NULL
+    AND regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g') <> ''
+    AND regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g')
+      NOT IN ('none', 'onetime', 'na', 'no', 'notset', 'commercial')
+  ))`;
+
 // Explicit mode wins; NULL infers the legacy split: a REAL WaveGuard tier +
 // a positive monthly rate has always meant "the 8AM cron bills the dues and
 // visits are covered" — everything else bills per visit at completion.
@@ -267,6 +282,8 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
 
 module.exports = {
   BILLING_MODES,
+  MONTHLY_LANE_SQL,
+  isMembershipTier,
   resolveBillingLane,
   membershipDuesCoverVisit,
   completionInvoiceAmount,

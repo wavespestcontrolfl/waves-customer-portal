@@ -39,12 +39,14 @@ async function sendPreChargeReminders() {
   // but the monthly cron never charges them (GUARD 3b) — never text a
   // reminder for a monthly charge that will not run (Codex round-2 + 5):
   // per_application collects per completed visit, annual_prepay is
-  // term-covered and collects at renewal. Column-guarded pre-migration.
+  // term-covered and collects at renewal. NULL rows follow the lane
+  // resolver's inference exactly as the cron's GUARD 3c does — a tier-less
+  // or sentinel-tier row resolves per_visit and gets no pre-charge text
+  // (Codex r8). Column-guarded pre-migration.
   try {
     if (await db.schema.hasColumn('customers', 'billing_mode')) {
-      customersQuery = customersQuery.where(function () {
-        this.whereNull('billing_mode').orWhere('billing_mode', 'monthly_membership');
-      });
+      const { MONTHLY_LANE_SQL } = require('./billing-lane');
+      customersQuery = customersQuery.whereRaw(MONTHLY_LANE_SQL);
     }
   } catch { /* billing_mode column absent — keep legacy selection */ }
   const customers = await customersQuery;

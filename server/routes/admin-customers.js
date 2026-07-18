@@ -2372,14 +2372,21 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // payment_pending deliberately does NOT qualify: the annual-prepay
           // service only stamps this lane once the prepay invoice is PAID —
           // pending-window visits must keep billing per application
-          // (Codex r2).
+          // (Codex r2). The term must also COVER TODAY: an expired or
+          // future-dated term would park the customer in a lane the cron
+          // skips while completion coverage stays false — recurring visits
+          // would complete unbilled until someone noticed (Codex r8 P1).
+          const { etDateString } = require('../utils/datetime-et');
+          const todayEt = etDateString();
           liveTerm = await db('annual_prepay_terms')
             .where({ customer_id: req.params.id })
             .whereIn('status', ['active', 'renewal_pending'])
+            .where('term_start', '<=', todayEt)
+            .where('term_end', '>=', todayEt)
             .first('id');
         } catch { /* table absent — treat as no live term */ }
         if (!liveTerm) {
-          return res.status(400).json({ error: 'Annual prepay requires a PAID active term — the lane stamps automatically when the annual invoice is paid' });
+          return res.status(400).json({ error: 'Annual prepay requires a PAID term covering today — the lane stamps automatically when the annual invoice is paid' });
         }
       }
       if (mode === 'per_visit' || mode === 'one_time') {

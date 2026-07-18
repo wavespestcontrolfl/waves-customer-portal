@@ -9,9 +9,10 @@
  * 1. CHECK gains 'per_visit' and 'one_time' alongside the existing
  *    'monthly_membership' / 'per_application' / 'annual_prepay'.
  * 2. Backfill is EVIDENCE-BASED and minimal: customers with a LIVE annual
- *    prepay term (active/renewal_pending, not yet ended) are stamped
- *    'annual_prepay' — the same rule the annual-prepay service applies when
- *    a prepay invoice pays. Then customers with an actual collected
+ *    prepay term (active/renewal_pending AND covering today — a future-
+ *    dated term must not park them in a lane the cron skips before
+ *    coverage starts, Codex r8) are stamped 'annual_prepay' — the same
+ *    rule the annual-prepay service applies when a prepay invoice pays. Then customers with an actual collected
  *    "WaveGuard Monthly" dues payment are stamped 'monthly_membership' —
  *    UNLESS any annual term is live or in flight, since a historical dues
  *    payment must not put a term-covered customer back in the monthly lane
@@ -44,6 +45,7 @@ exports.up = async function up(knex) {
         AND id IN (
           SELECT customer_id FROM annual_prepay_terms
           WHERE status IN ('active', 'renewal_pending')
+            AND term_start <= CURRENT_DATE
             AND term_end >= CURRENT_DATE
         )
     `);

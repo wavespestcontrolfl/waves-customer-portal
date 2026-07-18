@@ -25,7 +25,7 @@ const { buildPlanForService, isDateInWindow } = require('../services/waveguard-p
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -8368,8 +8368,15 @@ function shouldAutoInvoiceCompletion({
   // An explicit monthly_membership lane stands in for the tier here just as
   // it does in the coverage predicate: a tier-less explicit member whose
   // autopay is dead must fall through to a normal completion invoice, not
-  // complete unbilled (Codex r1).
-  if (waveguardTier || explicitMembership) return true;
+  // complete unbilled (Codex r1). The tier check uses the same sentinel
+  // classifier as the resolver (Codex r8): a Commercial/One-Time sentinel
+  // must not bill an unpriced visit at the monthly_rate fallback when the
+  // cron already classifies the customer per_visit — that would be the
+  // two-lanes bug from the completion side. Sentinel-tier PRICED visits on
+  // NEW bookings still bill via their create_invoice_on_complete stamp
+  // (booking no longer strips it for per-visit-resolved customers), and
+  // prod carries zero legacy sentinel-tier rows with a rate.
+  if (isMembershipTier(waveguardTier) || explicitMembership) return true;
   // GATED new path: a priced visit qualifies — but NEVER an always-free type
   // (appointment / estimate / re-service / follow-up) or a callback/re-treat,
   // even if a stale or inherited price is present. Keeps this gate in lockstep

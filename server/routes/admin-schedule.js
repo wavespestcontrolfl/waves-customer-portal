@@ -2464,7 +2464,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // acceptance is in flight, and the pending-prepay path depends on the
     // forced create_invoice_on_complete + price stamps to bill completions
     // that land before the annual invoice is paid (Codex r1 P1).
+    // A payer-billed customer's visits invoice the AP payer at completion —
+    // dues coverage never applies (membershipDuesCoverVisit is payer-
+    // guarded) — so stripping the price would underbill the payer's invoice
+    // down to the monthly_rate fallback or nothing (Codex r8 P1). The
+    // booking-time signal is the customer's DEFAULT payer: per-job payers
+    // only attach post-booking via the payer PATCH, and an office attaching
+    // one to an already-stripped member row must (re)price the row there —
+    // the schedule card's payer prediction surfaces the missing amount.
     const memberSeriesCovered = bookingBillingTermEffective !== 'prepay_annual'
+      && !customer?.payer_id
       && resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
     const createInvoiceStamp = memberSeriesCovered ? false : createInvoiceEffective;
     // A priced ADD-ON riding a covered member visit keeps a price stamp so

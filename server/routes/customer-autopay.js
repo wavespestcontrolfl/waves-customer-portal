@@ -125,17 +125,19 @@ router.get('/', async (req, res, next) => {
     // from monthly_rate for them (Codex round-2): it advertises a charge that
     // will never run. Column-guarded read — pre-migration keeps legacy shape.
     let billingMode = null;
+    let nonMonthlyBilling = false;
     try {
-      const modeRow = await db('customers').where({ id: req.customerId }).first('billing_mode');
+      const modeRow = await db('customers').where({ id: req.customerId }).first('billing_mode', 'waveguard_tier', 'monthly_rate');
       billingMode = modeRow?.billing_mode || null;
-    } catch { /* billing_mode column absent pre-migration */ }
+      // The projection must mirror the CRON's eligibility, which now runs
+      // every NULL row through the lane resolver (GUARD 3c): a tier-less or
+      // sentinel-tier NULL row resolves per_visit and is never dues-charged,
+      // so projecting a monthly next-charge for it advertises a charge that
+      // will not run (Codex r8; extends the round-2/5 explicit-mode rule).
+      const { resolveBillingLane } = require('../services/billing-lane');
+      nonMonthlyBilling = resolveBillingLane(modeRow || {}).mode !== 'monthly_membership';
+    } catch { /* billing_mode column absent pre-migration — legacy monthly projection */ }
     const perApplicationBilling = billingMode === 'per_application';
-    // Both non-monthly modes must suppress the monthly projection: the
-    // monthly cron never charges per_application, and annual_prepay is
-    // term-covered (renewal collects via its own flow) — projecting
-    // monthly_rate for either advertises a charge that will not run
-    // (Codex round-2 + round-5).
-    const nonMonthlyBilling = billingMode !== null && billingMode !== 'monthly_membership';
     // Per-application collection takes ANY saved tender (owner ruling
     // 2026-07-09): chargeInvoiceWithSavedCard locks the PI to the saved
     // method's family (card settles inline, ACH rides processing→paid), so

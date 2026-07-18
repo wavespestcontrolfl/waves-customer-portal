@@ -46,6 +46,16 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: 'Gold', invoiceAmount: 49 })).toBe(true);
   });
 
+  test('a sentinel tier (Commercial/One-Time) never takes the membership billing branch — the cron classifies those rows per_visit (Codex r8)', () => {
+    for (const tier of ['Commercial', 'One-Time', 'None']) {
+      expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: tier, invoiceAmount: 49 })).toBe(false);
+    }
+    // A priced sentinel-tier visit still bills via the scheduler flag.
+    expect(shouldAutoInvoiceCompletion({
+      ...base, waveguardTier: 'Commercial', createInvoiceOnComplete: true, hasVisitPrice: true, invoiceAmount: 129,
+    })).toBe(true);
+  });
+
   test('an explicit tier-less member whose coverage failed still invoices (Codex r1)', () => {
     expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: null, explicitMembership: true, invoiceAmount: 33.33 })).toBe(true);
     expect(shouldAutoInvoiceCompletion({ ...base, waveguardTier: null, explicitMembership: false, invoiceAmount: 33.33 })).toBe(false);
