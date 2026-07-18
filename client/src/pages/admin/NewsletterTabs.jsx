@@ -485,23 +485,41 @@ export function ComposeView({
     segmentLineCount,
   ]);
 
-  // Dirty flag for the segment controls: true once ANY segment input changes
-  // after mount. saveDraft omits segmentFilter on PATCH while clean, so
-  // editing a loaded draft (e.g. the sunset win-back, whose stored
-  // { tags: ['reengagement_due'] } the compose controls don't hydrate) can't
-  // overwrite the stored segment with the UI's default null — which would
-  // retarget the win-back at every active subscriber. The mount run is
-  // skipped; only operator interaction flips it.
+  // Dirty flag for the segment controls, set ONLY by the interactive
+  // handlers below — never by programmatic hydration. saveDraft omits
+  // segmentFilter on PATCH while clean (the route preserves the stored
+  // value), so merely loading/editing a draft can't overwrite its saved
+  // audience — e.g. retargeting the sunset win-back's
+  // { tags: ['reengagement_due'] } at every active subscriber.
   const segmentDirtyRef = useRef(false);
-  const segmentDirtySkipMountRef = useRef(true);
-  useEffect(() => {
-    if (segmentDirtySkipMountRef.current) { segmentDirtySkipMountRef.current = false; return; }
-    segmentDirtyRef.current = true;
-  }, [segmentFilter]);
+  const markSegmentDirty = () => { segmentDirtyRef.current = true; };
+
+  // Reflect a loaded draft's stored segment_filter into the compose controls
+  // so the audience the operator SEES (and anything a dirty save writes)
+  // matches the saved one. Programmatic — does not mark the segment dirty.
+  const applySegmentFromFilter = (f) => {
+    const sf = f || {};
+    setSegmentMode(
+      sf.customersOnly || sf.audience === "customers" ? "customers"
+        : sf.leadsOnly || sf.audience === "leads" ? "leads"
+          : Array.isArray(sf.sources) && sf.sources.length ? "custom" : "all",
+    );
+    setSegmentSources(Array.isArray(sf.sources) ? sf.sources : []);
+    setSegmentTags(Array.isArray(sf.tags) ? sf.tags : []);
+    setSegmentHasLines(Array.isArray(sf.has_service) ? sf.has_service : []);
+    setSegmentMissingLines(Array.isArray(sf.missing_service) ? sf.missing_service : []);
+    setSegmentRegions(Array.isArray(sf.region_zone) ? sf.region_zone : []);
+    setSegmentLineCount(
+      sf.min_line_count === 1 && sf.max_line_count === 1 ? "single"
+        : sf.min_line_count === 2 ? "multi"
+          : sf.min_line_count === 1 ? "members" : "any",
+    );
+  };
 
   // Apply a one-click cross-sell preset (sets the service-line controls and
   // forces customers-only, since service-line membership implies a customer).
   const applyCampaignPreset = (p) => {
+    markSegmentDirty();
     setSegmentMode("customers");
     setSegmentHasLines(p.has || []);
     setSegmentMissingLines(p.missing || []);
@@ -510,6 +528,7 @@ export function ComposeView({
   };
 
   const clearServiceLineSegment = () => {
+    markSegmentDirty();
     setSegmentHasLines([]);
     setSegmentMissingLines([]);
     setSegmentRegions([]);
@@ -568,6 +587,10 @@ export function ComposeView({
         setHtmlBody(ap.html_body || "");
         setTextBody(ap.text_body || "");
         setAutoShareSocial(ap.auto_share_social !== false);
+        // Show the draft's saved audience in the controls and re-baseline the
+        // dirty flag — loading is not an operator edit.
+        applySegmentFromFilter(ap.segment_filter);
+        segmentDirtyRef.current = false;
         const tplForType = TEMPLATES.find((t) => t.newsletterType === ap.newsletter_type);
         if (tplForType) {
           setSelectedTemplate(tplForType.key);
@@ -1135,7 +1158,7 @@ export function ComposeView({
                 <button
                   key={o.key}
                   type="button"
-                  onClick={() => setSegmentMode(o.key)}
+                  onClick={() => { markSegmentDirty(); setSegmentMode(o.key); }}
                   className={cn(
                     "h-8 px-3 text-12 font-medium rounded-sm border-hairline u-focus-ring",
                     segmentMode === o.key
@@ -1155,13 +1178,14 @@ export function ComposeView({
                     <button
                       key={src.value}
                       type="button"
-                      onClick={() =>
+                      onClick={() => {
+                        markSegmentDirty();
                         setSegmentSources((cur) =>
                           on
                             ? cur.filter((x) => x !== src.value)
                             : [...cur, src.value],
-                        )
-                      }
+                        );
+                      }}
                       className={cn(
                         "h-7 px-2.5 text-11 rounded-full border-hairline u-focus-ring",
                         on
@@ -1188,9 +1212,10 @@ export function ComposeView({
                   <button
                     key={t}
                     type="button"
-                    onClick={() =>
-                      setSegmentTags((cur) => cur.filter((x) => x !== t))
-                    }
+                    onClick={() => {
+                      markSegmentDirty();
+                      setSegmentTags((cur) => cur.filter((x) => x !== t));
+                    }}
                     className="h-7 px-2.5 text-11 rounded-full bg-zinc-900 text-white border-hairline border-zinc-900 u-focus-ring"
                     title="Click to remove"
                   >
@@ -1206,14 +1231,17 @@ export function ComposeView({
                     if (e.key === "Enter" || e.key === ",") {
                       e.preventDefault();
                       const v = tagDraft.trim().toLowerCase();
-                      if (v && !segmentTags.includes(v))
+                      if (v && !segmentTags.includes(v)) {
+                        markSegmentDirty();
                         setSegmentTags((cur) => [...cur, v]);
+                      }
                       setTagDraft("");
                     } else if (
                       e.key === "Backspace" &&
                       !tagDraft &&
                       segmentTags.length
                     ) {
+                      markSegmentDirty();
                       setSegmentTags((cur) => cur.slice(0, -1));
                     }
                   }}
@@ -1274,11 +1302,12 @@ export function ComposeView({
               <ChipRow
                 options={SERVICE_LINES}
                 selected={segmentHasLines}
-                onToggle={(v) =>
+                onToggle={(v) => {
+                  markSegmentDirty();
                   setSegmentHasLines((cur) =>
                     cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  )
-                }
+                  );
+                }}
               />
               <div className="text-11 text-ink-secondary mt-2 mb-1">
                 Missing all of
@@ -1286,11 +1315,12 @@ export function ComposeView({
               <ChipRow
                 options={SERVICE_LINES}
                 selected={segmentMissingLines}
-                onToggle={(v) =>
+                onToggle={(v) => {
+                  markSegmentDirty();
                   setSegmentMissingLines((cur) =>
                     cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  )
-                }
+                  );
+                }}
               />
               <div className="text-11 text-ink-secondary mt-3 mb-1">
                 Membership
@@ -1300,7 +1330,7 @@ export function ComposeView({
                   <button
                     key={o.key}
                     type="button"
-                    onClick={() => setSegmentLineCount(o.key)}
+                    onClick={() => { markSegmentDirty(); setSegmentLineCount(o.key); }}
                     className={cn(
                       "h-7 px-2.5 text-11 rounded-sm border-hairline u-focus-ring",
                       segmentLineCount === o.key
@@ -1316,11 +1346,12 @@ export function ComposeView({
               <ChipRow
                 options={REGION_ZONES}
                 selected={segmentRegions}
-                onToggle={(v) =>
+                onToggle={(v) => {
+                  markSegmentDirty();
                   setSegmentRegions((cur) =>
                     cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v],
-                  )
-                }
+                  );
+                }}
               />
               <div className="text-11 text-ink-tertiary mt-2">
                 Lines come from each customer&rsquo;s active recurring services.

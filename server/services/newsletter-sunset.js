@@ -317,12 +317,16 @@ async function findSunsetCandidates(now) {
 
 async function applySunset(ids, now) {
   if (!ids.length) return 0;
-  // status guard: an unsubscribe (public route or SendGrid webhook) landing
-  // between the SELECT and this UPDATE is the subscriber's own choice and
-  // outranks list hygiene — never overwrite it with 'inactive'.
+  // Guards re-checked ON the UPDATE, not just the candidate SELECT:
+  //   - status: an unsubscribe (public route or SendGrid webhook) landing in
+  //     between is the subscriber's own choice and outranks list hygiene.
+  //   - no-quiz-since-flag: a stay-subscribed confirm landing in between must
+  //     win — otherwise deactivated_at would postdate the quiz_answered_at
+  //     and reactivateSunsetComebacks() could never bring them back.
   const updated = await db('newsletter_subscribers')
     .whereIn('id', ids)
     .where({ status: 'active' })
+    .whereNotExists(engagementSubquery('flagged_at', { signals: 'quiz' }))
     .update({
       status: 'inactive',
       deactivated_at: now,
@@ -368,7 +372,7 @@ async function syncAlert(summary, now) {
       ? `Newsletter sunset paused: ${summary.candidates + summary.sunsetCandidates} of ${summary.activeCount} active look inactive`
       : `Newsletter win-back waiting: ${summary.cohortAwaiting} inactive subscriber${summary.cohortAwaiting === 1 ? '' : 's'} flagged`,
     description: summary.valveTripped
-      ? `Safety valve: ${summary.candidates} flag + ${summary.sunsetCandidates} sunset candidates out of ${summary.activeCount} active subscribers matched the ${INACTIVITY_DAYS}-day inactivity criteria (> ${Math.round(MAX_FLAG_FRACTION * 100)}%). That usually means an open/click tracking outage or a criteria bug, not a real mass lapse — nothing was flagged or suppressed. Review before re-running.`
+      ? `Safety valve: ${summary.candidates} flag + ${summary.sunsetCandidates} sunset candidates out of ${summary.activeCount} sendable active subscribers matched the ${INACTIVITY_DAYS}-day inactivity criteria (> ${Math.round(MAX_FLAG_FRACTION * 100)}%). That usually means an open/click tracking outage or a criteria bug, not a real mass lapse — nothing was flagged or suppressed. Review before re-running.`
     : `${summary.cohortAwaiting} subscriber(s) have ${INACTIVITY_DAYS}+ days of zero opens/clicks across ${MIN_DELIVERED_SENDS}+ delivered campaigns. A re-engagement draft is parked in /admin/newsletter — review, edit, and send it; non-responders auto-suppress ${GRACE_DAYS} days after delivery.`,
     // Deep-link straight into the parked draft: tab=compose mounts
     // ComposeView (the page defaults to the dashboard tab otherwise), and
@@ -404,7 +408,14 @@ async function runNewsletterSunset(now = new Date()) {
   const reactivated = await reactivateSunsetComebacks(now);
   const candidateIds = await findFlagCandidates(now);
   const sunsetIds = await findSunsetCandidates(now);
-  const activeRow = await db('newsletter_subscribers').where({ status: 'active' }).count('* as c').first();
+  // Valve denominator = the SENDABLE active list (same global-suppression
+  // filter the flag candidates run through). Counting suppressed-but-active
+  // rows would understate the cohort fraction and let a tracking outage
+  // slip past the valve on a bounce-heavy list.
+  const { excludeGloballySuppressed } = require('./newsletter-sender');
+  const activeRow = await excludeGloballySuppressed(
+    db('newsletter_subscribers').where({ status: 'active' }),
+  ).count('* as c').first();
   const activeCount = Number(activeRow?.c || 0);
   // Valve over the COMBINED cohorts: a tracking outage that starts after the
   // win-back delivers shows up as sunset candidates (flag candidates may be
