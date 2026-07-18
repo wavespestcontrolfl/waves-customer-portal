@@ -139,6 +139,18 @@ describe('requestCardForAppointment — gate and visit eligibility', () => {
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     expect(res.reason).toBe('visit_in_past');
   });
+
+  test("a 'rescheduled' visit (pending-rebook placeholder, stale date on the row) never texts — closed until re-slotted", async () => {
+    // routes/schedule.js flips the status but leaves the ORIGINAL date/
+    // window in place; the dispatch board excludes these rows as phantoms.
+    // Texting here would send the obsolete date. The rebooker restores
+    // 'confirmed' when the office re-slots, and the funnel reopens then.
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'rescheduled' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('visit_not_live:rescheduled');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+  });
 });
 
 describe('check 1 — policy exemption (before any capture machinery)', () => {
@@ -571,6 +583,17 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
   });
 
+  test("a 'rescheduled' visit refuses completion — no save/enroll until the visit is re-slotted", async () => {
+    // The reschedule-request row is a placeholder with no real slot; Auto
+    // Pay must not be enrolled against it. Once the rebooker restores
+    // 'confirmed', a page re-POST / webhook redelivery completes normally.
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'rescheduled' });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'no_longer_needed' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+  });
+
   test('payer attached since page load → no_longer_needed (never the wrong party)', async () => {
     mockResolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-7' });
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
@@ -817,6 +840,13 @@ describe('loadSecureCardPageData — page state machine', () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('closed');
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test("a 'rescheduled' visit renders the page CLOSED — never a ready form against the stale date/window", async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'rescheduled' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res).toMatchObject({ state: 'closed' });
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
   });
 

@@ -8404,6 +8404,12 @@ router.put('/:token/accept', async (req, res, next) => {
             noShowFeeAmount: cardHoldPolicy.noShowFeeAmount,
             cancelWindowHours: cardHoldPolicy.cancelWindowHours,
           },
+          // Freeze the accepted one-time total onto the hold (Codex #2821
+          // P1): the completion-charge cap compares against this stamp, so
+          // a later staff price edit (which rewrites scheduled_services.
+          // estimated_price) can never raise what the saved card may be
+          // charged past what the customer consented to here.
+          acceptedAmount: visitEstimatedPrice,
           trx,
         });
       }
