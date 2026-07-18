@@ -143,6 +143,13 @@ describe('predictCompletionBilling', () => {
     // Uncovered + priced add-on bills normally.
     expect(predictCompletionBilling({ ...annual, estimatedPrice: 150 }))
       .toEqual({ kind: 'invoice', amount: 150, conflictStampedPrice: false });
+    // A term-validated verdict beats the raw stamp: stale stamp + dead term
+    // must not read as covered (Codex r3)...
+    expect(predictCompletionBilling({ ...annual, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: false, estimatedPrice: 150 }))
+      .toEqual({ kind: 'invoice', amount: 150, conflictStampedPrice: false });
+    // ...and a validated-true verdict covers even mid-refresh oddities.
+    expect(predictCompletionBilling({ ...annual, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: true }).kind)
+      .toBe('covered_annual');
   });
 
   test('per-visit lane invoices the stamped price, callback bills nothing', () => {

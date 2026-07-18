@@ -1511,6 +1511,17 @@ router.get('/', async (req, res, next) => {
       const lane = resolveBillingLane({
         billing_mode: s.billing_mode, waveguard_tier: s.waveguard_tier, monthly_rate: s.monthly_rate,
       });
+      // A stale annual-prepay stamp (refund/void/expired term) must not
+      // read as covered — validate against the live term with the same
+      // authority completion uses; null = validation unavailable, the
+      // prediction falls back to the stamp (Codex r3).
+      let annualCoverageValidated = null;
+      if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
+        try {
+          const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+          annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db);
+        } catch { annualCoverageValidated = null; }
+      }
       // Present-tense money state for the sheet's billing card: what the
       // customer already owes (collectible invoices) and, for members,
       // whether this month's dues actually collected. Non-blocking — a
@@ -1558,6 +1569,7 @@ router.get('/', async (req, res, next) => {
           payerBilled: !!s.billed_to_payer_id,
           prepaidAmount: s.prepaid_amount,
           prepaidMethod: s.prepaid_method || null,
+          annualCoverageValidated,
         }),
       };
 
@@ -1762,6 +1774,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.skip_weekends',
           'scheduled_services.weekend_shift',
           'scheduled_services.source_estimate_id',
+          'scheduled_services.annual_prepay_term_id',
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
           'customers.autopay_payment_method_id',
@@ -1812,6 +1825,17 @@ router.get('/week', async (req, res, next) => {
         const lane = resolveBillingLane({
           billing_mode: s.billing_mode, waveguard_tier: s.waveguard_tier, monthly_rate: s.monthly_rate,
         });
+        // A stale annual-prepay stamp (refund/void/expired term) must not
+        // read as covered — validate against the live term with the same
+        // authority completion uses; null = validation unavailable, the
+        // prediction falls back to the stamp (Codex r3).
+        let annualCoverageValidated = null;
+        if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
+          try {
+            const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+            annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db);
+          } catch { annualCoverageValidated = null; }
+        }
         // Present-tense money state for the sheet's billing card: what the
         // customer already owes (collectible invoices) and, for members,
         // whether this month's dues actually collected. Non-blocking — a
@@ -1859,6 +1883,7 @@ router.get('/week', async (req, res, next) => {
             payerBilled: !!s.billed_to_payer_id,
             prepaidAmount: s.prepaid_amount,
             prepaidMethod: s.prepaid_method || null,
+            annualCoverageValidated,
           }),
         };
         return {
@@ -2413,12 +2438,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
     const memberSeriesCovered = bookingBillingTermEffective !== 'prepay_annual'
       && resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
     const createInvoiceStamp = memberSeriesCovered ? false : createInvoiceEffective;
-    // A priced ADD-ON riding a covered member visit must keep the row's
-    // price stamp: completion still suppresses the invoice (dues coverage),
-    // but the stamped price is what fires the one-per-series review alert
-    // so the office bills the add-on manually instead of it vanishing
-    // (Codex r2). Base-only rows stay stamp-free.
-    const hasPricedAddons = (lines) => (lines || []).some((a) => Number(a?.price) > 0);
+    // A priced ADD-ON riding a covered member visit keeps a price stamp so
+    // the one-per-series review alert fires and Charge Now surfaces the
+    // billable amount — but the stamp is the ADD-ON-ONLY total (pre-
+    // discount), never the base+add-on subtotal: the base is covered by
+    // dues, and stamping the full price would surface/mint a $100 plan
+    // visit + $20 add-on as $120 instead of the billable $20 (Codex r2+r3).
+    // Base-only rows stay stamp-free.
+    const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => sum + (Number(a?.price) > 0 ? Number(a.price) : 0), 0);
 
     const zone = getZone(customer?.city, customer?.zip);
     // Owner directive (2026-07-03): every service call defaults to 60 minutes;
@@ -2537,7 +2564,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
       if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
-      if (cols.estimated_price && finalPrice != null && (!memberSeriesCovered || hasPricedAddons(pricing.addonLines))) insertData.estimated_price = finalPrice;
+      if (cols.estimated_price) {
+        if (memberSeriesCovered) {
+          const addonStamp = addonOnlyTotal(pricing.addonLines);
+          if (addonStamp > 0) insertData.estimated_price = addonStamp;
+        } else if (finalPrice != null) insertData.estimated_price = finalPrice;
+      }
       if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
       if (cols.internal_notes && internalNotes) insertData.internal_notes = internalNotes;
@@ -2630,9 +2662,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // operator turns a re-service into a repeating cadence, every future
         // visit must stay free and report as a callback (not bill monthly dues).
         if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
-        if (cols.estimated_price && (!memberSeriesCovered || hasPricedAddons(childAddonLines))) {
+        if (cols.estimated_price) {
           if (zeroCallbackPrice) childData.estimated_price = 0;
-          else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
+          else if (memberSeriesCovered) {
+            const addonStamp = addonOnlyTotal(childAddonLines);
+            if (addonStamp > 0) childData.estimated_price = addonStamp;
+          } else if (childFinancials.price != null) childData.estimated_price = childFinancials.price;
         }
         if (cols.primary_line_price && pricing.primaryBase != null) childData.primary_line_price = pricing.primaryBase;
         if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) childData.discount_id = pricing.appointmentDiscount.discountId;
@@ -2692,9 +2727,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
-          if (cols.estimated_price && (!memberSeriesCovered || hasPricedAddons(boosterAddonLines))) {
+          if (cols.estimated_price) {
             if (zeroCallbackPrice) boosterData.estimated_price = 0;
-            else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
+            else if (memberSeriesCovered) {
+              const addonStamp = addonOnlyTotal(boosterAddonLines);
+              if (addonStamp > 0) boosterData.estimated_price = addonStamp;
+            } else if (boosterFinancials.price != null) boosterData.estimated_price = boosterFinancials.price;
           }
           if (cols.primary_line_price && pricing.primaryBase != null) boosterData.primary_line_price = pricing.primaryBase;
           if (cols.urgency) boosterData.urgency = urgency || 'routine';

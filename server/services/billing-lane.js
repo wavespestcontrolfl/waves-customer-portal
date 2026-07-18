@@ -128,6 +128,7 @@ function predictCompletionBilling({
   payerBilled,
   prepaidAmount,
   prepaidMethod,
+  annualCoverageValidated,
   billingMode,
 }) {
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
@@ -141,7 +142,15 @@ function predictCompletionBilling({
     // explicitly priced uncovered visit (separately scheduled add-on)
     // bills normally; an unpriced uncovered visit is owned by the renewal
     // flow and bills nothing here (Codex r1+r2).
-    if (prepaidMethod === ANNUAL_PREPAY_PREPAID_METHOD) {
+    // When the caller validated the stamp against the live term (the same
+    // annualPrepayCoversVisit authority completion uses), that verdict wins
+    // — a stale stamp after a refund/void/expired term must not read as
+    // covered (Codex r3). Null = validation unavailable; fall back to the
+    // stamp.
+    const stampCovered = annualCoverageValidated != null
+      ? annualCoverageValidated === true
+      : prepaidMethod === ANNUAL_PREPAY_PREPAID_METHOD;
+    if (stampCovered) {
       return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
     }
     if (!hasVisitPrice) return none;

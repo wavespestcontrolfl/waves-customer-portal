@@ -132,13 +132,22 @@ async function runSweep({ now = new Date() } = {}) {
   if (!(await smsTemplateActive())) return { skipped: true, reason: 'template_inactive' };
 
   const todayEt = etDateString(now);
+  const iso = (dt) => dt.toISOString().slice(0, 10);
+  // WINDOW, not a single day: the claim releases on a failed send, and a
+  // single exact-date target would never re-see that visit on later daily
+  // runs (Codex r3). Tomorrow → today+LEAD_DAYS keeps one send per
+  // appointment (the claim dedupes) while giving failures LEAD_DAYS-1
+  // retry days.
+  const windowStart = new Date(`${todayEt}T12:00:00Z`);
+  windowStart.setUTCDate(windowStart.getUTCDate() + 1);
   const target = new Date(`${todayEt}T12:00:00Z`);
   target.setUTCDate(target.getUTCDate() + LEAD_DAYS);
-  const targetDate = target.toISOString().slice(0, 10);
+  const windowStartDate = iso(windowStart);
+  const targetDate = iso(target);
 
   const visits = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .where('scheduled_services.scheduled_date', targetDate)
+    .whereBetween('scheduled_services.scheduled_date', [windowStartDate, targetDate])
     .whereIn('scheduled_services.status', ['pending', 'confirmed'])
     .where('scheduled_services.is_recurring', true)
     .whereNull('scheduled_services.balance_reminder_sent_at')
@@ -273,7 +282,7 @@ async function runSweep({ now = new Date() } = {}) {
       skipped++;
     }
   }
-  logger.info(`[previsit-balance] sweep for ${targetDate}: ${sent} sent, ${skipped} skipped of ${visits.length}`);
+  logger.info(`[previsit-balance] sweep for ${windowStartDate}..${targetDate}: ${sent} sent, ${skipped} skipped of ${visits.length}`);
   return { sent, skipped, considered: visits.length, targetDate };
 }
 
