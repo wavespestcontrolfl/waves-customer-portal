@@ -25,15 +25,7 @@ const gbpService = require('./google-business');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const config = require('../config');
 const MODELS = require('../config/models');
-
-let Anthropic;
-try {
-  const sdk = require('@anthropic-ai/sdk');
-  Anthropic = sdk.default || sdk.Anthropic || sdk;
-} catch (err) {
-  logger.warn(`[social] Anthropic SDK unavailable: ${err.message}`);
-  Anthropic = null;
-}
+const { dispatchWithFallback } = require('./llm/call');
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
@@ -487,11 +479,6 @@ function getHookSample() {
 }
 
 async function generateContent(platform, { title, description, link, locationName, source }) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY not configured');
-  }
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
   const safeTitle = String(title || '').replace(/[\r\n]+/g, ' ').slice(0, 300);
   const safeDesc = String(description || '').replace(/[\r\n]+/g, ' ').slice(0, 1000);
   const safeLocation = String(locationName || '').replace(/[\r\n]+/g, ' ').slice(0, 100);
@@ -630,14 +617,17 @@ Article summary: ${safeDesc}`,
 
   const prompt = prompts[platform] || prompts.facebook;
 
-  // Final brand-voice post copy → VOICE (Sonnet 4.6, warmer/more natural).
-  const response = await client.messages.create({
-    model: MODELS.VOICE,
-    max_tokens: 500,
-    messages: [{ role: 'user', content: prompt }],
+  // Final public post copy is VOICE-owned customer-facing brand copy
+  // (models.js registry): the customerCopy policy — MODEL_VOICE first, OpenAI
+  // Terra backup — never the content-drafting lane, so a WORKHORSE
+  // tune/canary can't silently move live captions off the brand voice.
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    text: prompt,
+    jsonMode: false,
+    maxTokens: 500,
   });
-
-  return stripModelWrapper(response.content[0]?.text);
+  if (!response.ok) throw new Error('Social copy providers unavailable');
+  return stripModelWrapper(response.text);
 }
 
 // ── AI copy for the Social Content Studio (campaign-framed, context-grounded) ──
@@ -645,10 +635,6 @@ Article summary: ${safeDesc}`,
 // The studio posts LOCAL campaigns, so this variant writes in the brand voice
 // from a grounded fact pack + the campaign's own CTA. Per platform, single call.
 async function generateCampaignContent(platform, { topic, facts, cta, city, service }) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY not configured');
-  }
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const safeTopic = String(topic || '').replace(/[\r\n]+/g, ' ').slice(0, 200);
   const safeFacts = String(facts || '').replace(/\r/g, '').slice(0, 1600);
   const safeCity = String(city || '').replace(/[\r\n]+/g, ' ').slice(0, 80);
@@ -711,13 +697,16 @@ Write a short professional LinkedIn post for a ${safeService} campaign in ${safe
 ${grounding}`,
   };
 
-  // Final brand-voice campaign copy → VOICE (Sonnet 4.6, warmer/more natural).
-  const response = await client.messages.create({
-    model: MODELS.VOICE,
-    max_tokens: 600,
-    messages: [{ role: 'user', content: prompts[platform] || prompts.facebook }],
+  // Final public campaign copy is VOICE-owned customer-facing brand copy
+  // (models.js registry): the customerCopy policy — MODEL_VOICE first, OpenAI
+  // Terra backup — same lane as the blog-share path above.
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    text: prompts[platform] || prompts.facebook,
+    jsonMode: false,
+    maxTokens: 600,
   });
-  return stripModelWrapper(response.content[0]?.text);
+  if (!response.ok) throw new Error('Campaign copy providers unavailable');
+  return stripModelWrapper(response.text);
 }
 
 // Generate brand-voice copy for the requested channels. Returns a partial map

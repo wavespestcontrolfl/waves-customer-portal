@@ -27,9 +27,7 @@ const { createNewsletterDraft } = require('../services/newsletter-draft');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('../services/llm/call');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -886,9 +884,6 @@ router.post('/segment-preview', async (req, res, next) => {
 //     Claude drafts from real event data instead of inventing.
 router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
   try {
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      return res.status(400).json({ error: 'Anthropic API not configured' });
-    }
     const { prompt, template, newsletterType, eventIds, audience, tone, includeCTA } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
@@ -904,7 +899,6 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
       return res.status(400).json({ error: 'prompt too long (max 4000 chars)' });
     }
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const month = new Date().toLocaleString('en-US', { month: 'long', timeZone: 'America/New_York' });
 
     // ── Flagship flow: local-weekly-fresh-events ──────────────────────
@@ -1044,18 +1038,14 @@ No prose outside the JSON.`;
 ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}`;
 
-    const response = await anthropic.messages.create({
-      model: MODELS.WORKHORSE,
-      max_tokens: 2000,
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      maxTokens: 2000,
+      jsonMode: true,
       system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      text: userPrompt,
     });
-
-    const text = response.content?.[0]?.text || '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('Claude did not return JSON');
-
-    const draft = JSON.parse(jsonMatch[0]);
+    if (!response.ok || !response.json) throw new Error('Newsletter AI providers did not return valid JSON');
+    const draft = response.json;
     res.json({ success: true, draft });
   } catch (err) {
     logger.error(`[newsletter] draft-ai failed: ${err.message}`);

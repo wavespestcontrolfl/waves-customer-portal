@@ -20,6 +20,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('./llm/call');
 
 // Tokens that unambiguously imply each branch.
 const PEST_KEYWORDS = [
@@ -75,13 +76,9 @@ function regexClassify(body) {
 }
 
 async function claudeClassify(body) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey || !body) return { interest: null, confidence: 0, method: 'none' };
+  if (!body) return { interest: null, confidence: 0, method: 'none' };
 
   try {
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey });
-
     const prompt = `You are classifying a customer SMS reply after they submitted a quote request for Waves Pest Control.
 
 Their reply: ${JSON.stringify(body)}
@@ -94,22 +91,19 @@ Classify into ONE of:
 
 Return ONLY JSON: {"interest":"pest"|"lawn"|"one_time"|"unknown","confidence":0.0-1.0}`;
 
-    const response = await client.messages.create({
-      model: MODELS.FAST,
-      max_tokens: 60,
-      messages: [{ role: 'user', content: prompt }],
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      text: prompt,
+      jsonMode: true,
+      maxTokens: 60,
     });
-
-    const text = response.content[0]?.text || '';
-    const match = text.match(/\{[^}]*\}/);
-    if (!match) return { interest: null, confidence: 0, method: 'claude' };
-    const parsed = JSON.parse(match[0]);
+    if (!response.ok || !response.json) return { interest: null, confidence: 0, method: 'ai' };
+    const parsed = response.json;
     const interest = ['pest', 'lawn', 'one_time'].includes(parsed.interest) ? parsed.interest : null;
     const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0;
-    return { interest, confidence, method: 'claude' };
+    return { interest, confidence, method: 'ai' };
   } catch (err) {
-    logger.error(`[sms-service-intent] Claude classify failed: ${err.message}`);
-    return { interest: null, confidence: 0, method: 'claude' };
+    logger.error(`[sms-service-intent] AI classify failed: ${err.message}`);
+    return { interest: null, confidence: 0, method: 'ai' };
   }
 }
 

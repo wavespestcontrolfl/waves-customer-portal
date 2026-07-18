@@ -6766,6 +6766,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
 // completion never waits on it, and any failure here is a non-blocking
 // 4xx/5xx the client surfaces inline and ignores.
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('../services/llm/call');
 
 // F1 (universal one-time services, ratified Q13): the comms context comes
 // from the shared WINDOWED builder (recurring = since last completed visit
@@ -7013,7 +7014,6 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
 router.post('/:serviceId/findings-recap/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
     const { structuredFindings, nextStepChips, includeCustomerComms } = req.body || {};
     const findingsType = structuredFindings?.type;
     if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
@@ -7054,8 +7054,6 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
     const commsContext = commsContextResult.text
       ? `${commsContextResult.promptHint}\n${commsContextResult.text}`
       : '';
-    const Anthropic = require('@anthropic-ai/sdk');
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const basePrompt = buildFindingsRecapPrompt({
       schema,
       values: structuredFindings?.values || {},
@@ -7063,29 +7061,22 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
       serviceType: svc.service_type,
       commsContext,
     });
-    // Prompt instructions are not enforcement: the draft lands on a
-    // customer-facing report, so validate it against the banned-claims list
-    // and retry once with the violations called out. Still dirty after the
-    // retry -> 502 and the tech writes the note manually (AI is never in
-    // the critical path).
-    let draft = '';
-    let violations = [];
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const msg = await anthropic.messages.create({
-        model: MODELS.FLAGSHIP,
-        max_tokens: 400,
-        messages: [{
-          role: 'user',
-          content: attempt === 0
-            ? basePrompt
-            : `${basePrompt}\n\nYour previous draft used prohibited wording (${violations.join(', ')}). Rewrite it without any absolute or promissory claims — describe only what was observed and done today.`,
-        }],
-      });
-      draft = String(msg.content?.[0]?.text || '').trim();
-      if (!draft) break;
-      violations = ActivityIndicators.findBannedCustomerCopy(draft);
-      if (!violations.length) break;
-    }
+    // Sol first, Opus backup. The validator rejects empty or promissory copy,
+    // causing the shared dispatcher to cross providers before returning.
+    const generated = await dispatchWithFallback(
+      MODELS.TEXT_POLICIES.report,
+      { text: basePrompt, jsonMode: false, maxTokens: 400 },
+      {
+        validate: (result) => {
+          const draft = String(result.text || '').trim();
+          if (!draft) return 'empty';
+          const violations = ActivityIndicators.findBannedCustomerCopy(draft);
+          return violations.length ? `banned:${violations.join(',')}` : null;
+        },
+      },
+    );
+    const draft = generated.ok ? String(generated.text || '').trim() : '';
+    const violations = draft ? ActivityIndicators.findBannedCustomerCopy(draft) : [];
     if (!draft) return res.status(502).json({ error: 'Draft generation returned no text' });
     if (violations.length) {
       logger.warn(`[dispatch] findings-recap draft failed banned-copy check for ${req.params.serviceId}: ${violations.join(', ')}`);
@@ -7109,7 +7100,6 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
 router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
     const { photos, structuredFindings } = req.body || {};
     if (!Array.isArray(photos) || !photos.length) {
       return res.status(400).json({ error: 'photos array is required', code: 'photos_required' });
@@ -7137,17 +7127,10 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
     // photo too big to persist is too big to analyze (the helper default
     // is the looser 15MB buffer cap, not the 2MB completion data-URL cap).
     const { decodeDataUrlPhoto, MAX_COMPLETION_PHOTO_DATA_URL_BYTES } = require('../services/service-photos');
-    const imageBlocks = [];
+    const images = [];
     for (const photo of photos) {
       const decoded = decodeDataUrlPhoto(photo?.data, { maxBytes: MAX_COMPLETION_PHOTO_DATA_URL_BYTES });
-      imageBlocks.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: decoded.mimeType,
-          data: decoded.buffer.toString('base64'),
-        },
-      });
+      images.push({ data: decoded.buffer.toString('base64'), mimeType: decoded.mimeType });
     }
     const PhotoAnalysis = require('../services/service-report/photo-analysis');
     const basePrompt = PhotoAnalysis.buildPhotoAnalysisPrompt({
@@ -7156,32 +7139,19 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       photoCount: photos.length,
       serviceType: svc.service_type,
     });
-    const Anthropic = require('@anthropic-ai/sdk');
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    let result = { ok: false };
-    for (let attempt = 0; attempt < 2 && !result.ok; attempt += 1) {
-      const msg = await anthropic.messages.create({
-        model: MODELS.VISION,
-        max_tokens: 700,
-        temperature: 0.2,
-        messages: [{
-          role: 'user',
-          content: [
-            ...imageBlocks,
-            {
-              type: 'text',
-              text: attempt === 0 || !result.violations?.length
-                ? basePrompt
-                : `${basePrompt}\n\nYour previous response used prohibited wording (${result.violations.join(', ')}). Rewrite without any absolute or promissory claims — describe only what is visible.`,
-            },
-          ],
-        }],
-      });
-      result = PhotoAnalysis.parsePhotoAnalysisResponse(
-        msg.content?.[0]?.text,
-        { photoCount: photos.length },
-      );
-    }
+    const generated = await dispatchWithFallback(
+      MODELS.TEXT_POLICIES.visionAnalysis,
+      { text: basePrompt, images, jsonMode: false, maxTokens: 700, temperature: 0.2 },
+      {
+        validate: (candidate) => {
+          const parsed = PhotoAnalysis.parsePhotoAnalysisResponse(candidate.text, { photoCount: photos.length });
+          return parsed.ok ? null : (parsed.error || 'invalid_photo_analysis');
+        },
+      },
+    );
+    const result = generated.ok
+      ? PhotoAnalysis.parsePhotoAnalysisResponse(generated.text, { photoCount: photos.length })
+      : { ok: false };
     if (!result.ok) {
       logger.warn(`[dispatch] photo analysis failed for ${req.params.serviceId}: ${result.error}${result.violations?.length ? ` (${result.violations.join(', ')})` : ''}`);
       return res.status(502).json({ error: 'Photo analysis failed the customer-copy quality check — caption the photos manually or skip.' });

@@ -19,6 +19,7 @@
 const db = require('../models/db');
 const MODELS = require('../config/models');
 const logger = require('./logger');
+const { dispatchWithFallback } = require('./llm/call');
 
 const MAX_INPUT = 2000;
 const MAX_SERVICE_LINES = 12;
@@ -169,20 +170,12 @@ function hasUsableContext({ input, serviceLines, context, sources }) {
 }
 
 async function aiSummary(prompt) {
-  let Anthropic;
-  try {
-    Anthropic = require('@anthropic-ai/sdk');
-  } catch {
-    return null;
-  }
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const msg = await anthropic.messages.create({
-    model: MODELS.VOICE,
-    max_tokens: 320,
-    messages: [{ role: 'user', content: prompt }],
+  const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    text: prompt,
+    jsonMode: false,
+    maxTokens: 320,
   });
-  return clean(msg.content?.[0]?.text || '', MAX_NOTES_OUT);
+  return result.ok ? clean(result.text, MAX_NOTES_OUT) : null;
 }
 
 /**

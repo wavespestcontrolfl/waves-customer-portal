@@ -54,7 +54,7 @@ Return ONLY valid JSON, no markdown.`;
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey });
     const response = await client.messages.create({
-      model: MODELS.FLAGSHIP,
+      model: MODELS.FAST,
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     });

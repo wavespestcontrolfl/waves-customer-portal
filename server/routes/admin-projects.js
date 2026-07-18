@@ -20,6 +20,7 @@ const db = require('../models/db');
 const config = require('../config');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('../services/llm/call');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const {
   PROJECT_TYPES,
@@ -431,8 +432,6 @@ Respond with exactly this JSON shape:
 }
 
 async function analyzeWdoProjectIntelligence({ customer, propertyAddress, currentFindings = {}, previousTreatmentPhoto = null }) {
-  const Anthropic = require('@anthropic-ai/sdk');
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   let propertyProfile = null;
 
   if (propertyAddress) {
@@ -443,44 +442,34 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
     }
   }
 
-  const content = [{
-    type: 'text',
-    text: buildWdoIntelligencePrompt({
+  const prompt = buildWdoIntelligencePrompt({
       customer,
       propertyAddress,
       currentFindings,
       propertyProfile,
       hasPreviousTreatmentPhoto: Boolean(previousTreatmentPhoto),
-    }),
-  }];
-
-  if (previousTreatmentPhoto) {
-    content.push({
-      type: 'image',
-      source: {
-        type: 'base64',
-        media_type: previousTreatmentPhoto.mediaType,
-        data: previousTreatmentPhoto.buffer.toString('base64'),
-      },
     });
-  }
+  const images = previousTreatmentPhoto ? [{
+    data: previousTreatmentPhoto.buffer.toString('base64'),
+    mimeType: previousTreatmentPhoto.mediaType,
+  }] : [];
+  const policy = previousTreatmentPhoto
+    ? MODELS.TEXT_POLICIES.visionAnalysis
+    : MODELS.TEXT_POLICIES.contentDraft;
+  const msg = await dispatchWithFallback(policy, {
+    text: prompt,
+    images,
+    maxTokens: 900,
+    jsonMode: true,
+    temperature: 0.2,
+  });
 
-  const request = {
-    model: previousTreatmentPhoto ? MODELS.VISION : MODELS.WORKHORSE,
-    max_tokens: 900,
-    messages: [{ role: 'user', content }],
-  };
-  if (previousTreatmentPhoto) request.temperature = 0.2;
-  const msg = await anthropic.messages.create(request);
-
-  const text = (msg.content || []).filter((block) => block.type === 'text').map((block) => block.text).join('\n');
-  const parsed = parseAiJsonObject(text);
-  if (!parsed) {
+  if (!msg.ok || !msg.json) {
     const err = new Error('AI returned an unreadable WDO prefill response');
     err.status = 502;
     throw err;
   }
-  const normalized = normalizeWdoIntelligenceResult(parsed, propertyAddress, {
+  const normalized = normalizeWdoIntelligenceResult(msg.json, propertyAddress, {
     hasPreviousTreatmentContext: Boolean(previousTreatmentPhoto)
       || hasMeaningfulValue(currentFindings.previous_treatment_evidence)
       || hasMeaningfulValue(currentFindings.previous_treatment_notes),
@@ -830,9 +819,9 @@ function resolveAiImageMediaType(contentType, key) {
 }
 
 async function buildAiPhotoInputs(photos = []) {
-  if (!photos.length) return { photoLines: '[no photos attached]', imageBlocks: [] };
-  if (!config.s3?.bucket) return { photoLines: '[photo review unavailable: S3 not configured]', imageBlocks: [] };
-  const imageBlocks = [];
+  if (!photos.length) return { photoLines: '[no photos attached]', images: [] };
+  if (!config.s3?.bucket) return { photoLines: '[photo review unavailable: S3 not configured]', images: [] };
+  const images = [];
   const photoLines = [];
   let totalBytes = 0;
   for (const ph of photos.slice(0, AI_PHOTO_LIMIT)) {
@@ -850,15 +839,8 @@ async function buildAiPhotoInputs(photos = []) {
         throw new Error('AI photo payload budget reached');
       }
       const mediaType = resolveAiImageMediaType(object.ContentType, ph.s3_key);
-      photoLines.push(`Photo ${imageBlocks.length + 1}: ${label}`);
-      imageBlocks.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: mediaType,
-          data: buffer.toString('base64'),
-        },
-      });
+      photoLines.push(`Photo ${images.length + 1}: ${label}`);
+      images.push({ data: buffer.toString('base64'), mimeType: mediaType });
       totalBytes += buffer.length;
     } catch (err) {
       logger.warn(`[projects] ai photo skipped ${ph.id}: ${err.message}`);
@@ -867,7 +849,7 @@ async function buildAiPhotoInputs(photos = []) {
   }
   return {
     photoLines: photoLines.length ? photoLines.join('\n') : '[no photos attached]',
-    imageBlocks,
+    images,
   };
 }
 
@@ -1118,9 +1100,7 @@ Do not include the customer name as a header. Do not add greetings, sign-offs, o
 }
 
 async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [], communicationContext = '', archivedFeeValues = [] }) {
-  const Anthropic = require('@anthropic-ai/sdk');
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const { photoLines, imageBlocks } = await buildAiPhotoInputs(photos);
+  const { photoLines, images } = await buildAiPhotoInputs(photos);
   const prompt = buildProjectReportPrompt({
     typeCfg,
     findings,
@@ -1132,18 +1112,14 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
     communicationContext,
     archivedFeeValues,
   });
-  const msg = await anthropic.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 1200,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'text', text: prompt },
-        ...imageBlocks,
-      ],
-    }],
+  const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.report, {
+    text: prompt,
+    images,
+    jsonMode: false,
+    maxTokens: 1200,
   });
-  return msg.content?.[0]?.text || '';
+  if (!result.ok || !String(result.text || '').trim()) throw new Error('Project report AI providers unavailable');
+  return result.text;
 }
 
 // ---------------------------------------------------------------------------
@@ -1758,8 +1734,6 @@ router.post('/', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
-
     const {
       project_type, findings, recommendations, customer_id, project_date,
       include_communications = true,
@@ -1807,7 +1781,13 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), async (req, res, next) => {
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+    // Two-provider policy (visionAnalysis / contentDraft): either configured
+    // provider can serve this request, so only bail when NEITHER key exists —
+    // an Anthropic-only guard would 400 exactly when the OpenAI failover leg
+    // should be carrying the lane.
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
+      return res.status(400).json({ error: 'AI not configured' });
+    }
 
     const customerId = req.body.customer_id || null;
     const projectId = req.body.project_id || null;
@@ -5029,8 +5009,6 @@ router.post('/:id/followup', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
-
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
