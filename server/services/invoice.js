@@ -3037,6 +3037,29 @@ const InvoiceService = {
             : `Cannot edit amounts on an invoice with payment already applied (payment ${appliedMoneyRow.id}) — refund it or issue a new invoice instead`,
         );
       }
+      // Saved-card (charge-card) attempts commit a durable claimed/ambiguous
+      // row BEFORE the charge reconciles — in that window there may be no
+      // payments row and no invoice PI yet, but an off-session charge may
+      // still settle. A retotal would let the webhook/reconciler bind
+      // collected money to a different live total. Same unresolved-attempt
+      // shape the pay page's cross-rail fence uses.
+      let unresolvedChargeAttempt = null;
+      try {
+        unresolvedChargeAttempt = await db("stripe_invoice_charge_attempts")
+          .where({ invoice_id: id })
+          .whereNull("resolved_at")
+          .whereIn("status", ["claimed", "ambiguous"])
+          .first("id");
+      } catch (err) {
+        throw new Error(
+          `Could not verify the saved-card charge state — refusing to edit (${err.message})`,
+        );
+      }
+      if (unresolvedChargeAttempt) {
+        throw new Error(
+          "A saved-card charge for this invoice is still processing or awaiting reconciliation — wait for it to resolve before editing amounts",
+        );
+      }
     }
 
     const allowed = INVOICE_UPDATE_ALLOWED_FIELDS;
@@ -3225,6 +3248,18 @@ const InvoiceService = {
           throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by editing a billed line");
         }
       }
+      // Extending an overdue invoice's due date into the future makes it
+      // current again — restore the delivered status ('viewed' if the
+      // customer ever opened it, else 'sent') so the stats bucket and the
+      // red list badge stop reporting it overdue. Server-decided
+      // transition: `status` stays banned from INVOICE_UPDATE_ALLOWED_FIELDS.
+      if (
+        String(lockedRow.status || "").toLowerCase() === "overdue" &&
+        data.due_date !== undefined &&
+        asDateOnly(data.due_date) >= etDateString(new Date())
+      ) {
+        data.status = lockedRow.viewed_at ? "viewed" : "sent";
+      }
       let editQuery = client("invoices")
         .where({ id })
         .whereIn("status", EDIT_ALLOWED_STATUSES)
@@ -3265,6 +3300,18 @@ const InvoiceService = {
                 "(payments.metadata::jsonb ->> 'invoice_id' = invoices.id::text OR payments.metadata::jsonb ->> 'dispute_invoice_id' = invoices.id::text OR payments.metadata::jsonb ->> 'waves_invoice_id' = invoices.id::text)",
               )
               .whereIn("payments.status", ["paid", "processing", "disputed"]);
+          })
+          .whereNotExists(function () {
+            this.select(db.raw("1"))
+              .from("stripe_invoice_charge_attempts")
+              .whereRaw(
+                "stripe_invoice_charge_attempts.invoice_id = invoices.id",
+              )
+              .whereNull("stripe_invoice_charge_attempts.resolved_at")
+              .whereIn("stripe_invoice_charge_attempts.status", [
+                "claimed",
+                "ambiguous",
+              ]);
           });
       }
       const [edited] = await editQuery.update(data).returning("*");

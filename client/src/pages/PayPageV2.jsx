@@ -1709,11 +1709,22 @@ export default function PayPageV2() {
     fetch(`${API_BASE}/pay/${token}/setup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ saveCard: saveCardDefault }),
+      // Echo the version this render came from — the server refuses to mint
+      // a PaymentIntent against an invoice an admin edited after our GET
+      // (staleInvoice 409 below), so the customer never confirms a charge
+      // for line items they aren't looking at.
+      body: JSON.stringify({ saveCard: saveCardDefault, invoiceVersion: data.invoice.version ?? undefined }),
     })
       .then(async (r) => {
         const setup = await r.json().catch(() => ({}));
         if (!r.ok) {
+          if (setup.staleInvoice) {
+            // The invoice changed since this page rendered — reload to show
+            // the customer the updated details before they pay. Never-resolving
+            // promise: the navigation supersedes this chain.
+            window.location.reload();
+            return new Promise(() => {});
+          }
           throw serverReportedError(setup.error || 'Failed to initialize payment', {
             status: r.status,
             inProgress: setup.inProgress,

@@ -380,6 +380,16 @@ describe('line-item edits on deposit-credited invoices are blocked (P1)', () => 
         const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
         return q;
       }
+      // The saved-card fence probes unresolved charge attempts; none here.
+      if (table === 'stripe_invoice_charge_attempts') {
+        const q = {
+          where: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          first: jest.fn(async () => null),
+        };
+        return q;
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
   }
@@ -421,7 +431,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
   // Re-reads the CURRENT invoice row at write time; some cases also probe
   // payment_plans for an active plan and the payments ledger for the
   // applied-money fence.
-  function guardDb(storedInvoice, { activePlan = null, appliedMoneyRow = null, inFlightTouch = null } = {}) {
+  function guardDb(storedInvoice, { activePlan = null, appliedMoneyRow = null, inFlightTouch = null, unresolvedChargeAttempt = null } = {}) {
     const captured = { paymentsQ: null };
     db.mockImplementation((table) => {
       if (table === 'invoices') {
@@ -443,6 +453,15 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       }
       if (table === 'invoice_followup_sequences') {
         const q = { where: jest.fn(() => q), first: jest.fn(async () => inFlightTouch) };
+        return q;
+      }
+      if (table === 'stripe_invoice_charge_attempts') {
+        const q = {
+          where: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          first: jest.fn(async () => unresolvedChargeAttempt),
+        };
         return q;
       }
       throw new Error(`Unexpected table query: ${table}`);
@@ -469,6 +488,19 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     guardDb({ id: 'inv-1', status: 'sent', customer_id: 'cust-1', line_items: '[]', stripe_payment_intent_id: 'pi_123' });
     await expect(InvoiceService.update('inv-1', { line_items: [{ description: 'X', quantity: 1, unit_price: 10 }] }))
       .rejects.toThrow(/already started paying/);
+  });
+
+  it('refuses to retotal while a saved-card charge attempt is unresolved (claimed/ambiguous)', async () => {
+    // /charge-card commits a durable attempt row BEFORE reconciliation; in
+    // that window there may be no payments row and no invoice PI, yet an
+    // off-session charge may still settle — amounts must stay frozen
+    // (codex r8).
+    guardDb(
+      { id: 'inv-1', status: 'sent', customer_id: 'cust-1', line_items: '[]' },
+      { unresolvedChargeAttempt: { id: 'att-1' } },
+    );
+    await expect(InvoiceService.update('inv-1', { line_items: [{ description: 'X', quantity: 1, unit_price: 10 }] }))
+      .rejects.toThrow(/saved-card charge/);
   });
 
   it('refuses any edit while a follow-up touch is mid-send (fresh claim on the sequence)', async () => {
@@ -760,6 +792,112 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       { previousDueDate: '2026-08-15', newDueDate: '2026-07-30' },
       expect.anything(),
     );
+  });
+
+  it('restores delivered status when an overdue due date moves into the future', async () => {
+    // Extending an overdue invoice makes it current — the stored 'overdue'
+    // must not keep it in the stats bucket / red badge (codex r8). Mocked
+    // etDateString "today" is 2026-06-12.
+    const stored = { id: 'inv-1', status: 'overdue', customer_id: 'cust-1', invoice_number: 'INV-106', line_items: '[]', due_date: '2026-06-01', viewed_at: null };
+    const activityInsert = jest.fn(async () => [1]);
+    const invoicesUpdate = jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, status: 'sent', due_date: '2026-08-15' }]) }));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: invoicesUpdate,
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'activity_log') {
+        return { insert: activityInsert };
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await InvoiceService.update('inv-1', { due_date: '2026-08-15' });
+    expect(invoicesUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', due_date: '2026-08-15' }));
+  });
+
+  it("restores 'viewed' (not 'sent') when the customer had opened the overdue invoice", async () => {
+    const stored = { id: 'inv-1', status: 'overdue', customer_id: 'cust-1', invoice_number: 'INV-107', line_items: '[]', due_date: '2026-06-01', viewed_at: '2026-06-03T12:00:00Z' };
+    const activityInsert = jest.fn(async () => [1]);
+    const invoicesUpdate = jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, status: 'viewed', due_date: '2026-08-15' }]) }));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: invoicesUpdate,
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'activity_log') {
+        return { insert: activityInsert };
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await InvoiceService.update('inv-1', { due_date: '2026-08-15' });
+    expect(invoicesUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'viewed' }));
+  });
+
+  it('keeps the overdue status when the edited due date is still in the past', async () => {
+    const stored = { id: 'inv-1', status: 'overdue', customer_id: 'cust-1', invoice_number: 'INV-108', line_items: '[]', due_date: '2026-06-01', viewed_at: null };
+    const activityInsert = jest.fn(async () => [1]);
+    const invoicesUpdate = jest.fn(() => ({ returning: jest.fn(async () => [{ ...stored, due_date: '2026-06-05' }]) }));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereIn: jest.fn(() => q),
+          whereNull: jest.fn(() => q),
+          whereNotExists: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async () => stored),
+          update: invoicesUpdate,
+        };
+        return q;
+      }
+      if (table === 'payment_plans') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      if (table === 'activity_log') {
+        return { insert: activityInsert };
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = { where: jest.fn(() => q), first: jest.fn(async () => null) };
+        return q;
+      }
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await InvoiceService.update('inv-1', { due_date: '2026-06-05' });
+    const patch = invoicesUpdate.mock.calls[0][0];
+    expect(patch.status).toBeUndefined();
   });
 
   it('does NOT re-anchor the follow-up sequence when the due date is unchanged', async () => {
