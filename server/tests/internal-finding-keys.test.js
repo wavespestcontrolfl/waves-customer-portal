@@ -86,6 +86,11 @@ describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
       .toBe('Repair cost $250 for the sill plate.');
     expect(redactSpecificAmounts('Treatment estimate $250 approved.', ['250']))
       .toBe('Treatment estimate $250 approved.');
+    // amount-first non-fee subjects too
+    expect(redactSpecificAmounts('A $250 repair was completed.', ['250']))
+      .toBe('A $250 repair was completed.');
+    expect(redactSpecificAmounts('$250 permit fee paid separately.', ['250']))
+      .toBe('$250 permit fee paid separately.');
   });
   test('never touches longer numbers, dates, or measurements', () => {
     expect(redactSpecificAmounts('Fee tier 2 applies to 2500 sq ft homes.', ['250']))

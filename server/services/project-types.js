@@ -1057,6 +1057,32 @@ function redactProjectTitleForWrite(title, projectTypeKey) {
   return typeof scrubbed === 'string' ? scrubbed.slice(0, PROJECT_TITLE_MAX_LENGTH) : scrubbed;
 }
 
+// Every fee amount a project ever recorded: the live structured field plus
+// each archived filing's snapshot (a stale draft fee an old narrative quoted
+// may only survive there). Feeds the VALUE-based scrub at egress and in the
+// backfill so paraphrased fees ("the quoted $250 charge") are caught without
+// the literal cue (codex #2817).
+function projectRecordedFeeValues(project) {
+  const values = [];
+  const parse = (v) => {
+    if (!v) return null;
+    if (typeof v === 'object') return v;
+    try { return JSON.parse(v); } catch { return null; }
+  };
+  const findings = parse(project?.findings);
+  if (findings?.inspection_fee != null) values.push(findings.inspection_fee);
+  const filings = parse(project?.wdo_sent_filings);
+  if (Array.isArray(filings)) {
+    for (const filing of filings) {
+      const snap = parse(filing?.findings) || filing?.findings;
+      if (snap && typeof snap === 'object' && snap.inspection_fee != null) {
+        values.push(snap.inspection_fee);
+      }
+    }
+  }
+  return values;
+}
+
 // Deep cue detection over a findings object (or JSON string of one).
 function findingsContainFeeCue(rawFindings) {
   let parsed = rawFindings;
@@ -1163,6 +1189,7 @@ module.exports = {
   redactInspectionFeeCues,
   containsInspectionFeeCue,
   redactSpecificAmounts,
+  projectRecordedFeeValues,
   findingsContainFeeCue,
   filingBinaryMayDiscloseFee,
   customerSafeServiceNotes,

@@ -290,9 +290,17 @@ function containsInspectionFeeCue(text) {
 // path runs server-side only, never in the browser bundle.
 const VALUE_SCRUB_SUBJECTS =
   /\b(?:repairs?|re-?treatments?|treatments?|permits?|damages?|estimates?|deductibles?|discounts?|credits?|balance|totals?|subtotal|prices?|costs?|charges?|values?|purchase|escrow|deposits?)\b/i;
+// Amount-FIRST subjects: "A $250 repair was completed" names its subject
+// right after the amount — skipped. Deliberately excludes denominating
+// nouns (charge/cost/price/amount): "the quoted $250 charge" names the fee
+// itself and must redact.
+const VALUE_SCRUB_AFTER_SUBJECTS =
+  /^\s*(?:\w+\s+)?(?:repairs?|re-?treatments?|treatments?|permits?|damages?|estimates?|deductibles?|discounts?|credits?|escrow|deposits?)\b/i;
 // Fee-context words override the subject skip: "The WDO inspection costs
 // $250" is the fee being paraphrased even though "costs" is a money noun.
-const VALUE_SCRUB_FEE_CONTEXT = /\b(?:inspection|wdo|fee)\b/i;
+// Deliberately NOT the bare word "fee" — "$250 permit fee" is the permit's
+// fee, not the inspection fee.
+const VALUE_SCRUB_FEE_CONTEXT = /\b(?:inspection|wdo)\b/i;
 function redactSpecificAmounts(text, values) {
   let str = String(text || '');
   if (!str) return str;
@@ -319,6 +327,8 @@ function redactSpecificAmounts(text, values) {
       const clauseStart = Math.max(0, offset - 50);
       const before = whole.slice(clauseStart, offset).split(/[.;!?\n]/).pop() || '';
       if (VALUE_SCRUB_SUBJECTS.test(before) && !VALUE_SCRUB_FEE_CONTEXT.test(before)) return match;
+      const after = (whole.slice(offset + match.length, offset + match.length + 30).split(/[.;!?\n]/)[0] || '');
+      if (VALUE_SCRUB_AFTER_SUBJECTS.test(after) && !VALUE_SCRUB_FEE_CONTEXT.test(before + after)) return match;
       return '[fee removed]';
     });
   }

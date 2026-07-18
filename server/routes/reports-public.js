@@ -13,6 +13,8 @@ const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
   redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
   projectTypeHasInternalFindingKeys,
   // A legacy archived FDACS PDF was rendered from RAW findings AND raw photo
   // captions — if either carries a fee disclosure, the S3 binary discloses
@@ -632,8 +634,17 @@ router.get('/project/:token/data', async (req, res, next) => {
       sentAt: project.sent_at,
       findings: viewerFindings,
       // Serve-time inspection-fee guard: covers legacy narratives and any
-      // written by an old instance during the deploy window (codex #2817).
-      recommendations: redactInspectionFeeCuesForType(project.recommendations, project.project_type),
+      // written by an old instance during the deploy window. Two passes —
+      // the literal-cue scrub plus the VALUE scrub with the fee this project
+      // recorded, so a paraphrase ("the quoted $250 charge") can't ride the
+      // public payload either (codex #2817).
+      recommendations: (() => {
+        if (!typeCarriesFee || !project.recommendations) return project.recommendations;
+        const feeValues = projectRecordedFeeValues(project);
+        let safe = redactInspectionFeeCues(project.recommendations);
+        if (feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+        return safe;
+      })(),
       followupDate: project.followup_date,
       // Follow-up findings are findings-shaped jsonb rendered key→value on
       // the page — same internal-key strip + fee scrub as the main findings.

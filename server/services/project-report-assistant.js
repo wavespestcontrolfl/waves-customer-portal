@@ -10,6 +10,9 @@ const {
   getProjectType,
   INTERNAL_FINDING_KEYS,
   redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeHasInternalFindingKeys,
 } = require('./project-types');
 
 // Internal/office-only finding keys — never in an answer. Shared with the
@@ -91,8 +94,14 @@ function answerNextVisit({ project, payload }) {
 }
 
 function answerRecommendations({ project }) {
-  // same type-gated inspection-fee guard as the /data egress (codex #2817)
-  const rec = redactInspectionFeeCuesForType(String(project.recommendations || ''), project.project_type).trim();
+  // same two-pass (cue + recorded-value) guard as the /data egress
+  // (codex #2817)
+  let rec = redactInspectionFeeCuesForType(String(project.recommendations || ''), project.project_type);
+  if (projectTypeHasInternalFindingKeys(project.project_type)) {
+    const feeValues = projectRecordedFeeValues(project);
+    if (feeValues.length) rec = redactSpecificAmounts(rec, feeValues);
+  }
+  rec = rec.trim();
   if (rec) {
     // Narrative drafts use WHAT WE RECOMMEND sections — answer with that
     // section when present, else the first two sentences.

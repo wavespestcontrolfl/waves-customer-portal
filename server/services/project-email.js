@@ -103,7 +103,12 @@ function projectTypeLabel(project = {}) {
 }
 
 function projectTitle(project = {}) {
-  return clean(project.title) || projectTypeLabel(project);
+  const title = clean(project.title);
+  // same type-gated fee scrub as the report headline and document list — a
+  // legacy/deploy-window title must not ride the customer/third-party
+  // emails raw (codex #2817)
+  if (title) return redactInspectionFeeCuesForType(title, project.project_type);
+  return projectTypeLabel(project);
 }
 
 function resolveProjectEmailRecipient(customer = {}) {

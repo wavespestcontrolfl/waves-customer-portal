@@ -25,6 +25,7 @@ const {
 const {
   PROJECT_TYPE_KEYS,
   projectTypeHasInternalFindingKeys,
+  projectRecordedFeeValues,
   PROJECT_TITLE_MAX_LENGTH,
 } = require('../../services/project-types');
 
@@ -32,25 +33,6 @@ function parseMaybeJson(value) {
   if (!value) return null;
   if (typeof value === 'object') return value;
   try { return JSON.parse(value); } catch { return null; }
-}
-
-// Every fee amount this project ever recorded: the live structured field
-// plus each archived filing's snapshot (a stale draft fee an old narrative
-// quoted may only survive there).
-function projectFeeValues(row) {
-  const values = [];
-  const findings = parseMaybeJson(row.findings);
-  if (findings?.inspection_fee != null) values.push(findings.inspection_fee);
-  const filings = parseMaybeJson(row.wdo_sent_filings);
-  if (Array.isArray(filings)) {
-    for (const filing of filings) {
-      const snap = parseMaybeJson(filing?.findings) || filing?.findings;
-      if (snap && typeof snap === 'object' && snap.inspection_fee != null) {
-        values.push(snap.inspection_fee);
-      }
-    }
-  }
-  return values;
 }
 
 function scrubText(value, feeValues) {
@@ -75,7 +57,7 @@ exports.up = async function up(knex) {
 
   // id → recorded fee values, reused by the snapshot pass below.
   const feeValuesByProject = new Map();
-  for (const row of rows) feeValuesByProject.set(row.id, projectFeeValues(row));
+  for (const row of rows) feeValuesByProject.set(row.id, projectRecordedFeeValues(row));
 
   for (const row of rows) {
     const feeValues = feeValuesByProject.get(row.id) || [];
