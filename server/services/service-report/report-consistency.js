@@ -30,19 +30,44 @@ function firstSentence(text, max = 170) {
   return out;
 }
 
+// Re-entry advisory rewrites name the treated surface, so they are
+// per-service-line: the lawn wording ("treated turf") landing on a tree &
+// shrub report told the customer the wrong surface was treated (T&S audit
+// 2026-07-18 P1). Unknown lines get no rewrite rather than a wrong noun.
+const REENTRY_REWRITES = {
+  lawn: {
+    dried: 'Treated turf has dried — pets and family are fine on it now.',
+    untilDry: 'Keep pets and family off treated turf until it dries.',
+  },
+  tree_shrub: {
+    dried: 'Treated beds and foliage have dried — pets and family are fine around them now.',
+    untilDry: 'Keep pets and family off treated beds and foliage until they dry.',
+  },
+};
+
 /**
  * @param {object} input
  * @param {object} input.data      the assembled report payload (incl. dynamicContext, lawnAssessment, summary)
- * @param {object} input.reportV2  buildLawnReportV2(...) output (insights etc.)
+ * @param {object} input.reportV2  the V2 payload (buildLawnReportV2 / buildTreeShrubReportV2 output)
+ * @param {string} [input.serviceLine='lawn']  report service line; drives which
+ *   reconciliations run. Lawn gets the full pass. Tree & shrub gets ONLY the
+ *   re-entry rewrite (with its own surface wording): its todaysResult comes
+ *   from the typed snapshot / insight builders, and its section never renders
+ *   a followUp card, so a prose-derived "follow-up already planned" claim
+ *   would surface with no supporting card (T&S audit 2026-07-18). Any other
+ *   line is a no-op.
  * @returns {{ todaysResult: string|null, reentry: object|null, followUp: object|null, warnings: object[] } | null}
  */
-function reconcileLawnReport({ data = {}, reportV2 = null } = {}) {
+function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' } = {}) {
   if (!reportV2) return null;
+  const reentryWording = REENTRY_REWRITES[serviceLine] || null;
+  if (!reentryWording) return null;
+  const lawnPass = serviceLine === 'lawn';
   const warnings = [];
   const insights = Array.isArray(reportV2.insights) ? reportV2.insights : [];
-  const hasIssue = insights.some((i) => i.status === 'watch' || i.status === 'needs_attention');
+  const hasIssue = lawnPass && insights.some((i) => i.status === 'watch' || i.status === 'needs_attention');
 
-  // ── Follow-up detection ───────────────────────────────────────────────────
+  // ── Follow-up detection (lawn only — see serviceLine doc above) ──────────
   // Honest framing: "planned" — we surface it as a reassurance card with the reason
   // from the next-visit focus. (A concrete date only if the data carries one.)
   const la = data.lawnAssessment || {};
@@ -56,8 +81,8 @@ function reconcileLawnReport({ data = {}, reportV2 = null } = {}) {
   // ("see you at your next visit") and advice ("return to normal watering")
   // used to fabricate a "Follow-up already planned" card telling the customer
   // an unbooked visit was scheduled (audit 2026-07-16).
-  const mentionsFollowUp = !!nextVisitFocus
-    || (!deniesFollowUp && /\bfollow[- ]?up\b|\bre-?check\b|\breturn visit\b|\b(?:will|we['’]ll) (?:return|come back|be back)\b/i.test(summaryText));
+  const mentionsFollowUp = lawnPass && (!!nextVisitFocus
+    || (!deniesFollowUp && /\bfollow[- ]?up\b|\bre-?check\b|\breturn visit\b|\b(?:will|we['’]ll) (?:return|come back|be back)\b/i.test(summaryText)));
   let followUp = null;
   if (mentionsFollowUp) {
     followUp = {
@@ -90,10 +115,10 @@ function reconcileLawnReport({ data = {}, reportV2 = null } = {}) {
     const allReady = re.targets.every((t) => t.statusAtGeneratedAt === 'ready');
     const untilDry = /until\s+dry/i.test(re.petAdvisory || '');
     if (untilDry && allReady) {
-      reentry = { status: 'Ready now', petAdvisory: 'Treated turf has dried — pets and family are fine on it now.' };
+      reentry = { status: 'Ready now', petAdvisory: reentryWording.dried };
       warnings.push({ severity: 'info', code: 'reentry_until_dry_resolved', message: '"Ready now" shown with an "until dry" precaution; treatment has since dried.', suggestedFix: reentry.petAdvisory });
     } else if (untilDry && !allReady) {
-      reentry = { status: 'Ready once dry', petAdvisory: 'Keep pets and family off treated turf until it dries.' };
+      reentry = { status: 'Ready once dry', petAdvisory: reentryWording.untilDry };
       warnings.push({ severity: 'warning', code: 'reentry_not_yet_dry', message: 'Re-entry not yet dry — status should read "Ready once dry".', suggestedFix: reentry.status });
     }
   }

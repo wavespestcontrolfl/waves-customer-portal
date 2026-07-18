@@ -313,7 +313,11 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   if (data.reportV2) {
     try {
       const { reconcileLawnReport } = require('../services/service-report/report-consistency');
-      const fix = reconcileLawnReport({ data: { ...data, dynamicContext }, reportV2: data.reportV2 });
+      // serviceLine drives which reconciliations apply — the reportV2 slot
+      // carries lawn AND tree & shrub payloads, and the lawn-worded re-entry
+      // rewrite ("treated turf") must never land on a tree & shrub report
+      // (T&S audit 2026-07-18 P1).
+      const fix = reconcileLawnReport({ data: { ...data, dynamicContext }, reportV2: data.reportV2, serviceLine: data.serviceLine });
       if (fix) {
         data.reportV2 = {
           ...data.reportV2,
