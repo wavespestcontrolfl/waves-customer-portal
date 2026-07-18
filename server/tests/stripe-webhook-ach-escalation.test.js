@@ -288,15 +288,23 @@ describe('handleAchFailure — >=3 failures card fallback', () => {
     );
   });
 
-  test('no card on file: ACH suspended, no flag flip, handler still resolves', async () => {
+  test('no card on file: ACH suspended AND autopay disarmed — the sweep cannot re-debit the dead bank (Codex round 2 P1)', async () => {
     mockState.recentFailures = 3;
     mockState.paymentMethodRows = [BANK_ROW()];
 
     await expect(handleAchFailure(PI, 'R01', 'evt_5')).resolves.toBeUndefined();
 
     const bank = mockState.paymentMethodRows.find((r) => r.id === 'pm-bank');
-    // Without a fallback card the flags are left alone.
+    // Display default stays (portal state), but the chargeable predicate
+    // (is_default AND autopay_enabled) is broken method-side…
     expect(bank.is_default).toBe(true);
+    expect(bank.autopay_enabled).toBe(false);
+    expect(await getChargeableAutopayMethod({ id: 'cust-1' }, stubKnex)).toBeFalsy();
+    // …and the retry sweep's stop condition is set customer-side, so the
+    // armed retry_count/next_retry_at row parks instead of re-debiting.
+    expect(mockState.customerUpdates).toContainEqual(
+      expect.objectContaining({ autopay_enabled: false }),
+    );
     expect(mockState.customerUpdates).toContainEqual(
       expect.objectContaining({ ach_status: 'suspended' }),
     );
@@ -381,5 +389,60 @@ describe('handleAchFailure — consent-scoped fallback (enrollment consent requi
     expect(mockState.customerUpdates).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+  });
+});
+
+// Codex round 2 (07-18, P2): the retry sweep charges whatever ends up
+// default+enabled with no expiry re-check, so an expired card must never be
+// promoted into Auto Pay by the ACH suspension flip. Junk expiry data reads
+// as expired (same fail-closed rule as the portal enable gate); when only
+// expired cards are consented, the no-fallback disarm path applies instead.
+describe('handleAchFailure — expired-card fallback exclusion (Codex round 2)', () => {
+  const cardOf = (id = 'pm-card') => mockState.paymentMethodRows.find((r) => r.id === id);
+
+  test('an expired consented card is never promoted — autopay disarms instead', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), { ...CARD_ROW(), exp_year: 2024 }];
+    mockState.consentRows = [CARD_CONSENT()];
+
+    await handleAchFailure(PI, 'R01', 'evt_exp_1');
+
+    expect(cardOf().is_default).toBe(false);
+    expect(cardOf().autopay_enabled).toBe(false);
+    expect(mockState.customerUpdates).toContainEqual(
+      expect.objectContaining({ autopay_enabled: false }),
+    );
+    expect(mockState.customerUpdates.some((p) => p.autopay_payment_method_id)).toBe(false);
+  });
+
+  test('junk expiry data fails closed — treated as expired, no promotion', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), { ...CARD_ROW(), exp_month: null, exp_year: null }];
+    mockState.consentRows = [CARD_CONSENT()];
+
+    await handleAchFailure(PI, 'R01', 'evt_exp_2');
+
+    expect(cardOf().autopay_enabled).toBe(false);
+    expect(mockState.customerUpdates).toContainEqual(
+      expect.objectContaining({ autopay_enabled: false }),
+    );
+  });
+
+  test('a current consented card is still promoted past an expired one ahead of it', async () => {
+    mockState.recentFailures = 3;
+    const expiredDefault = {
+      ...CARD_ROW(), id: 'pm-card-old', stripe_payment_method_id: 'pm_card_old', is_default: true, exp_year: 2024,
+    };
+    mockState.paymentMethodRows = [BANK_ROW(), expiredDefault, CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT(), CARD_CONSENT({ stripe_payment_method_id: 'pm_card_old' })];
+
+    await handleAchFailure(PI, 'R01', 'evt_exp_3');
+
+    expect(cardOf().is_default).toBe(true);
+    expect(cardOf().autopay_enabled).toBe(true);
+    expect(cardOf('pm-card-old').autopay_enabled).toBe(false);
+    expect(mockState.customerUpdates).toContainEqual(
+      expect.objectContaining({ autopay_payment_method_id: 'pm-card' }),
+    );
   });
 });

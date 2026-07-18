@@ -3205,12 +3205,25 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
               .where({ id: customer.id })
               .update({ autopay_payment_method_id: fallbackCard.id });
           } else {
-            // No enrollment-consented card → no fallback: the account is
-            // deliberately left without a chargeable autopay method
-            // rather than charging a card the customer never authorized
-            // for recurring billing; collection's suppression guards
-            // park the balance for manual follow-up.
-            logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} with no enrollment-consented fallback card — leaving autopay without a chargeable method`);
+            // No enrollment-consented card → DISARM, not just log: the
+            // failed payment row is already armed for the retry sweep, and
+            // processPaymentRetries() only stops on
+            // customers.autopay_enabled === false before stripe.charge()
+            // selects any default+enabled method — leaving the suspended
+            // bank's flags set meant the next sweep debited the same dead
+            // account. Clearing the method-level autopay flags breaks the
+            // chargeable predicate; clearing the customer-level switch
+            // stops the sweep before it charges. is_default is left alone
+            // (display state), and no autopay_log toggle is written — this
+            // is a system suspension, not a customer opt-out, so a later
+            // re-enroll with a fresh method stays legal.
+            await trx('payment_methods')
+              .where({ customer_id: customer.id })
+              .update({ autopay_enabled: false });
+            await trx('customers')
+              .where({ id: customer.id })
+              .update({ autopay_enabled: false });
+            logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} with no enrollment-consented fallback card — autopay disarmed, balance parked for manual follow-up`);
           }
           logger.warn(`[stripe-webhook] ACH suspended for customer ${customer.id} — 3+ failures in 90 days`);
         } else if (recentFailures >= 2) {
