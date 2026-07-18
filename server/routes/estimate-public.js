@@ -12636,6 +12636,15 @@ function isRetiredLawnTierKey(tierKey) {
 // way (save == accept), so the ladder arms its margin-floor leg for that
 // estimate from its stored engine inputs (codex P2 on the #2827 main-merge).
 function estimateLawnFloorArmed(estData = {}) {
+  // Admin V2 saves persist the exact /calculate-estimate payload under
+  // engineRequest ({ profile, selectedServices, options }); the adapter maps
+  // options.useLawnCostFloor into services.lawn.useLawnCostFloor at replay,
+  // so the raw option is that shape's arm signal. An explicit false is a
+  // deliberate disarm — honored, no fallthrough.
+  const reqOptions = estData?.engineRequest?.options;
+  if (reqOptions && typeof reqOptions === 'object' && reqOptions.useLawnCostFloor != null) {
+    return !!reqOptions.useLawnCostFloor;
+  }
   const engineInputs = extractEngineInputs(estData) || {};
   return !!(engineInputs.services?.lawn?.useLawnCostFloor ?? engineInputs.useLawnCostFloor);
 }

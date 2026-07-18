@@ -570,6 +570,34 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
   });
 
+  test('an admin V2 estimate re-armed via engineRequest.options clamps the ladder too', () => {
+    // Admin V2 saves persist the exact /calculate-estimate payload under
+    // engineRequest — the arm signal lives on options.useLawnCostFloor
+    // there, not under engineInputs (codex P2, round 6 on #2827).
+    const estData = {
+      engineRequest: {
+        profile: { measuredTurfSf: 5012 },
+        selectedServices: ['LAWN'],
+        options: { useLawnCostFloor: true, lawnFreq: 9 },
+      },
+    };
+    const freqs = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, estData);
+    const byKey = Object.fromEntries(freqs.map((f) => [f.key, f]));
+    expect(byKey.standard.monthly).toBeCloseTo(53.34, 2);
+    expect(byKey.premium.monthly).toBeCloseTo(75.6, 2);
+
+    // An explicit false on the payload is a deliberate disarm — no clamp.
+    const disarmed = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+      engineRequest: {
+        profile: { measuredTurfSf: 5012 },
+        selectedServices: ['LAWN'],
+        options: { useLawnCostFloor: false, lawnFreq: 9 },
+      },
+    });
+    const disarmedByKey = Object.fromEntries(disarmed.map((f) => [f.key, f]));
+    expect(disarmedByKey.standard.monthly).toBeCloseTo(49.5, 2);
+  });
+
   test('re-armed: a margin-floor-capped selected line keeps the requested discount per cadence and re-clamps each at ITS floor', () => {
     const priorUseFloor = LAWN_PRICING_V2.useLawnCostFloor;
     LAWN_PRICING_V2.useLawnCostFloor = true;
