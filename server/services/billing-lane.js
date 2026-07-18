@@ -26,13 +26,28 @@ const BILLING_MODES = [
   'one_time', // single job, no recurring billing relationship
 ];
 
-// Explicit mode wins; NULL infers the legacy split: WaveGuard tier + a
-// positive monthly rate has always meant "the 8AM cron bills the dues and
+// Tier sentinels that mean "NOT a member" even though the column is
+// non-empty ('Commercial', 'One-Time', 'N/A', …). Lockstep with
+// NON_MEMBERSHIP_TIER_KEYS in project-completion.js /
+// waveguard-existing-services.js / admin-customers.js — duplicated as a
+// literal so this module stays db-free for pure unit tests.
+const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
+function isMembershipTier(value) {
+  const key = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return !!key && !NON_MEMBERSHIP_TIER_KEYS.has(key);
+}
+
+// Explicit mode wins; NULL infers the legacy split: a REAL WaveGuard tier +
+// a positive monthly rate has always meant "the 8AM cron bills the dues and
 // visits are covered" — everything else bills per visit at completion.
+// Sentinel tiers (Commercial / One-Time / None…) are non-membership values
+// that merely live in the tier column; treating them as members would
+// suppress price stamps and dues-bill legacy commercial/one-time customers
+// who happen to carry a monthly_rate (Codex r5).
 function resolveBillingLane(customer) {
   const mode = customer?.billing_mode || null;
   if (mode && BILLING_MODES.includes(mode)) return { mode, source: 'explicit' };
-  const inferredMember = !!customer?.waveguard_tier && Number(customer?.monthly_rate || 0) > 0;
+  const inferredMember = isMembershipTier(customer?.waveguard_tier) && Number(customer?.monthly_rate || 0) > 0;
   return { mode: inferredMember ? 'monthly_membership' : 'per_visit', source: 'inferred' };
 }
 

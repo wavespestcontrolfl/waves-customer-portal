@@ -24,6 +24,13 @@ describe('resolveBillingLane', () => {
     expect(resolveBillingLane({}).mode).toBe('per_visit');
   });
 
+  test('NULL with a non-membership tier sentinel infers per-visit even with a rate (Codex r5)', () => {
+    for (const tier of ['Commercial', 'One-Time', 'None', 'N/A', 'Not Set', 'no']) {
+      expect(resolveBillingLane({ billing_mode: null, waveguard_tier: tier, monthly_rate: 150 }).mode)
+        .toBe('per_visit');
+    }
+  });
+
   test('an unknown mode string falls back to inference instead of being trusted', () => {
     expect(resolveBillingLane({ billing_mode: 'subscription', waveguard_tier: 'Bronze', monthly_rate: 30 }))
       .toEqual({ mode: 'monthly_membership', source: 'inferred' });

@@ -114,10 +114,19 @@ async function smsTemplateActive() {
   }
 }
 
-// OVERDUE invoices that belong to the recurring relationship: linked to a
+// Nothing flips an invoice's stored status to 'overdue' automatically — the
+// late-payment checker treats sent/viewed invoices as overdue purely by
+// due_date (or old created_at when due_date is null). Mirror its predicate
+// and its 7-day default here, or past-due recurring invoices sitting at
+// 'sent'/'viewed' never count and non-member customers get no reminder
+// (Codex r5; late-payment-checker.js checkAndNotify).
+const OVERDUE_AFTER_DAYS = 7;
+
+// Past-due invoices that belong to the recurring relationship: linked to a
 // recurring scheduled visit, homeowner-billed (payer AR excluded). One-time
 // invoice debt deliberately never counts here.
-async function overdueRecurringInvoices(customerId) {
+async function overdueRecurringInvoices(customerId, now = new Date()) {
+  const dueCutoff = new Date(now.getTime() - OVERDUE_AFTER_DAYS * 86400000);
   // The follow-up engine records its sends on
   // invoice_followup_sequences.last_touch_at, NOT invoices.last_reminder_at
   // — the recent-touch guard must read the real timestamp or the 10:00
@@ -126,8 +135,21 @@ async function overdueRecurringInvoices(customerId) {
     .join('scheduled_services as ss', 'invoices.scheduled_service_id', 'ss.id')
     .leftJoin('invoice_followup_sequences as ifs', 'ifs.invoice_id', 'invoices.id')
     .where('invoices.customer_id', customerId)
-    .where('invoices.status', 'overdue')
+    .whereIn('invoices.status', ['sent', 'viewed', 'overdue'])
+    .where(function pastDue() {
+      this.where('invoices.due_date', '<=', dueCutoff)
+        .orWhere(function noDueDate() {
+          this.whereNull('invoices.due_date').andWhere('invoices.created_at', '<=', dueCutoff);
+        });
+    })
     .whereNull('invoices.payer_id')
+    // A STOPPED sequence is an explicit admin "stop dunning this invoice"
+    // instruction (customer mailing a check, etc.) — both existing dunning
+    // engines honor it, and this sweep must not resurrect those customers
+    // ahead of a visit (Codex r5; invoice-followups.isDunningStopped).
+    .where(function sequenceNotStopped() {
+      this.whereNull('ifs.status').orWhereNot('ifs.status', 'stopped');
+    })
     .where('ss.is_recurring', true)
     .select('invoices.*', 'ifs.last_touch_at as followup_last_touch_at');
 }
@@ -201,12 +223,35 @@ async function runSweep({ now = new Date() } = {}) {
         logger.warn(`[previsit-balance] payer resolve failed for visit ${visit.id} — skipping to be safe: ${payerErr.message}`);
         payerBilled = true;
       }
-      const overdue = await overdueRecurringInvoices(visit.customer_id);
+      const overdue = await overdueRecurringInvoices(visit.customer_id, now);
       // Recently-touched overdue invoices stay with the follow-up engine.
       const cutoff = new Date(now.getTime() - RECENT_TOUCH_HOURS * 3600 * 1000);
-      const fresh = overdue.filter((inv) => [inv.last_reminder_at, inv.followup_last_touch_at]
-        .filter(Boolean)
-        .every((touch) => new Date(touch) < cutoff));
+      // The legacy 10:00 late-payment checker dedupes its sends via
+      // activity_log rows (action 'late_payment_reminder', metadata
+      // .invoiceId) — it stamps neither invoices.last_reminder_at nor a
+      // follow-up sequence, so without this read the 10:05 sweep re-texts
+      // an invoice the checker dunned five minutes earlier (Codex r5). A
+      // failed read counts as untouched: the checker's own insert is
+      // best-effort (.catch(() => {})), so absence never guaranteed silence.
+      let legacyDunnedIds = new Set();
+      try {
+        const legacyTouches = await db('activity_log')
+          .where({ customer_id: visit.customer_id, action: 'late_payment_reminder' })
+          .where('created_at', '>=', cutoff)
+          .select('metadata');
+        legacyDunnedIds = new Set(legacyTouches.map((row) => {
+          try {
+            const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+            return meta?.invoiceId || null;
+          } catch { return null; }
+        }).filter(Boolean));
+      } catch (activityErr) {
+        logger.warn(`[previsit-balance] activity_log read failed for customer ${visit.customer_id}: ${activityErr.message}`);
+      }
+      const fresh = overdue.filter((inv) => !legacyDunnedIds.has(inv.id)
+        && [inv.last_reminder_at, inv.followup_last_touch_at]
+          .filter(Boolean)
+          .every((touch) => new Date(touch) < cutoff));
       const overdueRecurringDue = fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
 
       const verdict = previsitBalanceReminderEligible({
@@ -311,4 +356,5 @@ module.exports = {
   EMAIL_TEMPLATE_KEY,
   LEAD_DAYS,
   DUES_GRACE_DAYS,
+  OVERDUE_AFTER_DAYS,
 };

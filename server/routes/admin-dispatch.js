@@ -4909,6 +4909,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: svc.cust_billing_mode === 'monthly_membership',
+      explicitPerVisitLane: ['per_visit', 'one_time'].includes(svc.cust_billing_mode),
       perApplicationBilling,
       annualPrepayBilling,
       hasVisitPrice,
@@ -8307,6 +8308,7 @@ function shouldAutoInvoiceCompletion({
   createInvoiceOnComplete,
   waveguardTier,
   explicitMembership = false,
+  explicitPerVisitLane = false,
   perApplicationBilling,
   annualPrepayBilling,
   hasVisitPrice,
@@ -8349,6 +8351,20 @@ function shouldAutoInvoiceCompletion({
   // auto-charge the saved method). Same performed-visit rule the referral
   // credit uses; 'incomplete' never reaches this gate (early return).
   if (perApplicationBilling) return visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType);
+  // An EXPLICIT per_visit/one_time lane means "invoiced for each visit" —
+  // exactly what the schedule card predicts. A priced, performed visit in
+  // these lanes bills without needing the scheduler flag, a lingering
+  // WaveGuard tier, or GATE_AUTOINVOICE_PRICED_VISITS (Codex r5: an admin
+  // reclassifying a customer left their existing future visits completing
+  // uninvoiced). Same performed/callback/always-free exclusions as the
+  // per-application branch; the invoiceAmount > 0 early guard already
+  // limits this to explicitly priced visits (completionInvoiceAmount
+  // returns 0 for unpriced explicit-lane visits — no dues-rate fallback).
+  // A RETURN either way: falling through to the tier branch would let a
+  // lingering tier bill a callback/always-free visit these lanes exempt.
+  if (explicitPerVisitLane) {
+    return visitPerformed && !isCallback && !isAlwaysFreeServiceType(serviceType);
+  }
   // An explicit monthly_membership lane stands in for the tier here just as
   // it does in the coverage predicate: a tier-less explicit member whose
   // autopay is dead must fall through to a normal completion invoice, not

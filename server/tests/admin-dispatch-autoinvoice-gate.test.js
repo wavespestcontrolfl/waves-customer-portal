@@ -71,6 +71,17 @@ describe('shouldAutoInvoiceCompletion', () => {
     expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, autoInvoicePricedVisits: true, isCallback: true })).toBe(false);
   });
 
+  test('EXPLICIT per-visit/one-time lane: a priced, performed visit invoices without flag, tier, or gate (Codex r5)', () => {
+    expect(shouldAutoInvoiceCompletion({ ...pricedSelfPay, explicitPerVisitLane: true })).toBe(true);
+  });
+
+  test('EXPLICIT per-visit lane still exempts callbacks, always-free types, and non-performed visits — a lingering tier cannot bill them via fall-through', () => {
+    const lane = { ...pricedSelfPay, explicitPerVisitLane: true, waveguardTier: 'Gold' };
+    expect(shouldAutoInvoiceCompletion({ ...lane, isCallback: true })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...lane, serviceType: 'Pest Control Re-Service' })).toBe(false);
+    expect(shouldAutoInvoiceCompletion({ ...lane, visitPerformed: false })).toBe(false);
+  });
+
   test('GATE ON: a paid inspection/rodent visit (ambiguous, not always-free) DOES invoice — price is authoritative at completion', () => {
     const on = { ...pricedSelfPay, autoInvoicePricedVisits: true };
     expect(shouldAutoInvoiceCompletion({ ...on, serviceType: 'WDO Inspection Service' })).toBe(true);
