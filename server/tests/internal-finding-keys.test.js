@@ -72,6 +72,24 @@ describe('stripInternalFindingKeys', () => {
   });
 });
 
+describe('free-text gating and default fee', () => {
+  const { projectTypeFreeTextKeys, projectRecordedFeeValues, WDO_DEFAULT_INSPECTION_FEE } = require('../services/project-types');
+  test('the value pass never touches structured fields — street numbers survive', () => {
+    const out = stripInternalFindingKeys({
+      property_address: '175 Main Street',
+      comments: 'Buyer asked whether the $175 charge is due.',
+      inspection_fee: '175',
+    }, { redactValues: true, feeValues: ['175'], freeTextKeys: projectTypeFreeTextKeys('wdo_inspection') });
+    expect(out.property_address).toBe('175 Main Street');
+    expect(out.comments).toBe('Buyer asked whether the [fee removed] charge is due.');
+    expect(out.inspection_fee).toBeUndefined();
+  });
+  test('a blank fee falls back to the flat WDO default for the value pass', () => {
+    expect(projectRecordedFeeValues({ findings: {} })).toEqual([WDO_DEFAULT_INSPECTION_FEE]);
+    expect(projectRecordedFeeValues({ findings: { inspection_fee: '175' } })).toEqual(['175']);
+  });
+});
+
 describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
   test('removes the recorded fee value even when the prose paraphrases it', () => {
     expect(redactSpecificAmounts('We quoted the $250 charge for this visit.', ['250']))

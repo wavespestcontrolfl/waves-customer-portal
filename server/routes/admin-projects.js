@@ -33,6 +33,9 @@ const {
   redactInspectionFeeCues,
   redactSpecificAmounts,
   projectRecordedFeeValues,
+  projectTypeFreeTextKeys,
+  projectTypeConfigFreeTextKeys,
+  WDO_DEFAULT_INSPECTION_FEE,
   redactInspectionFeeCuesForType,
   redactProjectTitleForWrite,
   projectTypeConfigHasInternalFindingKeys,
@@ -903,7 +906,11 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
   const safeRawRecommendations = scrubPromptInput(rawRecommendations);
   const safeCommunicationContext = scrubPromptInput(communicationContext);
   const safePhotoLines = scrubPromptInput(photoLines);
-  const findingsLines = Object.entries(stripInternalFindingKeys(findings, { redactValues: typeCarriesFee }) || {})
+  const findingsLines = Object.entries(stripInternalFindingKeys(findings, {
+    redactValues: typeCarriesFee,
+    feeValues: recordedFeeValues,
+    freeTextKeys: projectTypeConfigFreeTextKeys(typeCfg),
+  }) || {})
     .map(([k, v]) => [k, formatFindingForPrompt(v)])
     .filter(([, v]) => v.trim() !== '')
     .map(([k, v]) => `${labelMap[k] || k.replace(/_/g, ' ')}: ${v}`)
@@ -2089,6 +2096,7 @@ function wdoContentHash(project) {
     findings: stable(stripInternalFindingKeys(parseFindings(project), {
       redactValues: true,
       feeValues: projectRecordedFeeValues(project),
+      freeTextKeys: projectTypeFreeTextKeys('wdo_inspection'),
     }) || {}),
     project_date: normalizeDateOnly(project.project_date),
   });
@@ -2378,7 +2386,7 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
 // kept so resolveWdoInspectionFee is untouched; we never price on
 // customers.property_sqft (that's lawn area).
 const WDO_FEE_TIERS = [
-  { maxSqFt: Infinity, price: 250 },
+  { maxSqFt: Infinity, price: WDO_DEFAULT_INSPECTION_FEE },
 ];
 function parseWdoFee(value) {
   const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);

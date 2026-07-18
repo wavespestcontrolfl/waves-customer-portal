@@ -15,6 +15,7 @@ const {
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
   projectRecordedFeeValues,
+  projectTypeFreeTextKeys,
   projectTypeHasInternalFindingKeys,
   // A legacy archived FDACS PDF was rendered from RAW findings AND raw photo
   // captions — if either carries a fee disclosure, the S3 binary discloses
@@ -527,6 +528,7 @@ router.get('/project/:token/data', async (req, res, next) => {
     // is caught on every one of these surfaces (codex #2817).
     const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
     const feeValues = typeCarriesFee ? projectRecordedFeeValues(project) : [];
+    const freeTextKeys = projectTypeFreeTextKeys(project.project_type);
     const scrubText = (text) => {
       if (!typeCarriesFee || !text) return text;
       let safe = redactInspectionFeeCues(text);
@@ -609,15 +611,15 @@ router.get('/project/:token/data', async (req, res, next) => {
     // baked into prose) is handled by the redactInspectionFeeCues guard on
     // `recommendations` below. The value scrub is type-gated via
     // typeCarriesFee (computed above the photos block).
-    viewerFindings = stripInternalFindingKeys(viewerFindings, { redactValues: typeCarriesFee, feeValues });
+    viewerFindings = stripInternalFindingKeys(viewerFindings, { redactValues: typeCarriesFee, feeValues, freeTextKeys });
 
     res.json({
       projectType: project.project_type,
       fdacsPdfAvailable,
       status: project.status,
-      // The title is the report's customer-facing headline — free text with
-      // the same fee scrub as every other free-text field (codex #2817).
-      title: project.title ? redactInspectionFeeCuesForType(project.title, project.project_type) : project.title,
+      // The title is the report's customer-facing headline — free prose with
+      // the same cue+value scrub as every other free-text field (codex #2817).
+      title: scrubText(project.title),
       customerName: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
       // Customer email/phone for the hero contact lines — the report hero
       // mirrors the customer estimate, which prints the recipient's own
@@ -652,7 +654,7 @@ router.get('/project/:token/data', async (req, res, next) => {
       followupDate: project.followup_date,
       // Follow-up findings are findings-shaped jsonb rendered key→value on
       // the page — same internal-key strip + fee scrub as the main findings.
-      followupFindings: stripInternalFindingKeys(project.followup_findings, { redactValues: typeCarriesFee, feeValues }),
+      followupFindings: stripInternalFindingKeys(project.followup_findings, { redactValues: typeCarriesFee, feeValues, freeTextKeys }),
       followupCompletedAt: project.followup_completed_at,
       upcomingAppointment: upcomingAppointment ? {
         serviceType: upcomingAppointment.service_type,

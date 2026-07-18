@@ -12,6 +12,7 @@ const {
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
   projectRecordedFeeValues,
+  projectTypeFreeTextKeys,
   projectTypeHasInternalFindingKeys,
 } = require('./project-types');
 
@@ -33,10 +34,13 @@ function cleanFindings(project) {
   // (codex #2817).
   const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
   const feeValues = typeCarriesFee ? projectRecordedFeeValues(project) : [];
+  // value pass on free-prose fields only — structured fields (addresses)
+  // can legitimately contain the fee's digits
+  const freeTextKeys = projectTypeFreeTextKeys(project.project_type);
   for (const [key, value] of Object.entries(findings)) {
     if (INTERNAL_FINDING_KEY_SET.has(key)) continue;
     let text = redactInspectionFeeCuesForType(String(value ?? ''), project.project_type);
-    if (feeValues.length) text = redactSpecificAmounts(text, feeValues);
+    if (feeValues.length && freeTextKeys.has(key)) text = redactSpecificAmounts(text, feeValues);
     text = text.trim();
     if (text) entries[key] = text;
   }

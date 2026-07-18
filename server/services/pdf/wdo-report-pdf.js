@@ -36,7 +36,13 @@ const {
   WAVES_SUPPORT_PHONE_DISPLAY,
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
-const { stripInternalFindingKeys, redactInspectionFeeCues, projectRecordedFeeValues } = require('../project-types');
+const {
+  stripInternalFindingKeys,
+  redactInspectionFeeCues,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeFreeTextKeys,
+} = require('../project-types');
 
 // The emailed/archived FDACS PDF is a customer deliverable — it gets the
 // same internal-key strip + fee-cue scrub as the public /data payload, or a
@@ -46,7 +52,13 @@ const { stripInternalFindingKeys, redactInspectionFeeCues, projectRecordedFeeVal
 // field of its own, and the disclosure-of-interest statements in comments
 // don't carry amounts, so nothing the form REQUIRES is touched.
 function customerSafeFindings(rawFindings, feeValues = []) {
-  return stripInternalFindingKeys(asObject(rawFindings), { redactValues: true, feeValues }) || {};
+  return stripInternalFindingKeys(asObject(rawFindings), {
+    redactValues: true,
+    feeValues,
+    // value pass on free-prose fields only — a structured address can
+    // legitimately contain the fee's digits ("175 Main Street")
+    freeTextKeys: projectTypeFreeTextKeys('wdo_inspection'),
+  }) || {};
 }
 
 const TEMPLATE_PATH = path.join(__dirname, '..', '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf');
@@ -570,6 +582,7 @@ async function buildWdoReportPDFBuffer({ project, customer, applicator: applicat
   if (Array.isArray(photos) && photos.length) {
     await appendPhotoAddendum(pdfDoc, {
       photos,
+      feeValues: projectRecordedFeeValues(project),
       propertyAddress: clean(textValues['Address of Property Inspected']),
     }).catch((err) => {
       logger.warn(`[wdo-pdf] photo addendum failed for project ${project.id}: ${err.message}`);
@@ -726,7 +739,7 @@ async function appendContinuationPages(pdfDoc, { entries, propertyAddress, inspe
  * "Photo N - {caption}" line, matching the supplied sample format.
  * @param {Array<{ buffer?:Buffer, image?:string, contentType?:string, caption?:string }>} photos
  */
-async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress }) {
+async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress, feeValues = [] }) {
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const PAGE_W = 612;
@@ -779,9 +792,12 @@ async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress }) {
       }
 
       // Caption under the image — technician free text, so it gets the same
-      // fee scrub as the findings this PDF prints (codex #2817). WDO is the
-      // fee-carrying type and this builder is WDO-only, so unconditional.
-      const captionText = `Photo ${photoNum} - ${redactInspectionFeeCues(photo.caption || '')}`.trim();
+      // cue+value scrub as the findings this PDF prints (codex #2817: this
+      // archive is stamped pdf_renderer, so it MUST actually be clean). WDO
+      // is the fee-carrying type and this builder is WDO-only.
+      let safeCaption = redactInspectionFeeCues(photo.caption || '');
+      if (feeValues.length) safeCaption = redactSpecificAmounts(safeCaption, feeValues);
+      const captionText = `Photo ${photoNum} - ${safeCaption}`.trim();
       const lines = wrapText(captionText, font, 9, contentW).slice(0, 2);
       let cy = imgBottom - 12;
       for (const ln of lines) {

@@ -1062,6 +1062,12 @@ function redactProjectTitleForWrite(title, projectTypeKey) {
 // may only survive there). Feeds the VALUE-based scrub at egress and in the
 // backfill so paraphrased fees ("the quoted $250 charge") are caught without
 // the literal cue (codex #2817).
+// A blank WDO fee still bills at the flat default (owner decision
+// 2026-07-12) — the value scrub must cover that amount too, or a
+// paraphrased "$250 charge" passes through whenever the field was left
+// empty. admin-projects' WDO_FEE_TIERS imports this same constant.
+const WDO_DEFAULT_INSPECTION_FEE = 250;
+
 function projectRecordedFeeValues(project) {
   const values = [];
   const parse = (v) => {
@@ -1080,6 +1086,8 @@ function projectRecordedFeeValues(project) {
       }
     }
   }
+  // Blank fee = the flat default still bills (and can be paraphrased).
+  if (!values.length) values.push(WDO_DEFAULT_INSPECTION_FEE);
   return values;
 }
 
@@ -1137,24 +1145,50 @@ function customerSafeServiceNotes(notes, structuredNotes) {
 // arrays and nested objects — dropping internal KEYS at every depth (a nested
 // { details: { inspection_fee } } must not survive the top-level filter) and
 // scrubbing string values when redactValues is on.
-function sanitizeFindingValue(value, redactValues, feeValues) {
+function sanitizeFindingValue(value, redactValues, feeValues, applyValueScrub) {
   if (typeof value === 'string') {
     if (!redactValues) return value;
     let safe = redactInspectionFeeCues(value);
-    if (feeValues && feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
+    // The VALUE pass only runs on free-prose (textarea) fields — a
+    // structured single-line field like property_address can legitimately
+    // contain the fee's digits ("175 Main Street" with a $175 fee) and must
+    // never be corrupted by a numeric coincidence (codex #2817).
+    if (applyValueScrub && feeValues && feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
     return safe;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizeFindingValue(item, redactValues, feeValues));
+    return value.map((item) => sanitizeFindingValue(item, redactValues, feeValues, applyValueScrub));
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
         .filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key))
-        .map(([key, nested]) => [key, sanitizeFindingValue(nested, redactValues, feeValues)]),
+        .map(([key, nested]) => [key, sanitizeFindingValue(nested, redactValues, feeValues, applyValueScrub)]),
     );
   }
   return value;
+}
+
+// Keys whose values are free prose (textarea fields) for a project type —
+// the only finding values eligible for the VALUE-based fee scrub. Falls
+// back to an empty set for unknown types (value scrub then never fires on
+// findings; the cue scrub still does).
+function collectFreeTextKeys(fields, acc) {
+  for (const field of fields || []) {
+    if (field.type === 'textarea' && field.key) acc.add(field.key);
+    if (field.fields) collectFreeTextKeys(field.fields, acc);
+  }
+  return acc;
+}
+function projectTypeConfigFreeTextKeys(cfg) {
+  const acc = new Set();
+  if (!cfg) return acc;
+  collectFreeTextKeys(cfg.findingsFields, acc);
+  collectFreeTextKeys(cfg.fields, acc);
+  return acc;
+}
+function projectTypeFreeTextKeys(typeKey) {
+  return projectTypeConfigFreeTextKeys(PROJECT_TYPES[typeKey]);
 }
 
 // redactValues gates the VALUE scrub — callers on a known project type pass
@@ -1163,11 +1197,19 @@ function sanitizeFindingValue(value, redactValues, feeValues) {
 // Internal KEYS are dropped regardless (they only exist on types that define
 // them, so the filter is free elsewhere). Default fails closed: values are
 // scrubbed.
-function stripInternalFindingKeys(findings, { redactValues = true, feeValues = [] } = {}) {
+// freeTextKeys (a Set) limits the VALUE pass to prose fields; null means
+// "all values eligible" (used by tests and non-findings shapes).
+function stripInternalFindingKeys(findings, { redactValues = true, feeValues = [], freeTextKeys = null } = {}) {
   let parsed = findings;
   if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return {}; } }
   if (!parsed || typeof parsed !== 'object') return parsed;
-  return sanitizeFindingValue(parsed, redactValues, feeValues);
+  if (Array.isArray(parsed)) return sanitizeFindingValue(parsed, redactValues, feeValues, !freeTextKeys);
+  return Object.fromEntries(
+    Object.entries(parsed)
+      .filter(([key]) => !INTERNAL_FINDING_KEYS.includes(key))
+      .map(([key, value]) => [key,
+        sanitizeFindingValue(value, redactValues, feeValues, freeTextKeys ? freeTextKeys.has(key) : true)]),
+  );
 }
 
 function getProjectType(key) {
@@ -1199,6 +1241,9 @@ module.exports = {
   redactInspectionFeeCuesForType,
   redactProjectTitleForWrite,
   PROJECT_TITLE_MAX_LENGTH,
+  WDO_DEFAULT_INSPECTION_FEE,
+  projectTypeFreeTextKeys,
+  projectTypeConfigFreeTextKeys,
   projectTypeHasInternalFindingKeys,
   projectTypeConfigHasInternalFindingKeys,
 };

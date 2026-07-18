@@ -247,11 +247,22 @@ function formatProjectAppointmentTime(value) {
   return `${hour12}:${minute} ${suffix}`;
 }
 
+// The customer promise is ALWAYS windowStart + 2 hours — window_end is the
+// internal job-duration estimate and never customer-facing. The public
+// report page renders start+2h, so the staff preview must too.
+function projectAppointmentWindowEnd(windowStart) {
+  const raw = String(windowStart || "").trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(raw);
+  if (!match) return "";
+  const hour24 = (Number(match[1]) + 2) % 24;
+  return `${hour24}:${match[2]}`;
+}
+
 function formatProjectAppointmentWindow(appt) {
   if (!appt) return "";
   const date = formatProjectAppointmentDate(appt.scheduledDate);
   const start = formatProjectAppointmentTime(appt.windowStart);
-  const end = formatProjectAppointmentTime(appt.windowEnd);
+  const end = formatProjectAppointmentTime(projectAppointmentWindowEnd(appt.windowStart));
   const window = start && end ? `${start}-${end}` : start || end;
   return [date, window].filter(Boolean).join(" ");
 }

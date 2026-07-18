@@ -240,7 +240,7 @@ function expectedContentHash(findings, projectDate) {
     return value;
   };
   const { projectRecordedFeeValues } = require('../services/project-types');
-  const payload = JSON.stringify({ findings: stable(stripInternalFindingKeys(findings, { redactValues: true, feeValues: projectRecordedFeeValues({ findings }) }) || {}), project_date: projectDate });
+  const payload = JSON.stringify({ findings: stable(stripInternalFindingKeys(findings, { redactValues: true, feeValues: projectRecordedFeeValues({ findings }), freeTextKeys: require('../services/project-types').projectTypeFreeTextKeys('wdo_inspection') }) || {}), project_date: projectDate });
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
