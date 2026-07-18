@@ -20,7 +20,7 @@ jest.mock('@anthropic-ai/sdk', () => class MockAnthropic {
   constructor() { this.messages = { create: jest.fn() }; }
 });
 // knowledge-bridge pulls the llm dispatcher for its Q&A path — not under test
-jest.mock('../services/llm/call', () => ({ callLlm: jest.fn() }), { virtual: true });
+jest.mock('../services/llm/call', () => ({ callLlm: jest.fn() }));
 
 function makeDb(responses = {}) {
   const state = { responses, calls: {}, inserts: {}, updates: {} };

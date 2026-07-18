@@ -11,7 +11,7 @@ jest.mock('googleapis', () => ({
       },
     },
   },
-}), { virtual: true });
+}));
 
 const db = require('../models/db');
 const gbpService = require('../services/google-business');

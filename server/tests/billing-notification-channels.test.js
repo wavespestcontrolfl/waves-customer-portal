@@ -8,8 +8,8 @@ const { checkConsentForPurpose } = require('../services/messaging/validators/con
 // notifications-preferences.test.js — the route file only needs these to load).
 jest.mock('express', () => ({
   Router: () => ({ use: jest.fn(), get: jest.fn(), put: jest.fn() }),
-}), { virtual: true });
-jest.mock('joi', () => ({}), { virtual: true });
+}));
+jest.mock('joi', () => ({}));
 jest.mock('../middleware/auth', () => ({ authenticate: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn() }));
 const notificationsRoute = require('../routes/notifications');

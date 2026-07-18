@@ -160,6 +160,18 @@ finding and warns on P1. Reviewers must return JSON matching
   `async (req, res) => { … }` that isn't awaited and isn't deliberately
   fire-and-forget. Mark intentional fire-and-forget with
   `void someAsync().catch(err => logger.error(...))`.
+- **No `{ virtual: true }` jest mocks of real modules.** A virtual mock
+  registers under a synthesized name key instead of the resolved module
+  path; in a shared jest worker whose resolver was warmed by an earlier
+  suite, the module under test can require the REAL package and bypass
+  the mock — order-dependent, so it passes locally and goes red only in
+  CI (2026-07-18 incident: `google-ads-sync.test.js` drove the real
+  `google-ads-api` into a live OAuth call, #2843). Flag (P1) any
+  `jest.mock(name, factory, { virtual: true })` where `name` actually
+  resolves (installed package or existing relative file). `virtual` is
+  only for modules that genuinely don't exist — e.g. the
+  `./stripe-webhook-helpers` mock in
+  `server/tests/stripe-webhook-refund-failed.test.js:29`.
 - **Feature-flag fail-closed.** `useFeatureFlag` in
   `client/src/hooks/useFeatureFlag.js` is fail-closed by design (returns
   `false` on API error). Adding `|| true`, `?? true`, `localStorage`
