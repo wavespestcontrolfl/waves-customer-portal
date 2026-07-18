@@ -7,9 +7,9 @@
  * insert fan-out stay off the operational hot path — overnight freshness
  * is ample for research.
  *
- * Extraction rides the call-pipeline's sanctioned Gemini exception (own
- * env-overridable model const, not the tier registry) through llm/call.js's
- * callGemini. Output is ajv-validated against the v1 contract, every quote
+ * Extraction routes cross-provider through llm/call.js dispatchWithFallback
+ * (bake-off-locked primary + automatic Claude fallback; env-overridable per
+ * the extraction-exception pattern). Output is ajv-validated, every quote
  * is mechanically verified verbatim against the transcript, and quote +
  * context are DOUBLE-REDACTED (redactText per name-context, then redactPii)
  * before any row is written — the same non-negotiable as
@@ -29,16 +29,33 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { redactText } = require('./agent-decision-training');
 const { redact: redactPii } = require('./content/pii-redactor');
-const { callGemini } = require('./llm/call');
+const { dispatchWithFallback } = require('./llm/call');
+const MODELS = require('../config/models');
 const { hasAgentCallerLabels } = require('./sms-voice-corpus-miner');
 const { RESEARCH_SCHEMA_VERSION } = require('./call-research-taxonomy');
 const { buildCallResearchPrompt, validateResearchOutput, PROMPT_HASH } = require('./prompts/call-research-v1');
 
-// Bake-off-settled default (3.5-flash vs 2.5-pro pre-backfill; re-run at
-// 3.5-pro GA and bump only on a win). Swapping the model mid-corpus mixes
-// extraction provenance — pair a deliberate swap with a PROMPT_VERSION bump
-// when a uniform re-mine is wanted.
-const GEMINI_CALL_RESEARCH_MODEL = process.env.GEMINI_CALL_RESEARCH_MODEL || 'gemini-3.5-flash';
+// Route locked by the 7-arm bake-off (2026-07-18, 20 fixed prod calls, all
+// arms through the identical validate → verbatim-guard → redact pipeline):
+// gpt-5.6-sol won on trustworthy-chunk volume (73 kept at 97% verbatim);
+// Claude Opus 4.8 is the cross-provider fallback (98% verbatim, runner-up
+// on precision) per the house automatic-fallback-to-Claude rule. Both legs
+// env-overridable per the extraction-exception pattern; if the primary is
+// pointed at Anthropic the fallback flips to OpenAI so the dispatcher's
+// same-provider rejection can't brick the nightly. Swapping models
+// mid-corpus mixes extraction provenance — pair a deliberate swap with a
+// PROMPT_VERSION bump when a uniform re-mine is wanted. Re-run the bake-off
+// (scripts/bakeoff-call-research.js) at major model GAs; bump only on a win.
+const CALL_RESEARCH_PRIMARY = Object.freeze({
+  provider: process.env.CALL_RESEARCH_PROVIDER || MODELS.PROVIDER.OPENAI,
+  model: process.env.CALL_RESEARCH_MODEL || MODELS.OPENAI_REPORT_WRITER,
+});
+const CALL_RESEARCH_ROUTE = Object.freeze({
+  primary: CALL_RESEARCH_PRIMARY,
+  fallback: CALL_RESEARCH_PRIMARY.provider === MODELS.PROVIDER.ANTHROPIC
+    ? Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_REPORT_WRITER })
+    : Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.FLAGSHIP }),
+});
 
 const MAX_TRANSCRIPT_CHARS = 24000;
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -193,14 +210,13 @@ function eligibleCallsQuery({ onlyUnmined = true } = {}) {
 
 // One call → validated, normalized, REDACTED chunks. Shared by the nightly
 // run and the pre-backfill bake-off (which passes a model override).
-async function extractResearchChunks(call, customer, { model = GEMINI_CALL_RESEARCH_MODEL } = {}) {
+async function extractResearchChunks(call, customer, { route = CALL_RESEARCH_ROUTE } = {}) {
   const transcript = String(call.transcription || '').slice(0, MAX_TRANSCRIPT_CHARS);
   if (!hasAgentCallerLabels(transcript)) {
     return { status: 'unlabeled', chunks: [], dropped: {} };
   }
 
-  const res = await callGemini({
-    model,
+  const res = await dispatchWithFallback(route, {
     text: buildCallResearchPrompt(transcript),
     jsonMode: true,
     maxTokens: 8192,
@@ -239,7 +255,7 @@ async function extractResearchChunks(call, customer, { model = GEMINI_CALL_RESEA
     segment_refs: mapSegmentRefs(c.quote, call.transcript_structured),
   }));
 
-  return { status: 'ok', chunks: redacted, dropped, model: res.model || model };
+  return { status: 'ok', chunks: redacted, dropped, model: res.model || route.primary.model, fallbackUsed: !!res.fallbackUsed };
 }
 
 // Delete + reinsert + stamp, one transaction per call. The stamp is a
@@ -294,9 +310,14 @@ async function mineCallResearch({ limit = 150 } = {}) {
   const skipped = {};
   const bump = (key, by = 1) => { skipped[key] = (skipped[key] || 0) + by; };
 
-  if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
-    logger.warn('[call-research] GEMINI_API_KEY not configured — skipping run');
-    return { examined: 0, mined: 0, chunksInserted: 0, skipped: { no_gemini_key: 1 }, exhausted: true, ms: 0 };
+  const keyFor = (provider) => {
+    if (provider === MODELS.PROVIDER.OPENAI) return !!process.env.OPENAI_API_KEY;
+    if (provider === MODELS.PROVIDER.ANTHROPIC) return !!process.env.ANTHROPIC_API_KEY;
+    return !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+  };
+  if (![CALL_RESEARCH_ROUTE.primary, CALL_RESEARCH_ROUTE.fallback].some((r) => keyFor(r.provider))) {
+    logger.warn('[call-research] no API key for either route leg — skipping run');
+    return { examined: 0, mined: 0, chunksInserted: 0, skipped: { no_llm_key: 1 }, exhausted: true, ms: 0 };
   }
 
   // Degrade CLOSED if the consent column is missing (voice-corpus precedent).
@@ -344,7 +365,7 @@ async function mineCallResearch({ limit = 150 } = {}) {
     if (result.status === 'unlabeled') bump('transcript_unlabeled');
     Object.entries(result.dropped || {}).forEach(([key, count]) => bump(key, count));
 
-    const persisted = await persistCallChunks(call, result.chunks, result.model || GEMINI_CALL_RESEARCH_MODEL);
+    const persisted = await persistCallChunks(call, result.chunks, result.model || CALL_RESEARCH_ROUTE.primary.model);
     if (!persisted) {
       bump('retranscribed_mid_mine'); // fresh transcript re-selects next run
       continue;
@@ -370,7 +391,7 @@ module.exports = {
   mineCallResearch,
   extractResearchChunks,
   eligibleCallsQuery,
-  GEMINI_CALL_RESEARCH_MODEL,
+  CALL_RESEARCH_ROUTE,
   _test: {
     normalizeForMatch,
     isVerbatim,

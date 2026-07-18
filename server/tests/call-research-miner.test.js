@@ -4,7 +4,7 @@
  */
 
 const {
-  GEMINI_CALL_RESEARCH_MODEL,
+  CALL_RESEARCH_ROUTE,
   _test: { normalizeForMatch, isVerbatim, normalizeChunks, redactChunkText, buildRedactionContexts, mapSegmentRefs },
 } = require('../services/call-research-miner');
 const { RESEARCH_TAGS } = require('../services/call-research-taxonomy');
@@ -50,8 +50,12 @@ describe('call-research prompt contract', () => {
     expect(validateResearchOutput({}).valid).toBe(false);
   });
 
-  test('extraction model default is env-overridable Gemini, never hardcoded Claude', () => {
-    expect(GEMINI_CALL_RESEARCH_MODEL).toMatch(/^gemini-/);
+  test('extraction route crosses providers and defaults to the bake-off winner', () => {
+    expect(CALL_RESEARCH_ROUTE.primary).toEqual({ provider: 'openai', model: expect.stringMatching(/^gpt-/) });
+    expect(CALL_RESEARCH_ROUTE.fallback.provider).toBe('anthropic');
+    // dispatchWithFallback rejects same-provider policies — the route must
+    // never collapse to one provider, whatever the env overrides say.
+    expect(CALL_RESEARCH_ROUTE.fallback.provider).not.toBe(CALL_RESEARCH_ROUTE.primary.provider);
   });
 });
 
