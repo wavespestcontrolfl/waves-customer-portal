@@ -380,7 +380,11 @@ async function getOptions(serviceId) {
   };
 }
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId }) {
+// Forecast decoration gets this long per stop before the SMS goes out
+// without it — the copy is optional, the tech's response is not.
+const FORECAST_DECORATION_TIMEOUT_MS = 1500;
+
+async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, forecastHealth = { degraded: false } }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   // Moved-first means the new slot is already booked — no confirmation
@@ -404,16 +408,27 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId }) {
   // any NWS problem renders the generic lead, never blocks the SMS.
   // Daily gives the lead its today-number; hourly scores the actual
   // booked arrival window so the better-day clause can say morning vs
-  // afternoon. Fetched in parallel to cap NWS-outage latency.
+  // afternoon. Fetched in parallel, capped by the per-commit decoration
+  // budget: one slow pair marks the whole rain-out degraded so a
+  // route-scope move never queues per-stop NWS waits in front of the
+  // tech's response (the grid cache makes healthy repeats instant).
   const todayStr = etDateString();
   const isSameDay = String(chosen.date) === todayStr;
   let outlook = null;
   let hourly = null;
-  if (lat != null && lng != null) {
-    [outlook, hourly] = await Promise.all([
-      getDailyRainOutlook(lat, lng).catch(() => null),
-      getHourlyRainOutlook(lat, lng).catch(() => null),
+  if (lat != null && lng != null && !forecastHealth.degraded) {
+    const fetched = await Promise.race([
+      Promise.all([
+        getDailyRainOutlook(lat, lng).catch(() => null),
+        getHourlyRainOutlook(lat, lng).catch(() => null),
+      ]),
+      new Promise((resolve) => { setTimeout(resolve, FORECAST_DECORATION_TIMEOUT_MS).unref?.(); }),
     ]);
+    if (fetched) {
+      [outlook, hourly] = fetched;
+    } else {
+      forecastHealth.degraded = true;
+    }
   }
   const todayChance = outlook?.[todayStr]?.rainChance ?? null;
   const newChance = outlook?.[String(chosen.date)]?.rainChance ?? null;
@@ -524,6 +539,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // there fires its reply-alt SMS first.
   const orderedJobs = (isSameDay && siblingDelta > 0) ? [...jobs].reverse() : jobs;
   const results = [];
+  // Shared across the whole rain-out: the first slow NWS pair degrades
+  // forecast decoration for every remaining stop's SMS.
+  const forecastHealth = { degraded: false };
   for (const job of orderedJobs) {
     let newWindow;
     if (job.id === serviceId) {
@@ -567,7 +585,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             zip: service.zip, latitude: service.customer_latitude, longitude: service.customer_longitude,
           }
           : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip', 'latitude', 'longitude');
-        sms = await sendMovedSms({ job, customer, reasonCode, chosen, serviceId: job.id });
+        sms = await sendMovedSms({ job, customer, reasonCode, chosen, serviceId: job.id, forecastHealth });
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
         sms = { sent: false, reason: err.message };

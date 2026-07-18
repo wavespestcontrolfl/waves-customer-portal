@@ -43,13 +43,16 @@ const RescheduleSMS = require('../services/reschedule-sms');
 
 db.fn = { now: jest.fn(() => 'NOW()') };
 
-function chain(terminal = {}) {
+function chain({ rows = [], ...terminal } = {}) {
   return {
     where: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    limit: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(1),
+    // Awaiting the builder (the pending-rows list query) resolves `rows`.
+    then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
     ...terminal,
   };
 }
@@ -78,10 +81,10 @@ function pendingRow() {
 // db call order in handleRescheduleReply: reschedule_log (fetch pending) →
 // reschedule_log (mark responded) → scheduled_services (svc) → customers →
 // reschedule_log (new_date/new_window).
-function wire(svcRow, customer = { id: 'cust-1', phone: '+19415551234' }) {
+function wire(svcRow, customer = { id: 'cust-1', phone: '+19415551234' }, logRows = [pendingRow()]) {
   wireDb({
     reschedule_log: [
-      chain({ first: jest.fn().mockResolvedValue(pendingRow()) }),
+      chain({ rows: logRows }),
       chain(),
       chain(),
     ],
@@ -177,7 +180,7 @@ describe('handleRescheduleReply — confirm-in-place', () => {
   test('call-requested reply renders the reschedule_call_requested template with built-in fallback', async () => {
     wireDb({
       reschedule_log: [
-        chain({ first: jest.fn().mockResolvedValue(pendingRow()) }),
+        chain({ rows: [pendingRow()] }),
         chain(),
       ],
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551234' }) })],
@@ -256,13 +259,30 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     // canned ack and never reach the office.
     wireDb({
       reschedule_log: [
-        chain({ first: jest.fn().mockResolvedValue({ ...pendingRow(), notes: null }) }),
+        chain({ rows: [{ ...pendingRow(), id: 'log-2', notes: null }] }),
       ],
     });
 
     const result = await RescheduleSMS.handleRescheduleReply('cust-1', 'can you call me?');
 
     expect(result).toBeNull();
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('an optionless newer log does not shadow an older offer that still has options', async () => {
+    // Customer got a pre-change offer (options attached, unanswered), then a
+    // modern no-reply rain-out. Their "1" must still act on the older offer
+    // instead of dying on the newer optionless row.
+    wire(
+      { scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' },
+      undefined,
+      [{ ...pendingRow(), id: 'log-2', notes: null }, pendingRow()],
+    );
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', '1');
+
+    expect(result).toMatchObject({ handled: true });
+    // Confirm-in-place on the older offer's live slot — no re-booking.
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 });

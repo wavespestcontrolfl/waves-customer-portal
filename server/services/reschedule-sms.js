@@ -34,27 +34,36 @@ class RescheduleSMS {
     // matched whatever pending offer row existed and booked its (possibly
     // long-past) date. 7 days comfortably covers a real reschedule
     // conversation.
-    const pending = await db('reschedule_log')
+    const pendingRows = await db('reschedule_log')
       .where({ customer_id: customerId })
       .whereNull('customer_response')
       .where('created_at', '>', new Date(Date.now() - 7 * 86400000))
       .orderBy('created_at', 'desc')
-      .first();
+      .limit(5);
 
-    if (!pending) return null;
-
-    let options = {};
-    try {
-      options = typeof pending.notes === 'string' ? JSON.parse(pending.notes) : (pending.notes || {});
-    } catch (e) {
-      logger.warn(`[reschedule-sms] Failed to parse notes for log ${pending.id}: ${e.message}`);
-    }
-    // A log without reply options can never be acted on here — rain-outs
-    // stopped attaching options (the moved SMS asks for no reply, only a
+    // A log without reply options can never be acted on here — modern
+    // rain-outs attach none (the moved SMS asks for no reply, only a
     // self-serve link), so claiming their rows would swallow the customer's
     // next inbound (e.g. a "call me" would get the canned ack and never
-    // reach the office). Fall through to normal inbound handling instead.
-    if (!options.option1 && !options.option2) return null;
+    // reach the office). Skip them and keep scanning so an OLDER pending
+    // offer that still carries options stays answerable; no actionable row
+    // at all falls through to normal inbound handling.
+    let pending = null;
+    let options = {};
+    for (const row of pendingRows || []) {
+      let parsed = {};
+      try {
+        parsed = typeof row.notes === 'string' ? JSON.parse(row.notes) : (row.notes || {});
+      } catch (e) {
+        logger.warn(`[reschedule-sms] Failed to parse notes for log ${row.id}: ${e.message}`);
+      }
+      if (parsed.option1 || parsed.option2) {
+        pending = row;
+        options = parsed;
+        break;
+      }
+    }
+    if (!pending) return null;
     const reply = (messageBody || '').trim().toLowerCase();
     const responseTime = pending.sms_sent_at ? Math.round((Date.now() - new Date(pending.sms_sent_at).getTime()) / 60000) : null;
 

@@ -524,6 +524,32 @@ describe('rain-out service', () => {
       expect(noPhone.smsReason).toBe('no_phone');
     });
 
+    test('a slow NWS pair degrades forecast decoration for the rest of the rain-out', async () => {
+      wireRoute();
+      // NWS hangs: the anchor's decoration attempt burns the 1.5s budget,
+      // then every remaining stop skips the lookup entirely — texts still
+      // go out, with the generic lead.
+      getDailyRainOutlook.mockImplementation(() => new Promise(() => {}));
+      getHourlyRainOutlook.mockImplementation(() => new Promise(() => {}));
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: true,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      expect(renderSmsTemplate.mock.calls[0][1].weather_lead).toBe("the weather isn't cooperating today");
+      expect(getDailyRainOutlook).toHaveBeenCalledTimes(1); // sibling skipped after degradation
+
+      getDailyRainOutlook.mockResolvedValue(null);
+      getHourlyRainOutlook.mockResolvedValue(null);
+    });
+
     test('route scope is bounded to the anchor route position — earlier stops are never swept', async () => {
       const { routeChain } = wireRoute();
 
