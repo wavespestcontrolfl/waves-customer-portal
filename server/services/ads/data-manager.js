@@ -462,7 +462,7 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
     .orderByRaw(`${eventTimestampSql} DESC NULLS LAST`)
     .limit(cap);
 
-  return rows.map(mapLeadCandidate);
+  return applyMarketingConsent('qualified_lead', rows.map(mapLeadCandidate));
 }
 
 function invoiceRollupSubquery() {
@@ -531,7 +531,10 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
     .orderBy('ea.service_date', 'desc')
     .limit(queryLimit);
 
-  return dedupeCandidatesByTransaction(rows.map(mapCompletedJobCandidate)).slice(0, cap);
+  // Consent must run BEFORE this dedupe (see the invariant on collectCandidates).
+  return dedupeCandidatesByTransaction(
+    await applyMarketingConsent('completed_job_revenue', rows.map(mapCompletedJobCandidate))
+  ).slice(0, cap);
 }
 
 // Consent-clean conversion candidates before either lane (Google Data Manager
@@ -570,18 +573,22 @@ async function applyMarketingConsent(conversionType, candidates) {
   return cleaned;
 }
 
-// ORDER MATTERS: consent runs BEFORE the transaction dedupe. The dedupe picks
+// INVARIANT: consent stripping runs before EVERY dedupeCandidatesByTransaction
+// call, which is why applyMarketingConsent lives inside each collector (the
+// completed-job collector dedupes internally before capping). The dedupe picks
 // the duplicate with the richest match keys — scored on PRE-consent keys, an
-// opted-out email/phone row can beat a sibling that carries a click ID, then
-// get stripped to nothing and skipped, discarding the click-ID-only fallback
-// that sibling could still have measured with. Stripping first makes the
-// scorer choose among post-consent keys, so that fallback actually survives.
+// opted-out email/phone row can beat a sibling that carries only a click ID,
+// then get stripped to nothing and skipped, silently discarding the
+// click-ID-only fallback that sibling could still have measured with.
+// Stripping first makes the scorer choose among post-consent keys, so that
+// fallback actually survives. A new collector (or a new dedupe site) must
+// keep this ordering.
 async function collectCandidates(conversionType, options = {}) {
   if (conversionType === 'qualified_lead') {
-    return dedupeCandidatesByTransaction(await applyMarketingConsent(conversionType, await collectQualifiedLeadCandidates(options)));
+    return dedupeCandidatesByTransaction(await collectQualifiedLeadCandidates(options));
   }
   if (conversionType === 'completed_job_revenue') {
-    return dedupeCandidatesByTransaction(await applyMarketingConsent(conversionType, await collectCompletedJobCandidates(options)));
+    return dedupeCandidatesByTransaction(await collectCompletedJobCandidates(options));
   }
   throw new Error(`Unsupported conversion type: ${conversionType}`);
 }
