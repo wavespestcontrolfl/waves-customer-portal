@@ -32,7 +32,10 @@ const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
   redactSpecificAmounts,
+  resolveFeeValuesForScrub,
   projectRecordedFeeValues,
+  projectArchivedFeeValues,
+  projectTypeHasInternalFindingKeys,
   projectTypeFreeTextKeys,
   projectTypeConfigFreeTextKeys,
   WDO_DEFAULT_INSPECTION_FEE,
@@ -872,7 +875,7 @@ function formatFindingForPrompt(value) {
   return String(value ?? '');
 }
 
-function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext }) {
+function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photoLines, communicationContext, archivedFeeValues = [] }) {
   const labelMap = Object.fromEntries((typeCfg.findingsFields || []).map(f => [f.key, f.label]));
   // Internal keys (inspection_fee) must never reach the model — the drafted
   // narrative is returned verbatim as customer-facing `recommendations`.
@@ -894,8 +897,18 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
   if (typeof parsedFindingsForFee === 'string') {
     try { parsedFindingsForFee = JSON.parse(parsedFindingsForFee); } catch { parsedFindingsForFee = null; }
   }
-  const recordedFeeValues = typeCarriesFee && parsedFindingsForFee?.inspection_fee != null
-    ? [parsedFindingsForFee.inspection_fee]
+  // Resolved like every other scrub site: a blank/digit-free fee ('',
+  // 'waived') bills at the flat default, so the default must join the scrub
+  // targets here too — "buyer asked about the $250 charge" has no literal
+  // cue and would otherwise reach the model. Archived filing snapshot fees
+  // (passed by the on-project endpoint; the pre-save preview has none) join
+  // for the same reason: a legacy note can quote an older filed fee
+  // (codex #2817).
+  const recordedFeeValues = typeCarriesFee
+    ? resolveFeeValuesForScrub([
+      ...(parsedFindingsForFee?.inspection_fee != null ? [parsedFindingsForFee.inspection_fee] : []),
+      ...archivedFeeValues,
+    ])
     : [];
   const scrubPromptInput = (text) => {
     if (!typeCarriesFee) return text;
@@ -1084,7 +1097,7 @@ If recent customer communication context is [none provided], omit CUSTOMER CONCE
 Do not include the customer name as a header. Do not add greetings, sign-offs, or any text outside the allowed sections.`;
 }
 
-async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [], communicationContext = '' }) {
+async function draftProjectReport({ typeCfg, findings, rawRecommendations, customer, tech, projectDate, photos = [], communicationContext = '', archivedFeeValues = [] }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const { photoLines, imageBlocks } = await buildAiPhotoInputs(photos);
@@ -1097,6 +1110,7 @@ async function draftProjectReport({ typeCfg, findings, rawRecommendations, custo
     projectDate,
     photoLines,
     communicationContext,
+    archivedFeeValues,
   });
   const msg = await anthropic.messages.create({
     model: MODELS.FLAGSHIP,
@@ -1345,6 +1359,14 @@ router.get('/:id', async (req, res, next) => {
         // lists filings via GET /:id/wdo-filings instead.
         wdo_sent_filings: undefined,
         wdo_sent_filings_count: loadWdoFilings(project).length,
+        // The archive index is stripped above, but the customer preview must
+        // scrub against archived snapshot fees exactly like the public /data
+        // serializer — a previously filed report can quote an older fee than
+        // the current editable field, and preview == public has to hold for
+        // it. Only the derived fee values ride the payload (codex #2817).
+        wdo_archived_fee_values: projectTypeHasInternalFindingKeys(project.project_type)
+          ? projectArchivedFeeValues(project)
+          : [],
         // Same computation as the public report page's fdacsPdfAvailable —
         // the customer-preview needs it to mirror the page's WDO findings
         // suppression rule (the raw archive index is stripped above).
@@ -4809,6 +4831,7 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       projectDate,
       photos,
       communicationContext,
+      archivedFeeValues: projectArchivedFeeValues(project),
     });
     logger.info(`[projects] ai-write ${project.id} — ${report.length} chars`);
     res.json({ report });

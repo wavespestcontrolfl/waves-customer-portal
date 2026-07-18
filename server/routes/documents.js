@@ -4,7 +4,14 @@ const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
-const { getProjectType, customerSafeServiceNotes, redactInspectionFeeCuesForType } = require('../services/project-types');
+const {
+  getProjectType,
+  customerSafeServiceNotes,
+  redactInspectionFeeCuesForType,
+  redactSpecificAmounts,
+  projectRecordedFeeValues,
+  projectTypeHasInternalFindingKeys,
+} = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
@@ -795,10 +802,18 @@ router.get('/', authenticate, async (req, res, next) => {
       return {
         id: `project_${p.id}`,
         documentType,
-        // same type-gated fee scrub as the report page headline — covers a
-        // legacy title (or a CAS-skipped concurrent write) at this egress
-        // (codex #2817)
-        title: (p.title ? redactInspectionFeeCuesForType(p.title, p.project_type) : null)
+        // same type-gated fee scrub as the report page headline, cue AND
+        // recorded-value passes — covers a legacy title (or a CAS-skipped
+        // concurrent write) at this egress even when it paraphrases the fee
+        // without the literal cue (codex #2817)
+        title: (p.title
+          ? (() => {
+            const safe = redactInspectionFeeCuesForType(p.title, p.project_type);
+            return projectTypeHasInternalFindingKeys(p.project_type)
+              ? redactSpecificAmounts(safe, projectRecordedFeeValues(p))
+              : safe;
+          })()
+          : null)
           || (isCertificate ? label : `${label} Report`),
         description: p.sent_at ? `Report sent ${formatDate(p.sent_at)}` : label,
         fileName: `${label.replace(/\s+/g, '_')}_${p.sent_at ? new Date(p.sent_at).toISOString().slice(0, 10) : 'report'}.pdf`,

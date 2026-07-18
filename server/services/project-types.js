@@ -1064,24 +1064,36 @@ function redactProjectTitleForWrite(title, projectTypeKey) {
 // may only survive there). Feeds the VALUE-based scrub at egress and in the
 // backfill so paraphrased fees ("the quoted $250 charge") are caught without
 // the literal cue (codex #2817).
-function projectRecordedFeeValues(project) {
+const parseJsonish = (v) => {
+  if (!v) return null;
+  if (typeof v === 'object') return v;
+  try { return JSON.parse(v); } catch { return null; }
+};
+
+// Raw fee values from the ARCHIVED filing snapshots alone (a stale draft fee
+// an old narrative quoted may only survive there). Deliberately un-resolved:
+// callers merge these with whichever live fee applies to them — the stored
+// row at egress, the unsaved edit state in the admin preview, the request
+// body in the AI-write prompt — before resolveFeeValuesForScrub.
+function projectArchivedFeeValues(project) {
   const values = [];
-  const parse = (v) => {
-    if (!v) return null;
-    if (typeof v === 'object') return v;
-    try { return JSON.parse(v); } catch { return null; }
-  };
-  const findings = parse(project?.findings);
-  if (findings?.inspection_fee != null) values.push(findings.inspection_fee);
-  const filings = parse(project?.wdo_sent_filings);
+  const filings = parseJsonish(project?.wdo_sent_filings);
   if (Array.isArray(filings)) {
     for (const filing of filings) {
-      const snap = parse(filing?.findings) || filing?.findings;
+      const snap = parseJsonish(filing?.findings) || filing?.findings;
       if (snap && typeof snap === 'object' && snap.inspection_fee != null) {
         values.push(snap.inspection_fee);
       }
     }
   }
+  return values;
+}
+
+function projectRecordedFeeValues(project) {
+  const values = [];
+  const findings = parseJsonish(project?.findings);
+  if (findings?.inspection_fee != null) values.push(findings.inspection_fee);
+  values.push(...projectArchivedFeeValues(project));
   // Digit-free entries ('', 'waived') can't be scrub targets but still BILL
   // at the flat default — they must not suppress it (codex #2817).
   return resolveFeeValuesForScrub(values);
@@ -1239,6 +1251,7 @@ module.exports = {
   redactSpecificAmounts,
   resolveFeeValuesForScrub,
   projectRecordedFeeValues,
+  projectArchivedFeeValues,
   findingsContainFeeCue,
   filingBinaryMayDiscloseFee,
   customerSafeServiceNotes,

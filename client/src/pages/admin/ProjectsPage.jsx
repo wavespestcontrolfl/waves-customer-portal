@@ -889,11 +889,16 @@ function CustomerProjectReportPreview({
   // approve text the customer never sees (codex #2817). Type-gated to WDO,
   // the only type carrying the internal fee field.
   // Cue + recorded-value passes, matching the server /data serializer — the
-  // fee values come from the live edit state (findings.inspection_fee),
+  // fee values are the live edit state (findings.inspection_fee) merged with
+  // the archived filing snapshot fees the detail endpoint derives (a
+  // previously filed report can quote an older fee than the current field),
   // falling back to the shared flat default when blank, so staff approve
   // exactly what the customer's token serves (codex #2817).
   const previewFeeValues = project.project_type === WDO_TYPE
-    ? resolveFeeValuesForScrub(findings?.inspection_fee != null ? [findings.inspection_fee] : [])
+    ? resolveFeeValuesForScrub([
+      ...(findings?.inspection_fee != null ? [findings.inspection_fee] : []),
+      ...(Array.isArray(project.wdo_archived_fee_values) ? project.wdo_archived_fee_values : []),
+    ])
     : [];
   const feeRedact = project.project_type === WDO_TYPE
     ? (text) => (typeof text === "string"

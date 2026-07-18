@@ -99,6 +99,26 @@ describe('free-text gating and default fee', () => {
     expect(redactSpecificAmounts('Property at 250 Oakwood Drive inspected.', ['250']))
       .toBe('Property at 250 Oakwood Drive inspected.');
   });
+  test('archived filing snapshot fees join the recorded set, raw and un-resolved', () => {
+    const { projectArchivedFeeValues } = require('../services/project-types');
+    const project = {
+      findings: { inspection_fee: '175' },
+      wdo_sent_filings: JSON.stringify([
+        { findings: { inspection_fee: '325' } },
+        { findings: {} },
+      ]),
+    };
+    // the helper returns RAW snapshot values only — callers merge in their
+    // own live fee (stored row, unsaved edit state, or request body) before
+    // resolveFeeValuesForScrub, so no default is added here
+    expect(projectArchivedFeeValues(project)).toEqual(['325']);
+    expect(projectArchivedFeeValues({ findings: { inspection_fee: '175' } })).toEqual([]);
+    // full egress set = live + archived; a digit-free live fee never
+    // suppresses a digit-bearing archived one
+    expect(projectRecordedFeeValues(project)).toEqual(['175', '325']);
+    expect(projectRecordedFeeValues({ ...project, findings: { inspection_fee: 'waived' } }))
+      .toEqual(['325']);
+  });
 });
 
 describe('redactSpecificAmounts (legacy backfill value scrub)', () => {
