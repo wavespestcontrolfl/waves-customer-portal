@@ -395,7 +395,9 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
     }
     // Answer-arrived recheck: retire only when EVERY asked item is now
     // known — a partially answered ask is still actionable.
-    const hasAddressNow = [lead?.address, customer?.address_line1]
+    // The linked draft estimate's address counts too — operators resolve
+    // missing addresses directly on the estimate row.
+    const hasAddressNow = [lead?.address, customer?.address_line1, estimate?.address]
       .some((value) => value && /\d/.test(String(value)));
     const { hasConcreteServiceInterest } = require('../services/lead-estimate-automation');
     // ONLY the lead row answers a service ask: customers.lead_service_interest

@@ -288,6 +288,21 @@ async function parkClarifyAsk({
   }
 }
 
+// A KNOWN-service tail on a captured address ("123 Main St, pest control")
+// is the service answer, not part of the address — bounded vocabulary,
+// deterministic split. Returns { address, serviceTail }.
+const SERVICE_TAIL_RE = /[,\s]+((?:quarterly\s+|monthly\s+|recurring\s+|one[-\s]?time\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\s+(?:control|care|service|treatment|program|removal))?)\s*$/i;
+function stripServiceTail(address) {
+  let out = String(address || '').trim();
+  let tailParts = [];
+  let match;
+  while ((match = out.match(SERVICE_TAIL_RE))) {
+    tailParts.unshift(match[1]);
+    out = out.slice(0, match.index).replace(/[,\s]+$/, '').trim();
+  }
+  return { address: out, serviceTail: tailParts.join(' ') || null };
+}
+
 // Local address heuristics (mirrors lead-intake's leniency; duplicated
 // because lead-intake requires THIS module — importing back would cycle).
 const CLARIFY_STREET_SUFFIX_RE = /\b(st|street|ave|avenue|blvd|boulevard|rd|road|dr|drive|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|trl|trail|hwy|highway|loop)\b/i;
@@ -339,13 +354,21 @@ async function handleClarifyReply({ phone, body }) {
 
     const awaiting = await db('message_drafts')
       .where({ intent: 'estimate_clarify', source_ref: `clarify:${digits}` })
-      .whereNotNull('sent_at')
-      .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS))
       // Consumed asks (every item answered) leave reply routing — later
       // chit-chat ("thanks, sounds good") must not overwrite real answers
-      // or re-trigger drafting.
+      // or re-trigger drafting. PENDING asks route too: a customer who
+      // answers before the owner approves must have the answer recorded
+      // and the stale question rewritten/retired.
       .whereRaw("(flags->>'answered_at') is null")
-      .orderBy('sent_at', 'desc')
+      .where(function pendingOrRecentlySent() {
+        this.where(function pendingOpen() {
+          this.where('status', 'pending').whereNull('sent_at');
+        }).orWhere(function sentRecent() {
+          this.whereNotNull('sent_at')
+            .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
+        });
+      })
+      .orderByRaw('(sent_at is not null) asc, sent_at desc')
       .first();
     if (!awaiting) return { handled: false };
 
@@ -365,17 +388,32 @@ async function handleClarifyReply({ phone, body }) {
     const text = String(body).trim();
     const candidates = [];
     let capturedAddress = null;
+    let rawCapturedAddress = null;
+    let serviceTailFromAddress = null;
     if (missing.includes('street_address')) {
-      capturedAddress = extractAddressReply(text);
-      if (capturedAddress) candidates.push('street_address');
+      rawCapturedAddress = extractAddressReply(text);
+      if (rawCapturedAddress) {
+        // "123 Main St, pest control" — a KNOWN-service tail is the
+        // service answer, never part of the address.
+        const stripped = stripServiceTail(rawCapturedAddress);
+        if (stripped.address.length >= 6) {
+          capturedAddress = stripped.address;
+          serviceTailFromAddress = stripped.serviceTail;
+          candidates.push('street_address');
+        }
+      }
     }
     let serviceText = null;
-    if (missing.includes('specific_service')) {
+    if (missing.includes('specific_service') && serviceTailFromAddress) {
+      // Vocabulary-matched tail — no classifier round needed.
+      serviceText = serviceTailFromAddress;
+      candidates.push('specific_service');
+    } else if (missing.includes('specific_service')) {
       // The classifier is the acceptance bar — length alone would record
       // "thanks, sounds good" as the requested service. The RAW text is
       // stored (label semantics preserved); the classifier only vouches
       // that it actually names a service.
-      serviceText = capturedAddress ? text.replace(capturedAddress, ' ') : text;
+      serviceText = rawCapturedAddress ? text.replace(rawCapturedAddress, ' ') : text;
       serviceText = serviceText.replace(/\s+/g, ' ').replace(/^[\s,\-–—:]+|[\s,\-–—:]+$/g, '').trim();
       if (serviceText.length >= 3 && serviceText.length <= 80) {
         const { classifyServiceIntent } = require('./sms-service-intent');
@@ -429,14 +467,23 @@ async function handleClarifyReply({ phone, body }) {
       }
 
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
-      await trx('message_drafts').where({ id: fresh.id }).update({
-        flags: JSON.stringify({
-          ...freshFlags,
-          missing: remaining,
-          answer_recorded: [...(Array.isArray(freshFlags.answer_recorded) ? freshFlags.answer_recorded : []), ...recorded],
-          ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
-        }),
+      const answeredFlags = JSON.stringify({
+        ...freshFlags,
+        missing: remaining,
+        answer_recorded: [...(Array.isArray(freshFlags.answer_recorded) ? freshFlags.answer_recorded : []), ...recorded],
+        ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
       });
+      if (!fresh.sent_at && fresh.status === 'pending') {
+        // Answered before approval: rewrite the pending copy to the
+        // remainder or retire it outright (status-guarded — a claim wins).
+        await trx('message_drafts')
+          .where({ id: fresh.id, status: 'pending' })
+          .update(remaining.length
+            ? { draft_response: composeClarifyBody({ missing: remaining, firstName: null }), flags: answeredFlags }
+            : { status: 'rejected', flags: answeredFlags });
+      } else {
+        await trx('message_drafts').where({ id: fresh.id }).update({ flags: answeredFlags });
+      }
       return { recorded };
     });
     if (!locked.recorded.length) return { handled: false };

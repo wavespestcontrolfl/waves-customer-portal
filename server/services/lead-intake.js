@@ -62,6 +62,18 @@ function looksLikeAddress(body) {
 // carries a street suffix (latest wins so "I have 2 dogs, ... 123 Main St"
 // captures the street, not the dogs). Conservative — no suffix, no capture;
 // the awaiting_address state still handles a follow-up reply.
+// A KNOWN-service tail on a captured address ("123 Main St, pest control")
+// belongs to the service, not the address — the classifier reads the full
+// body separately, so the tail is simply dropped here.
+const SERVICE_TAIL_RE = /[,\s]+((?:quarterly\s+|monthly\s+|recurring\s+|one[-\s]?time\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\s+(?:control|care|service|treatment|program|removal))?)\s*$/i;
+function stripServiceTailFromAddress(address) {
+  let out = String(address || '').trim();
+  while (SERVICE_TAIL_RE.test(out)) {
+    out = out.replace(SERVICE_TAIL_RE, '').replace(/[,\s]+$/, '').trim();
+  }
+  return out;
+}
+
 function extractAddressCandidate(body) {
   const text = String(body || '');
   let best = null;
@@ -77,6 +89,10 @@ function extractAddressCandidate(body) {
     if (candidate.length >= 6 && candidate.length <= 160 && STREET_SUFFIX_RE.test(candidate)) {
       best = candidate;
     }
+  }
+  if (best) {
+    const stripped = stripServiceTailFromAddress(best);
+    best = stripped.length >= 6 ? stripped : null;
   }
   return best;
 }
