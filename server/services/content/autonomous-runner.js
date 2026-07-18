@@ -672,6 +672,18 @@ class AutonomousRunner {
       if (!comparisonResult.pass) {
         const blocking = comparisonResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
         const notes = `Comparison-table gate failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        // A THROWN evaluator (COMPARISON_TABLE_GATE_ERROR) is an engine
+        // fault, not a draft problem — a redraft can't fix it. Park for a
+        // human, same fail-closed posture as the *_unavailable paths.
+        if (blocking.some((f) => f.code === 'COMPARISON_TABLE_GATE_ERROR')) {
+          const finalized = await finalize(run, t0, {
+            outcome: 'skipped_gate_fail',
+            skip_reason: 'comparison_table_failed',
+            reviewer_notes: `${notes} — evaluator threw (engine fault); parked for review, not retried.`,
+          });
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken });
+          return finalized;
+        }
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken, skipReason: 'comparison_table_failed', notes, blocking,
         });
@@ -899,8 +911,14 @@ class AutonomousRunner {
       // redraft can't fix a broken gate, and silently skipping would hide
       // an engine fault (same fail-closed posture as the *_unavailable
       // paths above).
+      // content-quality-gate reports some infrastructure failures INSIDE
+      // hard_failures (evaluator_threw:*, pii_scan_unavailable:*,
+      // no_previous_version_to_compare) rather than as a top-level .error —
+      // those are engine faults too, not writer misses.
+      const qualityInfraFailure = Array.isArray(qualityResult?.hard_failures)
+        && qualityResult.hard_failures.some((f) => /^(evaluator_threw:|pii_scan_unavailable|no_previous_version_to_compare)/.test(String(f?.reason ?? f)));
       const gateInfraError = Boolean(uniquenessResult?.error || qualityResult?.error
-        || seoCompletionResult?.error || prePublishVisibilityResult?.error);
+        || seoCompletionResult?.error || prePublishVisibilityResult?.error) || qualityInfraFailure;
       if (!gatesPass && !brief.human_review_required && !gateInfraError) {
         const summary = this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief);
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {

@@ -104,6 +104,23 @@ describe('handleUndeliveredQuoteLink', () => {
     expect(result).toMatchObject({ handled: false, reason: 'not_quote_link' });
   });
 
+  test('claim exists but its lead is no longer open → STOP (never stamp a newer lead sharing the phone)', async () => {
+    const smsChain = chainFor({ id: 'sms1', to_phone: '+19412268022' });
+    const claimChain = chainFor({ lead_id: 'lead1' });
+    const leadLookup = chainFor(undefined); // lead1 converted/deleted before the delayed bounce
+    const leadChains = [leadLookup];
+    db.mockImplementation((table) => {
+      if (table === 'sms_log') return smsChain;
+      if (table === 'voicemail_sms_claims') return claimChain;
+      if (table === 'leads') return leadChains.shift() || chainFor(null);
+      return chainFor(null);
+    });
+
+    const result = await handleUndeliveredQuoteLink({ sid: 'SMabc', status: 'undelivered', errorCode: '30006', to: '+19412268022' });
+
+    expect(result).toMatchObject({ handled: false, reason: 'claimed_lead_not_open' });
+  });
+
   test('no claim row falls back to the newest still-new recent lead on the phone', async () => {
     const smsChain = chainFor({ id: 'sms1', to_phone: '+19412268022' });
     const claimChain = chainFor(undefined); // pre-claims-table send

@@ -416,15 +416,20 @@ async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
     // (sent/scheduled), which are the only ones that can bounce.
     const claim = await db('voicemail_sms_claims').where({ phone }).first('lead_id');
     let lead = null;
-    if (claim?.lead_id) {
+    if (claim) {
+      // The claim names the exact lead this text went to. If that lead is no
+      // longer open (contacted/converted/deleted before a delayed bounce
+      // arrived), STOP — falling back to phone+recency here could stamp an
+      // unrelated newer lead sharing the number.
+      if (!claim.lead_id) return { handled: false, reason: 'claim_without_lead' };
       lead = await db('leads')
         .where('id', claim.lead_id)
         .where('status', 'new')
         .whereNull('deleted_at')
         .first('id', 'next_follow_up_at');
-    }
-    if (!lead) {
-      // No usable claim row (pre-claims-table sends) — newest still-new
+      if (!lead) return { handled: false, reason: 'claimed_lead_not_open' };
+    } else {
+      // No claim row at all (pre-claims-table sends) — newest still-new
       // recent lead on this phone as the fallback.
       lead = await db('leads')
         .where('phone', phone)
@@ -433,8 +438,8 @@ async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
         .where('created_at', '>=', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000))
         .orderBy('created_at', 'desc')
         .first('id', 'next_follow_up_at');
+      if (!lead) return { handled: false, reason: 'no_open_lead' };
     }
-    if (!lead) return { handled: false, reason: 'no_open_lead' };
 
     const now = new Date();
     // Single guarded UPDATE, not read-then-write: only pull the follow-up in
