@@ -112,7 +112,7 @@ async function subscribeOrResubscribe({
       return { subscriber: fresh, action: 'confirmed' };
     }
 
-    if (existing.status === 'unsubscribed') {
+    if (existing.status === 'unsubscribed' || existing.status === 'inactive') {
       const updates = {
         source,
         first_name: firstName !== null ? firstName : existing.first_name,
@@ -121,6 +121,14 @@ async function subscribeOrResubscribe({
         unsubscribed_at: null,
         updated_at: new Date(),
       };
+      // 'inactive' = suppressed by the sunset job (newsletter-sunset.js), not
+      // an opt-out. A comeback re-enters through the same DOI path; clear the
+      // hygiene markers so the new subscription starts a clean episode.
+      if (existing.status === 'inactive') {
+        updates.deactivated_at = null;
+        updates.deactivated_reason = null;
+        updates.reengagement_flagged_at = null;
+      }
       if (requireConfirmation) {
         updates.status = 'pending';
         updates.confirmation_sent_at = new Date();
