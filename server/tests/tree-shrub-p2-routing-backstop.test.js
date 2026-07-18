@@ -16,7 +16,11 @@
 
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
 const { detectServiceCategory } = require('../utils/service-normalizer');
-const { recurringTreeShrubRowAtRetiredCadence, rewriteTreeShrubRecurringServices } = require('../routes/estimate-public');
+const {
+  recurringTreeShrubRowAtRetiredCadence,
+  retiredTreeShrubRequoteNeeded,
+  rewriteTreeShrubRecurringServices,
+} = require('../routes/estimate-public');
 const { remainingUnitCatalogKey } = require('../services/estimate-converter');
 
 describe('service-line routing — tree/shrub tokens beat fertil/weed', () => {
@@ -107,6 +111,39 @@ describe('recurringTreeShrubRowAtRetiredCadence — v4.5 six-visit mandate backs
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', treatmentsPerYear: 9 }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 4 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 6 }))).toBe(false);
+  });
+});
+
+describe('retiredTreeShrubRequoteNeeded — shared quote gate (deposit mirror contract, codex P1 r4)', () => {
+  // /data (canAccept), /deposit-intent, and /recurring-card-intent read the
+  // shared quote requirement — the retired condition must live there, not
+  // only in the accept-time 409, or a stale estimate collects a deposit the
+  // accept then rejects.
+  test('all-retired stored tier rows requote', () => {
+    expect(retiredTreeShrubRequoteNeeded({
+      results: { ts: [{ key: 'enhanced', ann: 900 }] },
+      recurring: { services: [{ name: 'Every 6 Weeks Tree & Shrub Care Service' }] },
+    })).toBe(true);
+  });
+
+  test('a selectable current tier keeps self-serve accept', () => {
+    expect(retiredTreeShrubRequoteNeeded({
+      results: { ts: [{ key: 'light' }, { key: 'standard' }, { key: 'enhanced' }] },
+      recurring: { services: [{ name: 'Every 6 Weeks Tree & Shrub Care Service' }] },
+    })).toBe(false);
+  });
+
+  test('no tier rows: explicit retired-cadence row requotes; cadence-less and non-T&S stay self-serve', () => {
+    expect(retiredTreeShrubRequoteNeeded({
+      recurring: { services: [{ name: 'Tree & Shrub Care', frequency: 'monthly' }] },
+    })).toBe(true);
+    expect(retiredTreeShrubRequoteNeeded({
+      recurring: { services: [{ name: 'Tree & Shrub Care' }] },
+    })).toBe(false);
+    expect(retiredTreeShrubRequoteNeeded({
+      recurring: { services: [{ name: 'Quarterly Pest Control' }] },
+    })).toBe(false);
+    expect(retiredTreeShrubRequoteNeeded(null)).toBe(false);
   });
 });
 

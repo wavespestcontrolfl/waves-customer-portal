@@ -10983,6 +10983,32 @@ function retiredLawnRequoteNeeded(estData = null) {
   return recurringKeys.includes('lawn_care');
 }
 
+// Tree & Shrub twin of retiredLawnRequoteNeeded (codex P1 r4): the retired
+// 9x Enhanced / 12x Premium T&S condition must be part of the SHARED quote
+// requirement, not only the accept-time 409 — /data (canAccept),
+// /deposit-intent, and /recurring-card-intent all read this gate, and an
+// accept-only check would let a stale estimate collect a deposit or save a
+// card before PUT /accept rejects (deposit mirror contract). Estimates that
+// still render a current (light/standard) tier card keep self-serve accept —
+// selecting one restamps the row and passes the accept backstop.
+function retiredTreeShrubRequoteNeeded(estData = null) {
+  if (!estData || typeof estData !== 'object') return false;
+  const resultStats = recurringResultStats(estData);
+  const rows = Array.isArray(resultStats?.ts) ? resultStats.ts : [];
+  const tierKeys = rows
+    .map((row) => treeShrubTierKey(row))
+    .filter((key) => ['light', 'standard', 'enhanced'].includes(key));
+  if (tierKeys.length) {
+    if (tierKeys.some((key) => key === 'light' || key === 'standard')) return false;
+    const { recurringSvcList } = acceptanceServiceLists(estData);
+    return (recurringSvcList || []).map(recurringServiceKey).includes('tree_shrub');
+  }
+  // No tier rows (legacy/mixed shape): a stored row explicitly at a retired
+  // cadence requotes up front. Cadence-less legacy rows keep self-serve —
+  // the converter schedules them at the current bi-monthly program.
+  return recurringTreeShrubRowAtRetiredCadence(estData);
+}
+
 // Does the estimate STORE a recurring lawn price below the program minimum?
 // The React view re-clamps stored rows at render (clampLawnLadderEntry), but
 // the legacy SSR page derives its hero/billing figures straight from the
@@ -11112,6 +11138,9 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const retiredLawnRequote = retiredLawnRequoteNeeded(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
+  const retiredTreeShrubRequote = retiredTreeShrubRequoteNeeded(
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  );
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
@@ -11119,7 +11148,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
     || commercialProposal
     || commercialRiskTypeReview
     || commercialLowConfidenceSiteQuote
-    || retiredLawnRequote;
+    || retiredLawnRequote
+    || retiredTreeShrubRequote;
 
   return {
     quoteRequired,
@@ -11129,7 +11159,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialProposal ? 'commercial_proposal' : null)
         || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
-        || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)),
+        || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
+        || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)),
     items: quoteRequiredItems,
   };
 }
@@ -16464,6 +16495,7 @@ module.exports.lawnFrequenciesFromEngineResult = lawnFrequenciesFromEngineResult
 module.exports.applySelectedLawnTierToEstimateData = applySelectedLawnTierToEstimateData;
 module.exports.recurringLawnRowAtRetiredCadence = recurringLawnRowAtRetiredCadence;
 module.exports.recurringTreeShrubRowAtRetiredCadence = recurringTreeShrubRowAtRetiredCadence;
+module.exports.retiredTreeShrubRequoteNeeded = retiredTreeShrubRequoteNeeded;
 module.exports.rewriteTreeShrubRecurringServices = rewriteTreeShrubRecurringServices;
 module.exports.storedLawnRowBelowProgramFloor = storedLawnRowBelowProgramFloor;
 module.exports.applySelectedMosquitoTierToEstimateData = applySelectedMosquitoTierToEstimateData;
