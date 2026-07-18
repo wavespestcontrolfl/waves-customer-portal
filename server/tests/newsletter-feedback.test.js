@@ -14,6 +14,7 @@ const {
   renderFeedbackHtml,
   renderFeedbackText,
   hasFeedbackToken,
+  ensureFeedbackToken,
   buildFeedbackSubstitutions,
   neutralizeFeedbackTokens,
   recordFeedbackReaction,
@@ -78,6 +79,19 @@ describe('feedback rendering', () => {
     expect(subs[FEEDBACK_HTML_TOKEN]).toContain('<a href');
     expect(subs[FEEDBACK_TEXT_TOKEN]).not.toContain('<a href');
     expect(subs[FEEDBACK_TEXT_TOKEN]).toContain(TOKEN);
+  });
+
+  test('ensureFeedbackToken appends once and is idempotent (sender + preview/proof parity)', () => {
+    const ensured = ensureFeedbackToken({ html: '<p>body</p>', text: 'body' });
+    expect(ensured.html).toContain(FEEDBACK_HTML_TOKEN);
+    expect(ensured.text).toContain(FEEDBACK_TEXT_TOKEN);
+    // Already-tokenized bodies (assembled drafts) pass through untouched —
+    // in either part.
+    expect(ensureFeedbackToken(ensured)).toEqual(ensured);
+    const htmlOnly = ensureFeedbackToken({ html: `x ${FEEDBACK_HTML_TOKEN}`, text: 'plain' });
+    expect(htmlOnly.text).toBe('plain');
+    // Empty text stays empty — no footer-only text part.
+    expect(ensureFeedbackToken({ html: '<p>x</p>', text: undefined }).text).toBeUndefined();
   });
 
   test('neutralizeFeedbackTokens leaves no literal token on archive surfaces', () => {

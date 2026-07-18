@@ -71,6 +71,7 @@ function buildDb({ send, deliveries = [], subscribers = [], onCalendarUpdate } =
     newsletter_sends: [
       chain({ first: send }),                              // fetch send
       chain({ updated: 1, returning: [{ id: send?.id }] }),// atomic claim
+      chain({ updated: 1 }),                               // per-chunk heartbeat (stale-lease keepalive)
       chain({ updated: 1 }),                               // final status update
       chain({ first: null }),                              // social-share re-fetch (null → share skipped)
     ],
@@ -258,6 +259,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
           },
         }),
         chain({ returning: [{ id: 'send-1' }] }),
+        chain({ updated: 1 }), // per-chunk heartbeat (stale-lease keepalive)
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_subscribers: [
@@ -406,6 +408,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ first: failedSend }),                         // resume fetch
         chain({ returning: [{ id: 's' }], onUpdate: (payload) => { claimUpdate = payload; } }),
         chain({ first: { ...failedSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat (stale-lease keepalive)
         chain({ updated: 1 }),                                // final status update
       ],
       newsletter_send_deliveries: [
@@ -461,6 +464,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ first: sentSend }),                          // resume fetch
         chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
         chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat (stale-lease keepalive)
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_send_deliveries: [
@@ -534,6 +538,8 @@ describe('resumeCampaign — preconditions', () => {
         chain({ first: sentSend }),                          // resume fetch
         chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
         chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        // No heartbeat entry: the self-healed chunk short-circuits (continue)
+        // before the send, so the per-chunk keepalive never fires.
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_send_deliveries: [
@@ -616,6 +622,7 @@ describe('resumeCampaign — preconditions', () => {
         chain({ first: sentSend }),                          // resume fetch
         chain({ returning: [{ id: 's' }] }),                  // conditional preclaim
         chain({ first: { ...sentSend, status: 'sending' } }), // sendCampaign fetch after resume preclaim
+        chain({ updated: 1 }),                                // per-chunk heartbeat (stale-lease keepalive)
         chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
       ],
       newsletter_send_deliveries: [

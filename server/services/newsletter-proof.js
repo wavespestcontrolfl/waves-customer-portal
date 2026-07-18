@@ -191,8 +191,13 @@ async function renderSendPreview(send, toEmail) {
   // Demo unsubscribe URL — won't resolve to a real subscriber but the link
   // renders correctly and Gmail/Apple Mail will show the native unsub UI.
   const demoUrl = sendgrid.unsubscribeUrl('test-' + send.id);
+  // Same reaction-footer ensure step the live sender runs, so a proof/test
+  // of a hand-composed campaign shows the footer the broadcast will carry
+  // (neutralized to inert chips below — no per-recipient token here).
+  const { ensureFeedbackToken } = require('./newsletter-feedback');
+  const ensured = ensureFeedbackToken({ html: send.html_body || '', text: send.text_body });
   let html = wrapNewsletter({
-    body: send.html_body || '',
+    body: ensured.html,
     unsubscribeUrl: demoUrl,
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
@@ -220,7 +225,7 @@ async function renderSendPreview(send, toEmail) {
       .split(GRASS_TYPE_TOKEN).join(grassValue),
   ));
   html = applyTokens(html);
-  const text = send.text_body ? applyTokens(send.text_body) : undefined;
+  const text = ensured.text ? applyTokens(ensured.text) : undefined;
   return { html, text, unsubscribeUrl: demoUrl };
 }
 

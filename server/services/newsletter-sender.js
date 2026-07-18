@@ -29,7 +29,7 @@ const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, C
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
-const { hasFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
+const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection } = require('./newsletter-event-selection');
 
@@ -270,6 +270,9 @@ function sendingLeaseMinutes() {
     : DEFAULT_SENDING_LEASE_MINUTES;
 }
 
+// updated_at doubles as the claim heartbeat: sendCampaign touches it after
+// every chunk, so "stale" means no chunk progress for a full lease window —
+// not merely a long-running send.
 function sendingClaimIsStale(send, now = new Date()) {
   if (send?.status !== 'sending') return false;
   const claimedAt = new Date(send.updated_at || send.created_at || 0).getTime();
@@ -472,16 +475,16 @@ async function sendCampaign(sendId, opts = {}) {
 
   // Every edition ends with the reaction footer (owner directive
   // 2026-07-17). Assembled drafts already carry the token; hand-composed
-  // campaigns get it appended at send time so the ask is a system property
-  // — same philosophy as ensureLegalTextFooter — instead of a template
-  // author's memory item. Local copies only: the persisted html_body stays
-  // the operator's content. Deterministic, so resumes rebuild identically.
-  let bodyHtml = send.html_body || '';
-  let bodyText = send.text_body;
-  if (!hasFeedbackToken([bodyHtml, bodyText].filter(Boolean).join('\n'))) {
-    bodyHtml = `${bodyHtml}\n\n{{feedback}}`;
-    if (bodyText) bodyText = `${bodyText}\n\n{{feedback-text}}`;
-  }
+  // campaigns get it appended so the ask is a system property — same
+  // philosophy as ensureLegalTextFooter. The SAME helper runs in the
+  // composer preview, test send, and owner proof, so review surfaces always
+  // show the footer the broadcast will carry. Local copies only: the
+  // persisted html_body stays the operator's content; deterministic, so
+  // resumes rebuild identically.
+  const { html: bodyHtml, text: bodyText } = ensureFeedbackToken({
+    html: send.html_body || '',
+    text: send.text_body,
+  });
 
   // Wrap the operator-written body in branded chrome (header + footer
   // + Waves logo). The unsubscribe URL is the SendGrid substitution
@@ -669,6 +672,15 @@ async function sendCampaign(sendId, opts = {}) {
         .update({ status: 'failed', bounce_reason: err.message.slice(0, 500), updated_at: new Date() });
         failed += updated;
       }
+
+      // Heartbeat: History's stale-claim recovery frees a 'sending' row once
+      // updated_at exceeds the lease. Touch the claim after every chunk —
+      // success or failure, both are progress — so a long-running send never
+      // looks abandoned while it's working; recovery only unlocks when no
+      // chunk has completed for a full lease window.
+      await db('newsletter_sends')
+        .where({ id: send.id, status: 'sending' })
+        .update({ updated_at: new Date() });
     }
   }
 
@@ -914,7 +926,18 @@ async function processScheduledSends() {
         continue;
       }
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);
-      try { await db('newsletter_sends').where({ id: row.id, status: 'sending' }).update({ status: 'failed' }); } catch { /* swallow */ }
+      try {
+        const flipped = await db('newsletter_sends').where({ id: row.id, status: 'sending' }).update({ status: 'failed' });
+        if (!flipped) {
+          // Pre-claim throw (e.g. SendGrid unconfigured): the row never
+          // reached 'sending' and would otherwise stay 'scheduled' — due
+          // forever, retried every tick, invisible as a failure. Same
+          // status-guarded flip as the route's fire-and-forget catch.
+          await db('newsletter_sends')
+            .where({ id: row.id, status: 'scheduled' })
+            .update({ status: 'failed', updated_at: new Date() });
+        }
+      } catch { /* swallow */ }
     }
   }
   return { processed };

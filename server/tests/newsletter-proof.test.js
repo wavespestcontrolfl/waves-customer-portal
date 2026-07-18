@@ -43,6 +43,12 @@ jest.mock('../services/notification-triggers', () => ({
 }));
 jest.mock('../services/email-template', () => ({
   wrapNewsletter: ({ body }) => `<wrapped>${body}</wrapped>`,
+  // The reaction footer is ensured on every proof body and neutralized by
+  // applyTokens; its neutral render resolves colors through this palette.
+  newsletterPalette: () => ({
+    navy: '#04395E', blue: '#0A7EC2', gold: '#F4B014', muted: '#4F5B70',
+    rule: '#D8E4EF', cardBg: '#F4F9FD', homeownerBg: '#E9F3FB',
+  }),
 }));
 
 const db = require('../models/db');

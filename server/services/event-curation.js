@@ -31,8 +31,7 @@ const logger = require('./logger');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const {
   excludeRoutineRecurringFromQuery,
-  isRoutineRecurringEvent,
-  isEditoriallyNewEvent,
+  isEligibleForFreshDigest,
 } = require('./event-freshness');
 const {
   filterPreviouslyFeaturedIdentities,
@@ -71,10 +70,11 @@ function buildCurationCandidateQuery(limit = CURATION_RUN_LIMIT) {
   const query = db('events_raw as e')
     .leftJoin('event_sources as s', 's.id', 'e.source_id')
     .select(
-      'e.id', 'e.title', 'e.description', 'e.start_at', 'e.venue_name',
-      'e.city', 'e.event_type', 'e.recurrence_type', 'e.freshness_status',
-      'e.times_featured', 'e.last_featured_at', 'e.pulled_at', 'e.is_free',
-      'e.family_friendly', 's.name as source_name',
+      'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
+      'e.venue_name', 'e.city', 'e.event_type', 'e.recurrence_type',
+      'e.freshness_status', 'e.times_featured', 'e.last_featured_at',
+      'e.pulled_at', 'e.is_free', 'e.family_friendly', 'e.event_url',
+      'e.admin_status', 'e.merged_into', 's.name as source_name',
     )
     .where('e.admin_status', 'pending')
     .whereNull('e.curated_at')
@@ -99,7 +99,13 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
   // auto-approved and later rely on the digest gate to save them.
   const nonRepeatedRows = await filterRepeatedDateIdentities(rows);
   const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows);
-  return historicallyNewRows.filter((row) => !isRoutineRecurringEvent(row) && isEditoriallyNewEvent(row));
+  // ONE editorial gate for approval and delivery: isEligibleForFreshDigest is
+  // the digest's own hard gate, so curation can never approve a row the
+  // digest would reject — and, critically, never DROP a row the digest would
+  // accept. A plain isRoutineRecurringEvent check here silently discarded
+  // fresh_series_launch debuts (the single-use series-debut carve-out),
+  // leaving them pending forever.
+  return historicallyNewRows.filter((row) => isEligibleForFreshDigest(row));
 }
 
 function buildCurationPrompt(events, todayIso) {

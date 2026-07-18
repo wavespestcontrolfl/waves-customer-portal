@@ -403,6 +403,18 @@ async function autoDraftFlagship() {
       // Include that Monday or the serialized runner cannot see its own first
       // draft and a catch-up/concurrent run creates a second campaign + proof.
       .where('created_at', '>=', getNewsletterDraftWindowStart(weekOf))
+      // Bound the window to THIS issue and exclude drafts already claimed by
+      // another calendar week: an operator-generated FUTURE issue draft
+      // shares type/status/null-created_by and a recent created_at, and
+      // without these guards this week's autopilot would adopt it, proof it
+      // as the current issue, and never create the real one.
+      .where('created_at', '<', defaultTargetSendAt(weekOf))
+      .whereNotExists(function otherWeekCalendarLink() {
+        this.select(trx.raw('1'))
+          .from('newsletter_calendar as c')
+          .whereRaw('c.send_id = newsletter_sends.id')
+          .whereNot('c.week_of', weekOf);
+      })
       .first();
 
     if (existing) {

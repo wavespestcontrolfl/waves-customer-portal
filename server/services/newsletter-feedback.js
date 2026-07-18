@@ -175,6 +175,21 @@ function buildFeedbackSubstitutions(content, { token } = {}) {
 }
 
 /**
+ * Ensure a campaign body carries the reaction-footer token, appending it
+ * when absent. ONE implementation shared by the live sender AND every
+ * review surface (composer preview, test send, owner proof) so what the
+ * owner approves always includes the footer the broadcast will carry —
+ * a send-time-only append would ship a block nobody reviewed.
+ */
+function ensureFeedbackToken({ html, text } = {}) {
+  if (hasFeedbackToken([html, text].filter(Boolean).join('\n'))) return { html, text };
+  return {
+    html: html ? `${html}\n\n${FEEDBACK_HTML_TOKEN}` : html,
+    text: text ? `${text}\n\n${FEEDBACK_TEXT_TOKEN}` : text,
+  };
+}
+
+/**
  * Replace every feedback token with its NEUTRAL render. Used by
  * stripPersonalizationTokens so every no-recipient surface (archive, RSS,
  * preview/test send) shows the question without per-recipient links. (Live
@@ -239,6 +254,7 @@ module.exports = {
   renderFeedbackNeutralHtml,
   renderFeedbackNeutralText,
   hasFeedbackToken,
+  ensureFeedbackToken,
   buildFeedbackSubstitutions,
   neutralizeFeedbackTokens,
   recordFeedbackReaction,

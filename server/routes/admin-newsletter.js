@@ -575,6 +575,16 @@ router.patch('/sends/:id', async (req, res, next) => {
           .filter((id) => typeof id === 'string' && UUID_RE.test(id)).slice(0, 12))
       : (typeof send.event_ids === 'string' ? send.event_ids : JSON.stringify(send.event_ids ?? []));
 
+    // A content edit to a proof-APPROVED scheduled row invalidates the
+    // approval: what the owner signed off is no longer what the scheduler
+    // would send. The row drops back to draft (schedule + proof fields
+    // cleared) and must be re-proofed. Metadata-only PATCHes (ai_prompt,
+    // auto_share_social) leave an approval intact.
+    const contentChanged = [subject, subjectB, htmlBody, textBody, previewText,
+      fromName, fromEmail, replyTo, segmentFilter, newsletterType, eventIds]
+      .some((value) => value !== undefined);
+    const invalidatesProof = send.status === 'scheduled' && !!send.proof_approved_at && contentChanged;
+
     const updatedCount = await db('newsletter_sends')
       .where({ id: req.params.id })
       .whereIn('status', ['draft', 'scheduled'])
@@ -593,13 +603,26 @@ router.patch('/sends/:id', async (req, res, next) => {
       auto_share_social: autoShareSocial !== undefined ? autoShareSocial : send.auto_share_social,
       event_ids: nextEventIds,
       updated_at: new Date(),
+      ...(invalidatesProof ? {
+        status: 'draft',
+        scheduled_for: null,
+        proof_token: null,
+        proof_sent_at: null,
+        proof_approved_at: null,
+      } : {}),
     });
     if (!updatedCount) {
       return res.status(409).json({ error: 'campaign changed while it was being saved; reload before editing' });
     }
+    if (invalidatesProof) {
+      // Calendar in lockstep, same as cancel-schedule: the send is draft
+      // again, so its calendar row rolls back to 'drafted'.
+      await db('newsletter_calendar').where({ send_id: req.params.id }).update({ status: 'drafted', updated_at: new Date() });
+      logger.warn(`[newsletter] send ${req.params.id} content edited after proof approval — schedule cancelled, proof reset, re-proof required`);
+    }
 
     const updated = await db('newsletter_sends').where({ id: req.params.id }).first();
-    res.json({ success: true, send: updated });
+    res.json({ success: true, send: updated, ...(invalidatesProof ? { proofInvalidated: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -705,6 +728,13 @@ router.post('/sends/:id/send', async (req, res) => {
     if (!send.html_body && !send.text_body) {
       return res.status(400).json({ error: 'body required' });
     }
+    // Fail synchronously on the classic pre-claim throw: with SendGrid
+    // unconfigured the fire-and-forget below would 202, sendCampaign would
+    // throw before claiming the row, and the campaign would sit
+    // draft/scheduled with no failure signal anywhere in History.
+    if (!sendgrid.isConfigured()) {
+      return res.status(503).json({ error: 'SendGrid is not configured (SENDGRID_API_KEY) — cannot send' });
+    }
     const eventSelection = await validateFlagshipEventSelection(send);
     if (!eventSelection.valid) {
       return res.status(400).json({ error: 'Flagship event selection is no longer eligible.', errors: eventSelection.errors });
@@ -756,7 +786,17 @@ router.post('/sends/:id/send', async (req, res) => {
       }
       logger.error(`[newsletter] background send ${req.params.id} failed: ${err.message}`, { stack: err.stack });
       try {
-        await db('newsletter_sends').where({ id: req.params.id, status: 'sending' }).update({ status: 'failed' });
+        const flipped = await db('newsletter_sends').where({ id: req.params.id, status: 'sending' }).update({ status: 'failed' });
+        if (!flipped) {
+          // Pre-claim throw: the row never reached 'sending'. Flip
+          // draft/scheduled → failed so History surfaces it with Resume.
+          // The status guard can't clobber a rival worker's live claim
+          // ('sending') or a completed run ('sent').
+          await db('newsletter_sends')
+            .where({ id: req.params.id })
+            .whereIn('status', ['draft', 'scheduled'])
+            .update({ status: 'failed', updated_at: new Date() });
+        }
       } catch { /* swallow */ }
     });
 
@@ -888,10 +928,13 @@ router.post('/preview', async (req, res) => {
     const demoUrl = sendgrid.unsubscribeUrl('preview-demo-token');
     // Previews have no recipient — neutralize every merge tag so the operator
     // never sees a literal {{greeting-name}}/{{city}}/{{grass-type}} in the
-    // dialog (city/grass fall back to their neutral defaults).
+    // dialog (city/grass fall back to their neutral defaults). The reaction
+    // footer is ensured first (same step as the live sender), so the preview
+    // shows the block the broadcast will carry even on hand-composed bodies.
     const { stripPersonalizationTokens } = require('../services/newsletter-draft');
+    const { ensureFeedbackToken } = require('../services/newsletter-feedback');
     const html = wrapNewsletter({
-      body: stripPersonalizationTokens(htmlBody || ''),
+      body: stripPersonalizationTokens(ensureFeedbackToken({ html: htmlBody || '' }).html),
       unsubscribeUrl: demoUrl,
       preheader: previewText ? stripPersonalizationTokens(previewText) : undefined,
       newsletterType: newsletterType || undefined,
@@ -1390,9 +1433,12 @@ router.patch('/events/:id', async (req, res, next) => {
     if (regionZone !== undefined) updates.region_zone = regionZone;
     if (priceText !== undefined) updates.price_text = priceText;
 
-    // Recompute freshness when type, status, or times_featured changes
+    // Recompute freshness when type, recurrence, status, or times_featured
+    // changes — a recurrence-only correction (weekly → none, or the reverse)
+    // must re-derive freshness_status or the digest SQL gate keeps acting on
+    // the stale classification.
     const featureTransition = adminStatus === 'featured' && event.admin_status !== 'featured';
-    if (eventType !== undefined || freshnessStatus !== undefined || featureTransition) {
+    if (eventType !== undefined || recurrenceType !== undefined || freshnessStatus !== undefined || featureTransition) {
       const { classifyFreshness } = require('../services/event-freshness');
 
       if (freshnessStatus !== undefined) {
@@ -1418,7 +1464,7 @@ router.patch('/events/:id', async (req, res, next) => {
         const nextFeatured = featureTransition ? (event.times_featured || 0) + 1 : event.times_featured;
         const { freshness_status, freshness_score } = classifyFreshness({
           event_type: eventType || event.event_type,
-          recurrence_type: recurrenceType || event.recurrence_type,
+          recurrence_type: recurrenceType !== undefined ? recurrenceType : event.recurrence_type,
           title: event.title,
           description: event.description,
           times_featured: nextFeatured,
