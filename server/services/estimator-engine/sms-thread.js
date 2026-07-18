@@ -174,9 +174,11 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       // Durable owed-quote task BEFORE any detached work — a restart or
       // deploy mid-compose must leave a bell, never a silent loss. The
       // pipeline upgrades this same bell in place on success; red-lane and
-      // blocked outcomes leave it standing (same manual instruction).
+      // blocked outcomes leave it standing (same manual instruction). A
+      // failed insert means NO durable artifact exists: report not-started
+      // so callers keep their own fallback (lead-intake keeps the shell).
       const { notify } = require('./index');
-      await notify({
+      const belled = await notify({
         call: null,
         context: null,
         lane: 'red',
@@ -185,6 +187,10 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
         title: origin.strings.redTitle,
         body: 'A customer text is asking for a quote. The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.',
       });
+      if (!belled) {
+        result.skipped = 'durable_bell_failed';
+        return result;
+      }
     }
     result.started = true;
     result.draftPromise = runThreadDraft({ phone, digits, triggerBody, origin, dryRun })

@@ -160,21 +160,31 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   };
   // SMS-origin bells dedupe on the phone-scoped thread key the way call
   // bells dedupe on callSid — repeated quote-flavored texts upgrade ONE
-  // bell instead of ringing per message.
+  // bell instead of ringing per message. Unlike a callSid, the thread key
+  // is permanent for the phone, so its dedupe is TIME-BOUNDED to the open
+  // life of an estimate: an independent quote request months later must
+  // mint a fresh bell, not vanish behind a long-read one.
+  const SMS_BELL_DEDUPE_MS = 7 * 86400000;
   const dedupe = callSid
-    ? { clause: "metadata->>'callSid' = ?", value: callSid }
-    : (threadKey ? { clause: "metadata->>'smsThreadKey' = ?", value: threadKey } : null);
+    ? { clause: "metadata->>'callSid' = ?", value: callSid, since: null }
+    : (threadKey
+      ? { clause: "metadata->>'smsThreadKey' = ?", value: threadKey, since: new Date(Date.now() - SMS_BELL_DEDUPE_MS) }
+      : null);
+  // Returns true only when a bell durably exists for this event (fresh
+  // insert, in-place upgrade, or a standing prior bell) — callers that
+  // treat the bell as their restart-loss artifact must know it landed.
   try {
     if (dedupe) {
       // Any prior bell for this call counts: the generic promised bell OR a
       // prior estimator bell (request-only bells carry quote_promised=false
       // but still have the estimator_engine marker — matching only promised
       // bells would duplicate on every reprocess).
-      const existing = await db('notifications')
+      let existingQuery = db('notifications')
         .whereRaw(dedupe.clause, [dedupe.value])
         .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
-        .orderBy('created_at', 'desc')
-        .first();
+        .orderBy('created_at', 'desc');
+      if (dedupe.since) existingQuery = existingQuery.where('created_at', '>=', dedupe.since);
+      const existing = await existingQuery.first();
       if (existing) {
         let existingMeta = {};
         try {
@@ -183,7 +193,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         // A prior estimator bell stands UNLESS this call now has a draft the
         // old bell doesn't know about (transient red → later success): the
         // stale "send it manually" text must upgrade to the draft link.
-        if (existingMeta.estimator_engine === true && (!estimateId || existingMeta.estimateId)) return;
+        if (existingMeta.estimator_engine === true && (!estimateId || existingMeta.estimateId)) return true;
         await db('notifications')
           .where({ id: existing.id })
           .update({
@@ -195,12 +205,14 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             // come back unread or the upgrade is invisible.
             read_at: null,
           });
-        return;
+        return true;
       }
     }
     await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
+    return true;
   } catch (err) {
     logger.warn(`[estimator-engine] admin notify failed: ${err.message}`);
+    return false;
   }
 }
 

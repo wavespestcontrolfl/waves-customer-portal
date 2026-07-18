@@ -54,7 +54,7 @@ beforeEach(() => {
   mockDispatch.mockResolvedValue({ ok: true, json: { quote_request: true, confidence: 0.9 } });
   mockBuildSmsThreadContext.mockResolvedValue({ call: null, transcript: 'x'.repeat(60), phone: PHONE });
   mockRunDraftPipeline.mockImplementation(async ({ result }) => ({ ...result, lane: 'yellow', created: true }));
-  mockNotify.mockResolvedValue(undefined);
+  mockNotify.mockResolvedValue(true);
 });
 
 afterAll(() => {
@@ -138,6 +138,18 @@ describe('startSmsThreadDraft', () => {
       lane: 'red',
       body: expect.stringContaining('ambiguous_phone'),
     }));
+    expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+  });
+
+  test('a failed durable bell reports not-started — callers keep their fallback', async () => {
+    // notify() returning false means NO restart-loss artifact exists; the
+    // handoff must not detach the composer or let lead-intake drop its
+    // shell path on a promise that isn't durably recorded.
+    mockNotify.mockResolvedValueOnce(false);
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    expect(result.started).toBe(false);
+    expect(result.skipped).toBe('durable_bell_failed');
+    expect(result.draftPromise).toBeUndefined();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 
