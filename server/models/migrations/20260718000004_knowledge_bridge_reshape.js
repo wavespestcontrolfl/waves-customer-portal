@@ -56,11 +56,14 @@ exports.up = async function up(knex) {
 
   const [{ count }] = await knex('knowledge_bridge').count('* as count');
   if (parseInt(count, 10) > 0) {
+    // CREATE TABLE AS (not renameTable): a rename keeps the old table's
+    // constraint/index NAMES (knowledge_bridge_pkey, ...), which would
+    // collide with createIntendedShape() below. CTAS snapshots the data
+    // with no constraints/indexes, so the recreate is collision-free.
     console.warn(`[knowledge_bridge reshape] preserving ${count} unexpected v1 row(s) as knowledge_bridge_v1_orphaned`);
-    await knex.schema.renameTable('knowledge_bridge', 'knowledge_bridge_v1_orphaned');
-  } else {
-    await knex.schema.dropTable('knowledge_bridge');
+    await knex.raw('CREATE TABLE knowledge_bridge_v1_orphaned AS TABLE knowledge_bridge');
   }
+  await knex.schema.dropTable('knowledge_bridge');
   await createIntendedShape(knex);
 };
 
@@ -69,11 +72,9 @@ exports.down = async function down(knex) {
     if (!(await knex.schema.hasColumn('knowledge_bridge', 'kb_entry_id'))) return; // not ours
     await knex.schema.dropTable('knowledge_bridge');
   }
-  if (await knex.schema.hasTable('knowledge_bridge_v1_orphaned')) {
-    await knex.schema.renameTable('knowledge_bridge_v1_orphaned', 'knowledge_bridge');
-    return;
-  }
-  // Recreate the 000015 source/target shape so the pre-migration state holds.
+  // Recreate the 000015 source/target shape so the pre-migration state holds
+  // (the orphan snapshot, if any, has data but no constraints — restore rows
+  // into a properly-constrained table rather than renaming it back).
   await knex.schema.createTable('knowledge_bridge', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.string('source_type', 30).notNullable();
@@ -90,4 +91,15 @@ exports.down = async function down(knex) {
     t.index(['link_type']);
     t.index(['source_type', 'source_id']);
   });
+  if (await knex.schema.hasTable('knowledge_bridge_v1_orphaned')) {
+    await knex.raw(`
+      INSERT INTO knowledge_bridge
+        (id, source_type, source_id, source_title, target_type, target_id, target_title,
+         link_type, confidence, auto_linked, created_at, updated_at)
+      SELECT id, source_type, source_id, source_title, target_type, target_id, target_title,
+             link_type, confidence, auto_linked, created_at, updated_at
+      FROM knowledge_bridge_v1_orphaned
+    `);
+    await knex.schema.dropTable('knowledge_bridge_v1_orphaned');
+  }
 };
