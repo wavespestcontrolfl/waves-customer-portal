@@ -221,15 +221,20 @@ async function handleIntakeReply(customer, body) {
       }
     }
     if (hasAddress) {
-      // The linked shell stays truthful BEFORE any engine handoff: form
-      // leads already carry an open empty-address shell, and the engine's
-      // conservative duplicate guard blocks against it — the captured
-      // address/service must land on the shell either way (engine path
-      // dedupes against a complete row; legacy path prices it manually).
-      const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
-      if (await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
+      // Shell-aware handoff: a pre-existing open shell (form leads) would
+      // block the engine's priced draft via the conservative duplicate
+      // guard — running the DEEP composer into that wall wastes the run
+      // and strands an incomplete shell. With a shell present, the legacy
+      // path below patches it (address/service) and notifies; the engine
+      // lane is for shell-less SMS-origin leads only.
+      const existingShell = await db('estimates')
+        .where({ customer_id: customer.id, status: 'draft' })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (!existingShell && await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
         return { handled: true, next: 'estimate_drafted' };
       }
+      const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
       await db('customers').where({ id: customer.id }).update({
         lead_intake_status: 'estimate_drafted',
       });
@@ -285,12 +290,17 @@ async function handleIntakeReply(customer, body) {
       return { handled: false };
     }
 
-    // Shell first, handoff second — same truthfulness rule as the
-    // awaiting_service branch above.
-    const estimate = await createOrUpdateDraftEstimate(customer, interest);
-    if (await engineDraftHandoff(customer, body, `address captured (${interest})`)) {
+    // Shell-aware handoff — same rule as the awaiting_service branch: the
+    // engine only runs when no open shell would block its priced draft.
+    const existingShell = await db('estimates')
+      .where({ customer_id: customer.id, status: 'draft' })
+      .orderBy('created_at', 'desc')
+      .first();
+    if (!existingShell && await engineDraftHandoff(customer, body, `address captured (${interest})`)) {
       return { handled: true, next: 'estimate_drafted' };
     }
+
+    const estimate = await createOrUpdateDraftEstimate(customer, interest);
     await db('customers').where({ id: customer.id }).update({
       lead_intake_status: 'estimate_drafted',
       updated_at: new Date(),

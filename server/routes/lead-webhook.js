@@ -852,8 +852,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // label for non-core services (Mosquito Control, Termite …) — a
         // coarse pest/lawn re-bucket would erase what they asked for.
         // Guarded UPDATE: only from the state this webhook just seeded.
-        const askExists = parkedAsk?.parked === true
-          || ['merged_into_open_clarify', 'open_or_recent_clarify'].includes(parkedAsk?.skipped);
+        // A live ADDRESS ask must actually exist: parked/merged/deduped
+        // outcomes carry `covers` — a cooldown against an unrelated
+        // service-only ask must not move the state.
+        const askExists = (parkedAsk?.parked === true
+          || ['merged_into_open_clarify', 'open_or_recent_clarify'].includes(parkedAsk?.skipped))
+          && Array.isArray(parkedAsk?.covers)
+          && parkedAsk.covers.includes('street_address');
         if (askExists
           && !clarifyMissing.includes('specific_service')
           && customer?.id) {

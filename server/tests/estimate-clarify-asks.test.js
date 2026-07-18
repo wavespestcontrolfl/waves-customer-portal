@@ -142,7 +142,7 @@ describe('parkClarifyAsk', () => {
       flags: JSON.stringify({ missing: ['street_address'] }),
     };
     const result = await parkClarifyAsk(BASE);
-    expect(result).toEqual({ parked: false, skipped: 'open_or_recent_clarify', draftId: 'draft-0' });
+    expect(result).toEqual({ parked: false, skipped: 'open_or_recent_clarify', draftId: 'draft-0', covers: ['street_address'] });
     expect(mockState.inserts).toHaveLength(0);
     expect(mockState.updates).toHaveLength(0);
   });
@@ -169,7 +169,7 @@ describe('parkClarifyAsk', () => {
       flags: JSON.stringify({ missing: ['street_address'], lead_id: 'old-lead' }),
     };
     const result = await parkClarifyAsk({ ...BASE, channelProvenance: 'sms' });
-    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0' });
+    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0', covers: ['street_address'] });
     const flags = JSON.parse(mockState.updates[0].payload.flags);
     expect(flags.missing).toEqual(['street_address']);
     expect(flags.lead_id).toBe('lead-1');
@@ -185,7 +185,7 @@ describe('parkClarifyAsk', () => {
       flags: JSON.stringify({ missing: ['specific_service'] }),
     }];
     const result = await parkClarifyAsk(BASE);
-    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'winner-1' });
+    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'winner-1', covers: ['specific_service', 'street_address'] });
     const flags = JSON.parse(mockState.updates[0].payload.flags);
     expect(flags.missing.sort()).toEqual(['specific_service', 'street_address']);
     expect(flags.lead_id).toBe('lead-1');
@@ -200,7 +200,7 @@ describe('parkClarifyAsk', () => {
       flags: JSON.stringify({ missing: ['specific_service'], toPhone: '+19415550142' }),
     };
     const result = await parkClarifyAsk({ ...BASE, channelProvenance: 'voice' });
-    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0' });
+    expect(result).toEqual({ parked: false, skipped: 'merged_into_open_clarify', draftId: 'draft-0', covers: ['specific_service', 'street_address'] });
     expect(mockState.inserts).toHaveLength(0);
     const update = mockState.updates[0].payload;
     const flags = JSON.parse(update.flags);

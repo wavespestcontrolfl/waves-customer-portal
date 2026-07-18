@@ -71,7 +71,7 @@ async function mergePendingClarify(existing, { askable, firstName, linkage }) {
   } catch { existingFlags = {}; }
   const existingMissing = Array.isArray(existingFlags.missing) ? existingFlags.missing : [];
   const merged = [...new Set([...existingMissing, ...askable])];
-  await db('message_drafts')
+  const changed = await db('message_drafts')
     .where({ id: existing.id, status: 'pending' })
     .update({
       customer_id: linkage.customerId || existing.customer_id || null,
@@ -85,6 +85,9 @@ async function mergePendingClarify(existing, { askable, firstName, linkage }) {
         channel_provenance: linkage.channelProvenance || existingFlags.channel_provenance || null,
       }),
     });
+  // 0 rows = the claim landed mid-merge; the caller must NOT report a
+  // merge (the new item would silently vanish from flags.missing).
+  return { changed: changed > 0, merged };
 }
 
 /**
@@ -162,25 +165,55 @@ async function parkClarifyAsk({
       // than one whose lead closed. approved/revised are mid-send and a
       // recently-sent one is a cooldown — untouched.
       if (existing.status === 'pending') {
-        await mergePendingClarify(existing, { askable, firstName, linkage });
-        return { parked: false, skipped: 'merged_into_open_clarify', draftId: existing.id };
+        const mergeResult = await mergePendingClarify(existing, { askable, firstName, linkage });
+        if (mergeResult.changed) {
+          return {
+            parked: false,
+            skipped: 'merged_into_open_clarify',
+            draftId: existing.id,
+            covers: mergeResult.merged,
+          };
+        }
+        // Claim landed mid-merge — the draft is being sent with its OLD
+        // items; report a plain dedupe covering only those, so callers
+        // don't assume the new item was asked (a later dead-end re-asks it
+        // via the consumed-ask exception below).
+        let claimedFlags = {};
+        try {
+          claimedFlags = typeof existing.flags === 'string' ? JSON.parse(existing.flags) : (existing.flags || {});
+        } catch { claimedFlags = {}; }
+        return {
+          parked: false,
+          skipped: 'open_or_recent_clarify',
+          draftId: existing.id,
+          covers: Array.isArray(claimedFlags.missing) ? claimedFlags.missing : [],
+        };
       }
-      // Recent-sent cooldown — EXCEPT when that ask was PARTIALLY answered
-      // and this request covers only what is still unanswered: the customer
-      // answered half, and the other half must not be silenced for seven
-      // days (the resumed pipeline re-asks it through this exact path).
+      // Recent-sent cooldown — with two exceptions: (a) the ask was
+      // PARTIALLY answered and this request covers only what is still
+      // unanswered (the other half must not be silenced for seven days);
+      // (b) the ask was fully CONSUMED — the contact is responsive, and a
+      // NEW dead-end's different question deserves a fresh ask.
       let sentFlags = {};
       try {
         sentFlags = typeof existing.flags === 'string' ? JSON.parse(existing.flags) : (existing.flags || {});
       } catch { sentFlags = {}; }
       const remaining = Array.isArray(sentFlags.missing) ? sentFlags.missing : [];
-      const partiallyAnswered = Array.isArray(sentFlags.answer_recorded) && sentFlags.answer_recorded.length > 0;
+      const recordedItems = Array.isArray(sentFlags.answer_recorded) ? sentFlags.answer_recorded : [];
+      const partiallyAnswered = recordedItems.length > 0;
+      const consumed = !!sentFlags.answered_at;
       const asksOnlyRemaining = remaining.length > 0 && askable.every((item) => remaining.includes(item));
-      if (!(partiallyAnswered && asksOnlyRemaining)) {
-        return { parked: false, skipped: 'open_or_recent_clarify', draftId: existing.id };
+      if (!((partiallyAnswered && asksOnlyRemaining) || consumed)) {
+        return {
+          parked: false,
+          skipped: 'open_or_recent_clarify',
+          draftId: existing.id,
+          // What that sent ask actually covered — remaining + answered.
+          covers: [...new Set([...remaining, ...recordedItems])],
+        };
       }
-      // fall through: park a fresh ask for the remainder (the partial
-      // unique index only covers OPEN drafts, so the sent row won't conflict).
+      // fall through: park a fresh ask (the partial unique index only
+      // covers OPEN drafts, so the sent row won't conflict).
     }
 
     const body = composeClarifyBody({ missing: askable, firstName });
@@ -216,8 +249,15 @@ async function parkClarifyAsk({
           .whereNull('sent_at')
           .first();
         if (winner) {
-          await mergePendingClarify(winner, { askable, firstName, linkage });
-          return { parked: false, skipped: 'merged_into_open_clarify', draftId: winner.id };
+          const mergeResult = await mergePendingClarify(winner, { askable, firstName, linkage });
+          if (mergeResult.changed) {
+            return {
+              parked: false,
+              skipped: 'merged_into_open_clarify',
+              draftId: winner.id,
+              covers: mergeResult.merged,
+            };
+          }
         }
         // Winner already claimed or sent between the conflict and this read
         // — the standing draft/cooldown covers the phone.
@@ -241,7 +281,7 @@ async function parkClarifyAsk({
     }
 
     logger.info('[estimate-clarify] clarify draft parked', { draftId: draft.id, source, missing: askable });
-    return { parked: true, draftId: draft.id };
+    return { parked: true, draftId: draft.id, covers: askable };
   } catch (err) {
     logger.warn(`[estimate-clarify] park failed: ${err.message}`);
     return { parked: false, skipped: `error: ${err.message}` };
