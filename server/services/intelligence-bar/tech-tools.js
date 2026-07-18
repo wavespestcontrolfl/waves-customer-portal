@@ -10,6 +10,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { formatAddress } = require('../../utils/address-normalizer');
+const { getProtocol: readProtocol } = require('../protocol-reader');
 
 const TECH_TOOLS = [
   {
@@ -69,8 +70,8 @@ Use for: "what's the protocol for quarterly pest?", "lawn care protocol for St. 
     input_schema: {
       type: 'object',
       properties: {
-        service_type: { type: 'string', description: 'pest, lawn, mosquito, termite, tree_shrub, rodent' },
-        lawn_track: { type: 'string', description: 'For lawn care: A, B, C1, C2, D (grass type tracks)' },
+        service_type: { type: 'string', description: 'pest, lawn, mosquito, termite, tree_shrub, rodent, palm_injection, cockroach, or bed_bug' },
+        lawn_track: { type: 'string', description: 'For lawn: st_augustine, bermuda, zoysia, bahia (legacy A/B, C1, C2, D are accepted)' },
       },
       required: ['service_type'],
     },
@@ -356,28 +357,8 @@ async function getProductInfo(productName) {
 
 
 async function getProtocol(input) {
-  const { service_type, lawn_track } = input;
-
   try {
-    const protocols = require('../../config/protocols.json');
-
-    if (service_type === 'lawn' || service_type === 'lawn_care') {
-      const track = lawn_track || 'A';
-      if (protocols.lawn && protocols.lawn[track]) {
-        return { protocol: protocols.lawn[track], track, type: 'lawn_care' };
-      }
-      return { available_tracks: Object.keys(protocols.lawn || {}), note: 'Specify a track: A (St. Augustine), B (Bermuda), C1 (Zoysia), C2 (Bahia), D (Mixed)' };
-    }
-
-    if (service_type === 'tree_shrub' || service_type === 'tree') {
-      return { protocol: protocols.tree_shrub, type: 'tree_shrub' };
-    }
-
-    // For other service types, return general guidance
-    return {
-      type: service_type,
-      note: `Specific protocol for "${service_type}" not found in protocols.json. Check the knowledge base for treatment guidance.`,
-    };
+    return readProtocol(input);
   } catch {
     return { error: 'Protocols config not available' };
   }

@@ -122,12 +122,20 @@ function PricingCard({ pricing }) {
         {tiers.map((tier, i) => (
           <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.glassNavy : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
             <div>
-              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>{tier.label}</div>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+                {/* "Recommended", not "Most popular": the pest-identifier
+                    snapshot hardcodes recommended on its (often only) tier —
+                    a popularity claim would be fabricated (codex P2 #2824).
+                    No label at all when there's nothing to compare against. */}
+                {tier.label}{tier.recommended && tiers.length > 1 ? ' · Recommended' : ''}
+              </div>
               {/* One-time packages count TOTAL visits (flea = 2-visit package),
-                  not a recurring per-year cadence. */}
+                  not a recurring per-year cadence. Recurring cadence says
+                  "applications per year" — owner rule, and it matches the
+                  lawn funnel's wording. */}
               {tier.visits ? (
                 <div style={{ fontSize: 14, color: MUTED }}>
-                  {tier.one_time != null ? `${tier.visits}-visit treatment` : `${tier.visits} visits per year`}
+                  {tier.one_time != null ? `${tier.visits}-visit treatment` : `${tier.visits} applications per year`}
                 </div>
               ) : null}
             </div>

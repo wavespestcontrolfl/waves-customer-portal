@@ -389,24 +389,92 @@ async function listAuditEvents(knex, { limit = 50 } = {}) {
     .select('id', 'actor_type', 'actor_id', 'action', 'resource_type', 'resource_id', 'metadata', 'created_at');
 }
 
-async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null } = {}) {
-  const q = knex('pest_pressure_scores')
-    .where('customer_id', customerId)
-    .orderBy('service_date', 'desc')
-    .limit(limit);
-  if (serviceLine) q.where('service_line', serviceLine);
+async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, limit = 12, beforeOrOnServiceDate = null, currentServiceRecordId = null } = {}) {
+  const q = knex('pest_pressure_scores as pps')
+    .leftJoin('service_records as sr', 'sr.id', 'pps.service_record_id')
+    .where('pps.customer_id', customerId)
+    .orderBy('pps.service_date', 'desc')
+    // Deterministic same-day chronology, on IMMUTABLE visit time: the trim
+    // below slices at the current row's position, so tied service_date rows
+    // must order by when the visit actually happened. calculated_at can't be
+    // the tie-break — admin recalculation rewrites it, which would re-sort an
+    // older recalculated report ahead of its later sibling and leak that
+    // sibling (codex P2 #2824 r2). started_at is stamped at visit time and
+    // never rewritten; sr.created_at covers same-day legacy pairs with NULL
+    // started_at (pps.id is a RANDOM UUID, not chronology — codex P2 r4 —
+    // so it survives only as an arbitrary-but-deterministic last resort).
+    .orderByRaw('sr.started_at DESC NULLS LAST')
+    .orderByRaw('sr.created_at DESC NULLS LAST')
+    .orderBy('pps.id', 'desc')
+    // Over-fetch when a same-day trim is requested so the trim can't starve
+    // the window below `limit`.
+    .limit(currentServiceRecordId ? limit + 8 : limit);
+  if (serviceLine) q.where('pps.service_line', serviceLine);
   // Token-scoped callers (customer-facing report views) must pass
   // beforeOrOnServiceDate set to the report's own service_date so a
   // long-lived `/api/reports/:token` bearer can't reveal later visits
   // recorded after the report was generated.
-  if (beforeOrOnServiceDate) q.where('service_date', '<=', beforeOrOnServiceDate);
-  return q.select(
-    'id', 'service_record_id', 'service_date', 'service_line',
-    'displayed_score', 'calculated_score', 'label_key', 'label_name',
-    'trend', 'trend_delta', 'data_completeness', 'is_overridden',
-    'override_reason', 'overridden_by', 'overridden_at',
-    'calculation_version', 'calculated_at',
+  if (beforeOrOnServiceDate) q.where('pps.service_date', '<=', beforeOrOnServiceDate);
+  const rows = await q.select(
+    'pps.id', 'pps.service_record_id', 'pps.service_date', 'pps.service_line',
+    'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
+    'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
+    'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
+    'pps.calculation_version', 'pps.calculated_at',
   );
+  // The date bound alone leaks same-day sibling visits: viewing the earlier
+  // report after a later same-day visit completes would chart the later
+  // score. Trim at this report's own row whenever it's stored (mirrors
+  // activity-scores-store); the legacy no-row fallback keeps the date bound.
+  if (currentServiceRecordId) {
+    const currentIdx = rows.findIndex((row) => String(row.service_record_id) === String(currentServiceRecordId));
+    if (currentIdx >= 0) return rows.slice(currentIdx).slice(0, limit);
+    // Current row absent from the fetched window: either it was never stored
+    // (legacy report) or enough later same-day siblings exist to push it past
+    // the limit+8 cap. Check directly and FAIL CLOSED in the stored case —
+    // chart the current row plus strictly-earlier days only — instead of
+    // falling back to the newest rows, which would include the very visits
+    // the trim exists to hide (codex P2 #2824 r3).
+    const currentRow = await knex('pest_pressure_scores as pps')
+      .where('pps.customer_id', customerId)
+      .where('pps.service_record_id', currentServiceRecordId)
+      .select(
+        'pps.id', 'pps.service_record_id', 'pps.service_date', 'pps.service_line',
+        'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
+        'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
+        'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
+        'pps.calculation_version', 'pps.calculated_at',
+      )
+      .first();
+    if (currentRow) {
+      // Query strictly-earlier days directly rather than filtering the
+      // already-fetched window: in this branch the window is saturated by
+      // same-day siblings, so it may contain few or NO earlier-day rows at
+      // all (codex P2 #2824 r4). Dropping the tied day entirely (including
+      // legitimate earlier same-day siblings) stays the accepted tradeoff —
+      // closed beats leaking later visits.
+      const earlierQuery = knex('pest_pressure_scores as pps')
+        .leftJoin('service_records as sr', 'sr.id', 'pps.service_record_id')
+        .where('pps.customer_id', customerId)
+        .where('pps.service_date', '<', currentRow.service_date)
+        .orderBy('pps.service_date', 'desc')
+        .orderByRaw('sr.started_at DESC NULLS LAST')
+        .orderByRaw('sr.created_at DESC NULLS LAST')
+        .orderBy('pps.id', 'desc')
+        .limit(limit);
+      if (serviceLine) earlierQuery.where('pps.service_line', serviceLine);
+      const earlierDays = await earlierQuery.select(
+        'pps.id', 'pps.service_record_id', 'pps.service_date', 'pps.service_line',
+        'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
+        'pps.trend', 'pps.trend_delta', 'pps.data_completeness', 'pps.is_overridden',
+        'pps.override_reason', 'pps.overridden_by', 'pps.overridden_at',
+        'pps.calculation_version', 'pps.calculated_at',
+      ).catch(() => []);
+      return [currentRow, ...earlierDays].slice(0, limit);
+    }
+    return rows.slice(0, limit);
+  }
+  return rows;
 }
 
 module.exports = {

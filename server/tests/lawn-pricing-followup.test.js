@@ -802,34 +802,37 @@ describe('lawn pricing production follow-up', () => {
     const bermuda = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9 });
     const zoysia = priceLawnCare(property, { track: 'zoysia', lawnFreq: 9 });
 
-    // St. Augustine enhanced at 4,492 sqft uses the 35% collected-margin floor
-    // ($594/yr), which then rides up to the $600 program minimum ($603/9-app).
-    expect(stAug.selected.perApp).toBe(67);
+    // St. Augustine enhanced at 4,492 sqft uses the 35% collected-margin floor —
+    // with spot reserves folded in (owner 2026-07-16) it lands at $621/yr,
+    // clear of the $600 program minimum.
+    expect(stAug.selected.perApp).toBe(69);
     expect(stAug.selected.costFloorApplied).toBe(true);
 
     // Bermuda enhanced remains market-table priced because market is above the floor.
     expect(bermuda.selected.perApp).toBe(68);
     expect(bermuda.selected.costFloorApplied).toBe(false);
 
-    // Zoysia enhanced has a higher material budget but still lands below market.
-    expect(zoysia.selected.perApp).toBe(68);
-    expect(zoysia.selected.costFloorApplied).toBe(false);
+    // Zoysia enhanced carries the largest reserve budget, which pushes its
+    // floor ($657/yr) above the market table — floor-priced since the fold.
+    expect(zoysia.selected.perApp).toBe(73);
+    expect(zoysia.selected.costFloorApplied).toBe(true);
   });
 
-  test('dense route St. Augustine enhanced quote prices off the market table just above the 35% floor', () => {
+  test('dense route St. Augustine enhanced quote floors just below the program minimum', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4250 }));
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
-    // Under the 35% floor the cost floor (~$572/yr) drops below the market
-    // table (~$576/yr) — but both sit below the $600 program minimum, which
-    // is the final customer price ($603 ceil'd to a clean 9-app multiple).
+    // With spot reserves folded in the 35% cost floor (~$594/yr) sits above
+    // the market table (~$576/yr) — but both sit below the $600 program
+    // minimum, which is the final customer price ($603 ceil'd to a clean
+    // 9-app multiple).
     expect(lawn.selected.perApp).toBe(67);
     expect(lawn.annual).toBe(603);
     expect(lawn.monthly).toBe(50.25);
-    expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
-    expect(lawn.costs.total).toBeLessThan(372);
-    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(571);
-    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(572);
+    expect(lawn.costs.total).toBeGreaterThanOrEqual(385);
+    expect(lawn.costs.total).toBeLessThan(386);
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(593);
+    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(594);
     expect(lawn.margin).toBeGreaterThanOrEqual(0.35);
     expect(lawn.pricingBasis).toBe('PROGRAM_MINIMUM_MONTHLY');
     expect(lawn.selected.marketAnnual).toBe(576);
@@ -868,6 +871,25 @@ describe('lawn pricing production follow-up', () => {
     });
   });
 
+  test('WaveGuard cannot discount lawn below its 35% collected-margin floor', () => {
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 5012,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThan(600);
+    expect(lawn.annualAfterDiscount).toBeCloseTo(lawn.minimumCollectedAnnualPrice, 2);
+    expect(lawn.marginFloorGuardApplied).toBe(true);
+    expect(lawn.discountCapped).toBe(true);
+    const collectedMargin = (lawn.annualAfterDiscount - lawn.costs.total)
+      / lawn.annualAfterDiscount;
+    expect(collectedMargin).toBeGreaterThanOrEqual(0.35 - 0.0001);
+  });
+
   test('manual recurring discounts include WaveGuard-discounted Lawn V2 pricing', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4250,
@@ -889,6 +911,138 @@ describe('lawn pricing production follow-up', () => {
     expect(estimate.summary.manualDiscount.capReason).not.toBe('lawn_program_minimum');
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
     expect(estimate.summary.manualDiscount.excludedServices).not.toContain('lawn_care_enhanced');
+  });
+
+  test('manual lawn discounts are capped at the collected-margin floor before persistence', () => {
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 5012,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+      manualDiscount: { type: 'PERCENT', value: 50 },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThan(600);
+    expect(estimate.summary.recurringAnnualAfterDiscount)
+      .toBeGreaterThanOrEqual(lawn.minimumCollectedAnnualPrice - 0.01);
+    expect(estimate.summary.manualDiscount).toEqual(expect.objectContaining({
+      capped: true,
+      capReason: 'lawn_margin_floor',
+    }));
+    expect(estimate.marginWarnings.find((warning) => (
+      warning.service === 'lawn_care' && warning.type === 'manual_discount_below_margin_floor'
+    ))).toBeUndefined();
+  });
+
+  test('manual discount audit allocates non-lawn-first: floored lawn keeps its price, pest absorbs the cut', () => {
+    // 5,012 sqft: lawn is WaveGuard-capped at its $630.82 margin floor (zero
+    // headroom); pest holds $421.20 after Silver. A 30% manual discount
+    // ($315.61) fits entirely inside the non-lawn headroom, so the aggregate
+    // guard lets it through uncapped — the per-line audit must attribute ALL
+    // of it to pest, not proportionally smear it across the protected lawn.
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 5012,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+      manualDiscount: { type: 'PERCENT', value: 30, source: 'test', eligibilityConfirmed: true },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+    const pest = estimate.lineItems.find(i => i.service === 'pest_control');
+
+    expect(lawn.annualAfterDiscount).toBeCloseTo(lawn.minimumCollectedAnnualPrice, 2);
+    expect(estimate.summary.manualDiscount.capped).toBe(false);
+    // Lawn's audited final never dips below its floor — its price never moved.
+    expect(lawn.manualFinalAnnual).toBeCloseTo(lawn.minimumCollectedAnnualPrice, 2);
+    expect(lawn.manualMarginWarning).toBeUndefined();
+    expect(estimate.marginWarnings.find((warning) => warning.service === 'lawn_care'))
+      .toBeUndefined();
+    // Pest absorbs the FULL pooled cut (421.20 − 315.61 = 105.59) and the
+    // margin warning reports that share truthfully — a proportional split
+    // (≈$126 share) would have hidden the below-floor pest margin entirely.
+    expect(pest.manualFinalAnnual).toBeCloseTo(pest.annualAfterDiscount - estimate.summary.manualDiscount.amount, 2);
+    expect(pest.manualMarginWarning).toBe(true);
+    expect(pest.manualFinalMargin).toBeLessThan(0.35);
+    const warning = estimate.marginWarnings.find((w) => (
+      w.service === 'pest_control' && w.type === 'manual_discount_below_margin_floor'
+    ));
+    expect(warning).toBeTruthy();
+    expect(warning.manualDiscountShare).toBeCloseTo(estimate.summary.manualDiscount.amount, 2);
+  });
+
+  test('a manual discount inside non-lawn headroom raises no margin warning and leaves lawn audit fields at the floor', () => {
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 5012,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+      manualDiscount: { type: 'PERCENT', value: 10, source: 'test', eligibilityConfirmed: true },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+    const pest = estimate.lineItems.find(i => i.service === 'pest_control');
+
+    expect(estimate.summary.manualDiscount.capped).toBe(false);
+    expect(lawn.manualFinalAnnual).toBeGreaterThanOrEqual(lawn.minimumCollectedAnnualPrice - 0.01);
+    expect(lawn.manualMarginWarning).toBeUndefined();
+    expect(pest.manualFinalAnnual).toBeCloseTo(pest.annualAfterDiscount - estimate.summary.manualDiscount.amount, 2);
+    // Pest still clears the 35% margin floor under full absorption.
+    expect(pest.manualFinalMargin).toBeGreaterThanOrEqual(0.35);
+    expect(estimate.marginWarnings.find((w) => w.type === 'manual_discount_below_margin_floor'))
+      .toBeUndefined();
+  });
+
+  test('monthly CEILs when the WaveGuard lawn margin floor binds (never rebuilds a cent under the floor)', () => {
+    // 4,632 sqft: margin floor $601.45/yr. 601.45/12 = 50.1208… — nearest-cent
+    // rounding gives $50.12/mo which rebuilds $601.44/yr, a cent UNDER the
+    // protected floor. The public ladder ceils this case
+    // (clampLawnLadderEntry), so the engine must emit $50.13 to stay
+    // cent-identical with what the customer sees and accepts.
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 4632,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(lawn.marginFloorGuardApplied).toBe(true);
+    expect(lawn.annualAfterDiscount).toBeCloseTo(lawn.minimumCollectedAnnualPrice, 2);
+    // Fixture guard: this floor must round DOWN at the cent, or the case
+    // can't distinguish ceil from round.
+    expect(Math.round(lawn.annualAfterDiscount / 12 * 100) / 100)
+      .toBeLessThan(Math.ceil(lawn.annualAfterDiscount / 12 * 100) / 100);
+    // Same ceiling expression as the public ladder (estimate-public.js
+    // clampLawnLadderEntry).
+    expect(lawn.monthlyAfterDiscount).toBe(Math.ceil((lawn.annualAfterDiscount / 12) * 100) / 100);
+    expect(lawn.monthlyAfterDiscount * 12).toBeGreaterThanOrEqual(lawn.annualAfterDiscount);
+    // Summary follows the same rule while the floor is pinned.
+    expect(estimate.summary.recurringMonthlyAfterDiscount * 12)
+      .toBeGreaterThanOrEqual(estimate.summary.recurringAnnualAfterDiscount);
+  });
+
+  test('summary monthly CEILs when a manual discount pins lawn exactly on its margin floor', () => {
+    // Lawn-only at 4,632 sqft ($603 authored, $601.45 floor): a 50% manual
+    // discount clamps to the $1.55 of headroom, leaving the plan billing the
+    // floor. round(601.45/12) = $50.12 would understate it; the stored
+    // monthly_total must carry the ladder's $50.13.
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 4632,
+      services: { lawn: { track: 'st_augustine', lawnFreq: 9 } },
+      manualDiscount: { type: 'PERCENT', value: 50, source: 'test', eligibilityConfirmed: true },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(estimate.summary.manualDiscount.capReason).toBe('lawn_margin_floor');
+    expect(estimate.summary.recurringAnnualAfterDiscount)
+      .toBeCloseTo(lawn.minimumCollectedAnnualPrice, 2);
+    expect(estimate.summary.recurringMonthlyAfterDiscount)
+      .toBe(Math.ceil((estimate.summary.recurringAnnualAfterDiscount / 12) * 100) / 100);
+    expect(estimate.summary.recurringMonthlyAfterDiscount * 12)
+      .toBeGreaterThanOrEqual(estimate.summary.recurringAnnualAfterDiscount);
+    // Audit field sits exactly on the floor, never below.
+    expect(lawn.manualFinalAnnual).toBeCloseTo(lawn.minimumCollectedAnnualPrice, 2);
   });
 
   test('a manual discount on a lawn-only estimate is capped at the program minimum (recurring slice)', () => {

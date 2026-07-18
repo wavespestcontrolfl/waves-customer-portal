@@ -1,5 +1,6 @@
 const { shouldAutoInvoiceCompletion } = require('../routes/admin-dispatch')._test;
 const { completionSavedCardFallbackPolicy } = require('../routes/admin-dispatch')._test;
+const { membershipDuesCoverVisit } = require('../routes/admin-dispatch')._test;
 
 describe('completion saved-card fallback policy', () => {
   test('suppresses fallback rails for a fresh in-progress claim', () => {
@@ -252,5 +253,53 @@ describe('shouldAutoInvoiceCompletion — per-application visit outcome', () => 
 
   test('the explicit scheduler flag still outranks a non-performed outcome (operator intent)', () => {
     expect(shouldAutoInvoiceCompletion({ ...perApp, visitPerformed: false, createInvoiceOnComplete: true })).toBe(true);
+  });
+});
+
+// The monthly-membership suppression. The 2026-07 double-billing shape: the
+// cadence generator stamps a per-visit estimated_price on a membership
+// customer's recurring rows, so `!hasVisitPrice` defeated the suppression and
+// completion cut a phantom per-visit invoice on top of the monthly dues.
+describe('membershipDuesCoverVisit', () => {
+  const member = {
+    visitIsPayerBilled: false,
+    perApplicationBilling: false,
+    annualPrepayBilling: false,
+    customerAutopayActive: true,
+    hasVisitPrice: false,
+    isRecurring: false,
+    waveguardTier: 'Bronze',
+    monthlyRate: 33.33,
+  };
+
+  test('unpriced plan visit is covered (legacy behavior preserved)', () => {
+    expect(membershipDuesCoverVisit(member)).toBe(true);
+  });
+
+  test('a RECURRING visit with a stamped per-visit price is covered — the double-billing fix', () => {
+    expect(membershipDuesCoverVisit({ ...member, hasVisitPrice: true, isRecurring: true })).toBe(true);
+  });
+
+  test('a priced ONE-OFF visit (add-on / WDO / special) still bills its price', () => {
+    expect(membershipDuesCoverVisit({ ...member, hasVisitPrice: true, isRecurring: false })).toBe(false);
+  });
+
+  test('every exclusion still defeats coverage', () => {
+    expect(membershipDuesCoverVisit({ ...member, visitIsPayerBilled: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, perApplicationBilling: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, annualPrepayBilling: true })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, customerAutopayActive: false })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, waveguardTier: null })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, monthlyRate: 0 })).toBe(false);
+    expect(membershipDuesCoverVisit({ ...member, monthlyRate: null })).toBe(false);
+  });
+
+  test('recurring alone does not cover a non-membership customer', () => {
+    expect(membershipDuesCoverVisit({
+      ...member, hasVisitPrice: true, isRecurring: true, waveguardTier: null,
+    })).toBe(false);
+    expect(membershipDuesCoverVisit({
+      ...member, hasVisitPrice: true, isRecurring: true, monthlyRate: 0,
+    })).toBe(false);
   });
 });

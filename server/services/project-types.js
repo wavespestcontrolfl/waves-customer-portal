@@ -48,7 +48,19 @@ const PROJECT_TYPES = {
     short: 'WDO',
     defaultTitle: 'WDO Inspection Service',
     requiresFollowup: false,
-    photoCategories: ['exterior', 'living_area', 'kitchen', 'bathroom', 'garage', 'attic', 'crawlspace', 'previous_treatment', 'other'],
+    photoCategories: [
+      'other',
+      'wdo_evidence',
+      'wdo_damage',
+      'previous_treatment',
+      'treatment_document',
+      'notice',
+      'inaccessible_area',
+      'exterior',
+      'interior',
+      'attic',
+      'crawlspace',
+    ],
     // `section` groups the form into scannable blocks (rendered as inline
     // headers by CreateProjectModal, same pattern as the typed completion's
     // sectioned findings). Presentation-only: field order is unchanged, the
@@ -57,7 +69,6 @@ const PROJECT_TYPES = {
       { key: 'property_address', label: 'Property inspected', type: 'text', section: 'Property & scope', placeholder: 'Street address, city, state, ZIP' },
       { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', section: 'Property & scope', placeholder: 'Main home, attached garage, detached garage, shed, addition…' },
       { key: 'structure_type', label: 'Structure type', type: 'select', section: 'Property & scope', options: WDO_CONSTRUCTION_OPTIONS },
-      { key: 'structure_sqft', label: 'Structure footprint (approx. sq ft)', type: 'text', section: 'Property & scope', placeholder: 'Under-roof area, e.g. 2200 — used for the fee tier if no fee is picked' },
       { key: 'inspection_fee', label: 'Inspection fee ($)', type: 'text', section: 'Property & scope', placeholder: 'Any amount, e.g. 175 — varies by construction (wood frame), new build, prior termite history' },
       { key: 'requested_by', label: 'Inspection requested by', type: 'customer_search', customerValue: 'contact_summary', section: 'Property & scope', placeholder: 'Search customer database or type name and contact information' },
       { key: 'report_sent_to', label: 'Report sent to', type: 'customer_search', customerValue: 'contact_summary', section: 'Property & scope', placeholder: 'Search customer database or type name and contact information if different' },
@@ -975,8 +986,8 @@ const PROJECT_TYPES = {
         itemLabel: 'Application',
         // Row headers continue the numbering after the primary application.
         itemIndexOffset: 2,
-        addLabel: 'Add another application',
-        description: 'Record each additional product applied on this job (e.g. a wood treatment alongside the soil barrier).',
+        addLabel: 'Add unplanned application',
+        description: 'Applications planned on the scheduled service load here automatically. Add a row only for an extra product applied in the field.',
         fields: [
           { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
           { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', showWhen: { field: 'treatment_method', value: 'Other' } },

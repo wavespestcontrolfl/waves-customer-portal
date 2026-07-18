@@ -82,22 +82,33 @@ function mapStatus(metaStatus) {
 }
 
 // Meta returns lead/result actions in an `actions` array of {action_type, value}.
-// Count the lead-gen + pixel/onsite lead actions as our "conversions".
-const CONVERSION_ACTION_TYPES = new Set([
-  'lead',
-  'onsite_conversion.lead_grouped',
-  'offsite_conversion.fb_pixel_lead',
-  'offsite_conversion.fb_pixel_complete_registration',
-  'offsite_conversion.fb_pixel_purchase',
-  'omni_purchase',
-  'purchase',
-]);
+// The roll-up types (`lead`, `omni_purchase`) ALREADY include their component
+// events (onsite/offsite pixel variants), so summing the aggregate together with
+// its components double-counts conversions (and, via action_values, doubles
+// conversion_value → halves CAC / doubles ROAS). Group them and take the
+// aggregate when Meta returns it, otherwise the sum of the components.
+const CONVERSION_GROUPS = [
+  { aggregate: 'lead', components: ['onsite_conversion.lead_grouped', 'offsite_conversion.fb_pixel_lead'] },
+  { aggregate: 'omni_purchase', components: ['purchase', 'offsite_conversion.fb_pixel_purchase'] },
+  { aggregate: null, components: ['offsite_conversion.fb_pixel_complete_registration'] },
+];
 
 function sumActions(actions) {
   if (!Array.isArray(actions)) return 0;
-  return actions.reduce((sum, a) => (
-    CONVERSION_ACTION_TYPES.has(a?.action_type) ? sum + (Number(a.value) || 0) : sum
-  ), 0);
+  const byType = new Map();
+  for (const a of actions) {
+    if (!a || !a.action_type) continue;
+    byType.set(a.action_type, (byType.get(a.action_type) || 0) + (Number(a.value) || 0));
+  }
+  let total = 0;
+  for (const g of CONVERSION_GROUPS) {
+    if (g.aggregate && byType.has(g.aggregate)) {
+      total += byType.get(g.aggregate); // deduped roll-up already covers components
+    } else {
+      for (const c of g.components) total += byType.get(c) || 0;
+    }
+  }
+  return total;
 }
 
 function mapCampaign(row) {
@@ -236,6 +247,9 @@ async function syncDailyPerformanceLocked(days = 7) {
 
 module.exports = {
   isConfigured,
+  // Read-only Graph access for the Intelligence Bar ops tools — mutations
+  // have no exported surface here at all.
+  graphGet,
   syncCampaigns,
   syncDailyPerformance,
   _private: {
@@ -245,6 +259,6 @@ module.exports = {
     mapCampaign,
     mapInsightRow,
     sumActions,
-    CONVERSION_ACTION_TYPES,
+    CONVERSION_GROUPS,
   },
 };

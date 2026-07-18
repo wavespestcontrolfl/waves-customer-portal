@@ -4,10 +4,10 @@
 // can't diverge from what the customer actually sees. (inspection_fee is a
 // fee-tier helper for invoicing — the invoice carries the actual price.)
 //
-// The registry and the inspection-fee cue scrubber live in
-// @waves/report-redaction — the server egress/write guards
-// (server/services/project-types.js) import the SAME module, so the client
-// surfaces and the server payload cannot drift.
+// The registry (inspection_fee + retired structure_sqft) and the
+// inspection-fee cue scrubber live in @waves/report-redaction — the server
+// egress/write guards (server/services/project-types.js) import the SAME
+// module, so the client surfaces and the server payload cannot drift.
 import {
   INTERNAL_FINDING_KEYS as INTERNAL_FINDING_KEY_LIST,
   redactInspectionFeeCues,

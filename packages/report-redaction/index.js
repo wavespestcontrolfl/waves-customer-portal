@@ -15,8 +15,12 @@
 
 // Internal/office-only finding keys — captured on the WDO create form but
 // NEVER customer-facing (audit 2026-07-16). inspection_fee is an invoicing
-// fee-tier helper; the invoice carries the actual price.
-const INTERNAL_FINDING_KEYS = ['inspection_fee'];
+// helper; the invoice carries the actual price. structure_sqft is a
+// historical helper from the retired footprint-based fee concept — neither
+// an FDACS field nor customer-facing report content (main, fee-tier
+// retirement; joined the shared registry at merge so the server strips it
+// too, not just the client).
+const INTERNAL_FINDING_KEYS = ['inspection_fee', 'structure_sqft'];
 
 // Words that END the inspection-fee cue's reach inside a clause. Two families:
 // - the fee was waived/comped/free — it has NO amount of its own, so whatever
@@ -289,7 +293,7 @@ function containsInspectionFeeCue(text) {
 // corrupts legitimate customer text. Regexes are built at call time — this
 // path runs server-side only, never in the browser bundle.
 // The flat WDO inspection fee that bills when the field is left blank
-// (owner decision 2026-07-12). Lives HERE so billing (WDO_FEE_TIERS),
+// (owner decision 2026-07-12). Lives HERE so billing (resolveWdoInspectionFee),
 // server redaction, and the client preview all share one number.
 const WDO_DEFAULT_INSPECTION_FEE = 250;
 

@@ -34,6 +34,12 @@ const PATTERNS = [
   { label: '.groupBy',       re: /\.groupBy\(\s*['"]([a-z_][a-z0-9_.]*)['"]/gi, mode: 'col' },
   { label: '.increment',     re: /\.(?:increment|decrement)\(\s*['"]([a-z_][a-z0-9_]*)['"]/gi, mode: 'col' },
   { label: '.join',          re: /\.(?:join|leftJoin|rightJoin|innerJoin|fullOuterJoin|crossJoin)\(\s*['"]([a-z_][a-z0-9_]*)(?:\s+as\s+([a-z_][a-z0-9_]*))?['"]\s*,\s*['"]([a-z_][a-z0-9_.]*)['"]\s*,\s*['"]([a-z_][a-z0-9_.]*)['"]/gi, mode: 'join' },
+  // Callback-join form: .leftJoin('table as alias', function () { ... }) /
+  // .join('table', qb => ...). The 3-string-arg pattern above can't see
+  // these, so the alias never registered and every "alias.col" qualifier
+  // in the module read as a phantom table (first hit: customer_turf_profiles
+  // as tp in estimate-tools).
+  { label: '.join(cb)',      re: /\.(?:join|leftJoin|rightJoin|innerJoin|fullOuterJoin|crossJoin)\(\s*['"]([a-z_][a-z0-9_]*)(?:\s+as\s+([a-z_][a-z0-9_]*))?['"]\s*,\s*(?:function\b|\(?\s*[a-z_$][\w$]*\s*\)?\s*=>|\()/gi, mode: 'table' },
   { label: 'db.raw',         re: /\b(?:db|trx|knex)\s*\.raw\(/g, mode: 'raw-flag' },
   // Object-alias form: db({ p: 'payments' }) / .from({ c: 'customers' }) /
   // .leftJoin({ e: 'estimates' }, ...). Group 1 = alias, group 2 = table.

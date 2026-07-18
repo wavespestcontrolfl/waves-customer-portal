@@ -38,11 +38,24 @@ const LAWN_TIER_VISITS = { basic: 4, standard: 6, enhanced: 9, premium: 12 };
 
 // Annual material budgets at the 4,500 sqft reference, by track → visits.
 // Sun/shade is NOT a pricing input — every lawn prices on its track's budget.
+// 2026-07-16 (owner-approved): budgets now FUND the protocol spot-treatment
+// reserves (protocols.json conditional_cost — ¼ of gated fungicide/
+// insecticide apps, ⅛ of herbicide spot). Reserve deltas follow the same
+// cadence conversion as the scheduled materials — average the flagged
+// calendar slots of the sold cadence's protocol tier (standard→bronze,
+// enhanced→enhanced, premium→premium, basic prorates bronze; the mapping
+// pinned by waveguard-pricing-exposure PROTOCOL_TIER_BY_PRICING_TIER),
+// multiply by the SOLD visit count (4/6/9/12), ceil so the funded floor
+// always covers the audited reserve. OR-alternative branches fund the
+// MAX-cost branch (e.g. zoysia Feb Medallion-or-Velista reserves the
+// $67.50 Velista side). Reserve deltas per track at 4/6/9/12 visits:
+// st_aug 11/16/15/20, bermuda 4/6/8/11, zoysia 16/23/31/41 (large-patch
+// program dominates), bahia 7/10/12/16.
 const LAWN_MATERIAL_BUDGETS = {
-  st_augustine: { 4: 64, 6: 87, 9: 167, 12: 205 },
-  bermuda: { 4: 57, 6: 87, 9: 164, 12: 215 },
-  zoysia: { 4: 67, 6: 101, 9: 174, 12: 178 },
-  bahia: { 4: 45, 6: 68, 9: 95, 12: 115 },
+  st_augustine: { 4: 75, 6: 103, 9: 182, 12: 225 },
+  bermuda: { 4: 61, 6: 93, 9: 172, 12: 226 },
+  zoysia: { 4: 83, 6: 124, 9: 205, 12: 219 },
+  bahia: { 4: 52, 6: 78, 9: 107, 12: 131 },
 };
 
 const MATERIAL_REFERENCE_SQFT = 4500;

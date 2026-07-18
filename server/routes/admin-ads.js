@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { buildChannelAttribution, splitFacebookByPaid } = require('../services/channel-attribution');
@@ -19,7 +19,147 @@ function getGoogleCallBridge() {
   return _GoogleCallBridge || (_GoogleCallBridge = require('../services/ads/google-call-bridge'));
 }
 
+// All ads endpoints require a signed-in staff member; the individual
+// spend-mutating endpoints below additionally require `requireAdmin` (see each
+// route). Reads stay tech-or-admin.
 router.use(adminAuthenticate, requireTechOrAdmin);
+
+// --- Write-body sanitizers -------------------------------------------------
+// POST/PUT /campaigns and PUT /targets previously mass-assigned req.body
+// straight into knex, so any column was settable. The canonical spend/identity
+// fields (budget_mode, daily_budget_*, platform, platform_campaign_id, status)
+// have dedicated endpoints that carry their own validation, audit log, and live
+// Google sync — the generic create/update must never write them, so we reject
+// them outright rather than silently drop, and validate the rest strictly.
+
+// Strict numeric parse: rejects trailing garbage ('50junk') and blank strings
+// that Number() would coerce to 0. Returns NaN on anything non-numeric.
+function toFiniteNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  return NaN;
+}
+
+// Known ad platforms (google_lsa + facebook are ingested read-only; only
+// google_ads is remotely budget-controllable — that guard lives in setBudget/
+// setMode). Matches ad_campaigns.platform's documented set.
+const CAMPAIGN_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
+const CAMPAIGN_STATUSES = ['active', 'paused', 'removed'];
+// Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
+const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
+// Identity — settable at creation, never repointed on update.
+const CAMPAIGN_CREATE_ONLY_FIELDS = ['platform', 'platform_campaign_id'];
+// Free-form metadata columns editable via either create or update.
+const CAMPAIGN_META_FIELDS = [
+  'campaign_name', 'campaign_type', 'target_area', 'service_category',
+  'target_services', 'intent_type', 'is_branded', 'service_line',
+  'monthly_budget', 'metadata',
+];
+
+// Returns { ok:true, value } or { ok:false, error }.
+function sanitizeCampaignWrite(body, isUpdate) {
+  const forbidden = isUpdate
+    ? [...CAMPAIGN_MANAGED_FIELDS, ...CAMPAIGN_CREATE_ONLY_FIELDS]
+    : CAMPAIGN_MANAGED_FIELDS;
+  for (const f of forbidden) {
+    if (body[f] !== undefined) {
+      return { ok: false, error: `${f} can't be set here — use the dedicated budget/mode/pause/enable/sync endpoints.` };
+    }
+  }
+
+  // status is settable on create (honored rather than defaulted to active) and
+  // on update (the only route to pause/remove a manual or google_lsa campaign —
+  // /pause + /enable reject non-google_ads; the route additionally steers a
+  // Google campaign's status change to those synced endpoints).
+  const allow = isUpdate
+    ? ['status', ...CAMPAIGN_META_FIELDS]
+    : [...CAMPAIGN_CREATE_ONLY_FIELDS, 'status', ...CAMPAIGN_META_FIELDS];
+  const out = {};
+  for (const key of allow) {
+    if (body[key] === undefined) continue;
+    out[key] = body[key];
+  }
+
+  if (!isUpdate) {
+    if (out.platform !== undefined && !CAMPAIGN_PLATFORMS.includes(out.platform)) {
+      return { ok: false, error: `platform must be one of: ${CAMPAIGN_PLATFORMS.join(', ')}` };
+    }
+    // External campaign IDs are numeric; a non-digit value would reach the
+    // interpolated GAQL `WHERE campaign.id = ...` in google-ads.js.
+    if (out.platform_campaign_id !== undefined && out.platform_campaign_id !== null
+        && !/^\d+$/.test(String(out.platform_campaign_id))) {
+      return { ok: false, error: 'platform_campaign_id must be digits only' };
+    }
+  }
+
+  if (out.status !== undefined && !CAMPAIGN_STATUSES.includes(out.status)) {
+    return { ok: false, error: `status must be one of: ${CAMPAIGN_STATUSES.join(', ')}` };
+  }
+
+  if (out.monthly_budget !== undefined && out.monthly_budget !== null) {
+    const n = toFiniteNumber(out.monthly_budget);
+    if (!(n >= 0)) return { ok: false, error: 'monthly_budget must be a number ≥ 0' };
+    out.monthly_budget = n;
+  }
+
+  return { ok: true, value: out };
+}
+
+// ad_targets thresholds drive the autonomous capacity→budget cron, so they must
+// stay ordered green < yellow < orange within 0–100 and the money/count fields
+// must be sane; a mass-assigned capacity_green_max of 200 would read every
+// campaign as green and hold budgets at full base regardless of real capacity.
+const TARGET_WRITABLE = [
+  'min_roas', 'max_cpa', 'min_conversion_rate', 'target_aov',
+  'capacity_green_max', 'capacity_yellow_max', 'capacity_orange_max',
+  'max_services_per_tech', 'metadata',
+];
+const TARGET_NONNEG = ['min_roas', 'max_cpa', 'min_conversion_rate', 'target_aov'];
+const TARGET_PCT = ['capacity_green_max', 'capacity_yellow_max', 'capacity_orange_max'];
+
+function sanitizeTargetsWrite(body, existing) {
+  const out = {};
+  for (const key of TARGET_WRITABLE) {
+    if (body[key] === undefined) continue;
+    out[key] = body[key];
+  }
+  for (const f of [...TARGET_NONNEG, ...TARGET_PCT]) {
+    if (out[f] === undefined || out[f] === null) continue;
+    const n = toFiniteNumber(out[f]);
+    if (!(n >= 0)) return { ok: false, error: `${f} must be a number ≥ 0` };
+    out[f] = n;
+  }
+  for (const f of TARGET_PCT) {
+    if (out[f] !== undefined && out[f] > 100) return { ok: false, error: `${f} must be ≤ 100` };
+  }
+  if (out.max_services_per_tech !== undefined && out.max_services_per_tech !== null) {
+    const n = toFiniteNumber(out.max_services_per_tech);
+    if (!Number.isInteger(n) || n < 1) return { ok: false, error: 'max_services_per_tech must be an integer ≥ 1' };
+    out.max_services_per_tech = n;
+  }
+  // Enforce strict green < yellow < orange ordering on the values that will
+  // ACTUALLY be in effect for the cron after this write. A field being written
+  // as null (clearing it) persists null, and the cron then reads its hard-coded
+  // default (`targets?.field || DEFAULT`) — so resolve null/blank to that same
+  // default here, not to the old stored value, or a cleared threshold could
+  // violate an ordering the request appeared to pass.
+  const effThreshold = (field, def) => {
+    const has = Object.prototype.hasOwnProperty.call(out, field);
+    const raw = has ? out[field] : existing?.[field];
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? n : def; // null / blank / missing → cron default
+  };
+  const g = effThreshold('capacity_green_max', 70);
+  const y = effThreshold('capacity_yellow_max', 85);
+  const o = effThreshold('capacity_orange_max', 95);
+  if (!(g < y && y < o)) {
+    return { ok: false, error: 'capacity thresholds must satisfy green < yellow < orange' };
+  }
+  return { ok: true, value: out };
+}
 
 // =========================================================================
 // CAMPAIGNS CRUD
@@ -53,23 +193,42 @@ router.get('/campaigns', async (req, res, next) => {
 });
 
 // POST /api/admin/ads/campaigns
-router.post('/campaigns', async (req, res, next) => {
+router.post('/campaigns', requireAdmin, async (req, res, next) => {
   try {
-    const [campaign] = await db('ad_campaigns').insert(req.body).returning('*');
+    const clean = sanitizeCampaignWrite(req.body, false);
+    if (!clean.ok) return res.status(400).json({ error: clean.error });
+    const [campaign] = await db('ad_campaigns').insert(clean.value).returning('*');
     res.json({ campaign });
   } catch (err) { next(err); }
 });
 
 // PUT /api/admin/ads/campaigns/:id
-router.put('/campaigns/:id', async (req, res, next) => {
+router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
   try {
-    const [campaign] = await db('ad_campaigns').where({ id: req.params.id }).update({ ...req.body, updated_at: new Date() }).returning('*');
+    const clean = sanitizeCampaignWrite(req.body, true);
+    if (!clean.ok) return res.status(400).json({ error: clean.error });
+    // A Google campaign's status must change through /pause + /enable so it syncs
+    // to Google Ads; a direct local flip here would drift from live spend.
+    // Manual / google_lsa campaigns have no synced status route, so PUT is the
+    // way to retire them.
+    if (clean.value.status !== undefined) {
+      const existing = await db('ad_campaigns').where({ id: req.params.id }).first();
+      if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+      if (existing.platform === 'google_ads' && clean.value.status !== existing.status) {
+        return res.status(400).json({ error: "Use /pause or /enable to change a Google campaign's status — they sync Google Ads." });
+      }
+    }
+    const [campaign] = await db('ad_campaigns')
+      .where({ id: req.params.id })
+      .update({ ...clean.value, updated_at: new Date() })
+      .returning('*');
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ campaign });
   } catch (err) { next(err); }
 });
 
 // POST /api/admin/ads/campaigns/:id/mode
-router.post('/campaigns/:id/mode', async (req, res, next) => {
+router.post('/campaigns/:id/mode', requireAdmin, async (req, res, next) => {
   try {
     const { mode, reason } = req.body;
     // Mode rewrites budget_mode + daily_budget_current and pushes the new
@@ -86,9 +245,18 @@ router.post('/campaigns/:id/mode', async (req, res, next) => {
 });
 
 // POST /api/admin/ads/campaigns/:id/budget
-router.post('/campaigns/:id/budget', async (req, res, next) => {
+router.post('/campaigns/:id/budget', requireAdmin, async (req, res, next) => {
   try {
-    const { budget, reason } = req.body;
+    // Validate the amount here for a clean 400 (setBudget also validates as the
+    // source-level backstop for its other caller, /advisor/apply). A daily
+    // budget must be strictly positive — use mode 'stop' to throttle, not $0.
+    const budget = toFiniteNumber(req.body.budget);
+    if (!(budget > 0)) {
+      return res.status(400).json({ error: 'budget must be a number > 0' });
+    }
+    if (budget > getBudgetManager().MAX_DAILY_BUDGET) {
+      return res.status(400).json({ error: `budget must be ≤ ${getBudgetManager().MAX_DAILY_BUDGET}` });
+    }
     // Only Google campaigns have remote control here — refuse Meta (read-only,
     // managed in Ads Manager) BEFORE mutating local budget, so the local row
     // can't drift from the real campaign.
@@ -97,19 +265,16 @@ router.post('/campaigns/:id/budget', async (req, res, next) => {
     if (campaign.platform !== 'google_ads') {
       return res.status(400).json({ error: `Budget control isn't supported for ${campaign.platform} campaigns — manage them in their native Ads Manager.` });
     }
-    const result = await getBudgetManager().setBudget(req.params.id, budget, reason || 'manual');
-
-    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
-      const gResult = await getGoogleAds().updateBudget(campaign.platform_campaign_id, budget);
-      if (gResult) result.googleAdsUpdated = true;
-    }
-
+    // setBudget now performs the mode-aware Google push itself (editing the base
+    // while a campaign is throttled must not blast the raw new base live), so the
+    // route no longer pushes separately with the raw value.
+    const result = await getBudgetManager().setBudget(req.params.id, budget, req.body.reason || 'manual');
     res.json(result);
   } catch (err) { next(err); }
 });
 
 // POST /api/admin/ads/campaigns/:id/pause
-router.post('/campaigns/:id/pause', async (req, res, next) => {
+router.post('/campaigns/:id/pause', requireAdmin, async (req, res, next) => {
   try {
     const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
@@ -134,7 +299,7 @@ router.post('/campaigns/:id/pause', async (req, res, next) => {
 });
 
 // POST /api/admin/ads/campaigns/:id/enable
-router.post('/campaigns/:id/enable', async (req, res, next) => {
+router.post('/campaigns/:id/enable', requireAdmin, async (req, res, next) => {
   try {
     const campaign = await db('ad_campaigns').where({ id: req.params.id }).first();
     if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
@@ -159,7 +324,7 @@ router.post('/campaigns/:id/enable', async (req, res, next) => {
 });
 
 // POST /api/admin/ads/sync — trigger full Google Ads sync
-router.post('/sync', async (req, res, next) => {
+router.post('/sync', requireAdmin, async (req, res, next) => {
   try {
     if (!getGoogleAds().isConfigured()) {
       return res.status(400).json({ error: 'Google Ads API not configured. Set GOOGLE_ADS_* environment variables.' });
@@ -182,7 +347,7 @@ router.post('/sync', async (req, res, next) => {
 
 // POST /api/admin/ads/sync/meta — pull Meta (Facebook/Instagram) campaigns +
 // daily insights into ad_campaigns/ad_performance_daily (platform='facebook').
-router.post('/sync/meta', async (req, res, next) => {
+router.post('/sync/meta', requireAdmin, async (req, res, next) => {
   try {
     if (!getMetaAds().isConfigured()) {
       return res.status(400).json({ error: 'Meta Ads API not configured. Set META_ADS_ACCESS_TOKEN + META_ADS_ACCOUNT_ID.' });
@@ -217,7 +382,7 @@ router.get('/call-bridge', async (req, res, next) => {
 // stale selection could insert an organic row the paid write can't flip.
 // try-lock semantics: if the cron holds the lease, the manual apply returns
 // 409 rather than waiting — re-run it a minute later.
-router.post('/call-bridge/apply', async (req, res, next) => {
+router.post('/call-bridge/apply', requireAdmin, async (req, res, next) => {
   try {
     const { runExclusive } = require('../utils/cron-lock');
     const periodDays = parseInt(String(req.body.period || '30d').replace('d', ''), 10) || 30;
@@ -384,7 +549,7 @@ router.get('/advisor/history', async (req, res, next) => {
 });
 
 // POST /api/admin/ads/advisor/generate — manually trigger
-router.post('/advisor/generate', async (req, res, next) => {
+router.post('/advisor/generate', requireAdmin, async (req, res, next) => {
   try {
     const advice = await getCampaignAdvisor().generateDailyAdvice();
     res.json({ report: advice });
@@ -392,33 +557,172 @@ router.post('/advisor/generate', async (req, res, next) => {
 });
 
 // POST /api/admin/ads/advisor/apply — apply a recommendation
-router.post('/advisor/apply', async (req, res, next) => {
+// Only budget/mode recommendations map to an automated change; everything else
+// (add_negative, bid/keyword/SEO/GBP actions) is advisory and returns
+// applied:false so the UI never claims an action it didn't take. Applies only
+// when the campaign resolves and a concrete value is present; increments the
+// day's applied_count only on a genuine apply.
+// Runs a budget-manager call made with requireLivePush and maps its typed
+// failures onto the honest applied:false contract ('live_push_unavailable' →
+// 422, 'live_push_failed' → 502). Push-first means NOTHING was persisted on
+// either failure — the reconcile cron has no recorded intent to retry later.
+const APPLY_FAILED = Symbol('apply-failed');
+async function applyLive(fn, res) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err.code === 'live_push_unavailable') {
+      res.status(422).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (err.code === 'live_push_failed' || err.code === 'live_push_rolled_back' || err.code === 'live_push_ambiguous') {
+      res.status(502).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (err.code === 'mode_conflict') {
+      res.status(409).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (['campaign_inactive', 'mode_noop', 'budget_noop', 'budget_out_of_bounds', 'budget_unbounded'].includes(err.code)) {
+      res.status(422).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    throw err;
+  }
+}
+
+router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
   try {
     const { action, campaignId, campaignName, value, reason } = req.body;
+    // ad_budget_log.reason is varchar(255) and the client sends the model's
+    // rec prose — an oversized reason would fail the audit insert AFTER the
+    // live push and force a pointless compensating rollback, permanently
+    // blocking that rec from applying.
+    const auditReason = String(reason || '').trim().slice(0, 255);
 
-    let result;
-    switch (action) {
-      case 'increase_budget':
-      case 'decrease_budget':
-        result = await getBudgetManager().setBudget(campaignId, value, reason || `Advisor: ${action}`);
-        break;
-      case 'change_mode':
-        result = await getBudgetManager().setMode(campaignId, value, reason || `Advisor: set ${value}`);
-        break;
-      case 'add_negative':
-        // Store the negative keyword request (actual Google Ads API integration later)
-        result = { action: 'add_negative', terms: value, status: 'queued', note: 'Add these as negative keywords in Google Ads' };
-        break;
-      default:
-        result = { action, status: 'noted', note: 'Manual action required' };
+    const isBudgetAction = action === 'increase_budget' || action === 'decrease_budget';
+    if (!isBudgetAction && action !== 'change_mode') {
+      // add_negative / adjust_bid / SEO / GBP / etc. — no automated action yet.
+      return res.json({ applied: false, manual: true, note: 'This recommendation needs a manual change (no automated action for it yet).' });
     }
 
-    // Increment applied count for today's report
-    await db('ad_advisor_reports')
-      .where({ date: etDateString() })
-      .increment('applied_count', 1);
+    // The Apply confirm shows campaignName — an id-only request would let a
+    // spend change go through without the admin ever seeing which campaign
+    // it targets (the advisor normalizer strips such recs; this is the
+    // server-side backstop).
+    if (!String(campaignName || '').trim()) {
+      return res.status(422).json({ applied: false, error: 'This recommendation carries no campaign name — apply it manually from the campaign editor.' });
+    }
+    // Prefer the stable id the advisor now carries; a bare name is a fallback
+    // for older stored reports. campaign_name is NOT unique (Google vs Meta
+    // rows, duplicated experiments), so a name matching more than one row is
+    // rejected rather than mutating whichever row Postgres returns first.
+    // The id is model output: a malformed one (not UUID-shaped) would 22P02
+    // the uuid column into a 500, so it's ignored in favor of the name.
+    const usableId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(campaignId || ''))
+      ? campaignId : null;
+    let campaign = null;
+    if (usableId) {
+      campaign = await db('ad_campaigns').where({ id: usableId }).first();
+    } else if (campaignName) {
+      const matches = await db('ad_campaigns')
+        .whereRaw('lower(campaign_name) = ?', [String(campaignName).toLowerCase()])
+        .select('*');
+      if (matches.length > 1) {
+        return res.status(422).json({ applied: false, error: `More than one campaign is named "${campaignName}" — apply this manually to the right one.` });
+      }
+      campaign = matches[0] || null;
+    }
+    if (!campaign) {
+      return res.status(422).json({ applied: false, error: `Couldn't find a campaign named "${campaignName || ''}" to apply this to — adjust it manually.` });
+    }
+    // The advisor sees every platform's rows, but only Google campaigns are
+    // remotely controllable (the budget manager throws on the rest — that
+    // must surface as an honest "can't", not a 500).
+    if (campaign.platform !== 'google_ads') {
+      return res.status(422).json({ applied: false, manual: true, error: `"${campaign.campaign_name}" is a ${campaign.platform} campaign managed outside this dashboard — apply this in its own Ads Manager.` });
+    }
+    // The advisor sees every non-removed status; a paused campaign must not
+    // take a budget/mode change that would silently revive it later with an
+    // advisor-selected value.
+    if (campaign.status !== 'active') {
+      return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is ${campaign.status || 'not active'} — re-enable it before applying advisor changes.` });
+    }
+    // The id is model output too: a rec can carry campaign A's id under
+    // campaign B's name. The card shows the NAME, so a mismatch means the
+    // click would mutate a different campaign than the admin approved.
+    if (usableId && campaignName
+      && String(campaign.campaign_name).toLowerCase() !== String(campaignName).toLowerCase()) {
+      return res.status(422).json({ applied: false, error: `This recommendation's campaign id resolves to "${campaign.campaign_name}", not "${campaignName}" — the advisor mislabeled it. Apply the change manually.` });
+    }
 
-    res.json({ success: true, result });
+    let result;
+    if (isBudgetAction) {
+      const amount = toFiniteNumber(value);
+      if (!(amount > 0)) {
+        return res.status(422).json({ applied: false, error: 'This recommendation has no concrete target budget — set the budget manually.' });
+      }
+      // A throttled campaign ('spent'/'stop') deliberately runs a mode-derived
+      // budget (frozen current / 1% of base), so setBudget would record the
+      // new BASE but push the throttled amount — not the target this rec
+      // claims. Applying it would report "$X/day set" while Google keeps the
+      // cap. Mode changes go through change_mode recs; budget edits on a
+      // throttled campaign are a manual, eyes-open action.
+      if (campaign.budget_mode && campaign.budget_mode !== 'base') {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is throttled in "${campaign.budget_mode}" mode, so a new daily budget wouldn't take effect. Apply a change_mode recommendation (or set the mode to base) first, or edit the budget manually.` });
+      }
+      // Safety bound on AI-supplied budgets: apply_value is unvalidated model
+      // output, and the card's prose can say "$30" while the value is 3000.
+      // One click moves a budget at most 3× in either direction from the
+      // campaign's known base (falling back to the current daily budget);
+      // with NO recorded budget there is nothing trustworthy to bound an AI
+      // number against, so the change is manual-only. Anything larger goes
+      // through the manual budget editor, where the number is typed by hand.
+      const baseBudget = toFiniteNumber(campaign.daily_budget_base);
+      const boundRef = baseBudget > 0 ? baseBudget : toFiniteNumber(campaign.daily_budget_current);
+      if (!(boundRef > 0)) {
+        return res.status(422).json({ applied: false, error: 'This campaign has no recorded daily budget to sanity-check an AI-suggested amount against — set the budget manually in the campaign editor.' });
+      }
+      if (amount > boundRef * 3 || amount < boundRef / 3) {
+        return res.status(422).json({ applied: false, error: `Refusing to one-click a budget change from $${boundRef}/day to $${amount}/day (more than a 3× move) — if that's really intended, set it in the campaign's budget editor.` });
+      }
+      // Known no-op (stale report / re-apply after success): base AND current
+      // already match the target — counting it as applied would be the same
+      // false green. A same-base apply with DRIFTED current stays allowed:
+      // that push reconciles the live budget back to the recorded base.
+      if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
+      }
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, trigger: 'advisor' }), res);
+      if (result === APPLY_FAILED) return undefined;
+    } else {
+      if (!['base', 'spent', 'stop'].includes(value)) {
+        return res.status(422).json({ applied: false, error: 'This recommendation has no concrete mode (base/spent/stop) — set the mode manually.' });
+      }
+      // A rec targeting the mode the campaign is already in is a no-op — the
+      // fallback advisor emits STOP for every low-ROAS campaign without
+      // checking, and reporting "applied" for zero state change is the same
+      // false green this endpoint exists to prevent.
+      if (value === campaign.budget_mode) {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already in ${value} mode — nothing to apply.` });
+      }
+      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, auditReason || `Advisor: set ${value}`, { requireLivePush: true, requireActive: true, trigger: 'advisor' }), res);
+      if (result === APPLY_FAILED) return undefined;
+    }
+
+    // Count only genuinely-applied actions against today's report. Reporting
+    // only: the live mutation is already done, so a transient failure here
+    // must not flip the response to "not applied" (the admin would retry and
+    // push the same change live twice).
+    try {
+      await db('ad_advisor_reports')
+        .where({ date: etDateString() })
+        .increment('applied_count', 1);
+    } catch (err) {
+      logger.warn(`[ads] advisor apply succeeded but applied_count increment failed: ${err.message}`);
+    }
+
+    res.json({ applied: true, result });
   } catch (err) { next(err); }
 });
 
@@ -608,7 +912,7 @@ router.get('/fixed-costs', async (req, res, next) => {
 
 // POST /api/admin/ads/fixed-costs — upsert a channel's monthly fixed cost.
 // { channel, monthlyAmount, note } — channel is the lead_source key (organic / google_ads / …).
-router.post('/fixed-costs', async (req, res, next) => {
+router.post('/fixed-costs', requireAdmin, async (req, res, next) => {
   try {
     const channel = String(req.body.channel || '').trim();
     if (!channel) return res.status(400).json({ error: 'channel is required' });
@@ -668,13 +972,15 @@ router.get('/targets', async (req, res, next) => {
 });
 
 // PUT /api/admin/ads/targets
-router.put('/targets', async (req, res, next) => {
+router.put('/targets', requireAdmin, async (req, res, next) => {
   try {
     const targets = await db('ad_targets').first();
+    const clean = sanitizeTargetsWrite(req.body, targets);
+    if (!clean.ok) return res.status(400).json({ error: clean.error });
     if (targets) {
-      await db('ad_targets').where({ id: targets.id }).update({ ...req.body, updated_at: new Date() });
+      await db('ad_targets').where({ id: targets.id }).update({ ...clean.value, updated_at: new Date() });
     } else {
-      await db('ad_targets').insert(req.body);
+      await db('ad_targets').insert(clean.value);
     }
     res.json({ success: true });
   } catch (err) { next(err); }

@@ -39,6 +39,13 @@ describe('lawn score — null categories are excluded, not coerced to 0', () => 
     expect(calculateLawnOverallScore({ overall_score: 88, stress_damage: 70, turf_density: 10 })).toBe(88);
   });
 
+  test("a legacy stress_damage of '' means NOT scored — the stored overall recomputes", () => {
+    // '' passed the old raw null-check, so a five-signal-era overall was
+    // trusted as four-category (audit 2026-07-16 P3). lawnScoreValue maps ''
+    // to null, forcing the recompute over the displayed bars.
+    expect(calculateLawnOverallScore({ overall_score: 88, stress_damage: '', turf_density: 10 })).toBe(10);
+  });
+
   test('a delta is null unless BOTH visits scored that category (no fabricated improvement)', () => {
     expect(lawnScoreDelta(85, 60)).toBe(25);
     expect(lawnScoreDelta(60, 85)).toBe(-25);

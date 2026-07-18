@@ -1779,7 +1779,8 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     });
 
     return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult: assessment.mergedPublishResult, run: updated };
-  });
+    // recordHealth: false — per-run approval lock, not a scheduled job.
+  }, { recordHealth: false });
 
   if (result?.skipped) {
     return { ok: false, status: 409, error: 'an approval for this run is already in progress' };
@@ -1835,7 +1836,8 @@ async function rejectAutonomousRun(runId, { reason } = {}) {
         .catch(() => null);
     }
     return { ok: true, run: updated };
-  });
+    // recordHealth: false — per-run approval lock, not a scheduled job.
+  }, { recordHealth: false });
   if (result?.skipped) {
     return { ok: false, status: 409, error: 'an approval for this run is in progress — retry once it finishes' };
   }

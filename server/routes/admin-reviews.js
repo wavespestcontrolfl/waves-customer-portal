@@ -461,7 +461,9 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         'customers.zip',
         'customers.waveguard_tier',
         'customers.nearest_location_id',
-        'customers.lifetime_revenue'
+        // Payments-derived net — customers.lifetime_revenue has no production
+        // writer and reads $0/stale for every real customer.
+        db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue")
       )
       .orderBy('customers.last_contact_date', 'desc')
       .limit(200);
@@ -627,6 +629,7 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
     // Serialize concurrent sends to the same customer so a double-click / retry
     // can't slip two messages past the cap + cooldown (audit O7). The lock is
     // non-blocking — a second in-flight send to the same customer is rejected.
+    // recordHealth: false — per-customer lock, not a scheduled job.
     const result = await runExclusive(`review-send:${customerId}`, async () => {
       // Private no-link check-ins (resolution_check / satisfaction_confirm) are
       // NOT review asks, so they bypass the review 3-cap / 30-day cooldown, the
@@ -719,7 +722,7 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
         success: false, queued: true,
         message: 'Send failed transiently and was queued for automatic retry.',
       } };
-    });
+    }, { recordHealth: false });
 
     if (result && result.skipped) {
       return res.status(409).json({ error: 'A review request to this customer is already being sent.' });
@@ -812,7 +815,7 @@ router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => 
         // the cap/cooldown before either Twilio log lands and double-ask.
         const r = await runExclusive(`review-send:${customerId}`, () =>
           ReviewService.startReviewSequence({ customerId, plan, startedBy: req.technicianId }),
-        );
+        { recordHealth: false }); // per-customer lock, not a scheduled job
         if (r && r.skipped) {
           results.push({ customerId, started: false, reason: 'send_in_progress' });
         } else {

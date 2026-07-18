@@ -471,9 +471,17 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
   // string split corrupts them. Suppressed sibling rows keep their
   // scheduled_service_id, which joins to the untouched source name;
   // ar.service_type is only the fallback for legacy rows with no link.
+  // Only services the customer will actually receive at this slot belong in
+  // the label: a 'rescheduled' pending-rebook placeholder or terminal row
+  // parked on the slot must not be advertised in confirmations/reminders.
+  // Suppressed-but-sendable siblings stay — the owner texts on their behalf.
+  // Legacy rows with no linked service keep their fallback label.
   const rows = await conn('appointment_reminders as ar')
     .leftJoin('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
     .where({ 'ar.customer_id': customerId, 'ar.appointment_time': apptTime, 'ar.cancelled': false })
+    .andWhere(function liveServiceSendableOrLegacy() {
+      this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+    })
     .orderBy('ar.created_at', 'asc')
     .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
 
@@ -900,8 +908,22 @@ const AppointmentReminders = {
     // a seed can collide with another service's reminder on the same date. Merge
     // the label into the existing row and insert THIS one fully suppressed (all
     // flags sent) so checkAndSendReminders() never sends two texts for one slot.
+    // Only a real OWNER counts (non-suppressed row the cron will deliver
+    // for) — a 'rescheduled' pending-rebook placeholder or terminal row
+    // parked on the slot must not swallow the new registration, or the
+    // real appointment would get no notifications at all. Unlinked legacy
+    // rows (NULL scheduled_service_id) DO own: the cron skips its
+    // live-status guard for them, so they send.
     const sameAppointment = await conn('appointment_reminders')
-      .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false })
+      .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false, suppressed_by_sibling: false })
+      .andWhere(function ownerDeliverable() {
+        this.whereNull('scheduled_service_id').orWhereExists(function ownerServiceSendable() {
+          this.select(1)
+            .from('scheduled_services')
+            .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']);
+        });
+      })
       .orderBy([
         { column: 'reminder_72h_sent', order: 'asc' },
         { column: 'reminder_24h_sent', order: 'asc' },
@@ -931,6 +953,10 @@ const AppointmentReminders = {
           reminder_24h_sent: true,
           reminder_24h_sent_at: now,
           cancelled: false,
+          // Durable marker — sibling suppression must be distinguishable from
+          // genuinely delivered reminders (the DB sync trigger's departure
+          // promotion only re-arms marked rows).
+          suppressed_by_sibling: true,
           ...createdAtOverride,
         })
         .returning('*');
@@ -1002,8 +1028,20 @@ const AppointmentReminders = {
           return { record: existing, serviceLabel: existing.service_type, inserted: false, reason: 'already_registered' };
         }
 
+        // Owner-only dedup — see registerVisitReminderInTx: a suppressed
+        // sibling or a cron-blocked ('rescheduled'/terminal) placeholder
+        // parked on the slot must not swallow this registration, while an
+        // unlinked legacy row (which the cron delivers for) still owns.
         const sameAppointment = await trx('appointment_reminders')
-          .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false })
+          .where({ customer_id: customerId, appointment_time: apptTime, cancelled: false, suppressed_by_sibling: false })
+          .andWhere(function ownerDeliverable() {
+            this.whereNull('scheduled_service_id').orWhereExists(function ownerServiceSendable() {
+              this.select(1)
+                .from('scheduled_services')
+                .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
+                .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']);
+            });
+          })
           .orderBy([
             { column: 'reminder_72h_sent', order: 'asc' },
             { column: 'reminder_24h_sent', order: 'asc' },
@@ -1033,6 +1071,8 @@ const AppointmentReminders = {
             reminder_72h_sent_at: now,
             reminder_24h_sent: true,
             reminder_24h_sent_at: now,
+            // Durable marker — see registerVisitReminderInTx.
+            suppressed_by_sibling: true,
           }).returning('*');
 
           return {
@@ -1668,32 +1708,66 @@ const AppointmentReminders = {
         return record;
       }
 
-      // Send reschedule notice
-      const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-      if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
-        const day = formatDay(newApptTime);
-        const date = formatDate(newApptTime);
-        const time = formatTime(newApptTime);
+      // Send reschedule notice. Any unsent outcome — safeSendAppointment
+      // returning false, a missing customer, or a throw anywhere in the
+      // attempt — must re-arm the 72h window so the cron's fallback reminder
+      // still delivers the new time. Without this, the DB sync trigger's
+      // pre-covered flag survives (startMoved sees the already-synced
+      // appointment_time) and the customer would get only the 24h text.
+      let noticeSent = false;
+      try {
+        const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
+        if (customer) {
+          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+          const day = formatDay(newApptTime);
+          const date = formatDate(newApptTime);
+          const time = formatTime(newApptTime);
 
-        const serviceLabel = smsServiceLabelStored(record.service_type);
-        const sent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-          return renderRequiredTemplate('appointment_rescheduled', {
-            first_name: firstName,
-            service_type: serviceLabel,
-            day,
-            date,
-            time,
-          }, {
-            workflow: 'appointment_rescheduled',
-            entity_type: 'scheduled_service',
-            entity_id: scheduledServiceId,
-          });
-        }, 'appointment_rescheduled', 'appointment_confirmation');
-        if (sent) {
-          await this.markRescheduleNoticeSent(scheduledServiceId);
-          logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+          const serviceLabel = smsServiceLabelStored(record.service_type);
+          noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
+            const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
+            return renderRequiredTemplate('appointment_rescheduled', {
+              first_name: firstName,
+              service_type: serviceLabel,
+              day,
+              date,
+              time,
+            }, {
+              workflow: 'appointment_rescheduled',
+              entity_type: 'scheduled_service',
+              entity_id: scheduledServiceId,
+            });
+          }, 'appointment_rescheduled', 'appointment_confirmation');
+          if (noticeSent) {
+            await this.markRescheduleNoticeSent(scheduledServiceId);
+            logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+          }
+        }
+      } finally {
+        if (!noticeSent && (newApptTime.getTime() - Date.now()) / 3600000 > 24.25) {
+          // Re-arm ONLY while the appointment is still inside the 72h
+          // delivery band — the cron's 72h branch never fires once
+          // hoursUntil <= 24.25, so a false flag there would just keep the
+          // row in every 15-minute scan forever (the still-armed 24h window
+          // carries the fallback for those). Guarded three ways so a failed
+          // attempt only re-arms state it still owns:
+          //   • appointment_time — a newer reschedule to a different time
+          //     (which may have sent its own notice) makes this a no-op;
+          //   • updated_at = this invocation's own write — an overlapping
+          //     SAME-time attempt that succeeded afterward (its
+          //     markRescheduleNoticeSent bumps updated_at) is not clobbered;
+          //   • suppressed_by_sibling — a row the DB sync trigger suppressed
+          //     under a slot owner stays quiet; re-arming it would
+          //     double-text the customer.
+          await db('appointment_reminders')
+            .where({
+              id: record.id,
+              appointment_time: newApptTime,
+              updated_at: now,
+              suppressed_by_sibling: false,
+            })
+            .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() })
+            .catch((rearmErr) => logger.error(`[appt-remind] 72h re-arm after failed notice failed: ${rearmErr.message}`));
         }
       }
 
@@ -1713,11 +1787,15 @@ const AppointmentReminders = {
 
       const records = await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
-        .select('id', 'appointment_time');
+        .select('id', 'appointment_time', 'suppressed_by_sibling');
 
       const now = new Date();
       let updated = 0;
       for (const record of records || []) {
+        // A sibling-suppressed row must stay fully suppressed — recomputing
+        // its flags from the appointment time would put it back in the cron's
+        // send set alongside the slot's owner (duplicate reminders).
+        if (record.suppressed_by_sibling) continue;
         const { alreadyInside72hWindow, alreadyInside24hWindow } = reminderFlagsCoveredByNotice(record.appointment_time, now);
         await db('appointment_reminders')
           .where({ id: record.id })

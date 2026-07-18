@@ -36,8 +36,31 @@ const VISITS_BY_TIER = { standard: 6, enhanced: 9, premium: 12 };
 function protocolAnnualMaterialAtSize(track, tier, turfSqft) {
   const protocolTier = PROTOCOL_TIER_BY_PRICING_TIER[tier];
   const visits = protocols.lawn[track].visits.filter((visit) => visit.tiers?.[protocolTier]);
-  const totalAtTenK = visits.reduce((sum, visit) => sum + Number(visit.material_cost || 0), 0);
-  return totalAtTenK * (turfSqft / 10000);
+  // material_cost = scheduled apps (this audit's 10,000 sqft basis);
+  // conditional_cost = the spot-treatment reserve (¼ gated fungicide/
+  // insecticide, ⅛ herbicide spot), derived from the protocol's inline
+  // line costs, which are reference-lawn (~4,500 sqft) quantities — e.g.
+  // the $8.68 LESCO 24-0-11 line buys 12.8 lb, covering ~4,100 sqft at the
+  // protocol's own 0.75 lb N/1K rate. Scale reserves to this audit's 10K
+  // basis before joining the material term. Both components are funded by
+  // LAWN_MATERIAL_BUDGETS as of 2026-07-16.
+  const RESERVE_REFERENCE_SQFT = 4500;
+  const totalAtTenK = visits.reduce(
+    (sum, visit) =>
+      sum
+      + Number(visit.material_cost || 0)
+      + Number(visit.conditional_cost || 0) * (10000 / RESERVE_REFERENCE_SQFT),
+    0,
+  );
+  // Tier flags cover more calendar slots than the sold cadence delivers
+  // (silver flags 8 slots, sold standard = 6 visits). Normalize the same
+  // way the budgets and lawn-cost-floor-shared's
+  // protocolMaterialBudgetAtReferenceSqft do: average the flagged slots,
+  // multiply by the SOLD visit count — the customer only receives (and
+  // the price only funds) the sold visits.
+  const soldVisits = VISITS_BY_TIER[tier];
+  const normalizedAtTenK = (totalAtTenK / visits.length) * soldVisits;
+  return normalizedAtTenK * (turfSqft / 10000);
 }
 
 function independentNonMaterialAnnualCost(tier, turfSqft) {

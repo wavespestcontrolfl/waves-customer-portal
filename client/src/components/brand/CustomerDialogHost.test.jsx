@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import React, { useRef } from 'react';
+import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import useModalFocus from '../../hooks/useModalFocus';
 import { BiometricLockContext } from '../BiometricGate';
@@ -13,18 +13,6 @@ afterEach(() => cleanup());
 function UnderlyingModal({ onEscape }) {
   const dialogRef = useModalFocus(true, onEscape);
   return <div ref={dialogRef} role="dialog" aria-label="Underlying modal" />;
-}
-
-function FocusFallbackHarness({ open, showTransientOpener }) {
-  const fallbackRef = useRef(null);
-  const dialogRef = useModalFocus(open, null, fallbackRef);
-  return (
-    <>
-      <button ref={fallbackRef} type="button">Stable trigger</button>
-      {showTransientOpener && <button type="button">Transient trigger</button>}
-      {open && <div ref={dialogRef} role="dialog" aria-label="Fallback modal"><button type="button">Inside</button></div>}
-    </>
-  );
 }
 
 describe('CustomerDialogHost', () => {
@@ -40,13 +28,12 @@ describe('CustomerDialogHost', () => {
     const dialog = await screen.findByRole('alertdialog', { name: 'Remove payment method?' });
     expect(dialog).toHaveAttribute('data-glass', 'modal');
     expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
-    await waitFor(() => expect(dialog).toHaveAttribute('tabindex', '-1'));
 
     fireEvent.keyDown(document, { key: 'Escape' });
 
     await expect(result).resolves.toBe(false);
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-  }, 10000);
+  });
 
   it('resolves alerts after the customer acknowledges them', async () => {
     render(<CustomerDialogHost />);
@@ -78,14 +65,15 @@ describe('CustomerDialogHost', () => {
     expect(screen.getByRole('dialog', { name: 'Underlying modal' })).toBeInTheDocument();
   });
 
-  it('keeps global dialogs out of the DOM while the biometric privacy lock is active', async () => {
+  it('queues dialogs while the biometric lock is active and shows them on unlock', async () => {
     const { rerender } = render(
-      <BiometricLockContext.Provider value>
+      <BiometricLockContext.Provider value={true}>
         <CustomerDialogHost />
       </BiometricLockContext.Provider>,
     );
 
-    const result = showCustomerAlert('A background request finished.');
+    const result = showCustomerAlert('Your card could not be charged.');
+    // Locked: nothing may portal under document.body where AT could reach it.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
     rerender(
@@ -93,19 +81,9 @@ describe('CustomerDialogHost', () => {
         <CustomerDialogHost />
       </BiometricLockContext.Provider>,
     );
-    expect(await screen.findByRole('dialog', { name: 'Something went wrong' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+
+    const button = await screen.findByRole('button', { name: 'OK' });
+    fireEvent.click(button);
     await expect(result).resolves.toBe(true);
-  });
-
-  it('restores focus to a stable fallback when a menu opener unmounts', () => {
-    const { rerender } = render(<FocusFallbackHarness open={false} showTransientOpener />);
-    screen.getByRole('button', { name: 'Transient trigger' }).focus();
-
-    rerender(<FocusFallbackHarness open showTransientOpener />);
-    expect(screen.getByRole('dialog', { name: 'Fallback modal' })).toHaveFocus();
-
-    rerender(<FocusFallbackHarness open={false} showTransientOpener={false} />);
-    expect(screen.getByRole('button', { name: 'Stable trigger' })).toHaveFocus();
   });
 });

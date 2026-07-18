@@ -10,13 +10,15 @@ const {
   isMembershipCustomerRow,
   isActivePlanCustomer,
   loadExistingRecurringQualifyingRows,
+  loadExistingQualifyingServiceKeys,
+  toQualifyingKeys,
 } = require('../services/waveguard-existing-services');
 
-function fakeDb({ customer, scheduledRows = [] } = {}) {
+function fakeDb({ customer, scheduledRows = [], scheduledColumns = null } = {}) {
   const db = (table) => ({
     where: () => db(table),
     whereNotIn: () => db(table),
-    columnInfo: async () => ({ is_recurring: {}, estimated_price: {} }),
+    columnInfo: async () => scheduledColumns || ({ is_recurring: {}, estimated_price: {} }),
     first: async () => (table === 'customers' ? customer : null),
     select: async () => (table === 'scheduled_services' ? scheduledRows : []),
   });
@@ -69,5 +71,81 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
     const db = fakeDb({ customer: { id: 'c1', waveguard_tier: null }, scheduledRows: [pestRow] });
     const rows = await loadExistingRecurringQualifyingRows(db, 'c1');
     expect(rows).toEqual([]);
+  });
+
+  test('authoritative qualifying keys expand combined plan components', async () => {
+    const db = fakeDb({
+      customer: { id: 'c1', waveguard_tier: 'Silver' },
+      scheduledRows: [
+        { id: 'combo', service_type: 'Quarterly Pest + Lawn' },
+        { id: 'non-tier', service_type: 'Rodent Bait Stations' },
+      ],
+    });
+
+    expect(toQualifyingKeys('Quarterly Pest + Lawn')).toEqual(['pest_control', 'lawn_care']);
+    expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual(['pest_control', 'lawn_care']);
+  });
+
+  test('rodent- and palm-only rows never feed qualifying keys', async () => {
+    const db = fakeDb({
+      customer: { id: 'c1', waveguard_tier: 'Gold' },
+      scheduledRows: [
+        { id: 'rodent', service_type: 'Rodent Pest Control' },
+        { id: 'palm', service_type: 'Palm Tree Injections' },
+      ],
+    });
+    expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual([]);
+  });
+
+  test('active-service addresses retain apartment and unit identifiers', async () => {
+    const db = fakeDb({
+      customer: { id: 'c1', waveguard_tier: 'Bronze' },
+      scheduledColumns: {
+        is_recurring: {},
+        estimated_price: {},
+        service_address_line1: {},
+        service_address_line2: {},
+        service_address_city: {},
+        service_address_zip: {},
+      },
+      scheduledRows: [{
+        id: 'unit-a',
+        service_type: 'Quarterly Pest Control',
+        service_address_line1: '123 Palm Ave',
+        service_address_line2: 'Apt A',
+        service_address_city: 'Bradenton',
+        service_address_zip: '34209',
+      }],
+    });
+
+    const rows = await loadExistingRecurringQualifyingRows(db, 'c1');
+    expect(rows[0].effective_service_address).toBe('123 Palm Ave Apt A, Bradenton, 34209');
+  });
+});
+
+describe('toQualifyingKeys rodent/palm exclusions', () => {
+  test('rodent-led names never qualify as pest coverage', () => {
+    // rodent_general_one_time's canonical label leads with rodent — it is a
+    // rodent service (non-qualifier), not pest coverage.
+    expect(toQualifyingKeys('Rodent Pest Control')).toEqual([]);
+    expect(toQualifyingKeys('Quarterly Rodent Bait Station Service')).toEqual([]);
+  });
+
+  test('pest-primary combined names keep pest coverage', () => {
+    // "pest" BEFORE the rodent token = pest-primary, matching detectServiceLine
+    // and recurring-appointment-seeder's serviceKeyFor.
+    expect(toQualifyingKeys('Pest & Rodent Control')).toEqual(['pest_control']);
+  });
+
+  test('palm labels never qualify as tree & shrub', () => {
+    expect(toQualifyingKeys('Palm Tree Injections')).toEqual([]);
+    expect(toQualifyingKeys('Palm Injections')).toEqual([]);
+  });
+
+  test('genuine pest and tree/shrub labels still qualify unchanged', () => {
+    expect(toQualifyingKeys('Quarterly Pest Control')).toEqual(['pest_control']);
+    expect(toQualifyingKeys('Tree & Shrub Care')).toEqual(['tree_shrub']);
+    // Palmetto-bug pest names carry no palm token and stay pest coverage.
+    expect(toQualifyingKeys('Palmetto Bug Pest Control')).toEqual(['pest_control']);
   });
 });

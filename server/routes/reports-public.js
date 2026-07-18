@@ -1012,6 +1012,11 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
           serviceLine: resolvedServiceLine || null,
           limit: 8,
           beforeOrOnServiceDate: service.service_date || null,
+          // Same-day trim, same as buildReportV1Data: without it this
+          // response replaces the page's trimmed history client-side and
+          // leaks a later same-day sibling the moment a rating is submitted
+          // (codex P2 #2824 r2).
+          currentServiceRecordId: service.id || null,
         }).catch(() => [])
       : [];
 

@@ -13,6 +13,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/stripe', () => ({
   chargeInvoiceWithSavedCard: jest.fn(),
+  quoteInvoiceSavedCardCharge: jest.fn(),
 }));
 
 const express = require('express');
@@ -35,6 +36,49 @@ async function withServer(fn) {
 
 describe('POST /:id/charge-card uncertain outcomes', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  test('returns the server-authoritative saved-card quote', async () => {
+    StripeService.quoteInvoiceSavedCardCharge.mockResolvedValue({
+      base: 250,
+      surcharge: 7.25,
+      total: 257.25,
+      rateBps: 290,
+      funding: 'credit',
+    });
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/invoices/inv-1/charge-card-quote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentMethodId: 'pm-1' }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        quote: expect.objectContaining({ total: 257.25, surcharge: 7.25 }),
+      });
+      expect(StripeService.quoteInvoiceSavedCardCharge).toHaveBeenCalledWith('inv-1', 'pm-1');
+    });
+  });
+
+  test('passes the quoted total into the authoritative charge comparison', async () => {
+    StripeService.chargeInvoiceWithSavedCard.mockResolvedValue({ id: 'pay-1' });
+
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/invoices/inv-1/charge-card`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentMethodId: 'pm-1', expectedTotal: 257.25 }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(
+        'inv-1',
+        'pm-1',
+        { expectedTotal: 257.25 },
+      );
+    });
+  });
 
   test('returns a terminal conflict when Stripe charged but the ledger write failed', async () => {
     const error = Object.assign(new Error('post-charge write failed'), {

@@ -1,3 +1,4 @@
+const { randomUUID } = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
@@ -7,6 +8,23 @@ const { isEnabled } = require('../../config/feature-gates');
 // load the google-ads-api client until a push is actually attempted.
 let _googleAds;
 function getGoogleAds() { return _googleAds || (_googleAds = require('./google-ads')); }
+
+// ad_campaigns.daily_budget_base / daily_budget_current are decimal(10,2), so
+// the largest storable value is 99,999,999.99. A budget above that (a typo like
+// 100000000) could be accepted by Google BEFORE the local write, then fail the
+// DB update — leaving the live campaign changed but the DB out of sync. Reject
+// it up front, before any push. (Google itself enforces its own maxima too.)
+const MAX_DAILY_BUDGET = 99999999.99;
+
+// ad_budget_log.reason is a varchar(255). A caller-supplied reason longer than
+// that would make the ad_budget_log insert fail AFTER the live Google push (and,
+// in setBudget, after the campaign write) — losing the audit row and 500-ing an
+// otherwise-successful change. Bound it up front so the audit insert can't fail
+// on length. Cron-generated reasons are short by construction.
+const MAX_REASON_LEN = 255;
+function boundReason(reason) {
+  return String(reason == null ? '' : reason).slice(0, MAX_REASON_LEN);
+}
 
 class BudgetManager {
   /**
@@ -56,9 +74,18 @@ class BudgetManager {
       orange: parseFloat(targets?.capacity_orange_max || 95),
     };
 
-    for (const campaign of campaigns) {
+    for (const listed of campaigns) {
+      // Set once Google accepts a TRANSITION push inside the transaction —
+      // if the local writes (or COMMIT) then fail, PostgreSQL rolls the row
+      // back while Google keeps the new amount, so the catch compensates via
+      // the same lock-reacquiring rollback the advisor apply uses. The
+      // reconcile branch never sets it: its push moves Google TOWARD the
+      // recorded local state, so a failed write self-heals next run and a
+      // rollback would undo a correct fix.
+      let cronPushed = null;
+      const opId = randomUUID();
       try {
-        const area = campaign.target_area || 'general';
+        const area = listed.target_area || 'general';
         const capacity = await this.getCapacityForArea(area, checkDate);
         const pct = capacity.utilizationPct;
 
@@ -72,6 +99,21 @@ class BudgetManager {
         } else {
           newMode = 'stop'; // 1% budget (never pause — kills QS)
         }
+
+        // The guard→push→persist below runs against a FOR UPDATE re-read of
+        // the row, inside one transaction — the same lock the advisor apply
+        // holds. Without it, this cron could push a stale mode's budget from
+        // its unlocked list read, block on the advisor's lock, then commit
+        // its stale amount OVER the advisor's newer one (DB saying stopped
+        // while Google runs the advisor budget until the next reconcile).
+         
+        await db.transaction(async (trx) => {
+          const campaign = await trx('ad_campaigns').where({ id: listed.id }).forUpdate().first();
+          // Supersession anchor for the rollback: taken AFTER the lock is
+          // held (capacity math above can take a while — a writer committing
+          // during it is already reflected in this locked snapshot).
+          const lockAcquiredAt = new Date();
+          if (!campaign || campaign.status !== 'active') return;
 
         if (newMode !== campaign.budget_mode) {
           const newBudget = this.calculateBudget(campaign, newMode);
@@ -90,17 +132,19 @@ class BudgetManager {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} NOT applied — Google Ads push failed; will retry next run`);
-              continue;
+              return;
             }
             pushedLive = true;
+            cronPushed = { campaign, attempted: newBudget, startedAt: lockAcquiredAt, opId, preLive: pushed?.previousDailyBudget ?? null };
           }
 
-          await db('ad_campaigns').where({ id: campaign.id }).update({
+          await trx('ad_campaigns').where({ id: campaign.id }).update({
             budget_mode: newMode,
             daily_budget_current: newBudget,
+            updated_at: new Date(),
           });
 
-          await db('ad_budget_log').insert({
+          await trx('ad_budget_log').insert({
             campaign_id: campaign.id,
             campaign_name: campaign.campaign_name,
             previous_mode: campaign.budget_mode,
@@ -111,6 +155,9 @@ class BudgetManager {
             trigger: 'auto',
             capacity_pct: pct,
             check_date: checkDate,
+            op_id: opId,
+            google_ads_updated: pushedLive,
+            created_at: new Date(),
           });
 
           logger.info(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} (capacity ${pct.toFixed(0)}%${pushedLive ? ', pushed to Google Ads' : ', local only'})`);
@@ -136,14 +183,15 @@ class BudgetManager {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
-              continue;
+              return;
             }
 
-            await db('ad_campaigns').where({ id: campaign.id }).update({
+            await trx('ad_campaigns').where({ id: campaign.id }).update({
               daily_budget_current: expectedBudget,
+              updated_at: new Date(),
             });
 
-            await db('ad_budget_log').insert({
+            await trx('ad_budget_log').insert({
               campaign_id: campaign.id,
               campaign_name: campaign.campaign_name,
               previous_mode: campaign.budget_mode,
@@ -154,19 +202,37 @@ class BudgetManager {
               trigger: 'auto',
               capacity_pct: pct,
               check_date: checkDate,
+              op_id: opId,
+              google_ads_updated: true,
+              created_at: new Date(),
             });
 
             logger.info(`Budget: ${campaign.campaign_name} reconciled ${campaign.budget_mode} budget to ${expectedBudget} (pushed to Google Ads)`);
           }
         }
+        });
       } catch (err) {
-        logger.error(`Budget adjust failed for ${campaign.campaign_name}: ${err.message}`);
+        if (cronPushed) {
+          const rollback = await this.rollbackAfterLivePush(cronPushed.campaign, err, cronPushed.attempted, cronPushed.startedAt, cronPushed.opId, cronPushed.preLive);
+          if (rollback.code === 'apply_committed') {
+            logger.info(`Budget adjust: ${listed.campaign_name} COMMIT ack was lost but the change is durable — no compensation needed`);
+          } else {
+            logger.error(`Budget adjust: ${listed.campaign_name} persist failed after live push — ${rollback.message}`);
+          }
+        } else {
+          logger.error(`Budget adjust failed for ${listed.campaign_name}: ${err.message}`);
+        }
       }
     }
   }
 
   calculateBudget(campaign, mode) {
-    const base = parseFloat(campaign.daily_budget_base || 20);
+    // $20 is the fallback ONLY for a NULL/blank/non-numeric base (legacy DB-only
+    // campaign not yet backfilled). A real stored 0 stays 0 — writes reject a
+    // non-positive base, so a genuine 0 never reaches a live campaign, and the
+    // old `|| 20` collapsing 0→$20 can't silently spend money.
+    const parsed = parseFloat(campaign.daily_budget_base);
+    const base = Number.isFinite(parsed) ? parsed : 20;
     switch (mode) {
       case 'base': return base;
       case 'spent': return parseFloat(campaign.daily_budget_current || base); // freeze at current
@@ -231,23 +297,14 @@ class BudgetManager {
     };
   }
 
-  async getTechCountForArea(area, dateStr) {
-    // Get active technicians
+  async getTechCountForArea(_area, _dateStr) {
+    // Capacity is driven by the real active-technician count. There is no
+    // per-area tech roster in the data (one field crew covers the whole service
+    // area), so every area uses the same live count — the old hardcoded
+    // {area: [names]} map invented 2–3 phantom techs per zone and overstated
+    // capacity, holding budgets at full base while the real schedule was full.
     const techs = await db('technicians').where({ active: true });
-    if (!area || area === 'general') return techs.length;
-
-    // Filter by service area (simplified — techs cover zones)
-    const areaMap = {
-      'Lakewood Ranch': ['Adam', 'Jose'],
-      'LWR': ['Adam', 'Jose'],
-      'Parrish': ['Jacob'],
-      'Sarasota': ['Adam', 'Jose'],
-      'Venice': ['Jacob'],
-      'Bradenton': ['Adam', 'Jose', 'Jacob'],
-    };
-
-    const techNames = areaMap[area] || techs.map(t => t.name);
-    return techNames.length;
+    return techs.length;
   }
 
   /**
@@ -335,8 +392,29 @@ class BudgetManager {
 
   /**
    * Manually set a campaign's budget mode (from advisor "Apply" button).
+   *
+   * opts.requireLivePush: for callers that must never record an intent the
+   * live campaign didn't take (the advisor apply). Runs the WHOLE change —
+   * the row re-read, every guard, the Google push, and both local writes —
+   * inside ONE transaction holding a FOR UPDATE lock on the campaign row, so
+   * a concurrent mode/status transition (capacity cron, another admin) can't
+   * slip between the guard and the mutation. A refused push throws
+   * 'live_push_failed', an unrunnable one 'live_push_unavailable', both
+   * BEFORE any local write; a persist failure after a successful push rolls
+   * the transaction back (campaign write AND audit row together) and pushes
+   * the prior live budget back ('live_push_rolled_back' /
+   * 'live_push_ambiguous'). Unlinked campaigns keep DB-only intent.
+   * opts.requireActive: reject ('campaign_inactive') unless status='active',
+   * re-checked under the same lock.
+   * opts.trigger: ad_budget_log.trigger attribution (default 'manual';
+   * the advisor route passes 'advisor').
    */
-  async setMode(campaignId, mode, reason = 'manual') {
+  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, trigger = 'manual' } = {}) {
+    reason = boundReason(reason);
+    // This operation's identity stamp on its audit row (lets the rollback —
+    // and the no-push catch below — recognize a lost-COMMIT-ack as "actually
+    // committed"). The rollback's supersession anchor is taken in-lock.
+    const opId = randomUUID();
     // Now that setMode can mutate real Google Ads spend, an unknown mode
     // must be rejected up front — calculateBudget's default case would
     // silently price a typo as the full base budget AND persist the invalid
@@ -345,76 +423,657 @@ class BudgetManager {
       throw new Error(`Invalid budget mode "${mode}" — must be base, spent, or stop`);
     }
 
-    const campaign = await db('ad_campaigns').where({ id: campaignId }).first();
-    if (!campaign) throw new Error('Campaign not found');
-    // Source-level guard so EVERY caller (incl. /advisor/apply) is covered: only
-    // Google campaigns are remotely controllable here — never mutate a read-only
-    // Meta row's local budget/mode (it would drift from Ads Manager).
-    if (campaign.platform !== 'google_ads') {
-      throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
+    if (requireLivePush) {
+      // Holding the row lock across the Google call is a deliberate tradeoff:
+      // it serializes this row against the 2-hourly cron and other admin
+      // writes for the duration of one API call, which is what makes the
+      // guard→push→persist sequence actually atomic. Scale here is one admin
+      // and a slow cron — contention is not a concern.
+      let pushedCampaign = null;
+      let pendingResult = null;
+      try {
+        return await db.transaction(async (trx) => {
+          const campaign = await trx('ad_campaigns').where({ id: campaignId }).forUpdate().first();
+          // Supersession anchor: taken AFTER the row lock is held, so writers
+          // this operation serialized behind (already reflected in the locked
+          // snapshot) can never read as "newer" in the rollback's audit check.
+          const lockAcquiredAt = new Date();
+          if (!campaign) throw new Error('Campaign not found');
+          if (campaign.platform !== 'google_ads') {
+            throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
+          }
+          if (requireActive && campaign.status !== 'active') {
+            const err = new Error(`"${campaign.campaign_name}" is ${campaign.status || 'not active'} — advisor changes only apply to active campaigns.`);
+            err.code = 'campaign_inactive';
+            throw err;
+          }
+          // Under the lock: two concurrent applies of the same rec both pass
+          // the route's unlocked no-op check; the loser must not re-push the
+          // already-current mode and count a second "applied" change.
+          if (mode === campaign.budget_mode) {
+            const err = new Error(`"${campaign.campaign_name}" is already in ${mode} mode — nothing to apply.`);
+            err.code = 'mode_noop';
+            throw err;
+          }
+
+          const newBudget = this.calculateBudget(campaign, mode);
+          const linked = Boolean(campaign.platform_campaign_id);
+          let googleAdsUpdated = false;
+          if (linked) {
+            const canPush = campaign.daily_budget_base != null && getGoogleAds().isConfigured();
+            if (!canPush) {
+              const err = new Error(`"${campaign.campaign_name}" is linked to a live Google Ads campaign, but the live push can't run (Google Ads API not configured, or no base budget set) — nothing was changed.`);
+              err.code = 'live_push_unavailable';
+              throw err;
+            }
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
+            googleAdsUpdated = !!pushed;
+            if (!googleAdsUpdated) {
+              const err = new Error(`Google Ads refused the budget update for "${campaign.campaign_name}" — nothing was changed. Check the campaign in Google Ads (shared budgets can't be updated from here).`);
+              err.code = 'live_push_failed';
+              throw err;
+            }
+            pushedCampaign = {
+              campaign,
+              attempted: newBudget,
+              startedAt: lockAcquiredAt,
+              opId,
+              preLive: pushed?.previousDailyBudget ?? null,
+              // Returned as-is if the rollback discovers the COMMIT actually
+              // landed (lost acknowledgement) — the apply succeeded.
+              successResult: { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated: true, livePushAttempted: true },
+            };
+          }
+
+          // Wall-clock stamps (not trx.fn.now(), which is transaction-START
+          // time): the sync's freshness fence and the rollback's supersession
+          // window both compare these against timestamps captured mid-flight,
+          // so a slow writer must stamp when its write actually happens.
+          await trx('ad_campaigns').where({ id: campaignId }).update({
+            budget_mode: mode,
+            daily_budget_current: newBudget,
+            updated_at: new Date(),
+          });
+          await trx('ad_budget_log').insert({
+            campaign_id: campaignId,
+            campaign_name: campaign.campaign_name,
+            previous_mode: campaign.budget_mode,
+            new_mode: mode,
+            previous_budget: campaign.daily_budget_current,
+            new_budget: newBudget,
+            reason,
+            trigger,
+            op_id: opId,
+            google_ads_updated: googleAdsUpdated,
+            created_at: new Date(),
+          });
+
+          pendingResult = { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated, livePushAttempted: linked };
+          return pendingResult;
+        });
+      } catch (err) {
+        // Every guard throws BEFORE pushedCampaign is set, so any rejection
+        // after it — the persist statements OR the transaction's own COMMIT —
+        // is a local failure after Google accepted the change, and it gets
+        // the compensating rollback instead of reading as an ordinary error.
+        if (pushedCampaign) {
+          const recovery = await this.rollbackAfterLivePush(pushedCampaign.campaign, err, pushedCampaign.attempted, pushedCampaign.startedAt, pushedCampaign.opId, pushedCampaign.preLive);
+          if (recovery.code === 'apply_committed') return pushedCampaign.successResult;
+          throw recovery;
+        }
+        // No live push ran (unlinked campaign) — but the transaction itself
+        // may still have committed with only its acknowledgement lost. A
+        // durable own audit row proves it; report the success that happened.
+        if (pendingResult && await this.ownOpCommitted(opId)) return pendingResult;
+        throw err;
+      }
     }
 
-    const newBudget = this.calculateBudget(campaign, mode);
+    // Legacy (manual route) path: DB-first with a best-effort push, but now
+    // inside the SAME row-locked transaction the advisor apply and the cron
+    // hold — a direct edit overlapping an advisor apply serializes instead of
+    // committing its Google call and DB write in opposite orders. Semantics
+    // are otherwise unchanged: the write commits even when the push fails
+    // (googleAdsUpdated reports the outcome; the gate-on reconcile converges
+    // Google later), so a thrown push is swallowed into googleAdsUpdated:false.
+    // Because the push now runs BEFORE the COMMIT, a commit failure after an
+    // accepted push gets the same compensating rollback the advisor path uses
+    // (previously the write was already committed, so there was no divergence).
+    let manualPushed = null;
+    let pendingResult = null;
+    try {
+    return await db.transaction(async (trx) => {
+      const campaign = await trx('ad_campaigns').where({ id: campaignId }).forUpdate().first();
+      const lockAcquiredAt = new Date(); // supersession anchor — see requireLivePush path
+      if (!campaign) throw new Error('Campaign not found');
+      // Source-level guard so EVERY caller is covered: only Google campaigns
+      // are remotely controllable here — never mutate a read-only Meta row's
+      // local budget/mode (it would drift from Ads Manager).
+      if (campaign.platform !== 'google_ads') {
+        throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
+      }
 
-    await db('ad_campaigns').where({ id: campaignId }).update({
-      budget_mode: mode,
-      daily_budget_current: newBudget,
+      const newBudget = this.calculateBudget(campaign, mode);
+
+      await trx('ad_campaigns').where({ id: campaignId }).update({
+        budget_mode: mode,
+        daily_budget_current: newBudget,
+        updated_at: new Date(),
+      });
+
+      // Human-initiated, so not gated by adsBudgetLivePush — that gate covers
+      // only the autonomous cron. NULL daily_budget_base skips the push like
+      // the cron does: calculateBudget's $20 fallback must never reach a real
+      // campaign. The push runs BEFORE the audit insert so the row records
+      // whether Google actually changed (google_ads_updated is what the
+      // rollback's supersession proof keys on).
+      let googleAdsUpdated = false;
+      let livePushAttempted = false;
+      let pushed = null;
+      if (campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+        livePushAttempted = true;
+        try {
+          pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
+          googleAdsUpdated = !!pushed;
+        } catch { googleAdsUpdated = false; }
+        if (googleAdsUpdated) {
+          manualPushed = {
+            campaign,
+            attempted: newBudget,
+            startedAt: lockAcquiredAt,
+            opId,
+            preLive: pushed?.previousDailyBudget ?? null,
+            successResult: { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated: true, livePushAttempted: true },
+          };
+        }
+      }
+
+      await trx('ad_budget_log').insert({
+        campaign_id: campaignId,
+        campaign_name: campaign.campaign_name,
+        previous_mode: campaign.budget_mode,
+        new_mode: mode,
+        previous_budget: campaign.daily_budget_current,
+        new_budget: newBudget,
+        reason,
+        trigger,
+        op_id: opId,
+        google_ads_updated: googleAdsUpdated,
+        created_at: new Date(),
+      });
+
+      pendingResult = { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated, livePushAttempted };
+      return pendingResult;
     });
-
-    await db('ad_budget_log').insert({
-      campaign_id: campaignId,
-      campaign_name: campaign.campaign_name,
-      previous_mode: campaign.budget_mode,
-      new_mode: mode,
-      previous_budget: campaign.daily_budget_current,
-      new_budget: newBudget,
-      reason,
-      trigger: 'manual',
-    });
-
-    // Mirror the manual /campaigns/:id/budget route: DB first, then
-    // best-effort live push, outcome reported so the caller can tell whether
-    // Google actually took the new budget. Human-initiated, so not gated by
-    // adsBudgetLivePush — that gate covers only the autonomous cron. NULL
-    // daily_budget_base skips the push like the cron does: calculateBudget's
-    // $20 fallback must never reach a real campaign.
-    let googleAdsUpdated = false;
-    if (campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
-      const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
-      googleAdsUpdated = !!pushed;
+    } catch (err) {
+      if (manualPushed) {
+        const recovery = await this.rollbackAfterLivePush(manualPushed.campaign, err, manualPushed.attempted, manualPushed.startedAt, manualPushed.opId, manualPushed.preLive);
+        if (recovery.code === 'apply_committed') return manualPushed.successResult;
+        throw recovery;
+      }
+      // Best-effort path with no accepted push (refused/skipped): the trx may
+      // still have committed with its acknowledgement lost — a durable own
+      // audit row proves the local change landed.
+      if (pendingResult && await this.ownOpCommitted(opId)) return pendingResult;
+      throw err;
     }
+  }
 
-    return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated };
+  /**
+   * Lost-COMMIT-acknowledgement probe for writers whose transaction had NO
+   * live push (unlinked campaign, or a best-effort manual write whose push
+   * was refused/unavailable): if our own audit row (op_id) is durable, the
+   * COMMIT landed and the local change succeeded — the caller returns its
+   * success result instead of rethrowing a false failure (whose retry would
+   * then 422 on the locked no-op guard).
+   */
+  async ownOpCommitted(opId) {
+    if (!opId) return false;
+    try {
+      return Boolean(await db('ad_budget_log').where({ op_id: opId }).first());
+    } catch {
+      return false; // can't verify → keep the original error
+    }
+  }
+
+  /**
+   * A requireLivePush caller's DB write failed AFTER Google accepted the
+   * push. Try a compensating push restoring the prior live budget so "not
+   * applied" stays true; report honestly either way. The local rows still
+   * hold the OLD state, so the budget reconcile converges Google back to it
+   * even in the ambiguous case.
+   *
+   * lockAcquiredAt anchors the newer-writer check at the moment the failed
+   * operation acquired its row lock — anything the operation serialized
+   * BEHIND is already reflected in its snapshot and judged by the snapshot
+   * comparisons below; only writers that queued AFTER it can be "newer".
+   * preLiveBudget is the live amount Google reported immediately before the
+   * failed push (from updateBudget's pre-mutation read) — the restore target
+   * when the snapshot's daily_budget_current is stale (e.g. a prior manual
+   * write whose push failed recorded intent Google never ran).
+   */
+  async rollbackAfterLivePush(campaign, persistErr, attemptedLiveBudget = null, lockAcquiredAt = null, opId = null, preLiveBudget = null) {
+    const previousLive = Number(campaign.daily_budget_current);
+    // Prefer what Google actually ran pre-push over the local record of it.
+    const preLive = Number(preLiveBudget);
+    const restoreAmount = Number.isFinite(preLive) && preLive > 0 ? preLive : previousLive;
+    // 'restored' — we pushed the prior live budget back; nothing changed.
+    // 'superseded' — a writer queued behind our failed apply committed (and
+    //   pushed) a NEWER state after our rollback released the lock; restoring
+    //   the old amount would clobber it on Google while the DB records the
+    //   newer change, so we leave the newer state alone. Our apply still
+    //   persisted nothing.
+    // 'ambiguous' — we couldn't safely determine/restore.
+    let outcome = 'ambiguous';
+    try {
+      const canRestore = Number.isFinite(restoreAmount) && restoreAmount > 0;
+      if (opId || canRestore) {
+        await db.transaction(async (trx) => {
+          // Reacquire the row lock and verify the row still matches our
+          // pre-apply snapshot before touching Google.
+          const row = await trx('ad_campaigns').where({ id: campaign.id }).forUpdate().first();
+          const centsEq = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
+          const sameMode = row && String(row.budget_mode ?? '') === String(campaign.budget_mode ?? '');
+          // Lost-COMMIT-acknowledgement check: if OUR OWN audit row (op_id)
+          // exists, the transaction actually committed and every local write
+          // is durable — the apply SUCCEEDED and needs no compensation. The
+          // caller converts 'apply_committed' back into its success result.
+          // Runs regardless of canRestore: a durable commit is a durable
+          // commit even when there's no prior amount to restore.
+          if (opId) {
+            const ownRow = await trx('ad_budget_log').where({ op_id: opId }).first();
+            if (ownRow) {
+              outcome = 'committed';
+              return;
+            }
+          }
+          if (!canRestore) return; // nothing safe to compare/restore against → ambiguous
+          // Authoritative supersession signal: every REAL writer (advisor,
+          // cron, manual routes) inserts an ad_budget_log row inside its own
+          // transaction; the Google sync never does. Audit rows are stamped
+          // with wall-clock insert time (not transaction start), so a writer
+          // that queued behind this operation's lock always compares AFTER
+          // lockAcquiredAt. Supersession requires PROOF the newer writer
+          // changed Google (google_ads_updated) — a best-effort write that
+          // only recorded local intent left Google at OUR failed amount, so
+          // it must not suppress the compensating restore.
+          let newerProvenWriter = false;
+          let newerLocalOnlyWriter = false;
+          if (lockAcquiredAt) {
+            const newerAudits = await trx('ad_budget_log')
+              .where({ campaign_id: campaign.id })
+              .where('created_at', '>=', lockAcquiredAt)
+              .where(function notOwnOp() {
+                this.whereNull('op_id');
+                if (opId) this.orWhereNot({ op_id: opId });
+              })
+              .select('google_ads_updated');
+            newerProvenWriter = newerAudits.some(r => r.google_ads_updated === true);
+            newerLocalOnlyWriter = !newerProvenWriter && newerAudits.length > 0;
+          }
+          const snapshotBaseNull = campaign.daily_budget_base == null;
+          // Sync-mirror signature: mode untouched, current == exactly what we
+          // pushed, and the base either unchanged (sync never writes base for
+          // rows that have one) or — for a null-base snapshot — mirrored to
+          // the same pushed amount (google-ads sync writes base only when the
+          // stored base was null).
+          const mirrored = sameMode && attemptedLiveBudget != null
+            && centsEq(row?.daily_budget_current, attemptedLiveBudget)
+            && (snapshotBaseNull
+              ? centsEq(row?.daily_budget_base, attemptedLiveBudget)
+              : centsEq(row?.daily_budget_base, campaign.daily_budget_base));
+          if (newerProvenWriter) {
+            outcome = 'superseded';
+          } else if (sameMode && centsEq(row.daily_budget_current, previousLive)) {
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, restoreAmount);
+            if (pushed) {
+              // Touch the row inside the lock: a daily sync that FETCHED
+              // Google before this restore but is queued on the lock would
+              // otherwise land its stale (pre-restore) observation — the
+              // sync skips rows whose updated_at moved after its fetch began.
+              // If the pre-push live amount differed from the recorded
+              // current (stale local record), record what Google now runs —
+              // daily_budget_current is ground truth.
+              await trx('ad_campaigns').where({ id: campaign.id }).update({
+                updated_at: new Date(),
+                ...(centsEq(restoreAmount, previousLive) ? {} : { daily_budget_current: restoreAmount }),
+              });
+              outcome = 'restored';
+            }
+          } else if (mirrored) {
+            // Restore Google AND the mirrored columns, or the failed budget
+            // stays live with local state agreeing with it (a mirrored
+            // null-base snapshot also gets its base cleared back to null so
+            // the failed amount never becomes the canonical base).
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, restoreAmount);
+            if (pushed) {
+              await trx('ad_campaigns').where({ id: campaign.id }).update({
+                daily_budget_current: restoreAmount,
+                updated_at: new Date(),
+                ...(snapshotBaseNull ? { daily_budget_base: null } : {}),
+              });
+              outcome = 'restored';
+            }
+          } else if (newerLocalOnlyWriter) {
+            // A writer queued behind our failed apply committed a LOCAL
+            // change but has no proof it changed Google (refused/skipped
+            // push) — Google still runs OUR failed amount. Restore Google to
+            // the pre-push live budget and leave the newer local intent
+            // alone (the gate-on reconcile converges Google toward it);
+            // bump updated_at so a queued sync can't land its pre-restore
+            // observation over that intent.
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, restoreAmount);
+            if (pushed) {
+              await trx('ad_campaigns').where({ id: campaign.id }).update({ updated_at: new Date() });
+              outcome = 'restored';
+            }
+          } else {
+            // Row changed with no audit row at all: the only auditless writer
+            // is the Google sync, so it landed a live observation that isn't
+            // a mirror of our push — an external (Ads Manager) change owns
+            // the live budget. Don't clobber it.
+            outcome = 'superseded';
+          }
+        });
+      }
+    } catch { outcome = 'ambiguous'; }
+    if (outcome === 'committed') {
+      // Not a failure at all — the COMMIT landed but its acknowledgement was
+      // lost. Callers return their success result.
+      logger.warn(`[budget-manager] COMMIT ack lost for ${campaign.id} (${persistErr.message}) but the change is durable — treating as applied`);
+      const committedErr = new Error('The change committed (acknowledgement was lost in transit).');
+      committedErr.code = 'apply_committed';
+      return committedErr;
+    }
+    logger.error(`[budget-manager] persist failed after live push for ${campaign.id} (${persistErr.message}); live rollback: ${outcome}`);
+    // The reconcile promise is only true while the adsBudgetLivePush gate is
+    // ON — with it off, no cron run converges Google back, and the daily sync
+    // would mirror the unintended live amount instead. Say so, loudly.
+    const reconcileActive = isEnabled('adsBudgetLivePush');
+    const messages = {
+      restored: 'Recording the change failed after Google accepted it — the live budget was rolled back and nothing was changed. Try again.',
+      superseded: 'This apply failed to record and was not applied — a newer budget change committed in the meantime and owns the live budget; nothing from this apply persisted.',
+      ambiguous: `Google accepted the change but recording it locally failed, and the rollback push could not safely run — the live campaign may be running the new amount. Local records still hold the previous state. ${reconcileActive
+        ? 'This corrects after the next daily Google Ads sync exposes the drift (up to ~24h) — the 2-hourly reconcile cannot see it until then, so check the campaign in Google Ads now if it matters today.'
+        : 'Automatic budget reconciliation is currently OFF (GATE_ADS_BUDGET_LIVE_PUSH), so this will NOT self-heal — fix the budget in Google Ads or the campaign editor now.'}`,
+    };
+    const err = new Error(messages[outcome]);
+    err.code = outcome === 'ambiguous' ? 'live_push_ambiguous' : 'live_push_rolled_back';
+    return err;
   }
 
   /**
    * Manually update a campaign's base daily budget.
+   *
+   * opts.requireLivePush: same contract as setMode — on a LINKED campaign a
+   * refused or unrunnable push throws ('live_push_failed' /
+   * 'live_push_unavailable') BEFORE the new base is persisted, so a failed
+   * apply leaves no local intent for the reconcile cron to re-push later;
+   * a post-push persist failure rolls the live budget back (or reports
+   * 'live_push_ambiguous').
+   * opts.requireBaseMode: reject ('mode_conflict') unless the row — re-read
+   * under the transaction's FOR UPDATE lock — is still in base mode, so a
+   * concurrent mode change can't slip between the guard and the push.
+   * opts.requireActive: reject ('campaign_inactive') unless status='active',
+   * checked under the same lock.
+   * opts.requireBoundFactor: reject ('budget_out_of_bounds' /
+   * 'budget_unbounded' / 'budget_noop') unless the amount is within this
+   * factor of the LOCKED row's base (falling back to current) and actually
+   * changes something — the caller's unlocked pre-checks can be raced by a
+   * concurrent base edit or a duplicate apply.
+   * opts.trigger: ad_budget_log.trigger attribution (default 'manual').
    */
-  async setBudget(campaignId, newBaseBudget, reason = 'manual') {
-    const campaign = await db('ad_campaigns').where({ id: campaignId }).first();
-    if (!campaign) throw new Error('Campaign not found');
-    if (campaign.platform !== 'google_ads') {
-      throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
+  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, trigger = 'manual' } = {}) {
+    reason = boundReason(reason);
+    const opId = randomUUID(); // audit-row identity; supersession anchor is taken in-lock
+    // Validate the amount up front — a non-positive / NaN / non-finite base would
+    // be written locally and pushed to Google as garbage micros (or, at 0,
+    // collapse to the $20 fallback), and the 2-hourly reconcile would keep
+    // re-pushing it. A daily budget must be strictly positive; use mode 'stop'
+    // to throttle. parseFloat is deliberately avoided so '50junk' is rejected.
+    let base = typeof newBaseBudget === 'number'
+      ? newBaseBudget
+      : (typeof newBaseBudget === 'string' && newBaseBudget.trim() !== '' ? Number(newBaseBudget) : NaN);
+    if (!Number.isFinite(base) || base <= 0) {
+      throw new Error(`Invalid budget "${newBaseBudget}" — must be a number > 0`);
+    }
+    // Cap at the storable maximum BEFORE the Google push, so an over-large value
+    // can't change the live campaign and then fail the decimal(10,2) DB write.
+    if (base > MAX_DAILY_BUDGET) {
+      throw new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
+    }
+    // Round to cents so Google receives EXACTLY what the decimal(10,2) columns
+    // store — a value like 50.001 would otherwise push exact micros to Google
+    // while the DB rounds to 50.00, re-creating the live/local drift this path
+    // is meant to prevent.
+    base = Math.round(base * 100) / 100;
+    // Re-check after rounding: a sub-cent input like 0.004 passes the > 0 check
+    // above but rounds to 0, which would push an invalid $0 to Google / persist a
+    // 0 base. The minimum daily budget is one cent.
+    if (base <= 0) {
+      throw new Error(`Invalid budget "${newBaseBudget}" — rounds to $0; the minimum is $0.01`);
     }
 
-    await db('ad_campaigns').where({ id: campaignId }).update({
-      daily_budget_base: newBaseBudget,
-      daily_budget_current: campaign.budget_mode === 'base' ? newBaseBudget : campaign.daily_budget_current,
-    });
+    if (requireLivePush) {
+      // Same locked-transaction shape as setMode: the FOR UPDATE re-read
+      // makes the base-mode and active-status guards atomic with the push
+      // and persist (a concurrent cron/admin transition can't slip between
+      // them), and transaction atomicity keeps the campaign write and audit
+      // row together — a failed insert rolls both back before the
+      // compensating Google rollback runs.
+      let pushedCampaign = null;
+      let pendingResult = null;
+      try {
+        return await db.transaction(async (trx) => {
+          const campaign = await trx('ad_campaigns').where({ id: campaignId }).forUpdate().first();
+          const lockAcquiredAt = new Date(); // supersession anchor — see setMode
+          if (!campaign) throw new Error('Campaign not found');
+          if (campaign.platform !== 'google_ads') {
+            throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
+          }
+          if (requireActive && campaign.status !== 'active') {
+            const err = new Error(`"${campaign.campaign_name}" is ${campaign.status || 'not active'} — advisor changes only apply to active campaigns.`);
+            err.code = 'campaign_inactive';
+            throw err;
+          }
+          // Under the lock, so a mode transition can no longer race this
+          // check: a throttled campaign must not take a raw-target push the
+          // caller would report as the live daily budget.
+          if (requireBaseMode && campaign.budget_mode && campaign.budget_mode !== 'base') {
+            const err = new Error(`"${campaign.campaign_name}" switched to "${campaign.budget_mode}" mode — the new daily budget wouldn't take effect, so nothing was changed.`);
+            err.code = 'mode_conflict';
+            throw err;
+          }
+          // Bound + no-op re-checked against the LOCKED row: the caller's
+          // pre-checks read an unlocked snapshot, so a concurrent base edit
+          // could turn an in-bounds amount into a wild jump, and a duplicate
+          // apply from a second tab could re-push an already-current budget.
+          if (requireBoundFactor) {
+            const lockedBase = Number(campaign.daily_budget_base);
+            const boundRef = Number.isFinite(lockedBase) && lockedBase > 0 ? lockedBase : Number(campaign.daily_budget_current);
+            if (!(boundRef > 0)) {
+              const err = new Error(`"${campaign.campaign_name}" has no recorded daily budget to sanity-check the amount against — set the budget manually in the campaign editor.`);
+              err.code = 'budget_unbounded';
+              throw err;
+            }
+            if (base > boundRef * requireBoundFactor || base < boundRef / requireBoundFactor) {
+              const err = new Error(`Refusing a budget change from $${boundRef}/day to $${base}/day (more than a ${requireBoundFactor}× move) — if that's really intended, set it in the campaign's budget editor.`);
+              err.code = 'budget_out_of_bounds';
+              throw err;
+            }
+            if (base === lockedBase && base === Number(campaign.daily_budget_current)) {
+              const err = new Error(`"${campaign.campaign_name}" is already at $${base}/day — nothing to apply.`);
+              err.code = 'budget_noop';
+              throw err;
+            }
+          }
 
-    await db('ad_budget_log').insert({
-      campaign_id: campaignId,
-      campaign_name: campaign.campaign_name,
-      previous_mode: campaign.budget_mode,
-      new_mode: campaign.budget_mode,
-      previous_budget: campaign.daily_budget_base,
-      new_budget: newBaseBudget,
-      reason,
-      trigger: 'manual',
-    });
+          const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
+          const linked = Boolean(campaign.platform_campaign_id);
+          let googleAdsUpdated = false;
+          if (linked) {
+            if (!getGoogleAds().isConfigured()) {
+              const err = new Error(`"${campaign.campaign_name}" is linked to a live Google Ads campaign, but the live push can't run (Google Ads API not configured) — nothing was changed.`);
+              err.code = 'live_push_unavailable';
+              throw err;
+            }
+            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
+            googleAdsUpdated = !!pushed;
+            if (!googleAdsUpdated) {
+              const err = new Error(`Google Ads refused the budget update for "${campaign.campaign_name}" — nothing was changed. Check the campaign in Google Ads (shared budgets can't be updated from here).`);
+              err.code = 'live_push_failed';
+              throw err;
+            }
+            pushedCampaign = {
+              campaign,
+              attempted: effectiveBudget,
+              startedAt: lockAcquiredAt,
+              opId,
+              preLive: pushed?.previousDailyBudget ?? null,
+              successResult: { campaign: campaign.campaign_name, previousBudget: campaign.daily_budget_base, newBudget: base, effectiveBudget, googleAdsUpdated: true, livePushAttempted: true },
+            };
+          }
 
-    return { campaign: campaign.campaign_name, previousBudget: campaign.daily_budget_base, newBudget: newBaseBudget };
+          await trx('ad_campaigns').where({ id: campaignId }).update({
+            daily_budget_base: base,
+            daily_budget_current: effectiveBudget,
+            updated_at: new Date(),
+          });
+          await trx('ad_budget_log').insert({
+            campaign_id: campaignId,
+            campaign_name: campaign.campaign_name,
+            previous_mode: campaign.budget_mode,
+            new_mode: campaign.budget_mode,
+            previous_budget: campaign.daily_budget_base,
+            new_budget: base,
+            reason,
+            trigger,
+            op_id: opId,
+            google_ads_updated: googleAdsUpdated,
+            created_at: new Date(),
+          });
+
+          pendingResult = {
+            campaign: campaign.campaign_name,
+            previousBudget: campaign.daily_budget_base,
+            newBudget: base,
+            effectiveBudget,
+            googleAdsUpdated,
+            livePushAttempted: linked,
+          };
+          return pendingResult;
+        });
+      } catch (err) {
+        // Guards all throw before pushedCampaign is set — any later rejection
+        // (persist statements or the COMMIT itself) is a post-push local
+        // failure and takes the compensating rollback.
+        if (pushedCampaign) {
+          const recovery = await this.rollbackAfterLivePush(pushedCampaign.campaign, err, pushedCampaign.attempted, pushedCampaign.startedAt, pushedCampaign.opId, pushedCampaign.preLive);
+          if (recovery.code === 'apply_committed') return pushedCampaign.successResult;
+          throw recovery;
+        }
+        // Unlinked campaign (no live push): a lost COMMIT ack still means the
+        // local change is durable if our own audit row exists.
+        if (pendingResult && await this.ownOpCommitted(opId)) return pendingResult;
+        throw err;
+      }
+    }
+
+    // Legacy (manual route) path: push-first as before, but inside the SAME
+    // row-locked transaction as the advisor apply and the cron so overlapping
+    // writers serialize instead of interleaving their Google calls and DB
+    // writes in opposite orders. Semantics unchanged: a refused push still
+    // records the new base with the prior current. Because the push precedes
+    // the COMMIT, a post-push local failure gets the same compensating
+    // rollback the other writers use.
+    let manualPushed = null;
+    let pendingResult = null;
+    try {
+    return await db.transaction(async (trx) => {
+      const campaign = await trx('ad_campaigns').where({ id: campaignId }).forUpdate().first();
+      const lockAcquiredAt = new Date(); // supersession anchor — see setMode
+      if (!campaign) throw new Error('Campaign not found');
+      if (campaign.platform !== 'google_ads') {
+        throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
+      }
+
+      // What Google should actually run given the campaign's CURRENT mode: editing
+      // the base while a campaign is throttled ('stop') or frozen ('spent') must
+      // NOT blast the raw new base live — push the mode-derived amount, exactly
+      // like setMode and the capacity cron. In 'base' mode this is the new base
+      // itself; 'spent' stays frozen at daily_budget_current; 'stop' recomputes 1%.
+      const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
+
+      // Push FIRST so daily_budget_current only ever records a budget Google is
+      // actually running: if Google rejects the change (shared budget, API error)
+      // we keep the prior current, so a requested decrease can't leave local state
+      // claiming the lower budget is live while Google keeps overspending. An
+      // unlinked/unconfigured campaign has no live counterpart, so its current
+      // advances to the intended amount (DB-only intent tracking).
+      let googleAdsUpdated = false;
+      let pushAttempted = false;
+      if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+        pushAttempted = true;
+        const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
+        googleAdsUpdated = !!pushed;
+        if (googleAdsUpdated) {
+          manualPushed = {
+            campaign,
+            attempted: effectiveBudget,
+            startedAt: lockAcquiredAt,
+            opId,
+            preLive: pushed?.previousDailyBudget ?? null,
+            successResult: { campaign: campaign.campaign_name, previousBudget: campaign.daily_budget_base, newBudget: base, effectiveBudget, googleAdsUpdated: true, livePushAttempted: true },
+          };
+        }
+      }
+      const newCurrent = (pushAttempted && !googleAdsUpdated)
+        ? campaign.daily_budget_current   // push failed → Google still runs the old amount
+        : effectiveBudget;
+
+      await trx('ad_campaigns').where({ id: campaignId }).update({
+        daily_budget_base: base,
+        daily_budget_current: newCurrent,
+        updated_at: new Date(),
+      });
+
+      await trx('ad_budget_log').insert({
+        campaign_id: campaignId,
+        campaign_name: campaign.campaign_name,
+        previous_mode: campaign.budget_mode,
+        new_mode: campaign.budget_mode,
+        previous_budget: campaign.daily_budget_base,
+        new_budget: base,
+        reason,
+        trigger,
+        op_id: opId,
+        google_ads_updated: googleAdsUpdated,
+        created_at: new Date(),
+      });
+
+      pendingResult = {
+        campaign: campaign.campaign_name,
+        previousBudget: campaign.daily_budget_base,
+        newBudget: base,
+        effectiveBudget,
+        googleAdsUpdated,
+        livePushAttempted: pushAttempted,
+      };
+      return pendingResult;
+    });
+    } catch (err) {
+      if (manualPushed) {
+        const recovery = await this.rollbackAfterLivePush(manualPushed.campaign, err, manualPushed.attempted, manualPushed.startedAt, manualPushed.opId, manualPushed.preLive);
+        if (recovery.code === 'apply_committed') return manualPushed.successResult;
+        throw recovery;
+      }
+      // No accepted push (refused/unconfigured/unlinked): a lost COMMIT ack
+      // still means the local change is durable if our own audit row exists.
+      if (pendingResult && await this.ownOpCommitted(opId)) return pendingResult;
+      throw err;
+    }
   }
 }
 
 module.exports = new BudgetManager();
+module.exports.MAX_DAILY_BUDGET = MAX_DAILY_BUDGET;

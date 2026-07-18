@@ -122,6 +122,8 @@ describe('selfHealMissingReminderRows', () => {
     const lookup = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
     const sameTime = {
       where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      whereExists: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue(null),
     };

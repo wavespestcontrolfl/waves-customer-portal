@@ -38,10 +38,25 @@ const { STRIPE_OPS_TOOLS, executeStripeOpsTool } = require('../services/intellig
 const { GITHUB_OPS_TOOLS, executeGithubOpsTool } = require('../services/intelligence-bar/github-ops-tools');
 const { STORE_OPS_TOOLS, executeStoreOpsTool } = require('../services/intelligence-bar/store-ops-tools');
 const { GROWTHBOOK_TOOLS, executeGrowthbookTool } = require('../services/intelligence-bar/growthbook-tools');
+const { GOOGLE_ADS_OPS_TOOLS, executeGoogleAdsOpsTool } = require('../services/intelligence-bar/google-ads-ops-tools');
+const { TOKEN_HEALTH_TOOLS, executeTokenHealthTool } = require('../services/intelligence-bar/token-health-tools');
+const { SENDGRID_OPS_TOOLS, executeSendgridOpsTool } = require('../services/intelligence-bar/sendgrid-ops-tools');
+const { DATAFORSEO_OPS_TOOLS, executeDataforseoOpsTool } = require('../services/intelligence-bar/dataforseo-ops-tools');
+const { GBP_OPS_TOOLS, executeGbpOpsTool } = require('../services/intelligence-bar/gbp-ops-tools');
+const { GA4_OPS_TOOLS, executeGa4OpsTool } = require('../services/intelligence-bar/ga4-ops-tools');
+const { META_ADS_OPS_TOOLS, executeMetaAdsOpsTool } = require('../services/intelligence-bar/meta-ads-ops-tools');
+const { BOUNCIE_OPS_TOOLS, executeBouncieOpsTool } = require('../services/intelligence-bar/bouncie-ops-tools');
+const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligence-bar/apify-ops-tools');
+const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
+const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
+const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
+const { isUserFeatureEnabled } = require('../services/feature-flags');
+const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
+const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -67,6 +82,8 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 const MODEL = process.env.INTELLIGENCE_BAR_MODEL || MODELS.FLAGSHIP;
 const MAX_TOOL_ROUNDS = 8;
 const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
+const AGENT_ESTIMATE_FEATURE_KEY = 'agent_estimate';
+const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
 
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
@@ -90,12 +107,29 @@ const STRIPE_OPS_TOOL_NAMES = new Set(STRIPE_OPS_TOOLS.map(t => t.name));
 const GITHUB_OPS_TOOL_NAMES = new Set(GITHUB_OPS_TOOLS.map(t => t.name));
 const STORE_OPS_TOOL_NAMES = new Set(STORE_OPS_TOOLS.map(t => t.name));
 const GROWTHBOOK_TOOL_NAMES = new Set(GROWTHBOOK_TOOLS.map(t => t.name));
-// Every infra module loads with the dashboard context and shares the
-// admin-only guard that OPS_TOOLS established.
+const GOOGLE_ADS_OPS_TOOL_NAMES = new Set(GOOGLE_ADS_OPS_TOOLS.map(t => t.name));
+const TOKEN_HEALTH_TOOL_NAMES = new Set(TOKEN_HEALTH_TOOLS.map(t => t.name));
+const SENDGRID_OPS_TOOL_NAMES = new Set(SENDGRID_OPS_TOOLS.map(t => t.name));
+const DATAFORSEO_OPS_TOOL_NAMES = new Set(DATAFORSEO_OPS_TOOLS.map(t => t.name));
+const GBP_OPS_TOOL_NAMES = new Set(GBP_OPS_TOOLS.map(t => t.name));
+const GA4_OPS_TOOL_NAMES = new Set(GA4_OPS_TOOLS.map(t => t.name));
+const META_ADS_OPS_TOOL_NAMES = new Set(META_ADS_OPS_TOOLS.map(t => t.name));
+const BOUNCIE_OPS_TOOL_NAMES = new Set(BOUNCIE_OPS_TOOLS.map(t => t.name));
+const APIFY_OPS_TOOL_NAMES = new Set(APIFY_OPS_TOOLS.map(t => t.name));
+const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
+const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
+const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
+// Every infra module loads with EVERY admin context (any admin page can ask
+// about deploys, errors, or webhook health) and shares the admin-only guard
+// that OPS_TOOLS established — technician tokens never see or execute them.
 const INFRA_TOOLS = [
   ...OPS_TOOLS, ...SENTRY_OPS_TOOLS, ...CLOUDFLARE_OPS_TOOLS,
   ...TWILIO_OPS_TOOLS, ...STRIPE_OPS_TOOLS, ...GITHUB_OPS_TOOLS,
   ...STORE_OPS_TOOLS, ...GROWTHBOOK_TOOLS,
+  ...GOOGLE_ADS_OPS_TOOLS, ...TOKEN_HEALTH_TOOLS, ...SENDGRID_OPS_TOOLS,
+  ...DATAFORSEO_OPS_TOOLS, ...GBP_OPS_TOOLS, ...GA4_OPS_TOOLS,
+  ...META_ADS_OPS_TOOLS, ...BOUNCIE_OPS_TOOLS, ...APIFY_OPS_TOOLS,
+  ...SOCIAL_OPS_TOOLS, ...MANAGED_AGENTS_OPS_TOOLS, ...JOB_HEALTH_TOOLS,
 ];
 const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
@@ -105,6 +139,31 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // history and the inbox are visible from any page — not just the
 // Communications/Email pages.
 const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS];
+
+function toolsNamed(tools, names) {
+  const allowed = new Set(names);
+  return tools.filter((tool) => allowed.has(tool.name));
+}
+
+// The Agent Estimate page gets a deliberately narrow tool cabinet. Property
+// truth, pricing, protocols, and inventory are readable; its one write can
+// only create/revise a draft through the UI-confirmation path. It cannot send,
+// schedule, update a lead, or reach any other business-data write.
+const AGENT_ESTIMATE_TOOLS = [
+  ...toolsNamed(ESTIMATE_TOOLS, [
+    'lookup_property',
+    'compute_estimate',
+    'read_pricing_config',
+    'recent_pricing_changes',
+    'find_similar_estimates',
+    'match_existing_customer',
+    'get_waveguard_tiers',
+    'get_neighborhood_grass_profile',
+    AGENT_ESTIMATE_WRITE_TOOL,
+  ]),
+  ...toolsNamed(TECH_TOOLS, ['get_protocol', 'get_product_info', 'search_knowledge_base']),
+  ...toolsNamed(PROCUREMENT_TOOLS, ['query_products', 'analyze_margins', 'query_stock']),
+];
 
 // Tools whose REST equivalents guard with requireAdmin — technician tokens
 // must not reach them through the intelligence bar either. The email surface
@@ -133,6 +192,14 @@ const PII_TOOL_NAMES = new Set([
   'send_sms',
   'draft_sms_reply',
   'draft_sms',
+  'lookup_property',
+  'find_similar_estimates',
+  'match_existing_customer',
+  'create_pending_estimate',
+  // compute_estimate carries the full service address + selected lead id —
+  // same PII class as lookup_property and the draft writer.
+  'compute_estimate',
+  AGENT_ESTIMATE_WRITE_TOOL,
   // Email tools return sender names/addresses and message bodies, and reply
   // inputs carry the drafted body — same class of PII as the comms tools.
   'get_inbox_summary',
@@ -154,6 +221,21 @@ const PII_TOOL_NAMES = new Set([
   // them) — redact like the comms tools.
   'get_twilio_alerts',
   'get_twilio_failed_messages',
+  // SendGrid suppression results are lists of customer email addresses —
+  // redact like the comms tools.
+  'get_email_suppressions',
+  'check_email_suppression',
+  // Trip start/end points trace customer service stops, and managed-agent
+  // session titles are app-authored and can reference leads/customers.
+  'get_truck_trips',
+  'get_managed_agent_runs',
+  // Recorded job errors are provider messages that can echo request
+  // payloads (Twilio errors embed phone numbers) — the ledger masks digit
+  // runs at record time, and telemetry redacts as defense in depth.
+  'get_scheduled_job_health',
+  // PaymentIntent descriptions are app-written and can embed customer names
+  // or invoice references — redact like the other billing-adjacent tools.
+  'get_stripe_payment_intents',
   // GrowthBook feature rules expose raw targeting `condition` predicates,
   // which are arbitrary attribute strings that can embed customer emails or
   // user identifiers — keep them out of query telemetry.
@@ -198,6 +280,13 @@ function sanitizeQueryImages(images) {
   return out;
 }
 
+// PII-tool results (customer names in SMS threads, email bodies, payment
+// descriptions, …) enter conversationHistory just like image-derived text
+// does: a follow-up turn can echo the name with no tool call at all, so the
+// taint must survive the round-trip through the client the same way the
+// image taint does.
+const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
   return conversationHistory.some((message) => {
@@ -207,23 +296,30 @@ function hasImageTaintedHistory(conversationHistory) {
   });
 }
 
+function hasPiiTaintedHistory(conversationHistory) {
+  if (!Array.isArray(conversationHistory)) return false;
+  return conversationHistory.some((message) => (
+    message && typeof message.content === 'string' && message.content.includes(PII_TAINT_MARKER)
+  ));
+}
+
 function stripInternalHistoryMarkers(message) {
   if (!message || typeof message.content !== 'string') return message;
   return {
     ...message,
     content: message.content
       .split('\n')
-      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER)
+      .filter((line) => line.trim() !== IMAGE_TAINT_MARKER && line.trim() !== PII_TAINT_MARKER)
       .join('\n')
       .trim(),
   };
 }
 
-function markImageTaintedContent(content, imageTainted) {
-  if (!imageTainted || typeof content !== 'string' || content.includes(IMAGE_TAINT_MARKER)) {
+function appendTaintMarker(content, tainted, marker) {
+  if (!tainted || typeof content !== 'string' || content.includes(marker)) {
     return content;
   }
-  return `${content}\n${IMAGE_TAINT_MARKER}`;
+  return `${content}\n${marker}`;
 }
 
 // Build the current-turn user message. Plain string when no images and no
@@ -276,6 +372,10 @@ function uiConfirmEnabled() {
   return process.env.GATE_IB_UI_CONFIRM === 'true';
 }
 
+async function agentEstimateEnabled(req) {
+  return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
+}
+
 function summarizeProposal(toolName, params) {
   // One level of plain-object params flattens into the summary — without it
   // an update_customer card reads "customer_id: X" and hides WHAT is being
@@ -307,6 +407,25 @@ function summarizeProposal(toolName, params) {
   return summary + ripple;
 }
 
+function confirmationDisplayParams(toolName, params, preview) {
+  if (toolName !== AGENT_ESTIMATE_WRITE_TOOL) return params;
+  return {
+    action: preview?.action || (params?.estimateId ? 'revise draft' : 'create draft'),
+    customer: params?.customerName || null,
+    address: params?.address || null,
+    services: Object.keys(params?.engineInputs?.services || {}).join(', ') || null,
+    monthly: preview?.totals?.monthly ?? null,
+    annual: preview?.totals?.annual ?? null,
+    one_time: preview?.totals?.oneTime ?? null,
+    lane: preview?.lane || null,
+    review_flags: (preview?.lane_reasons || []).join('; ') || 'none',
+    reasoning: params?.reasoning || null,
+    assumptions: (params?.assumptions || []).join('; ') || 'none',
+    open_questions: (params?.uncertainty || []).join('; ') || 'none',
+    leadId: params?.leadId || null,
+  };
+}
+
 /**
  * Propose a gated write as a pending action instead of executing it.
  *
@@ -316,10 +435,16 @@ function summarizeProposal(toolName, params) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
+  if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL && selectedLeadId) {
+    if (params.leadId && String(params.leadId) !== String(selectedLeadId)) {
+      return { failed: true, modelResult: { error: 'Draft lead does not match the Agent Estimate lead currently open.' } };
+    }
+    params.leadId = selectedLeadId;
+  }
 
   let preview;
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
@@ -332,6 +457,9 @@ async function proposePendingWrite({ toolUse, req, context }) {
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };
+  }
+  if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
+    params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
   }
 
   const row = await PendingActions.createPendingAction({
@@ -352,7 +480,11 @@ async function proposePendingWrite({ toolUse, req, context }) {
       id: row.id,
       tool: toolUse.name,
       summary: row.summary,
-      params,
+      // Display-only summary. The full immutable payload stays server-side
+      // behind the pending-action id/hash; do not make a road user scroll
+      // through raw engine JSON, evidence quotes, and property ledgers just
+      // to find the dollars and review flags they are approving.
+      params: confirmationDisplayParams(toolUse.name, params, preview),
       expiresAt: row.expires_at,
     },
   };
@@ -372,6 +504,31 @@ function getConfirmedActionIdempotencyKey(req, params) {
 
 // Context-specific system prompt extensions
 const CONTEXT_PROMPTS = {
+  agent_estimate: `
+AGENT ESTIMATE CONTEXT:
+You are the manual, mobile-first estimate copilot for one selected lead or existing-customer expansion request. The current page data contains the lead's quote-form submission, call recordings/transcripts, SMS up to this session, recognized customer account, active services/current spend, profile facts, prior estimates, current draft, and approved learning. Read all supplied evidence before recommending scope.
+
+WORKFLOW:
+1. Build a per-field fact ledger for service address, home/building sqft, lot sqft, treatable lawn sqft, stories, property type, and commercial unit/count measurements. Cite which supplied source supports each selected value and surface conflicts.
+   Evidence order: operator-confirmed measurement or record > verbatim transcript/SMS/quote text > structured extraction > AI-generated lead summary > neighborhood prior. Never quote a summary as if it were verbatim.
+2. Use lookup_property to verify property facts when an address exists, and pass its property_fact_verification_token unchanged into create_agent_estimate_draft. Caller/operator measurements must cite an exact quote from the loaded lead evidence instead. A lookup, satellite image, model observation, neighborhood aggregate, transcript, or quote form can be wrong. Keep source and confidence per field; never turn one overall confidence score into confidence for every field.
+3. For lawn, price treatable turf—not the whole parcel. A neighborhood grass profile is only a weak/moderate prior; confirm the actual grass from a close photo, a verified profile, or the operator. If asked to count palms or inspect an image, report a count/range and visibility limits; never silently convert that observation into pricing.
+4. Read the complete relevant protocol and check catalog/stock for protocol-named products. Missing on-hand quantity means UNTRACKED, not available. Protocols and inventory can change scope or force review, but NEVER set a dollar amount.
+5. Call compute_estimate for every price and after every pricing-input change. On this page always pass the selected leadId. The server recognizes the linked or unambiguous customer, loads current qualifying services, and applies the combined WaveGuard tier. The engine uses the DB-authoritative configuration. Use the returned per-line margin check with the $35/hour loaded labor rate and 35% collected-margin target. Do not use rough procurement margin averages to override a client-specific engine result.
+6. Clearly separate verified facts, assumptions, unresolved questions, evidence, protocol review, inventory review, and the final engine inputs. Commercial bed bug/cockroach/rodent work without measured unit/count evidence stays review-required.
+7. For a recognized customer, list what they currently buy and spend per application, then put ONLY requested additions in engineInputs.services. Never reprice, discount, or duplicate an active service: its key establishes the starting tier, but its existing paid price stays unchanged. Apply the combined tier only to the newly quoted services.
+8. Use the specific engine service for the requested program: oneTimePest/oneTimeLawn/oneTimeMosquito for one-time work, germanRoach for the multi-visit German roach cleanout, pestInitialRoach for standalone cockroach treatment, and the named specialty key for flea, bed bug, stinging insect, rodent, termite, or other work. Never flatten these into generic pest. The server maps priced line items to approved estimate_v2 React sections; single-service, one-time, cockroach, and multi-service bundle presentations are already supported. You do not create or edit React code.
+9. When ready, call create_agent_estimate_draft exactly once. It only proposes a confirmation card. Never claim the draft exists until the operator taps Confirm. To revise, use the current Agent Estimate estimateId and new engineInputs; the same draft/token is updated.
+
+HARD BOUNDARIES:
+- Existing customers are supported only as expansion drafts. Customer identity, current services/spend, membership inputs, and discounts are server-authoritative; ambiguous matches do not receive account pricing.
+- generateEstimate owns every dollar. Never invent, round, or manually alter a price.
+- estimates.notes is customer-visible. Internal reasoning belongs only in the tool's structured internal fields.
+- You cannot send an estimate. The operator previews and explicitly sends by SMS/email from the page.
+- Corrections in this conversation affect the current session immediately. Do not call them permanent learning. Permanent learning requires an operator-submitted candidate and admin approval.
+
+ROAD RESPONSE STYLE:
+Lead with the recommendation and price result, then give compact cards/lists for Facts, Margin, Review flags, and Next tap. Keep routine answers concise and make unresolved safety/measurement issues unmistakable.`,
   schedule: `
 SCHEDULE CONTEXT:
 You are currently on the Schedule & Dispatch page. The operator is managing today's or a specific day's schedule.
@@ -429,22 +586,7 @@ ANALYSIS STYLE:
 - Flag anything that's significantly better or worse than expected
 - Be opinionated: "This is strong" or "This needs attention" — the operator wants your read, not just data
 - When showing revenue, always include both the dollar amount and the trend direction
-- Round to whole dollars for readability ($1,234 not $1,234.56)
-
-INFRASTRUCTURE (all READ-ONLY):
-The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; code lives on GitHub.
-- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
-- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
-- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
-- Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
-- Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed). Business revenue questions use the revenue tools, not these.
-- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
-- App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
-- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
-- Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) = healthy.
-- Combine infra with business data when useful ("did we miss calls while the server was erroring?")
-- If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
-- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`,
+- Round to whole dollars for readability ($1,234 not $1,234.56)`,
 
   seo: `
 SEO & CONTENT ENGINE CONTEXT:
@@ -829,53 +971,100 @@ RESPONSE STYLE:
 - For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute payouts from the query flow.`,
 };
 
+// Guidance for the infra tool modules. These tools load on EVERY admin
+// context (getToolsForContext), so this block is appended for every admin
+// request rather than living inside one context prompt. Tech and non-admin
+// requests never load the tools, so their prompts must not describe them.
+const INFRA_PROMPT = `INFRASTRUCTURE (all READ-ONLY):
+The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; email is SendGrid; ads run on Google Ads; the four local listings are Google Business Profiles; site analytics is GA4; rank tracking is DataForSEO; code lives on GitHub.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
+- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
+- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
+- Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
+- Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed), get_stripe_payment_intents (live payment attempts — the ONLY view of incomplete/abandoned drafts, which never reach the local database; requires_capture = card hold awaiting capture, not a draft). COMPLETED revenue questions use the revenue tools, not these.
+- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
+- App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
+- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
+- Google Ads: get_google_ads_serving_status (LIVE serving state + why a campaign is limited/not serving + daily budget), get_google_ads_disapprovals (policy-disapproved ads). Budget CHANGES go through /admin/ads only; spend/ROAS analysis uses the revenue tools.
+- Meta Ads: get_meta_ads_delivery_status (effective_status = what is ACTUALLY delivering), get_meta_ads_issues (WITH_ISSUES/disapproved ads). Same rules as Google Ads.
+- Truck (Bouncie): get_truck_status (live location/running/fuel/tracker freshness), get_truck_trips (a day's trips + mileage — the live view of the tax mileage ledger's source).
+- Apify: get_apify_status (monthly usage vs limit + recent scrape runs — the price-scan scraper dies silently at the cap).
+- Social: get_social_channel_status (per-channel flags + credential presence + dry-run/pause switches + recent posts). Token VALIDITY is token health; posting happens in the social studio.
+- Managed agents: get_managed_agent_runs (recent autonomous agent sessions — BI briefing, blog engine, backlink, lead response — with status and token usage). The "did last night's runs succeed?" check.
+- Internal crons: get_scheduled_job_health (the portal's OWN scheduled jobs — pricing sweeps, syncs, reminder crons — last run/success, failure streaks, stuck-mid-run). The internal counterpart to the external checks above.
+- SendGrid: get_email_suppressions (recent bounces/blocks/spam reports), check_email_suppression (is ONE address suppressed). A suppressed address silently swallows every send.
+- Google Business Profiles: get_gbp_status (connection + verification/suspension + latest posts per location). Reviews use the review tools.
+- GA4: get_ga4_snapshot (live traffic + conversion events, lags ~1 day). Deeper trends live on the dashboard.
+- DataForSEO: get_dataforseo_balance (prepaid credits — rank tracking stops silently at $0).
+- Credentials: get_integration_token_health — cross-integration connection status from the daily checks; the first tool to reach for on any "X stopped working" hunch.
+- Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) + tokens healthy = healthy.
+- Combine infra with business data when useful ("did we miss calls while the server was erroring?")
+- If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
+- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
+
 function getToolsForContext(context, isAdmin = false) {
+  // Tech portal stays isolated — no base, no infra, tech-tools only.
+  if (context === 'tech') {
+    return TECH_TOOLS;
+  }
   // Email tools mirror the requireAdmin /api/admin/email surface — never
   // offer them to technician tokens. ADMIN_ONLY_TOOL_NAMES blocks execution
   // regardless; this keeps them out of the model's tool list too.
   const base = isAdmin ? BASE_TOOLS : BASE_TOOLS.filter(t => !EMAIL_TOOL_NAMES.has(t.name));
+  if (context === 'agent_estimate') {
+    return AGENT_ESTIMATE_TOOLS;
+  }
+  // Infra reads (Railway/Sentry/Cloudflare/Twilio/Stripe/GitHub/stores/
+  // GrowthBook) are context-independent — deploys break and webhooks fail no
+  // matter which page the operator is on. Admin-only: the /query loop and
+  // /execute both refuse them for technician tokens, so non-admin lists must
+  // not offer them either. Appended LAST so each context's own tools stay a
+  // stable prompt-cache prefix.
+  const infra = isAdmin ? INFRA_TOOLS : [];
   if (context === 'schedule' || context === 'dispatch') {
-    return [...base, ...SCHEDULE_TOOLS];
+    return [...base, ...SCHEDULE_TOOLS, ...infra];
   }
   if (context === 'dashboard') {
-    return [...base, ...DASHBOARD_TOOLS, ...INFRA_TOOLS];
+    return [...base, ...DASHBOARD_TOOLS, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...base, ...SEO_QUERY_TOOLS];
+    return [...base, ...SEO_QUERY_TOOLS, ...infra];
   }
   if (context === 'procurement' || context === 'inventory') {
-    return [...base, ...PROCUREMENT_TOOLS];
+    return [...base, ...PROCUREMENT_TOOLS, ...infra];
   }
   if (context === 'revenue') {
-    return [...base, ...REVENUE_TOOLS];
+    return [...base, ...REVENUE_TOOLS, ...infra];
   }
   if (context === 'reviews') {
-    return [...base, ...REVIEW_TOOLS];
+    return [...base, ...REVIEW_TOOLS, ...infra];
   }
   if (context === 'comms') {
     // Full comms set already includes the read tools — don't double-load
-    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : [])];
+    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : []), ...infra];
   }
   if (context === 'tax') {
-    return [...base, ...TAX_TOOLS];
+    return [...base, ...TAX_TOOLS, ...infra];
   }
   if (context === 'leads') {
-    return [...base, ...LEADS_TOOLS];
+    return [...base, ...LEADS_TOOLS, ...infra];
   }
   if (context === 'email') {
     // Full email set already includes the shared subset — don't double-load
-    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS] : base;
+    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
-    return [...base, ...BANKING_QUERY_TOOLS];
+    return [...base, ...BANKING_QUERY_TOOLS, ...infra];
   }
   if (context === 'estimates') {
-    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
+    // create_agent_estimate_draft's trust boundary (feature gate + forced UI
+    // confirmation) is only active in the agent_estimate context. Offered
+    // from the ordinary estimates bar it would either never surface its
+    // Confirm card (UI-confirm gate off) or surface one that /confirm-action
+    // rejects (user flag off) — so it is not offered here at all.
+    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS.filter((tool) => tool.name !== AGENT_ESTIMATE_WRITE_TOOL), ...infra];
   }
-  if (context === 'tech') {
-    return TECH_TOOLS;
-  }
-  return base;
+  return [...base, ...infra];
 }
 
 // techContext is only set for tech portal calls
@@ -902,7 +1091,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeBankingTool(toolName, input);
   }
   if (ESTIMATE_TOOL_NAMES.has(toolName)) {
-    return executeEstimateTool(toolName, input);
+    return executeEstimateTool(toolName, input, actionContext);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input);
@@ -933,6 +1122,42 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (GROWTHBOOK_TOOL_NAMES.has(toolName)) {
     return executeGrowthbookTool(toolName, input);
+  }
+  if (GOOGLE_ADS_OPS_TOOL_NAMES.has(toolName)) {
+    return executeGoogleAdsOpsTool(toolName, input);
+  }
+  if (TOKEN_HEALTH_TOOL_NAMES.has(toolName)) {
+    return executeTokenHealthTool(toolName, input);
+  }
+  if (SENDGRID_OPS_TOOL_NAMES.has(toolName)) {
+    return executeSendgridOpsTool(toolName, input);
+  }
+  if (DATAFORSEO_OPS_TOOL_NAMES.has(toolName)) {
+    return executeDataforseoOpsTool(toolName, input);
+  }
+  if (GBP_OPS_TOOL_NAMES.has(toolName)) {
+    return executeGbpOpsTool(toolName, input);
+  }
+  if (GA4_OPS_TOOL_NAMES.has(toolName)) {
+    return executeGa4OpsTool(toolName, input);
+  }
+  if (META_ADS_OPS_TOOL_NAMES.has(toolName)) {
+    return executeMetaAdsOpsTool(toolName, input);
+  }
+  if (BOUNCIE_OPS_TOOL_NAMES.has(toolName)) {
+    return executeBouncieOpsTool(toolName, input);
+  }
+  if (APIFY_OPS_TOOL_NAMES.has(toolName)) {
+    return executeApifyOpsTool(toolName, input);
+  }
+  if (SOCIAL_OPS_TOOL_NAMES.has(toolName)) {
+    return executeSocialOpsTool(toolName, input);
+  }
+  if (MANAGED_AGENTS_OPS_TOOL_NAMES.has(toolName)) {
+    return executeManagedAgentsOpsTool(toolName, input);
+  }
+  if (JOB_HEALTH_TOOL_NAMES.has(toolName)) {
+    return executeJobHealthTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);
@@ -1005,9 +1230,13 @@ router.post('/query', async (req, res, next) => {
     const { prompt, conversationHistory = [], context, pageData } = req.body;
     const images = sanitizeQueryImages(req.body.images);
     const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
+    const piiTaintedHistory = hasPiiTaintedHistory(conversationHistory);
 
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
+    }
+    if (context === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
     }
     if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
       return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
@@ -1030,10 +1259,23 @@ router.post('/query', async (req, res, next) => {
     if (context && CONTEXT_PROMPTS[context]) {
       systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
     }
+    // Infra tools load on every admin context (getToolsForContext), so their
+    // guidance rides along for every admin request. The tech and
+    // agent_estimate contexts don't load them (isolated toolsets) and
+    // non-admin requests never get the tools, so those prompts must not
+    // describe them — the branch also keeps the admin and non-admin prefixes
+    // separately cacheable.
+    if (context !== 'tech' && context !== 'agent_estimate' && req.techRole === 'admin') {
+      systemPrompt += '\n\n' + INFRA_PROMPT;
+    }
+    if (context === 'agent_estimate') {
+      systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
+    }
+    const uiConfirmActive = uiConfirmEnabled() || context === 'agent_estimate';
     // Write-confirmation guidance must match the active mechanism (#1568) —
     // the gate is read per-request, so the prompt is appended per-request.
     if (context !== 'tech') {
-      systemPrompt += uiConfirmEnabled()
+      systemPrompt += uiConfirmActive
         ? `\n\nWRITE CONFIRMATION (UI mode):
 Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT execute when you call them. Your call returns a preview, and the action appears as a confirmation card in the portal UI next to your response.
 - NEVER call the same write tool again after a pending_confirmation result — that creates a duplicate card. One call per intended action.
@@ -1134,11 +1376,16 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           result = { error: 'Explicit confirmation is required for this action. Use the confirmed action endpoint.' };
           failed = true;
           errorMessage = result.error;
-        } else if (uiConfirmEnabled() && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
+        } else if (uiConfirmActive && UI_GATED_WRITE_TOOL_NAMES.has(toolUse.name)) {
           // Issue #1568: gated writes are proposed, never executed, from the
           // model loop. The confirmation id goes to the client only.
           try {
-            const proposed = await proposePendingWrite({ toolUse, req, context });
+            const proposed = await proposePendingWrite({
+              toolUse,
+              req,
+              context,
+              selectedLeadId: pageData?.agent_estimate_context?.lead?.id || null,
+            });
             result = proposed.modelResult;
             if (proposed.failed) {
               failed = true;
@@ -1211,16 +1458,21 @@ For create_customer, the route-optimization writes, and the inventory stock writ
     // Log the query for analytics. tool_calls stores names + field keys only;
     // prompt/response are additionally redacted when a PII-bearing tool ran
     // (prompts carry typed customer contact details, responses echo SMS
-    // bodies) OR when the conversation is image-tainted — the current turn has
-    // attachments, or an earlier image turn is still in the window and its
-    // OCR-derived answer can be echoed by a follow-up that carries no images
-    // itself. Either way Claude can surface a customer's name/address/phone
-    // with no tool call at all.
+    // bodies), when an earlier PII-tool turn is still in the history window
+    // (its answer can be echoed by a follow-up with no tool call), OR when
+    // the conversation is image-tainted — the current turn has attachments,
+    // or an earlier image turn is still in the window and its OCR-derived
+    // answer can be echoed by a follow-up that carries no images itself.
+    // Either way Claude can surface a customer's name/address/phone with no
+    // tool call at all.
     const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
-    const redactPii = usedPiiTool || imageTainted;
-    const redactNote = usedPiiTool
-      ? '[redacted — PII-bearing tools used]'
-      : '[redacted — image attachment may contain PII]';
+    const piiTainted = usedPiiTool || piiTaintedHistory;
+    const redactPii = piiTainted || imageTainted || context === 'agent_estimate';
+    const redactNote = context === 'agent_estimate'
+      ? '[redacted — Agent Estimate lead context]'
+      : piiTainted
+        ? '[redacted — PII-bearing tools used]'
+        : '[redacted — image attachment may contain PII]';
     try {
       await db('intelligence_bar_queries').insert({
         prompt: redactPii ? redactNote : prompt,
@@ -1240,22 +1492,36 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       // Pending write proposals for the client confirmation card. This is the
       // ONLY channel the confirmation ids travel on — the client must keep
       // them in component state, never in conversationHistory.
-      ...(uiConfirmEnabled() ? { pendingActions: pendingProposals } : {}),
+      ...(uiConfirmActive ? { pendingActions: pendingProposals } : {}),
       // Return conversation history for multi-turn. Attached images are not
       // round-tripped (a text marker stands in) — keeps follow-up payloads
-      // small and image bytes out of the stored history.
+      // small and image bytes out of the stored history. Image and PII taint
+      // markers ride on the stored turns so follow-ups stay redacted; both
+      // are stripped before the history reaches the model.
       conversationHistory: [
         ...conversationHistory.slice(-8),
         {
           role: 'user',
-          content: markImageTaintedContent(
-            images.length
-              ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
-              : prompt,
-            imageTainted,
+          content: appendTaintMarker(
+            appendTaintMarker(
+              images.length
+                ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+                : prompt,
+              imageTainted,
+              IMAGE_TAINT_MARKER,
+            ),
+            piiTainted,
+            PII_TAINT_MARKER,
           ),
         },
-        { role: 'assistant', content: markImageTaintedContent(finalResponse, imageTainted) },
+        {
+          role: 'assistant',
+          content: appendTaintMarker(
+            appendTaintMarker(finalResponse, imageTainted, IMAGE_TAINT_MARKER),
+            piiTainted,
+            PII_TAINT_MARKER,
+          ),
+        },
       ],
     });
 
@@ -1275,6 +1541,9 @@ router.post('/execute', async (req, res, next) => {
     if (!action) {
       return res.status(400).json({ error: 'Action is required' });
     }
+    if (action === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+    }
     if ((DASHBOARD_TOOL_NAMES.has(action) || INFRA_TOOL_NAMES.has(action)) && isNonAdminDashboardRequest(req)) {
       return res.status(403).json({ error: 'Admin access required for dashboard actions' });
     }
@@ -1284,7 +1553,7 @@ router.post('/execute', async (req, res, next) => {
     if (ADMIN_ONLY_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for this action' });
     }
-    if (uiConfirmEnabled() && UI_GATED_WRITE_TOOL_NAMES.has(action)) {
+    if ((uiConfirmEnabled() || action === AGENT_ESTIMATE_WRITE_TOOL) && UI_GATED_WRITE_TOOL_NAMES.has(action)) {
       // With the UI-confirm gate on, gated writes commit exclusively through
       // /confirm-action — /execute would skip the claim, payload hash, and
       // single-use replay protection.
@@ -1356,11 +1625,37 @@ router.post('/confirm-action', async (req, res, next) => {
     }
     const action = claim.action;
 
+    if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
+      await PendingActions.recordResult(action.id, { error: 'Agent Estimate is not enabled' });
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+    }
+
     if (ADMIN_ONLY_TOOL_NAMES.has(action.tool_name) && req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required for this action' });
     }
 
     const execParams = { ...action.params };
+    let approvedAgentEstimateFingerprint = null;
+    if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL) {
+      const approvedFingerprint = execParams._approvedPreviewFingerprint;
+      approvedAgentEstimateFingerprint = approvedFingerprint;
+      delete execParams._approvedPreviewFingerprint;
+      const livePreview = await executeToolByName(action.tool_name, execParams, null, {
+        isAdmin: req.techRole === 'admin',
+        technicianId: req.technicianId || req.technician?.id || null,
+        confirmed: false,
+      });
+      if (isToolFailure(livePreview)
+        || !approvedFingerprint
+        || approvedFingerprint !== agentEstimatePreviewFingerprint(livePreview)) {
+        const result = {
+          error: 'Agent Estimate pricing or customer context changed after preview. Build a new confirmation card before saving.',
+          preview_changed: true,
+        };
+        await PendingActions.recordResult(action.id, result);
+        return res.status(409).json(result);
+      }
+    }
     if (WRITE_TWO_STEP_TOOL_NAMES.has(action.tool_name)) {
       // Server-derived confirmation: the operator clicked Confirm. This is
       // the only place a confirmed flag is ever attached.
@@ -1371,6 +1666,9 @@ router.post('/confirm-action', async (req, res, next) => {
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: true,
+      ...(approvedAgentEstimateFingerprint
+        ? { approvedPreviewFingerprint: approvedAgentEstimateFingerprint }
+        : {}),
     });
     await PendingActions.recordResult(action.id, result);
 
@@ -1378,7 +1676,8 @@ router.post('/confirm-action', async (req, res, next) => {
       success: !result?.error,
     });
 
-    res.json({ success: !result?.error, tool: action.tool_name, result });
+    res.status(result?.preview_changed ? 409 : 200)
+      .json({ success: !result?.error, tool: action.tool_name, result });
   } catch (err) {
     logger.error('[intelligence-bar] confirm-action failed:', err);
     next(err);
@@ -1404,8 +1703,19 @@ router.post('/cancel-action', async (req, res, next) => {
 
 // ─── QUICK ACTIONS (pre-built prompts for common tasks) ─────────
 
-router.get('/quick-actions', async (req, res) => {
+router.get('/quick-actions', async (req, res, next) => {
   const { context } = req.query;
+  // The flag lookup is this handler's only awaited call; Express 4 does not
+  // forward a rejected handler promise, so an uncaught DB error here would
+  // become an unhandled rejection instead of a 500.
+  try {
+    if (context === 'agent_estimate' && !(await agentEstimateEnabled(req))) {
+      return res.status(404).json({ error: 'Agent Estimate is not enabled' });
+    }
+  } catch (err) {
+    logger.error('[intelligence-bar] quick-actions flag lookup failed:', err);
+    return next(err);
+  }
   if (context === 'dashboard' && isNonAdminDashboardRequest(req)) {
     return res.status(403).json({ error: 'Admin access required for dashboard intelligence' });
   }
@@ -1428,6 +1738,7 @@ router.get('/quick-actions', async (req, res) => {
 
   const scheduleActions = [
     { id: 'day_briefing', group: 'Plan', label: 'Day Briefing', prompt: 'Give me a full briefing for today' },
+    { id: 'truck', group: 'Plan', label: "Where's the Truck", prompt: "Where's the truck right now, and what has it driven today?" },
     { id: 'find_time', group: 'Plan', label: 'Find a Time', prompt: 'Find the best time slot for a new customer — ask me for the address and service type' },
     { id: 'gaps_this_week', group: 'Plan', label: 'Gaps This Week', prompt: 'Where do we have open capacity this week?' },
     { id: 'optimize', group: 'Optimize', label: 'Optimize Routes', prompt: 'Optimize all routes for today' },
@@ -1450,6 +1761,9 @@ router.get('/quick-actions', async (req, res) => {
     { id: 'infra_check', group: 'Ops', label: 'Infra Check', prompt: 'Full infrastructure health check: Railway deploy status for each service, Sentry top and new issues in the last 24 hours, Cloudflare Pages build failures, and any Stripe or Twilio webhook/delivery failures.' },
     { id: 'error_check', group: 'Ops', label: 'Error Check', prompt: 'Check Sentry: top unresolved errors and any issues that first appeared in the last 24 hours.' },
     { id: 'shipped_today', group: 'Ops', label: 'What Shipped', prompt: 'What shipped recently? List merged PRs from the last 48 hours and confirm the latest Railway deploy is green.' },
+    { id: 'integrations_check', group: 'Ops', label: 'Integrations Check', prompt: 'Are all integrations healthy? Check token health across every platform and flag anything disconnected, expired, or never authorized.' },
+    { id: 'agent_runs', group: 'Ops', label: 'Agent Runs', prompt: 'Did the autonomous agent runs succeed? List recent managed agent sessions and flag any terminated or stuck ones.' },
+    { id: 'cron_health', group: 'Ops', label: 'Cron Health', prompt: 'Are the scheduled jobs healthy? Show any cron that is failing repeatedly, stuck mid-run, or has not succeeded recently.' },
   ];
 
   const seoActions = [
@@ -1463,7 +1777,16 @@ router.get('/quick-actions', async (req, res) => {
     { id: 'content_pipe', group: 'Plan', label: 'Content Pipeline', prompt: "What's in the content pipeline? How many posts need generation?" },
   ];
 
-  if (context === 'schedule' || context === 'dispatch') {
+  if (context === 'agent_estimate') {
+    res.json({ actions: [
+      { id: 'build', group: 'Build', label: 'Build Estimate', prompt: 'Build the estimate from all available evidence. Verify property facts, protocols, inventory, and per-line margin, then propose the draft for my confirmation.' },
+      { id: 'property', group: 'Verify', label: 'Verify Property', prompt: 'Double-check the home/building sqft, lot sqft, stories, and treatable lawn area. Show sources and conflicts per field.' },
+      { id: 'margin', group: 'Verify', label: 'Check Margin', prompt: 'Re-run the current engine inputs and confirm each service line protects the 35% collected margin using $35/hour loaded labor.' },
+      { id: 'protocol', group: 'Verify', label: 'Protocol + Stock', prompt: 'Read the complete protocols for the proposed services and check the named products in inventory. Treat missing counts as untracked.' },
+      { id: 'grass', group: 'Property', label: 'Grass Type', prompt: 'What grass is typical in this ZIP, and what evidence do we still need to verify this actual lawn?' },
+      { id: 'palms', group: 'Photo', label: 'Count Palms', prompt: 'Count the palm trees visible in the attached property image. Give a count or range, note occlusions, and do not change pricing until I confirm.' },
+    ] });
+  } else if (context === 'schedule' || context === 'dispatch') {
     res.json({ actions: scheduleActions });
   } else if (context === 'dashboard') {
     res.json({ actions: dashboardActions });
@@ -1493,6 +1816,7 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'top_customers', group: 'Analyze', label: 'Top 10 Customers', prompt: 'Who are our top 10 customers by revenue this month?' },
       { id: 'ad_roi', group: 'Analyze', label: 'Ad ROI', prompt: "What's our ad attribution? ROAS and CAC by channel?" },
       { id: 'low_margin', group: 'Watch', label: 'Low Margin Alert', prompt: 'Which service lines are below our active margin floor?' },
+      { id: 'stripe_drafts', group: 'Watch', label: 'Stripe Drafts', prompt: 'Any incomplete Stripe payment attempts? List recent drafts and failed attempts with amounts and failure reasons.' },
     ] });
   } else if (context === 'tech') {
     res.json({ actions: [
@@ -1522,6 +1846,7 @@ router.get('/quick-actions', async (req, res) => {
       { id: 'stats', group: 'Analyze', label: 'SMS Stats', prompt: 'SMS volume breakdown this month by type' },
       { id: 'csr', group: 'Analyze', label: 'CSR Coach', prompt: "How's the CSR performance? Any follow-up tasks pending?" },
       { id: 'search', group: 'Search', label: 'Search Messages', prompt: 'Search messages about...' },
+      { id: 'deliverability', group: 'Triage', label: 'Email Deliverability', prompt: 'Any email deliverability problems this week? Check SendGrid bounces, blocks, spam reports, and unsubscribes.' },
     ] });
   } else if (context === 'tax') {
     res.json({ actions: [
@@ -1582,3 +1907,4 @@ module.exports = router;
 // Exposed for the write-gate contract test — keeps the test's
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
+module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));

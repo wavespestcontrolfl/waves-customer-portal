@@ -140,6 +140,8 @@ const TYPE_LABELS = {
 };
 const WDO_TYPE = "wdo_inspection";
 const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
+const OFFICIAL_TERMITE_DOCUMENT_TYPES = new Set([WDO_TYPE, CERTIFICATE_TYPE]);
+const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
@@ -155,7 +157,6 @@ const PROJECT_TYPES_WITH_PREP_GUIDES = new Set([
   "rodent_exclusion",
   "rodent_trapping",
   "mosquito_event",
-  "pre_treatment_termite_certificate",
 ]);
 const BOOK_URL = "https://www.wavespestcontrol.com/book/";
 const REQUIRED_RECOMMENDATION_SECTION_HEADINGS = [
@@ -358,7 +359,7 @@ function closeoutBillingLabel(billing = {}) {
     if (billing.invoiceId) return `Invoice ready ${money(billing.amount)}`;
     return `Billing resolved ${money(billing.amount)}`;
   }
-  return `Billing required ${money(billing.amount)}`;
+  return `Invoice not sent ${money(billing.amount)}`;
 }
 
 function closeoutFollowupLabel(followup = {}) {
@@ -1629,8 +1630,8 @@ export function ProjectDetail({
   // WDO reports can't be sent until the licensee signature is captured.
   const wdoNeedsSignature =
     project?.project_type === WDO_TYPE && !project?.wdo_signature?.signed;
-  // Payment hold: server-computed availability (WDO + gate on + not sent)
-  // and the live held state driving the banner + manual-release hint.
+  // Payment hold: server-computed availability (official termite document +
+  // gate on + not sent) and the live state driving the release hint.
   const reportHoldAvailable = !!project?.report_payment_hold_available;
   const reportHeld = ["held", "releasing"].includes(
     String(project?.report_hold_status || ""),
@@ -2289,6 +2290,7 @@ export function ProjectDetail({
 
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
   const idPrefix = `project-${projectId}`;
+  const isOfficialTermiteDocument = OFFICIAL_TERMITE_DOCUMENT_TYPES.has(project.project_type);
   const fieldInputId = (key) => `${idPrefix}-finding-${key}`;
   const readiness = evaluateProjectReadiness({
     project: { ...project, title: editTitle },
@@ -2300,6 +2302,7 @@ export function ProjectDetail({
 
   return (
     <div
+      data-official-document-editor={isOfficialTermiteDocument ? project.project_type : undefined}
       style={{
         background: ESTIMATE_BG,
         border: `1px solid ${ESTIMATE_BORDER}`,
@@ -2308,8 +2311,12 @@ export function ProjectDetail({
         flexDirection: "column",
         overflow: "hidden",
         boxShadow: "0 10px 30px rgba(27, 44, 91, 0.08)",
+        fontFamily: isOfficialTermiteDocument ? ROBOTO_FONT : undefined,
       }}
     >
+      {isOfficialTermiteDocument && (
+        <style>{`[data-official-document-editor] *, [data-official-document-editor] input, [data-official-document-editor] select, [data-official-document-editor] textarea, [data-official-document-editor] button { font-family: ${ROBOTO_FONT} !important; }`}</style>
+      )}
       {/* Header */}
       <div
         style={{
@@ -2928,7 +2935,7 @@ export function ProjectDetail({
             </div>
             {billingBlocksClose && (
               <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
-                Resolve billing before closing. The project can stay in review until the invoice or prepaid coverage exists.
+                Use the completion action to charge an authorized card on file, or send the invoice and hold the customer&apos;s {project.project_type === CERTIFICATE_TYPE ? "certificate" : "report"} until payment.
               </div>
             )}
             {followupBlocksClose && (
@@ -3009,7 +3016,9 @@ export function ProjectDetail({
               cursor: "pointer",
               marginRight: "auto",
             }}
-            title="Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
+            title={project.project_type === WDO_TYPE
+              ? "Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
+              : "Send the invoice + pay link now; the pre-treatment certificate is delivered automatically once the invoice is paid"}
           >
             <input
               type="checkbox"
@@ -3020,7 +3029,7 @@ export function ProjectDetail({
             Hold report until invoice is paid
           </label>
         )}
-        {canAdminActions && (
+        {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
             onClick={handleSendPortalInvite}
@@ -3037,7 +3046,7 @@ export function ProjectDetail({
             Portal invite
           </button>
         )}
-        {canAdminActions && (
+        {canAdminActions && !isOfficialTermiteDocument && (
           <button
             type="button"
             onClick={handleSendPrepGuide}
@@ -3062,7 +3071,7 @@ export function ProjectDetail({
             disabled={saving || closeoutBlocksClose}
             title={
               billingBlocksClose
-                ? "Resolve billing before closing"
+                ? "Send the invoice before closing"
                 : followupBlocksClose
                   ? "Resolve follow-up automation before closing"
                   : previewBlocksClose
@@ -3072,7 +3081,7 @@ export function ProjectDetail({
             style={{ ...btnSecondary, opacity: saving || closeoutBlocksClose ? 0.5 : 1 }}
           >
             {billingBlocksClose
-              ? "Resolve billing first"
+              ? "Send invoice first"
               : followupBlocksClose
                 ? "Resolve follow-up first"
                 : previewBlocksClose
@@ -3121,7 +3130,9 @@ export function ProjectDetail({
             </button>
           )}
         {canAdminActions &&
-          (project.project_type === WDO_TYPE || project.service_record_id) &&
+          (project.project_type === WDO_TYPE ||
+            project.project_type === CERTIFICATE_TYPE ||
+            project.service_record_id) &&
           project.status !== "closed" && (
             <button
               type="button"
@@ -3131,12 +3142,18 @@ export function ProjectDetail({
               title={
                 wdoNeedsSignature
                   ? "Capture the licensee signature first"
-                  : project.project_type === WDO_TYPE
-                    ? "Send the filled FDACS-13645 report and an invoice together via email + text"
+                  : reportHoldAvailable
+                    ? holdReportUntilPaid
+                      ? project.project_type === WDO_TYPE
+                        ? "Send the invoice and payment link now; release the FDACS-13645 report automatically after payment"
+                        : "Send the invoice and payment link now; release the pre-treatment certificate automatically after payment"
+                      : "Send the report and an invoice together via email + text"
                     : "Send the report and an invoice together via email + text"
               }
             >
-              Send report + invoice
+              {reportHoldAvailable && holdReportUntilPaid
+                ? "Send invoice & hold report"
+                : "Send report + invoice"}
             </button>
           )}
       </div>{" "}

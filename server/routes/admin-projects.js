@@ -38,7 +38,6 @@ const {
   projectTypeHasInternalFindingKeys,
   projectTypeFreeTextKeys,
   projectTypeConfigFreeTextKeys,
-  WDO_DEFAULT_INSPECTION_FEE,
   redactInspectionFeeCuesForType,
   redactProjectTitleForWrite,
   projectTypeConfigHasInternalFindingKeys,
@@ -68,6 +67,7 @@ const InvoiceService = require('../services/invoice');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { isEnabled } = require('../config/feature-gates');
+const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('../services/wdo-inspection-fee');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -92,11 +92,31 @@ const s3 = new S3Client({
     : undefined,
 });
 const PHOTO_PREFIX = 'project-photos/';
+// project_photos.caption is varchar(200): a longer caption would fail the
+// INSERT after the image is already in S3, stranding an orphan object and
+// blocking every Save retry. Clamp rather than reject — losing the tail of a
+// description is recoverable; a wedged photo upload is not.
+const PHOTO_CAPTION_MAX = 200;
+function clampPhotoCaption(value) {
+  const caption = String(value ?? '').trim();
+  return caption ? caption.slice(0, PHOTO_CAPTION_MAX) : null;
+}
 const AI_PHOTO_LIMIT = 8;
 const AI_PHOTO_MAX_BYTES = 4.5 * 1024 * 1024;
 const AI_PHOTO_TOTAL_MAX_BYTES = 12 * 1024 * 1024;
 const AI_SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Official termite documents use the same invoice-first customer delivery:
+// invoice now, report/certificate held until settlement, automatic release.
+// Ordinary service reports continue to send immediately and are never gated.
+const REPORT_PAYMENT_HOLD_PROJECT_TYPES = new Set([
+  'wdo_inspection',
+  'pre_treatment_termite_certificate',
+]);
+
+function supportsReportPaymentHold(projectType) {
+  return REPORT_PAYMENT_HOLD_PROJECT_TYPES.has(String(projectType || ''));
+}
 
 function isAdmin(req) {
   return req.techRole === 'admin';
@@ -1204,6 +1224,84 @@ router.get('/applicators', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function parseDefaultProductNames(value) {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = parsed.split(','); }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+}
+
+function pretreatMethodForPlannedProduct(productName, serviceLabel = '') {
+  const value = `${productName || ''} ${serviceLabel || ''}`.toLowerCase();
+  if (/bora[- ]?care|borate|wood treatment/.test(value)) return 'Wood treatment (borate)';
+  if (/trelona|sentricon|bait/.test(value)) return 'Bait system';
+  return 'Soil barrier (chemical)';
+}
+
+// GET /api/admin/projects/scheduled-service/:id/application-prefill
+// The certificate is post-service paperwork, so its application rows begin
+// with the products already planned by the appointment's primary service and
+// add-on lines. They remain editable because the applicator must record what
+// was actually used, not blindly certify the schedule's plan.
+router.get('/scheduled-service/:id/application-prefill', async (req, res, next) => {
+  try {
+    const scheduled = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
+    if (!scheduled) return res.status(404).json({ error: 'Scheduled service not found' });
+    if (!isAdmin(req) && String(scheduled.technician_id || '') !== String(req.technicianId || '')) {
+      return res.status(403).json({ error: 'Scheduled service access denied' });
+    }
+
+    const addonRows = await db('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduled.id })
+      .orderBy('created_at', 'asc')
+      .select('service_id', 'service_name')
+      .catch(() => []);
+    const serviceIds = [scheduled.service_id, ...addonRows.map((row) => row.service_id)].filter(Boolean);
+    const libraryRows = serviceIds.length
+      ? await db('services').whereIn('id', serviceIds).select('id', 'name', 'default_products')
+      : [];
+    const libraryById = new Map(libraryRows.map((row) => [String(row.id), row]));
+    const serviceLines = [
+      {
+        serviceId: scheduled.service_id,
+        label: libraryById.get(String(scheduled.service_id || ''))?.name || scheduled.service_type || 'Scheduled service',
+      },
+      ...addonRows.map((row) => ({
+        serviceId: row.service_id,
+        label: libraryById.get(String(row.service_id || ''))?.name || row.service_name || 'Scheduled add-on',
+      })),
+    ];
+    const planned = serviceLines.flatMap((line) => {
+      const library = libraryById.get(String(line.serviceId || ''));
+      return parseDefaultProductNames(library?.default_products).map((productName) => ({
+        productName,
+        serviceLabel: line.label,
+      }));
+    });
+    const productNames = [...new Set(planned.map((row) => row.productName))];
+    const productRows = productNames.length
+      ? await db('products_catalog').whereIn('name', productNames).select('*').catch(() => [])
+      : [];
+    const productByName = new Map(productRows.map((row) => [String(row.name || '').toLowerCase(), row]));
+    const applications = planned.map((row) => {
+      const product = productByName.get(row.productName.toLowerCase()) || {};
+      return {
+        _scheduled_service_label: row.serviceLabel,
+        treatment_method: pretreatMethodForPlannedProduct(row.productName, row.serviceLabel),
+        product_name: row.productName,
+        epa_registration: product.epa_reg_number || product.epa_registration_number || '',
+        active_ingredient: product.active_ingredient || '',
+      };
+    });
+
+    return res.json({ applications, source: 'scheduled_service' });
+  } catch (err) { return next(err); }
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/admin/projects — list (admin dashboard)
 // ---------------------------------------------------------------------------
@@ -1382,9 +1480,9 @@ router.get('/:id', async (req, res, next) => {
         wdo_applicator: wdoApplicator,
         customer_name: `${project.first_name || ''} ${project.last_name || ''}`.trim(),
         report_url: project.report_token ? await projectReportPathForProject(db, project, project) : null,
-        // Drives the "Hold report until paid" toggle in the drawer: gate on +
-        // WDO + not yet delivered. The columns ride on ...project above.
-        report_payment_hold_available: project.project_type === 'wdo_inspection'
+        // Drives the "Hold report until paid" toggle in the drawer for both
+        // official termite documents. The columns ride on ...project above.
+        report_payment_hold_available: supportsReportPaymentHold(project.project_type)
           && isEnabled('wdoReportPaymentHold')
           && !project.sent_at
           && project.status !== 'sent',
@@ -2253,6 +2351,55 @@ const MAX_ADDENDUM_PHOTOS = 16; // 8 addendum pages (2 per page)
 const MAX_ADDENDUM_RAW_PHOTO_BYTES = 32 * 1024 * 1024;
 const MAX_ADDENDUM_TOTAL_BYTES = 14 * 1024 * 1024;
 
+const WDO_ADDENDUM_CATEGORY_CAPTIONS = Object.freeze({
+  wdo_evidence: 'Visible WDO evidence documented at the inspected property.',
+  wdo_damage: 'Visible WDO damage documented at the inspected property.',
+  inaccessible_area: 'Obstruction or inaccessible area documented during the inspection.',
+  previous_treatment: 'Evidence of previous treatment documented at the inspected property.',
+  notice: 'Inspection or treatment notice documented at the inspected property.',
+  treatment_document: 'Prior treatment document reviewed during the inspection.',
+  exterior: 'Exterior condition documented at the inspected structure.',
+  interior: 'Interior condition documented at the inspected structure.',
+  living_area: 'Living-area condition documented during the inspection.',
+  kitchen: 'Kitchen-area condition documented during the inspection.',
+  bathroom: 'Bathroom-area condition documented during the inspection.',
+  garage: 'Garage condition documented during the inspection.',
+  attic: 'Attic condition documented during the inspection.',
+  crawlspace: 'Crawlspace condition documented during the inspection.',
+  other: 'Site condition documented during the WDO inspection.',
+});
+
+const WDO_ADDENDUM_FINDING_DETAILS = Object.freeze({
+  wdo_evidence: { keys: ['wdo_evidence', 'live_wdo'], prefix: 'Visible WDO evidence' },
+  wdo_damage: { keys: ['wdo_damage'], prefix: 'Visible WDO damage' },
+  inaccessible_area: { keys: ['inaccessible_areas'], prefix: 'Obstruction or inaccessible area' },
+  previous_treatment: { keys: ['previous_treatment_notes'], prefix: 'Previous treatment evidence' },
+  treatment_document: { keys: ['previous_treatment_notes'], prefix: 'Prior treatment document' },
+  notice: { keys: ['notice_location'], prefix: 'Inspection notice location' },
+});
+
+function wdoAddendumPhotoCaption(photo = {}, project = null) {
+  const typed = String(photo.caption || '').trim();
+  if (typed) return typed;
+  const category = String(photo.category || '').trim().toLowerCase();
+  const findings = project ? parseFindings(project) : {};
+  const detailConfig = WDO_ADDENDUM_FINDING_DETAILS[category];
+  const detail = detailConfig?.keys
+    .map((key) => String(findings[key] || '').replace(/\s+/g, ' ').trim())
+    .find(Boolean);
+  if (detail) {
+    return `${detailConfig.prefix}: ${detail}`.slice(0, 300);
+  }
+  if (WDO_ADDENDUM_CATEGORY_CAPTIONS[category]) {
+    return WDO_ADDENDUM_CATEGORY_CAPTIONS[category];
+  }
+  if (category) {
+    const label = category.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return `${label.charAt(0).toUpperCase()}${label.slice(1)} documented during the WDO inspection.`;
+  }
+  return 'Site condition documented during the WDO inspection.';
+}
+
 // Fetch the project's photos from S3 for the PDF photo addendum, ordered the
 // way the tech arranged them, normalizing each (normalizeAddendumPhoto:
 // EXIF rotation baked in, bounded JPEG). When normalization can't decode the
@@ -2306,7 +2453,7 @@ async function loadWdoAddendumPhotos(project) {
         break;
       }
       totalBytes += buffer.length;
-      out.push({ buffer, contentType, caption: ph.caption || '' });
+      out.push({ buffer, contentType, caption: wdoAddendumPhotoCaption(ph, project) });
     } catch (err) {
       logger.warn(`[projects] addendum photo fetch failed for ${ph.id}: ${err.message}`);
     }
@@ -2398,46 +2545,6 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
   };
 }
 
-// WDO inspection auto-invoice fee. The tech enters any fee on the form
-// (findings.inspection_fee) — WDO pricing varies by construction (wood frame),
-// new build, prior termite history, etc. That entry always wins. If it's
-// left blank, the fee is $250 FLAT (owner decision 2026-07-12 — Q8 of the
-// universal one-time services plan replaced the old ≤2500/$150 · ≤3500/$200
-// · >3500/$250 structure-sqft tiers so every fee source agrees). Tier shape
-// kept so resolveWdoInspectionFee is untouched; we never price on
-// customers.property_sqft (that's lawn area).
-const WDO_FEE_TIERS = [
-  { maxSqFt: Infinity, price: WDO_DEFAULT_INSPECTION_FEE },
-];
-function parseWdoFee(value) {
-  const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  const n = m ? Number(m[1]) : 0;
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-// An EXPLICIT zero entry ("0", "$0", "0.00 — comped") is a statement, not an
-// omission: the first number in the field is 0. Digit-free text ("waived",
-// blank) is NOT explicit zero — that's the blank case and keeps the owner's
-// $250 flat default.
-function wdoFeeIsExplicitZero(value) {
-  const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  return m != null && Number(m[1]) === 0;
-}
-function resolveWdoInspectionFee(findings) {
-  const picked = parseWdoFee(findings?.inspection_fee);
-  if (picked > 0) return picked;
-  // Owner ruling 2026-07-15 (#2751 follow-up): an explicitly $0 fee means the
-  // inspection is no-charge — resolve 0 so the invoice paths refuse to bill
-  // it, instead of falling through to the blank-fee default.
-  if (wdoFeeIsExplicitZero(findings?.inspection_fee)) return 0;
-  const sqft = Number(String(findings?.structure_sqft ?? '').replace(/[^0-9.]/g, '')) || 0;
-  if (sqft > 0) {
-    for (const tier of WDO_FEE_TIERS) {
-      if (sqft <= tier.maxSqFt) return tier.price;
-    }
-  }
-  return 250; // nothing picked or measured — top tier, operator adjusts in dry-run
-}
-
 function isReusableInvoice(inv) {
   return inv && !['void', 'paid'].includes(inv.status);
 }
@@ -2446,7 +2553,7 @@ const WDO_INVOICE_LINE_DESCRIPTION = 'WDO Inspection (FDACS-13645 Wood-Destroyin
 
 // If a reused invoice is still the auto-created WDO draft (untouched: draft
 // status, our title + single WDO line item) and the resolved fee has since
-// changed (the tech edited inspection_fee / structure_sqft between the dry-run
+// changed (the tech edited inspection_fee between the dry-run
 // and the send), reprice its line item so we never bill the stale amount. A
 // manually edited invoice (different title/lines) is left untouched.
 async function maybeRepriceWdoDraft(invoice, project) {
@@ -2617,38 +2724,34 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
 
     // 3. Nothing to reuse — mint the project's draft invoice. How the draft is
     //    built depends on the project type.
-    if (project.project_type === 'wdo_inspection') {
-      // Hold-until-paid must never CREATE a statement-accrued invoice as a
-      // side effect of a send the route is about to reject (Codex P1 on
-      // #2753): InvoiceService.create would resolve a NET-terms payer, stamp
-      // payer_statement_id, and roll the line onto the open monthly statement
-      // BEFORE the route's accrued guard runs. Predict accrual here with the
-      // same read-only payer resolution the dry-run preview uses, mirroring
-      // create()'s accrual condition (NET-terms payer + GATE_PAYER_STATEMENTS
-      // — see invoice.js), and refuse before anything exists. Runs on the
-      // dry-run too so the operator learns at preview time. Existing invoices
-      // (explicit id / reuse paths above) are covered by the route's
-      // payer_statement_id check instead — no creation happens there.
-      if (holdRequested) {
-        let holdSsId = project.scheduled_service_id || null;
-        if (!holdSsId && project.service_record_id) {
-          const srLink = await trx('service_records')
-            .where({ id: project.service_record_id, customer_id: project.customer_id })
-            .first('scheduled_service_id').catch(() => null);
-          if (srLink?.scheduled_service_id) holdSsId = srLink.scheduled_service_id;
-        }
-        const resolvedHoldPayer = await require('../services/payer').resolveForInvoice({
-          customerId: project.customer_id,
-          scheduledServiceId: holdSsId,
-        }).catch(() => null);
-        if (resolvedHoldPayer?.payerId
-          && ['net15', 'net30'].includes(String(resolvedHoldPayer.paymentTerms || ''))
-          && isEnabled('payerStatements')) {
-          const err = new Error('This inspection bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices');
-          err.code = 'hold_statement_accrued';
-          throw err;
-        }
+    //
+    // Hold-until-paid must never CREATE a statement-accrued invoice as a side
+    // effect of a send the route is about to reject. This applies equally to
+    // WDO reports and pre-treatment certificates. Predict accrual before the
+    // type-specific create path runs; existing/reused invoices are guarded by
+    // payer_statement_id in the route after resolution.
+    if (holdRequested) {
+      let holdSsId = project.scheduled_service_id || null;
+      if (!holdSsId && project.service_record_id) {
+        const srLink = await trx('service_records')
+          .where({ id: project.service_record_id, customer_id: project.customer_id })
+          .first('scheduled_service_id').catch(() => null);
+        if (srLink?.scheduled_service_id) holdSsId = srLink.scheduled_service_id;
       }
+      const resolvedHoldPayer = await require('../services/payer').resolveForInvoice({
+        customerId: project.customer_id,
+        scheduledServiceId: holdSsId,
+      }).catch(() => null);
+      if (resolvedHoldPayer?.payerId
+        && ['net15', 'net30'].includes(String(resolvedHoldPayer.paymentTerms || ''))
+        && isEnabled('payerStatements')) {
+        const err = new Error('This service bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices');
+        err.code = 'hold_statement_accrued';
+        throw err;
+      }
+    }
+
+    if (project.project_type === 'wdo_inspection') {
 
       // WDO bills a single auto-priced "WDO Inspection" line. On a dry-run, DON'T
       // mint a real draft just to show the amount — every cancelled preview would
@@ -2691,22 +2794,26 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     }
 
     // Non-WDO service reports bill what the visit actually was, so the draft's
-    // line items come from the linked service record's scheduled-service pricing.
+    // line items come from the linked scheduled-service pricing. A pre-treatment
+    // certificate reaches this path before closeout creates its service record,
+    // so scheduled_service_id alone is a valid invoice source.
     // Unlike WDO there's no cheap synthetic fee to preview, and replaying the
     // full discount/tax math outside create() would risk drift, so we mint the
     // real draft on BOTH the dry-run and the send. That's safe: the draft is
     // persisted + linked to the project, so a re-preview or the follow-up send
     // reuses the SAME draft (reuse path 1 above) — a cancelled preview leaves at
     // most one legitimate draft per project, never duplicates.
-    if (!project.service_record_id) {
-      const err = new Error('This service report isn’t linked to a completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
+    if (!project.service_record_id && !project.scheduled_service_id) {
+      const err = new Error('This service report isn’t linked to an appointment or completed visit, so an invoice can’t be built automatically. Create the invoice from the visit first — it will be reused here.');
       err.code = 'invoice_build_failed';
       throw err;
     }
-    const serviceRecord = await trx('service_records')
-      .where({ id: project.service_record_id, customer_id: project.customer_id })
-      .first();
-    if (!serviceRecord) {
+    const serviceRecord = project.service_record_id
+      ? await trx('service_records')
+        .where({ id: project.service_record_id, customer_id: project.customer_id })
+        .first()
+      : null;
+    if (project.service_record_id && !serviceRecord) {
       const err = new Error('The visit linked to this report wasn’t found for this customer, so an invoice can’t be built automatically.');
       err.code = 'invoice_build_failed';
       throw err;
@@ -2719,10 +2826,10 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // is a separate denormalized link that, if it disagrees, would price the
     // invoice off a different appointment than the one being reported on. Without
     // any scheduled service there's no priced line set to bill from.
-    const scheduledServiceId = serviceRecord.scheduled_service_id || project.scheduled_service_id;
+    const scheduledServiceId = serviceRecord?.scheduled_service_id || project.scheduled_service_id;
     const built = scheduledServiceId
       ? await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
-          fallbackDescription: serviceRecord.service_type || getProjectType(project.project_type)?.label || 'Service visit',
+          fallbackDescription: serviceRecord?.service_type || getProjectType(project.project_type)?.label || 'Service visit',
         })
       : { lineItems: [], discountIds: [] };
     // Sum the non-discount (positive) lines — a draft with no positive lines
@@ -2737,7 +2844,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     }
     const createdNonWdo = await InvoiceService.create({
       customerId: project.customer_id,
-      serviceRecordId: project.service_record_id,
+      serviceRecordId: project.service_record_id || undefined,
       scheduledServiceId: scheduledServiceId || undefined,
       lineItems: built.lineItems,
       discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
@@ -3178,7 +3285,7 @@ function normalizeUsPhone(phone) {
 }
 
 // ---------------------------------------------------------------------------
-// WDO report payment hold — release ("pay before you get the report")
+// Official termite document payment hold — release ("pay before delivery")
 // ---------------------------------------------------------------------------
 
 // Failed release deliveries retry on the sweep with exponential backoff,
@@ -3191,6 +3298,68 @@ function reportHoldBackoffMinutes(attempts) {
 
 function reportHoldColumnsPresent(projectCols) {
   return Boolean(projectCols.report_hold_status && projectCols.report_hold_attempts);
+}
+
+function reportHoldReleaseSmsKey(projectId, invoiceId) {
+  return `project_report_hold_release:${safeIdempotencySegment(projectId)}:${safeIdempotencySegment(invoiceId)}`;
+}
+
+async function acceptedProviderSmsForClaim(claimId) {
+  return db('sms_log')
+    .where({ direction: 'outbound' })
+    .whereIn('status', ['queued', 'sent', 'delivered'])
+    .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(claimId)])
+    .first('id');
+}
+
+// Persist a claim before calling Twilio. Its id is forwarded through the
+// messaging adapter and written onto Twilio's provider-side sms_log row. If
+// the process crashes after Twilio accepts but before the project release is
+// stamped, the next hold retry sees that sibling row and does not text twice.
+async function claimReportHoldReleaseSms({ projectId, invoiceId, customerId, toPhone, messageBody }) {
+  const releaseKey = reportHoldReleaseSmsKey(projectId, invoiceId);
+  let claim = await db('sms_log')
+    .whereRaw("metadata->>'report_hold_release_key' = ?", [releaseKey])
+    .first();
+
+  if (claim) {
+    const providerRow = await acceptedProviderSmsForClaim(claim.id);
+    if (providerRow || claim.status === 'sent') {
+      if (claim.status !== 'sent') {
+        await db('sms_log').where({ id: claim.id }).update({ status: 'sent', updated_at: db.fn.now() });
+      }
+      return { id: claim.id, alreadySent: true };
+    }
+    await db('sms_log').where({ id: claim.id }).update({
+      status: 'sending',
+      message_body: messageBody,
+      to_phone: toPhone,
+      updated_at: db.fn.now(),
+    });
+    return { id: claim.id, alreadySent: false };
+  }
+
+  claim = { id: crypto.randomUUID() };
+  await db('sms_log').insert({
+    id: claim.id,
+    customer_id: customerId || null,
+    direction: 'outbound',
+    from_phone: config.twilio?.phoneNumber || 'system',
+    to_phone: toPhone,
+    message_body: messageBody,
+    status: 'sending',
+    message_type: 'project_report_release',
+    metadata: JSON.stringify({ report_hold_release_key: releaseKey }),
+  });
+  return { id: claim.id, alreadySent: false };
+}
+
+async function finishReportHoldReleaseSmsClaim(claimId, sent) {
+  if (!claimId) return;
+  await db('sms_log').where({ id: claimId }).update({
+    status: sent ? 'sent' : 'failed',
+    updated_at: db.fn.now(),
+  });
 }
 
 /**
@@ -3280,6 +3449,13 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     const readiness = evaluateProjectSendReadiness({ project, customer });
     if (readiness.hardMissing.length > 0) {
       return await revertToHeld(`Missing required compliance details: ${readiness.hardMissing.map((m) => m.label).join('; ')}`);
+    }
+    // Certificate fields are intentionally soft during an interactive send so
+    // an admin can explicitly override a thin draft. Automatic release has no
+    // operator present to make that judgment, so revalidate every required
+    // statutory field against the current (possibly edited) certificate.
+    if (project.project_type === 'pre_treatment_termite_certificate' && readiness.missing.length > 0) {
+      return await revertToHeld(`Missing required certificate details: ${readiness.missing.map((m) => m.label).join('; ')}`);
     }
 
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer);
@@ -3393,24 +3569,37 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
           entity_type: 'project',
           entity_id: refreshed.id,
         });
-        const result = await sendCustomerMessage({
-          to: normalizedPhone,
-          body: smsBody,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'support_resolution',
+        const smsClaim = await claimReportHoldReleaseSms({
+          projectId: refreshed.id,
+          invoiceId: invoice.id,
           customerId: customer.id,
-          identityTrustLevel: 'phone_matches_customer',
-          entryPoint: 'project_report_hold_release',
-          metadata: {
-            original_message_type: 'project_report',
-            project_id: refreshed.id,
-            invoice_id: invoice.id,
-          },
+          toPhone: normalizedPhone,
+          messageBody: smsBody,
         });
-        channels.sms = result.sent
-          ? { ok: true }
-          : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+        if (smsClaim.alreadySent) {
+          channels.sms = { ok: true, deduplicated: true };
+        } else {
+          const result = await sendCustomerMessage({
+            to: normalizedPhone,
+            body: smsBody,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'support_resolution',
+            customerId: customer.id,
+            identityTrustLevel: 'phone_matches_customer',
+            entryPoint: 'project_report_hold_release',
+            metadata: {
+              original_message_type: 'project_report',
+              project_id: refreshed.id,
+              invoice_id: invoice.id,
+              scheduled_sms_log_id: smsClaim.id,
+            },
+          });
+          await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
+          channels.sms = result.sent
+            ? { ok: true }
+            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+        }
       } catch (err) {
         channels.sms = { ok: false, error: err.message };
       }
@@ -3421,6 +3610,15 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
       emailRecipient.email ? 'email' : null,
     ].filter(Boolean);
     const successfulChannelCount = availableChannels.filter((ch) => channels[ch]?.ok).length;
+    // Non-WDO official documents can release by email OR SMS, but at least one
+    // real customer channel must succeed. Never mark a paid certificate as
+    // released when every delivery attempt failed (or no contact exists).
+    if (!isWdo && successfulChannelCount === 0) {
+      const reasons = availableChannels.length
+        ? availableChannels.map((ch) => channels[ch]?.error).filter(Boolean).join('; ')
+        : 'No customer email or phone on file';
+      return await revertToHeld(`Certificate delivery failed: ${reasons || 'unknown'}`);
+    }
     const deliveryStatus = successfulChannelCount < availableChannels.length ? 'partial' : 'sent';
 
     const releaseUpdate = {
@@ -3788,22 +3986,38 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Explicit boolean — a stringified `dry_run: "false"` must NOT read as truthy
     // (and silently preview instead of send), nor `dry_run: 0` send for real.
     const dryRun = req.body?.dry_run === true || req.body?.dry_run === 'true';
+    // Card-on-file completion needs a durable draft invoice id before the
+    // explicit charge. This mode performs all report/readiness/billing checks
+    // but sends nothing and never arms a report hold.
+    const prepareInvoice = req.body?.prepare_invoice === true || req.body?.prepare_invoice === 'true';
 
     // Payment hold ("pay before you get the report"): deliver the invoice +
-    // pay link ONLY, and park the report until the invoice settles (the
-    // release sweep then delivers it). Same explicit-boolean parsing as
-    // dry_run. WDO-only by design — a non-WDO combined send carries the
-    // report link inside the SMS/email body, so there is nothing to hold.
+    // pay link ONLY, and park the report/certificate until the invoice settles
+    // (the release sweep then delivers it). Limited to the two official termite
+    // documents; ordinary service reports continue to deliver immediately.
     const holdRequested = req.body?.hold_report_until_paid === true || req.body?.hold_report_until_paid === 'true';
     if (holdRequested) {
       if (!isEnabled('wdoReportPaymentHold')) {
         return res.status(422).json({ error: 'Report payment hold is not enabled (GATE_WDO_REPORT_PAYMENT_HOLD)', code: 'hold_not_enabled' });
       }
-      if (!isWdoProject) {
-        return res.status(422).json({ error: 'Hold-until-paid is available for WDO inspection reports only', code: 'hold_not_supported' });
+      if (!supportsReportPaymentHold(project.project_type)) {
+        return res.status(422).json({ error: 'Hold-until-paid is available for WDO reports and pre-treatment certificates only', code: 'hold_not_supported' });
       }
       if (project.sent_at || project.status === 'sent') {
         return res.status(422).json({ error: 'This report was already delivered — a payment hold can only apply before the first send', code: 'hold_after_send' });
+      }
+      // The automatic release re-validates every required certificate field
+      // with no operator present (releaseHeldProjectReport), and a readiness
+      // override accepted here is not persisted — so a hold armed over
+      // missing soft fields would collect payment and then never deliver.
+      // Refuse the hold up front (dry_run included, so the operator learns at
+      // preview): complete the certificate, or send it now without the hold.
+      if (project.project_type === 'pre_treatment_termite_certificate' && readiness.missing.length > 0) {
+        return res.status(422).json({
+          error: 'Hold-until-paid needs a complete certificate — the automatic release re-checks every required field, so a held certificate with missing details would never deliver. Fill in the missing fields, or send now without the hold.',
+          code: 'hold_requires_complete_certificate',
+          missing: readiness.missing,
+        });
       }
       const holdCols = await db('projects').columnInfo().catch(() => ({}));
       if (!reportHoldColumnsPresent(holdCols)) {
@@ -3815,7 +4029,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       project,
       customer,
       invoiceId: req.body?.invoice_id,
-      dryRun,
+      dryRun: dryRun && !prepareInvoice,
       holdRequested,
     });
 
@@ -3834,6 +4048,20 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       return res.status(422).json({
         error: 'This invoice bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices',
         code: 'hold_statement_accrued',
+      });
+    }
+
+    if (prepareInvoice) {
+      return res.json({
+        prepared: true,
+        invoice: {
+          id: invoice.id,
+          invoice_number: invoice.invoice_number,
+          total: invoice.total,
+          status: invoice.status,
+          created,
+          payer_billed: !!invoice.payer_id,
+        },
       });
     }
 
@@ -4297,8 +4525,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         // service) but NOT the pay link — AR routes to the payer's AP inbox.
         // Held sends text the pay link only — the report link must not go out
         // before payment.
+        const holdReleaseDelivery = emailRecipient.email ? 'emailed' : 'sent by text';
         const smsBody = holdActive
-          ? `Hi ${firstName}, your Waves ${typeLabel} is complete. Invoice ${invoice.invoice_number} — pay online: ${payUrl}\n\nYour report is emailed automatically as soon as it's paid.`
+          ? `Hi ${firstName}, your Waves ${typeLabel} is complete. Invoice ${invoice.invoice_number} — pay online: ${payUrl}\n\nYour report is ${holdReleaseDelivery} automatically as soon as it's paid.`
           : isPayerInvoice
             ? `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}`
             : `Hi ${firstName}, your Waves ${typeLabel} report is ready: ${reportUrl}\n\nInvoice ${invoice.invoice_number} — pay online: ${payUrl}`;
@@ -4354,7 +4583,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // there is no report leg yet. Payer holds skip the homeowner channels by
     // design, so they never count against the delivery status.
     const delivered = holdActive
-      ? (isPayerInvoice ? !!channels.payer_email?.ok : !!channels.email?.ok)
+      ? (isPayerInvoice
+          ? !!channels.payer_email?.ok
+          : isWdoProject
+            ? !!channels.email?.ok
+            : successfulChannelCount > 0)
       : (delivered_report && payerLegOk);
     const anySuccess = successfulChannelCount > 0
       || (isPayerInvoice && (accruedOnStatement || !!channels.payer_email?.ok));
@@ -4866,7 +5099,7 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       project_id: project.id,
       s3_key: key,
       category: req.body.category || null,
-      caption: req.body.caption || null,
+      caption: clampPhotoCaption(req.body.caption),
       visit: req.body.visit === 'followup' ? 'followup' : 'primary',
       uploaded_by_tech_id: req.technicianId,
     }).returning('*');
@@ -4937,7 +5170,9 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
     if (!(await requireProjectAccess(req, res, project))) return;
     const updates = {};
     for (const f of ['caption', 'category', 'sort_order']) {
-      if (req.body[f] !== undefined) updates[f] = req.body[f];
+      if (req.body[f] !== undefined) {
+        updates[f] = f === 'caption' ? clampPhotoCaption(req.body[f]) : req.body[f];
+      }
     }
     if (Object.keys(updates).length === 0) return res.json({ ok: true });
     await db('project_photos')
@@ -4959,6 +5194,7 @@ router._private = {
   dropStaleCertTreatmentDate,
   reportHoldBackoffMinutes,
   resolveWdoInspectionFee,
+  wdoAddendumPhotoCaption,
   wdoFeeIsExplicitZero,
 };
 
