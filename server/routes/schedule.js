@@ -48,7 +48,19 @@ router.get('/', async (req, res, next) => {
       )
       .orderBy('scheduled_services.scheduled_date', 'asc');
 
+    // Open rebook intent regardless of date: 'rescheduled' phantom rows keep
+    // their ORIGINAL — often past — date until SmartRebooker actions them
+    // back onto the calendar, so the date-bounded list above can miss them
+    // entirely. The cancellation eligibility guard (POST /api/requests)
+    // treats them as cancellable date-exempt; expose the same signal so the
+    // Plan tab's Account Options mirror the server instead of hiding the
+    // self-serve cancel path from an eligible customer.
+    const openRebookIntent = await db('scheduled_services')
+      .where({ customer_id: req.customerId, status: 'rescheduled' })
+      .first('id');
+
     res.json({
+      hasOpenRebookIntent: !!openRebookIntent,
       upcoming: upcoming.map(s => ({
         id: s.id,
         date: s.scheduled_date,

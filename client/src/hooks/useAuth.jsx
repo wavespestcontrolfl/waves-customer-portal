@@ -169,7 +169,11 @@ export function AuthProvider({ children }) {
       }
       const nextId = tokenCustomerId(token);
       const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token);
-      sessionEpochRef.current += 1;
+      // Bump the epoch ONLY on a real identity change: a same-customer
+      // access-token rotation from another tab must not supersede this tab's
+      // in-flight flows (e.g. a property switch mid-await) — the identity
+      // those responses describe is still current (Codex #2859 r1 P2).
+      if (identityChanged) sessionEpochRef.current += 1;
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not

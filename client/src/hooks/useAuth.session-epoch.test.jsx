@@ -128,6 +128,36 @@ describe('session epoch guards', () => {
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
   });
 
+  it('does NOT supersede an in-flight switch on a same-customer token rotation from another tab', async () => {
+    const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const tokenFor = (customerId, nonce) => `${b64u({ alg: 'none' })}.${b64u({ customerId, nonce })}.x`;
+    const tokA1 = tokenFor('cust-a', 1);
+    const tokA2 = tokenFor('cust-a', 2);
+    const store = { waves_token: tokA1, waves_refresh_token: 'ref-a' };
+    stubLocalStorage(store);
+    api.getMe.mockResolvedValueOnce({ id: 'cust-a' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+
+    const slowSwitch = deferred();
+    api.selectAuthProperty.mockReturnValueOnce(slowSwitch.promise);
+    api.getMe.mockResolvedValue({ id: 'cust-b' });
+
+    let switchResult;
+    await act(async () => {
+      const pending = authApi.switchProperty('cust-b');
+      // Another tab rotates the SAME customer's access token mid-switch —
+      // identity unchanged, so this must not invalidate the switch.
+      store.waves_token = tokA2;
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token', newValue: tokA2 }));
+      slowSwitch.resolve({ token: 'tok-b', refreshToken: 'ref-b', properties: [] });
+      switchResult = await pending;
+    });
+
+    expect(switchResult).toBe(true);
+    expect(api.setTokens).toHaveBeenCalledWith('tok-b', 'ref-b');
+    expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
+  });
+
   it('ignores a stale 401 from a replaced token instead of clearing the new session', async () => {
     stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
     const slowMe = deferred();

@@ -8143,6 +8143,12 @@ function MyPlanTab({ customer, focusService }) {
   // Server-resolved lane verdict for NULL modes — see the dashboard summary
   // (Codex r10).
   const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
+  // Cancellation-eligibility signals the visit/rate data above can't carry:
+  // an armed next_charge_date with no monthly rate, and date-exempt
+  // 'rescheduled' rebook intents that the date-bounded schedule list omits
+  // (Codex #2859 r1 P2 — the gate must mirror EVERY server case).
+  const [hasScheduledCharge, setHasScheduledCharge] = useState(false);
+  const [hasOpenRebookIntent, setHasOpenRebookIntent] = useState(false);
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
@@ -8162,6 +8168,7 @@ function MyPlanTab({ customer, focusService }) {
     ]).then(([nextData, scheduleData, servicesData]) => {
       setNextService(nextData.next || null);
       setUpcomingServices(scheduleData.upcoming || []);
+      setHasOpenRebookIntent(scheduleData.hasOpenRebookIntent === true);
       setServiceHistory(servicesData.services || []);
       setPlanStatus('ready');
     }).catch((err) => {
@@ -8175,6 +8182,7 @@ function MyPlanTab({ customer, focusService }) {
     api.getAutopay().then(d => {
       setBillingMode(d?.billing_mode || null);
       setResolvedNonMonthly(d?.non_monthly_billing === true);
+      setHasScheduledCharge(d?.has_scheduled_charge === true);
     }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
   }, [loadPlan]);
@@ -8208,12 +8216,17 @@ function MyPlanTab({ customer, focusService }) {
     : 0;
   const tierServiceLimit = activeTierName ? (TIER_SERVICES[activeTierName] || 1) : 0;
   // Pause/Cancel are only offered when there is something to pause or cancel —
-  // mirrors the server's nothing_to_cancel guard on POST /api/requests (an
-  // active plan, an upcoming visit, or live billing). A tier-'none' account
-  // with only one-time history gets no account-wide churn control. Rendered
-  // only at planStatus 'ready', so nextService/upcomingServices are loaded.
+  // mirrors EVERY case of the server's nothing_to_cancel guard on POST
+  // /api/requests: an active plan, an upcoming visit, live billing
+  // (monthly rate OR an armed next_charge_date), or a date-exempt
+  // 'rescheduled' rebook intent the date-bounded schedule list omits. A
+  // tier-'none' account with only one-time history gets no account-wide
+  // churn control. Rendered only at planStatus 'ready', so
+  // nextService/upcomingServices are loaded.
   const hasCancellableAccount = !!activeTierName || !!nextService
     || upcomingServices.length > 0
+    || hasOpenRebookIntent
+    || hasScheduledCharge
     || Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0) > 0;
 
   const detectCatalogServiceId = (service) => {
