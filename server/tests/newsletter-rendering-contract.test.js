@@ -112,7 +112,7 @@ describe('newsletter rendering contract', () => {
     const mutedColor = /font-size:14px;letter-spacing:0\.01em;color:(#[0-9A-F]{6});line-height:1\.65/i.exec(html)?.[1];
 
     expect(pageBackground).toBe('#EDF4FA');
-    expect(mutedColor).toBe('#626B7A');
+    expect(mutedColor).toBe('#4F5B70');
     expect(contrastRatio(mutedColor, pageBackground)).toBeGreaterThanOrEqual(4.5);
     expect(html).not.toMatch(/font-size:(?:11|12|13)px/);
     expect(html).toContain('padding:4px');

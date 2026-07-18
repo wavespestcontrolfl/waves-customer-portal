@@ -1728,3 +1728,7 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 ## 2026-07-17 — Glass is the rule for the newsletter and every secondary customer page
 
 **Owner decision.** The newsletter — the email chrome AND every page a reader lands on from it (confirm, unsubscribe, quiz, feedback) — renders in the glass language, and so does every secondary customer-facing page in React. No customer surface ships in an ad-hoc palette again: new secondary pages start from the glass tokens (canonical navy `#04395E` ink, orb-scene background, frosted cards, gold action bars, nothing under 14px). The server-rendered newsletter landing pages (`renderConfirmPage` in `public-newsletter.js`) were the last non-glass customer surface and now mirror `GLASS_THEME` from `email-template.js`. React secondary pages already comply via `useGlassSurface` (e.g. `NewsletterArchivePage`); any future exception needs an explicit owner call logged here.
+
+## 2026-07-17 — Email body copy deepens to navy-slate
+
+**Owner decision.** The shared glass email palette's body (`#555B69`) and muted (`#626B7A`) greys read dull across every email surface. Body copy deepens to `#2A3F5F` and muted to `#4F5B70` — same hue family as the canonical navy ink, materially higher contrast, AA maintained (the rendering-contract test enforces ≥4.5:1 for muted on the page scene). Applied collectively: `GLASS_THEME`, the DB-template block palette, the newsletter palette, and the glass landing pages. Classic (gate-off) values untouched.

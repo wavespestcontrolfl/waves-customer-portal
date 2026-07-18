@@ -38,9 +38,12 @@ const { formatDisplayDate } = require('../utils/date-only');
 const GLASS_THEME = {
   ink: '#04395E', // canonical glass navy (--brand)
   link: '#0A7EC2', // glass accent blue (--accent)
-  body: '#555B69', // rgba(12,21,40,.7) over white
-  // Dark enough to keep secondary/footer copy AA-readable on the pale scene.
-  muted: '#626B7A',
+  // Body copy sits in the ink's hue family, deepened for punch (owner call
+  // 2026-07-17: the old grey-slate #555B69 read dull across every email).
+  body: '#2A3F5F',
+  // Dark enough to keep secondary/footer copy AA-readable on the pale scene
+  // (darkened alongside body, same owner call; was #626B7A).
+  muted: '#4F5B70',
   // The scene — the glass-engine orb language, tuned to how the live
   // estimate/report pages actually READ (their orbs render through
   // heavy blur + grain, so the result is far softer than the raw
@@ -89,8 +92,8 @@ const GLASS_THEME = {
   blocks: {
     font: "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Inter,Arial,sans-serif",
     heading: '#04395E',
-    text: '#555B69',
-    mutedText: '#626B7A',
+    text: '#2A3F5F',
+    mutedText: '#4F5B70',
     rule: '#D8E4EF',
     calloutBorder: '#F4B014',
     calloutBg: '#FFF8E4',
@@ -104,7 +107,7 @@ const GLASS_THEME = {
     navy: '#04395E',
     blue: '#0A7EC2',
     gold: '#F4B014',
-    muted: '#626B7A',
+    muted: '#4F5B70',
     cardBg: '#F4F9FD',
     homeownerBg: '#E9F3FB',
     rule: '#D8E4EF',
