@@ -338,7 +338,10 @@ function draftMessageType(draft, legacyValue) {
 // claim released, 503. Suppression/consent are re-checked by
 // sendCustomerMessage regardless. Narrowly scoped to
 // intent='estimate_clarify'.
-const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate']);
+// 'unresponsive' counts as closed here — the staleness sweep and admin lead
+// flows treat it as terminal, and a clarify question is by definition a
+// response request the contact has already stopped answering.
+const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive']);
 async function guardClarifySend(draft, res, releaseFields = {}) {
   if (draft.intent !== 'estimate_clarify') return { blocked: false };
   if (!isEnabled('estimateClarifyAsks')) {

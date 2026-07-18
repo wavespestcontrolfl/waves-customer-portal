@@ -45,6 +45,9 @@ describe('lead estimate automation gate', () => {
   test('blocks leads missing a concrete requested service', () => {
     expect(hasConcreteServiceInterest('Pest Control Consultation')).toBe(false);
     expect(hasConcreteServiceInterest('Other Services')).toBe(false);
+    // The email-lead default label is a placeholder, never a service.
+    expect(hasConcreteServiceInterest('General inquiry')).toBe(false);
+    expect(hasConcreteServiceInterest('General question about service')).toBe(false);
     expect(hasConcreteServiceInterest('One-Time Termite Treatment')).toBe(true);
 
     const readiness = evaluateLeadEstimateAutomationReadiness({

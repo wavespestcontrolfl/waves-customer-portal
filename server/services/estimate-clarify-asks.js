@@ -97,15 +97,17 @@ async function parkClarifyAsk({
     const digits = allDigits.slice(-10);
 
     const sourceRef = `clarify:${digits}`;
-    // One open clarify per phone; no re-ask soon after a sent one.
+    // One OPEN clarify per phone; no re-ask soon after a sent one. "Open"
+    // means sent_at IS NULL — the admin send path stamps sent_at but leaves
+    // status 'approved'/'revised', so status alone would read a delivered
+    // clarify as open forever. "Recently sent" keys on sent_at directly for
+    // the same reason.
     const existing = await db('message_drafts')
       .where({ intent: 'estimate_clarify', source_ref: sourceRef })
       .where(function openOrRecentlySent() {
-        this.whereIn('status', ['pending', 'approved', 'revised'])
-          .orWhere(function recentlySent() {
-            this.where('status', 'sent')
-              .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
-          });
+        this.where(function stillOpen() {
+          this.whereIn('status', ['pending', 'approved', 'revised']).whereNull('sent_at');
+        }).orWhere('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
       })
       .first();
     if (existing) return { parked: false, skipped: 'open_or_recent_clarify', draftId: existing.id };

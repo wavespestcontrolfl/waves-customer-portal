@@ -826,8 +826,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       && (estimateAutomationReadiness.missing || []).length) {
       try {
         const { parkClarifyAsk } = require('../services/estimate-clarify-asks');
-        await parkClarifyAsk({
-          missing: estimateAutomationReadiness.missing,
+        const clarifyMissing = estimateAutomationReadiness.missing;
+        const parkedAsk = await parkClarifyAsk({
+          missing: clarifyMissing,
           phone: phoneFormatted,
           firstName,
           customerId: customer?.id || null,
@@ -835,6 +836,27 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           estimateId: createdEstimateId,
           source: 'lead_webhook_blocked',
         });
+        // Address-only ask alignment: the webhook seeded
+        // lead_intake_status='awaiting_service' above, but this form already
+        // carries a concrete service — a customer answering the approved
+        // address question would hit the service classifier and be dropped.
+        // Advance the machine to awaiting_address (with the interest it
+        // needs) so the reply is captured as the address. Guarded UPDATE:
+        // only from the state this webhook just seeded.
+        if (parkedAsk?.parked
+          && !clarifyMissing.includes('specific_service')
+          && customer?.id) {
+          const { classifyServiceIntent } = require('../services/sms-service-intent');
+          const cls = await classifyServiceIntent(serviceInterest || '');
+          if (cls?.interest) {
+            await db('customers')
+              .where({ id: customer.id, lead_intake_status: 'awaiting_service' })
+              .update({
+                lead_intake_status: 'awaiting_address',
+                lead_service_interest: cls.interest,
+              });
+          }
+        }
       } catch (askErr) {
         logger.error(`Lead clarify ask failed: ${askErr.message}`);
       }

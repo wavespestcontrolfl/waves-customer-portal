@@ -69,10 +69,16 @@ exports.up = async function up(knex) {
   // else: function absent (fresh replay ordering puts 20260705010010 first,
   // which creates it; nothing to splice here yet — idempotent re-run covers).
 
+  // sent_at IS NULL is load-bearing: the admin send path finalizes a draft
+  // by stamping sent_at while LEAVING status 'approved'/'revised'
+  // (finalizeDraftSend updates only final_response/sent_at/response_time) —
+  // without it one successful clarify would hold the phone's slot forever.
   await knex.raw(`
     CREATE UNIQUE INDEX IF NOT EXISTS message_drafts_clarify_open_uniq
       ON message_drafts (source_ref)
-      WHERE intent = 'estimate_clarify' AND status IN ('pending', 'approved', 'revised')
+      WHERE intent = 'estimate_clarify'
+        AND status IN ('pending', 'approved', 'revised')
+        AND sent_at IS NULL
   `);
 };
 
