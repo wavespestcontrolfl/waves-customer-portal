@@ -117,22 +117,17 @@ async function maybeDraftEstimateForSmsThread({ phone, triggerBody = '', skipInt
       }
     }
 
-    // Precheck BEFORE any context/model work: an open automated estimate on
-    // this phone means the earlier draft's bell stands — rerunning the
-    // composer per follow-up text would only burn DEEP tokens to hit the
-    // same duplicate guard.
-    const { blockIfAutomatedEstimateDuplicate } = require('../estimate-automation-duplicates');
-    const existingBlock = await blockIfAutomatedEstimateDuplicate(phone);
-    if (existingBlock) {
-      result.skipped = 'open_automated_estimate';
-      result.existingEstimateId = existingBlock.existingEstimateId || null;
-      return result;
-    }
-
+    // No phone-only duplicate precheck here: an open estimate on this phone
+    // can be for a DIFFERENT property (multi-property owners are real), and
+    // only the composer can read the address out of the thread. The
+    // draft-time guard has the address-aware bypass; a true duplicate exits
+    // through the blocked path's single thread-keyed bell. Cost is bounded
+    // by the FAST quote-intent gate above — only genuine quote requests
+    // reach the DEEP composer.
     const { buildSmsThreadContext } = require('./context-builder');
     const { runDraftPipeline, notify } = require('./index');
     const origin = smsOrigin(`sms:${digits}`);
-    const context = await buildSmsThreadContext({ phone });
+    const context = await buildSmsThreadContext({ phone, triggerBody });
     if (context.error) {
       result.lane = 'red';
       result.reasons = [context.error];

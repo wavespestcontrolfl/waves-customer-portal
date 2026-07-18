@@ -310,7 +310,7 @@ async function buildCallContext(callLogId) {
 // error out entirely: unlike a call, there is no independent transcript —
 // the thread history itself cannot be attributed to one profile, and no
 // caller-name extraction exists to disambiguate.
-async function buildSmsThreadContext({ phone, triggerAt = new Date() }) {
+async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBody = '' }) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
   const customerMatch = await loadCustomerByPhone(phone, null);
   if (customerMatch.ambiguous) return { error: 'ambiguous_phone' };
@@ -323,6 +323,14 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date() }) {
     loadSmsThread(phone, { limit: 40, before, since: smsSince }),
     loadPriorEstimates(phone),
   ]);
+  // The webhook records the TRIGGERING inbound message to sms_log after the
+  // handlers run, so the thread read here can miss exactly the text that
+  // asked for the quote (or supplied the address). Append it when the
+  // thread doesn't already end with it.
+  const trigger = String(triggerBody || '').trim().slice(0, 500);
+  if (trigger && smsThread[smsThread.length - 1]?.body !== trigger) {
+    smsThread.push({ direction: 'inbound', body: trigger, at: before });
+  }
   const transcript = smsThread
     .map((m) => `[${m.direction === 'inbound' ? 'Customer' : 'Waves'}] ${m.body}`)
     .join('\n');

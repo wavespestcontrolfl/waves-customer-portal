@@ -114,6 +114,17 @@ describe('parseExtractedAddress', () => {
     });
     expect(parseExtractedAddress('')).toEqual({ line1: null, city: null, state: null, zip: null });
   });
+
+  test('unit designators fold into line1 so the real city survives', () => {
+    expect(parseExtractedAddress('123 Main St, Apt 4, Sarasota, FL 34239')).toEqual({
+      line1: '123 Main St, Apt 4', city: 'Sarasota', state: 'FL', zip: '34239',
+    });
+    expect(parseExtractedAddress('55 Bay Dr, #12, Venice, FL')).toEqual({
+      line1: '55 Bay Dr, #12', city: 'Venice', state: 'FL', zip: null,
+    });
+    // Streets named after the state never lose their name to token stripping.
+    expect(parseExtractedAddress('710 Florida Ave, Palmetto, FL 34221').line1).toBe('710 Florida Ave');
+  });
 });
 
 describe('maybeDraftEstimateFromEmailLead', () => {
@@ -121,6 +132,17 @@ describe('maybeDraftEstimateFromEmailLead', () => {
     mockReadiness.mockReturnValue({ ready: false, missing: ['phone'] });
     const result = await maybeDraftEstimateFromEmailLead({ email: EMAIL, extracted: EXTRACTED, lead: LEAD });
     expect(result).toEqual({ created: false, skipped: 'not_ready', missing: ['phone'] });
+    expect(mockState.inserts).toHaveLength(0);
+  });
+
+  test('a partial extracted phone never drafts — the lock and dedupe need a real last-10', async () => {
+    const result = await maybeDraftEstimateFromEmailLead({
+      email: EMAIL,
+      extracted: { ...EXTRACTED, phone: '555-0100' },
+      lead: LEAD,
+    });
+    expect(result).toEqual({ created: false, skipped: 'no_usable_phone' });
+    expect(mockReadiness).not.toHaveBeenCalled();
     expect(mockState.inserts).toHaveLength(0);
   });
 

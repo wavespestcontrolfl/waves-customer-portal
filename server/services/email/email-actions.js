@@ -29,21 +29,29 @@ function emailQuoteDraftsEnabled() {
 // The classifier extracts a single address string ("123 Main St, Sarasota,
 // FL 34239" or partial). Light comma-split parse — the automation readiness
 // gate only needs a digit-bearing street line; city/zip absence just drops
-// confidence to medium, which the builder accepts.
+// confidence to medium, which the builder accepts. Unit designators after
+// the street ("…, Apt 4, Sarasota, …") fold into line1 so the real city
+// survives; state/zip tokens are only stripped from the tail parts, never
+// part 0 (streets like "Florida Ave" are real).
+const ADDRESS_UNIT_RE = /^(?:apt|apartment|unit|suite|ste|bldg|building|lot|rm|room|#)\b/i;
 function parseExtractedAddress(raw) {
   const text = String(raw || '').trim();
   if (!text) return { line1: null, city: null, state: null, zip: null };
   const zip = (text.match(/\b\d{5}\b/) || [null])[0];
   const parts = text.split(',').map((p) => p.trim()).filter(Boolean);
-  const line1 = parts[0] || text;
-  const cityPart = (parts[1] || '')
-    .replace(/\bFL(?:ORIDA)?\b/i, '')
-    .replace(/\b\d{5}(?:-\d{4})?\b/, '')
-    .trim();
+  const line1Parts = [parts[0] || text];
+  const rest = parts.slice(1);
+  while (rest.length && (ADDRESS_UNIT_RE.test(rest[0]) || /^#?\d+[A-Za-z]?$/.test(rest[0]))) {
+    line1Parts.push(rest.shift());
+  }
+  const tailState = rest.some((p) => /\bFL(?:ORIDA)?\b/i.test(p)) ? 'FL' : null;
+  const city = rest
+    .map((p) => p.replace(/\bFL(?:ORIDA)?\b/i, '').replace(/\b\d{5}(?:-\d{4})?\b/, '').trim())
+    .find(Boolean) || null;
   return {
-    line1: line1 || null,
-    city: cityPart || null,
-    state: /\bFL(?:ORIDA)?\b/i.test(text) ? 'FL' : null,
+    line1: line1Parts.join(', ') || null,
+    city,
+    state: tailState,
     zip: zip || null,
   };
 }
@@ -65,7 +73,14 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     withAutomatedEstimatePhoneLock,
   } = require('../estimate-automation-duplicates');
 
+  // The lock and duplicate guard silently degrade without a usable last-10,
+  // and readiness only checks non-emptiness — an LLM-extracted partial
+  // number must not mint an unserialized draft with an unusable
+  // customer_phone. No usable phone ⇒ the email stays a plain lead.
   const phone = extracted.phone || null;
+  if (String(phone || '').replace(/\D/g, '').length < 10) {
+    return { created: false, skipped: 'no_usable_phone' };
+  }
   const addr = parseExtractedAddress(extracted.address);
   const intake = {
     email: lead.email || null,
@@ -439,7 +454,53 @@ async function handleLeadInquiry(email, classification) {
       auto_action: 'linked_to_existing_lead',
       updated_at: new Date(),
     });
-    return { action: 'linked_to_existing_lead', leadId: existingLead.id };
+    // A follow-up email often supplies exactly what the first lacked (phone,
+    // address, concrete service) — behind the gate, try the same draft path
+    // with gaps back-filled from the lead row. The confidence floor still
+    // applies (this branch sits before the shared guards), and the phone
+    // duplicate guard prevents double-drafting an already-quoted lead.
+    let followUpDraft = null;
+    const followUpConfidence = Number(classification.confidence);
+    if (emailQuoteDraftsEnabled()
+      && Number.isFinite(followUpConfidence)
+      && followUpConfidence >= leadMinConfidence()) {
+      try {
+        followUpDraft = await maybeDraftEstimateFromEmailLead({
+          email,
+          extracted: {
+            ...extracted,
+            phone: extracted.phone || existingLead.phone || null,
+            address: extracted.address || existingLead.address || null,
+            service_interest: extracted.service_interest || existingLead.service_interest || null,
+          },
+          lead: existingLead,
+        });
+      } catch (e) {
+        logger.warn(`[email-actions] follow-up email draft failed (link stands): ${e.message}`);
+      }
+      if (followUpDraft?.created) {
+        try {
+          await db('notifications').insert({
+            recipient_type: 'admin',
+            category: 'new_lead',
+            title: `Email follow-up completed a quote request — draft estimate ready`,
+            body: classification.summary || email.subject,
+            icon: '📧',
+            link: '/admin/estimates',
+            metadata: JSON.stringify({
+              emailId: email.id,
+              leadId: existingLead.id,
+              estimateId: followUpDraft.estimateId,
+            }),
+          });
+        } catch (e) { /* non-critical */ }
+      }
+    }
+    return {
+      action: 'linked_to_existing_lead',
+      leadId: existingLead.id,
+      ...(followUpDraft?.created ? { estimateId: followUpDraft.estimateId } : {}),
+    };
   }
 
   // Guard: an existing LIVE customer must not come back as a lead (silent

@@ -101,13 +101,21 @@ describe('maybeDraftEstimateForSmsThread', () => {
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 
-  test('an open automated estimate skips before context/model work', async () => {
-    mockDuplicateCheck.mockResolvedValueOnce({ blocked: true, existingEstimateId: 'est-1' });
+  test('the triggering text rides into the context build (sms_log races the webhook insert)', async () => {
+    await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+    expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
+      triggerBody: 'what would a quote for pest control run me?',
+    }));
+  });
+
+  test('an open estimate on the phone does NOT precheck-skip — the draft-time guard owns duplicates', async () => {
+    // Multi-property owners text about a second property while an estimate
+    // is open; only the composer can read the address, so the address-aware
+    // duplicate bypass at draft time must get its chance.
+    mockDuplicateCheck.mockResolvedValue({ blocked: true, existingEstimateId: 'est-1' });
     const result = await maybeDraftEstimateForSmsThread({ phone: PHONE, triggerBody: 'quote for lawn care please' });
-    expect(result.skipped).toBe('open_automated_estimate');
-    expect(result.existingEstimateId).toBe('est-1');
-    expect(mockBuildSmsThreadContext).not.toHaveBeenCalled();
-    expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+    expect(result.created).toBe(true);
+    expect(mockRunDraftPipeline).toHaveBeenCalledTimes(1);
   });
 
   test('unreadable thread bells red on the phone-scoped thread key', async () => {
