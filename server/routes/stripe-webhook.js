@@ -2695,21 +2695,30 @@ async function handlePaymentMethodDetached(paymentMethod) {
   // support tooling) previously left customers.autopay_enabled pointing at a
   // method row that no longer exists — the admin UI showed Auto Pay Active
   // while collection threw "No Stripe autopay payment method on file".
-  const rows = await db('payment_methods')
-    .where({ stripe_payment_method_id: pmId })
-    .select('id', 'customer_id', 'is_default', 'autopay_enabled');
+  //
+  // The delete and the customer Auto Pay cleanup commit TOGETHER, and a
+  // failure ESCAPES to the dispatcher (Codex #2853 r2 P1): the old shape
+  // deleted first and swallowed cleanup errors, so a transient
+  // customers-update failure acked the webhook with the row already gone —
+  // the Stripe retry then found no payment_methods row, could never learn
+  // which customer pointer to clear, and Auto Pay stayed falsely Active.
+  // A rollback keeps the row, so the retry re-enters with intact state.
+  const disabledCustomers = [];
+  await db.transaction(async (trx) => {
+    const rows = await trx('payment_methods')
+      .where({ stripe_payment_method_id: pmId })
+      .select('id', 'customer_id', 'is_default', 'autopay_enabled');
 
-  const deleted = await db('payment_methods')
-    .where({ stripe_payment_method_id: pmId })
-    .del();
+    const deleted = await trx('payment_methods')
+      .where({ stripe_payment_method_id: pmId })
+      .del();
 
-  if (deleted > 0) {
-    logger.info(`[stripe-webhook] Removed ${deleted} payment method(s) from DB: ${pmId}`);
-  }
+    if (deleted > 0) {
+      logger.info(`[stripe-webhook] Removed ${deleted} payment method(s) from DB: ${pmId}`);
+    }
 
-  for (const row of rows) {
-    try {
-      const cust = await db('customers')
+    for (const row of rows) {
+      const cust = await trx('customers')
         .where({ id: row.customer_id })
         .first('autopay_enabled', 'autopay_payment_method_id');
       const wasInCharge = cust?.autopay_enabled
@@ -2719,16 +2728,21 @@ async function handlePaymentMethodDetached(paymentMethod) {
       // Mirror removeCard's cleanup (_disableAutopayIfMethodRemoved):
       // disable honestly rather than silently promoting another method —
       // enrollment is consent-gated and never auto-picks a replacement.
-      await db('customers')
+      await trx('customers')
         .where({ id: row.customer_id })
         .update({ autopay_enabled: false, autopay_payment_method_id: null });
-      await require('../services/autopay-log').logAutopay(row.customer_id, 'autopay_disabled', {
-        details: { source: 'payment_method_detached', payment_method_id: row.id, stripe_payment_method_id: pmId },
-      });
-      logger.info(`[stripe-webhook] Auto Pay disabled for customer ${row.customer_id} — in-charge method ${row.id} detached out-of-band`);
-    } catch (err) {
-      logger.warn(`[stripe-webhook] autopay cleanup after detach failed for customer ${row.customer_id}: ${err.message}`);
+      disabledCustomers.push(row);
     }
+  });
+
+  // Audit rows post-commit: logAutopay is internally best-effort (it never
+  // throws), and the state change above is already durable — a missing log
+  // row must not make Stripe re-run a delete that already committed.
+  for (const row of disabledCustomers) {
+    await require('../services/autopay-log').logAutopay(row.customer_id, 'autopay_disabled', {
+      details: { source: 'payment_method_detached', payment_method_id: row.id, stripe_payment_method_id: pmId },
+    });
+    logger.info(`[stripe-webhook] Auto Pay disabled for customer ${row.customer_id} — in-charge method ${row.id} detached out-of-band`);
   }
 }
 

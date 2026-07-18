@@ -83,7 +83,9 @@ describe('request URL log redaction', () => {
     expect(redactRequestUrl(`/api/admin/customers/${uuid}`)).toBe(`/api/admin/customers/${uuid}`);
     expect(redactRequestUrl('/api/admin/invoices/WPC-2026-0001')).toBe('/api/admin/invoices/WPC-2026-0001');
     expect(redactRequestUrl('/api/admin/call-recordings/audio/RE123')).toBe('/api/admin/call-recordings/audio/RE123');
-    // …but a UUID directly after a newsletter bearer prefix IS the credential.
+    // …but a UUID directly after a newsletter bearer prefix IS the credential
+    // (feedback reaction links share the quiz tokens' randomUUID class).
     expect(redactRequestUrl(`/api/public/newsletter/unsubscribe/${uuid}`)).toBe('/api/public/newsletter/unsubscribe/[REDACTED]');
+    expect(redactRequestUrl(`/api/public/newsletter/feedback/${uuid}/loved`)).toBe('/api/public/newsletter/feedback/[REDACTED]/loved');
   });
 });

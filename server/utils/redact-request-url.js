@@ -40,7 +40,21 @@ function looksLikeJwt(value) {
 // stay (they're row ids all over admin logs, not secrets) EXCEPT directly
 // after the newsletter bearer prefixes, where a randomUUID IS the credential.
 const UUID_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const UUID_BEARER_PARENTS = new Set(['unsubscribe', 'confirm', 'quiz']);
+// 'feedback' — newsletter reaction links (/api/public/newsletter/
+// feedback/:token/:reaction) use the same randomUUID bearer class as the
+// quiz tokens (AGENTS.md public-newsletter block).
+const UUID_BEARER_PARENTS = new Set(['unsubscribe', 'confirm', 'quiz', 'feedback']);
+
+// Legacy estimate slug tokens (nameSlug-8hex, the pre-estimate-versions admin
+// share-link format — estimate-public and estimate-slots-public TOKEN_REs
+// still accept them) are bearer credentials the length-based rules above
+// never match. Scope an explicit rule to estimate path parents so
+// /estimate/jane-doe-9f8e7d6c and /api/estimates/jane-doe-9f8e7d6c/data stop
+// logging reusable quote links with customer pricing/contact details. The
+// -8hex suffix requirement keeps fixed admin children (slots, config,
+// extension-request, UUID row ids) out of scope.
+const ESTIMATE_BEARER_PARENTS = new Set(['estimate', 'estimates']);
+const LEGACY_ESTIMATE_SLUG = /^[a-z0-9][a-z0-9-]*-[a-f0-9]{8}$/i;
 
 function isTokenLikePathSegment(segment, previousSegment) {
   const decoded = decodeQueryPart(segment);
@@ -52,6 +66,9 @@ function isTokenLikePathSegment(segment, previousSegment) {
   // → 43 chars. 40+ continuous base64url chars is a token, not a slug/id.
   if (/^[A-Za-z0-9_-]{40,}$/.test(decoded)) return true;
   if (UUID_SEGMENT.test(decoded) && UUID_BEARER_PARENTS.has(String(previousSegment || '').toLowerCase())) return true;
+  if (!UUID_SEGMENT.test(decoded)
+    && LEGACY_ESTIMATE_SLUG.test(decoded)
+    && ESTIMATE_BEARER_PARENTS.has(String(previousSegment || '').toLowerCase())) return true;
   return false;
 }
 

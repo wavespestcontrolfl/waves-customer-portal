@@ -1693,39 +1693,40 @@ const StripeService = {
     // deterministic order: legacy data (or a pre-fix race) can hold several
     // is_default rows, and an unordered .first() charged whichever row the
     // planner happened to return.
+    // Eligibility beyond "enabled + has a Stripe pm id": the callers'
+    // customerOnAutopay check only proves SOME default+enabled method is
+    // chargeable, so both the pointer AND the fallback must refuse a method
+    // the eligibility predicate rejects — an expired card, an unverified
+    // bank row, or any bank while customers.ach_status is blocked. Without
+    // the fallback check, rejecting the pointer just reselected the same
+    // row (the pointer normally IS the default) and charged it anyway.
+    const { isBankMethodType, isExpiredCardMethod } = require('./autopay-eligibility');
+    const methodEligibleForCharge = (m) => !!m
+      && !!m.stripe_payment_method_id
+      && !isExpiredCardMethod(m)
+      && !(isBankMethodType(m.method_type) && (
+        (customer.ach_status && customer.ach_status !== 'active')
+        || ['pending_verification', 'verification_failed'].includes(m.ach_status)
+      ));
+
     let card = null;
     if (customer.autopay_payment_method_id) {
-      card = await db('payment_methods')
+      const pointerRow = await db('payment_methods')
         .where({ id: customer.autopay_payment_method_id, customer_id: customerId, processor: 'stripe', autopay_enabled: true })
         .whereNotNull('stripe_payment_method_id')
         .first();
-      // The pointer can go stale in ways the callers' customerOnAutopay
-      // check never sees — it only proves SOME default+enabled method is
-      // chargeable. A pointer at an expired card, an unverified bank row,
-      // or any bank while customers.ach_status is blocked would debit a
-      // method the eligibility predicate rejects (e.g. the blocked bank
-      // instead of the consented default card). Apply the same
-      // expiry/ACH-health rules here; an ineligible pointer falls through
-      // to the deterministic default lookup below.
-      if (card) {
-        const { isBankMethodType, isExpiredCardMethod } = require('./autopay-eligibility');
-        const pointerIsBank = isBankMethodType(card.method_type);
-        const bankBlocked = pointerIsBank && (
-          (customer.ach_status && customer.ach_status !== 'active')
-          || ['pending_verification', 'verification_failed'].includes(card.ach_status)
-        );
-        if (isExpiredCardMethod(card) || bankBlocked) {
-          logger.warn(`[stripe] autopay pointer ${card.id} ineligible for customer ${customerId} (${isExpiredCardMethod(card) ? 'expired card' : 'ACH blocked'}) — falling back to default lookup`);
-          card = null;
-        }
+      if (pointerRow && !methodEligibleForCharge(pointerRow)) {
+        logger.warn(`[stripe] autopay pointer ${pointerRow.id} ineligible for customer ${customerId} (${isExpiredCardMethod(pointerRow) ? 'expired card' : 'ACH blocked'}) — falling back to default lookup`);
+      } else {
+        card = pointerRow || null;
       }
     }
     if (!card) {
-      card = await db('payment_methods')
+      const candidates = await db('payment_methods')
         .where({ customer_id: customerId, processor: 'stripe', is_default: true, autopay_enabled: true })
         .orderBy('updated_at', 'desc')
-        .orderBy('id', 'asc')
-        .first();
+        .orderBy('id', 'asc');
+      card = candidates.find(methodEligibleForCharge) || null;
     }
 
     if (!card || !card.stripe_payment_method_id) {
