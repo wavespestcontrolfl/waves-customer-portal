@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
+import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -64,7 +65,7 @@ function adminFetch(path, options = {}) {
 
 const TABS = [
   { key: "dashboard", label: "Dashboard", desc: "Overview", Icon: TrendingUp },
-  { key: "calendar", label: "Calendar", desc: "Editorial plan", Icon: CalendarDays },
+  { key: "calendar", label: "Calendar", desc: NEWSLETTER_UI_COPY.sendCadence, Icon: CalendarDays },
   { key: "compose", label: "Compose", desc: "Draft + send", Icon: MailPlus },
   { key: "history", label: "History", desc: "Performance", Icon: FileText },
   { key: "subscribers", label: "Subscribers", desc: "Audience", Icon: Users },
@@ -1502,7 +1503,7 @@ function CalendarView() {
         <table className="w-full text-left">
           <thead>
             <tr className="border-b border-zinc-100">
-              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-32">Week</th>
+              <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-44">{NEWSLETTER_UI_COPY.calendarWeekHeading}</th>
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary">Topic</th>
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-40">Homeowner Tip</th>
               <th className="px-3 py-2 text-11 font-medium text-ink-tertiary w-20">Status</th>
@@ -1554,7 +1555,7 @@ export default function NewsletterPage() {
   // Cross-tab handoff for "Draft newsletter" clicks on EventCard.
   // DashboardView calls onDraftFromEvent(event) → we stash the event +
   // switch to the Compose tab. ComposeView consumes pendingDraftEvent
-  // on mount (applies the Weekend Lineup template + opens the AI Draft
+  // on mount (applies the flagship template + opens the AI Draft
   // modal pre-filled with the event facts), then clears it via
   // clearPendingDraftEvent so reopening Compose later doesn't re-fire.
   const [pendingDraftEvent, setPendingDraftEvent] = useState(null);

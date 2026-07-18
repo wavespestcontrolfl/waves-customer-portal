@@ -14,6 +14,7 @@
 const mockSendOne = jest.fn(async () => ({ messageId: 'sg-proof-1' }));
 const mockSendCampaign = jest.fn(async () => ({ ok: true }));
 const mockValidate = jest.fn(() => ({ errors: [], warnings: [] }));
+const mockValidateEventSelection = jest.fn(async () => ({ valid: true, errors: [], flagship: true }));
 const mockTrigger = jest.fn(async () => ({ ok: true }));
 
 jest.mock('../models/db', () => jest.fn());
@@ -33,6 +34,9 @@ jest.mock('../services/newsletter-sender', () => ({
 }));
 jest.mock('../services/newsletter-validator', () => ({
   validateNewsletterDraft: mockValidate,
+}));
+jest.mock('../services/newsletter-event-selection', () => ({
+  validateFlagshipEventSelection: mockValidateEventSelection,
 }));
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: mockTrigger,
@@ -85,15 +89,24 @@ const FLAGSHIP_DRAFT = {
 // sets proof_sent_at === updated_at in one update).
 const PROOF_STAMP = new Date('2026-07-09T18:00:00Z');
 const PROOFED_DRAFT = { ...FLAGSHIP_DRAFT, proof_sent_at: PROOF_STAMP, updated_at: PROOF_STAMP };
+const TARGET_SEND_AT = new Date('2026-07-21T10:00:00Z'); // Tuesday 6:00 AM EDT
 
-function wireDb({ sends, subscribers } = {}) {
+function wireDb({ sends, subscribers, calendar } = {}) {
   const sendsChain = chain(sends || {});
   const subsChain = chain(subscribers || { first: undefined });
-  db.mockImplementation((table) => (table === 'newsletter_sends' ? sendsChain : subsChain));
-  return { sendsChain, subsChain };
+  const calendarChain = chain(calendar || {
+    first: { id: 'cal-1', week_of: '2026-07-21', target_send_at: TARGET_SEND_AT },
+  });
+  db.mockImplementation((table) => {
+    if (table === 'newsletter_sends') return sendsChain;
+    if (table === 'newsletter_calendar') return calendarChain;
+    return subsChain;
+  });
+  return { sendsChain, subsChain, calendarChain };
 }
 
 beforeEach(() => {
+  jest.useFakeTimers().setSystemTime(new Date('2026-07-20T12:00:00Z'));
   jest.clearAllMocks();
   process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'true';
   // Approvers are fail-closed (no default) — tests opt in explicitly.
@@ -101,8 +114,11 @@ beforeEach(() => {
   delete process.env.NEWSLETTER_PROOF_EMAIL;
   delete process.env.GMAIL_USER_EMAIL;
   mockValidate.mockReturnValue({ errors: [], warnings: [] });
+  mockValidateEventSelection.mockResolvedValue({ valid: true, errors: [], flagship: true });
   mockSendOne.mockImplementation(async () => ({ messageId: 'sg-proof-1' }));
 });
+
+afterEach(() => jest.useRealTimers());
 
 afterAll(() => {
   delete process.env.GATE_NEWSLETTER_PROOF_APPROVAL;
@@ -257,6 +273,7 @@ describe('sendNewsletterProof', () => {
     // Internal control message — newsletter suppression must not apply
     expect(args.asmGroupId).toBeUndefined();
     expect(args.html).toContain('Reply <strong>APPROVED</strong>');
+    expect(args.html).toContain('Tuesday at 6:00 AM ET');
     expect(args.html).toContain('606');
     // Claim is whereNull-guarded, version-guarded on the fetched row's
     // updated_at (ms-truncated raw compare — node-pg precision), and
@@ -274,6 +291,45 @@ describe('sendNewsletterProof', () => {
       recipientCount: 606,
       recipient: 'co***@wavespestcontrol.com',
     }));
+  });
+
+  test('future-issue proof validates its lineup against the linked issue Tuesday', async () => {
+    const futureTarget = new Date('2026-07-28T10:00:00Z');
+    wireDb({
+      sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } },
+      calendar: { first: { id: 'cal-future', week_of: '2026-07-28', target_send_at: futureTarget } },
+    });
+    const result = await sendNewsletterProof('send-1');
+    expect(result.sent).toBe(true);
+    expect(mockValidateEventSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'send-1' }),
+      { reference: futureTarget },
+    );
+  });
+
+  test('proof blocks a future Tuesday target that does not match its calendar week', async () => {
+    wireDb({
+      sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } },
+      calendar: {
+        first: {
+          id: 'cal-mismatch',
+          week_of: '2026-07-21',
+          target_send_at: new Date('2026-07-28T10:00:00Z'),
+        },
+      },
+    });
+    const result = await sendNewsletterProof('send-1');
+    expect(result.reason).toBe('calendar_target_invalid');
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(mockSendOne).not.toHaveBeenCalled();
+  });
+
+  test('legacy draft with an ineligible locked lineup gets no proof', async () => {
+    mockValidateEventSelection.mockResolvedValue({ valid: false, errors: ['Locked event is no longer eligible: Weekly Yoga.'], flagship: true });
+    wireDb({ sends: { first: { ...FLAGSHIP_DRAFT, proof_token: null } } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.reason).toBe('event_selection_invalid');
+    expect(mockSendOne).not.toHaveBeenCalled();
   });
 
   test('lost the atomic proof claim (concurrent worker) → no email', async () => {
@@ -359,15 +415,19 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
-  test('HTML-only reply: typed approved dispatches', async () => {
-    wireDb({ sends: { first: PROOFED_DRAFT } });
+  test('HTML-only reply: typed approved schedules Tuesday 6 AM without immediate dispatch', async () => {
+    const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval({
       ...APPROVAL_EMAIL,
       body_text: null,
       body_html: '<div dir="ltr">approved<br></div><div class="gmail_quote">On Thu wrote: Reply APPROVED…</div>',
     });
     expect(r).toBe(true);
-    expect(mockSendCampaign).toHaveBeenCalledWith('send-1');
+    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'scheduled',
+      scheduled_for: TARGET_SEND_AT,
+    }));
+    expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
   test('duplicate approval reply is a no-op', async () => {
@@ -425,6 +485,28 @@ describe('maybeHandleProofApproval', () => {
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything());
   });
 
+  test('invalid or past calendar target leaves an approved draft unscheduled', async () => {
+    const { sendsChain } = wireDb({
+      sends: { first: PROOFED_DRAFT },
+      calendar: { first: { id: 'cal-1', week_of: '2026-07-21', target_send_at: '2026-07-14T10:00:00Z' } },
+    });
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    expect(r).toBe(true);
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: expect.arrayContaining([expect.stringContaining('future issue Tuesday')]),
+    }));
+  });
+
+  test('legacy recurring lineup is rechecked at approval and never scheduled', async () => {
+    mockValidateEventSelection.mockResolvedValue({ valid: false, errors: ['Locked event is no longer eligible: Weekly Yoga.'], flagship: true });
+    const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
+    expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(true);
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
   test('lost the atomic approval claim → no dispatch', async () => {
     wireDb({ sends: { first: PROOFED_DRAFT, update: 0 } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
@@ -432,11 +514,15 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
-  test('happy path: owner replies approved → claim + dispatch + notification (masked address)', async () => {
-    const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
+  test('happy path: owner approval queues the linked Tuesday 6 AM target', async () => {
+    const { sendsChain, calendarChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(sendsChain.whereNull).toHaveBeenCalledWith('proof_approved_at');
+    expect(mockValidateEventSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'send-1' }),
+      { reference: TARGET_SEND_AT },
+    );
     // Approval claim is version-guarded: token + status + updated_at
     expect(sendsChain.where).toHaveBeenCalledWith({
       id: 'send-1', proof_token: 'ab12cd34', status: 'draft',
@@ -445,18 +531,19 @@ describe('maybeHandleProofApproval', () => {
       expect.stringContaining("date_trunc('milliseconds', updated_at)"),
       [PROOF_STAMP],
     );
-    // Crash-safe: the claim itself schedules the send so the scheduler
-    // tick is the durable executor if the immediate dispatch dies.
+    // Crash-safe: the claim itself schedules the send at the calendar target.
     expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
       proof_approved_at: expect.any(Date),
       proof_approval_email_id: 'email-1',
       status: 'scheduled',
-      scheduled_for: expect.any(Date),
+      scheduled_for: TARGET_SEND_AT,
     }));
-    expect(mockSendCampaign).toHaveBeenCalledWith('send-1');
+    expect(calendarChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    expect(mockSendCampaign).not.toHaveBeenCalled();
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_approved', expect.objectContaining({
       approvedBy: 'co***@wavespestcontrol.com',
       recipientCount: 606,
+      scheduledFor: TARGET_SEND_AT.toISOString(),
     }));
   });
 });

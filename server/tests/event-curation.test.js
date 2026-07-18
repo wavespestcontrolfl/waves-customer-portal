@@ -9,6 +9,7 @@ const {
   parseCurationResponse,
   missingDecisionFallbacks,
   curationEnabled,
+  buildCurationCandidateQuery,
 } = require('../services/event-curation');
 
 const EVENTS = [
@@ -37,11 +38,17 @@ describe('event-curation buildCurationPrompt', () => {
   const prompt = buildCurationPrompt(EVENTS, '2026-06-11');
 
   test('carries the editorial approve/reject rules and fail-closed instruction', () => {
-    expect(prompt).toContain('Fresh This Week');
-    expect(prompt).toContain('APPROVE events a local reader would actually go to');
+    expect(prompt).toContain("Waves Newsletter's weekly local events issue");
+    expect(prompt).not.toContain('Fresh This Week');
+    expect(prompt).toContain('APPROVE genuinely new, date-specific events');
     expect(prompt).toContain('Government/civic process');
     expect(prompt).toContain('When unsure, approve: false');
     expect(prompt).toContain("Today's date: 2026-06-11");
+  });
+
+  test('explicitly rejects routine yoga/trivia/karaoke and every-week listings', () => {
+    expect(prompt).toContain('weekly/daily/monthly yoga');
+    expect(prompt).toContain('every Tuesday');
   });
 
   test('lists every event with its exact id, date, venue, and source', () => {
@@ -58,6 +65,17 @@ describe('event-curation buildCurationPrompt', () => {
     ], '2026-06-11');
     expect(long).toContain('line1 line2');
     expect(long).not.toContain('x'.repeat(301));
+  });
+});
+
+describe('event-curation candidate query recurrence gate', () => {
+  test('excludes routine event and recurrence types before model curation', () => {
+    const { sql, bindings } = buildCurationCandidateQuery(25).toSQL();
+    expect(sql).toMatch(/event_type.*not in/i);
+    expect(sql).toMatch(/recurrence_type.*not in/i);
+    expect(bindings).toEqual(expect.arrayContaining([
+      'recurring_series', 'ongoing', 'daily', 'weekly', 'monthly', 'custom',
+    ]));
   });
 });
 

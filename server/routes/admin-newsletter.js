@@ -20,10 +20,28 @@ const { linkToCustomer, subscribeOrResubscribe, EMAIL_RE } = require('../service
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
 const { isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
-const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, getNewsletterWeekOf, defaultTargetSendAt, weekLockKey } = require('../services/event-freshness');
+const {
+  isEligibleForFreshDigest,
+  scoreFreshEvent,
+  dedupeDigestEvents,
+  excludeRoutineRecurringFromQuery,
+  getCurrentNewsletterTuesday,
+  getActiveNewsletterTuesday,
+  defaultTargetSendAt,
+  isFlagshipTargetForWeek,
+  getNewsletterDraftWindowStart,
+  isFlagshipScheduledTime,
+  isFlagshipDeliveryWindow,
+  weekLockKey,
+} = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
+const {
+  validateFlagshipEventSelection,
+  filterPreviouslyFeaturedIdentities,
+  filterRepeatedDateIdentities,
+} = require('../services/newsletter-event-selection');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
 const { computeSendRates, ratesFromTotals } = require('../services/newsletter-analytics');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -302,9 +320,10 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
       const mm = String(nowET.month).padStart(2, '0');
       windowStart = parseETDateTime(`${nowET.year}-${mm}-01T00:00:00`);
     } else {
-      // Current Thursday-anchored week.
-      const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
-      windowStart = parseETDateTime(`${etDateString(addETDays(now, -daysBack))}T00:00:00`);
+      // Flagship drafts are created Monday for Tuesday's issue. Include that
+      // Monday in the freshness window so Compose auto-loads the new draft.
+      const issueTuesday = parseETDateTime(`${getActiveNewsletterTuesday(now)}T12:00:00`);
+      windowStart = parseETDateTime(`${etDateString(addETDays(issueTuesday, -1))}T00:00:00`);
     }
 
     const draft = await db('newsletter_sends')
@@ -423,7 +442,34 @@ router.get('/sends/:id', async (req, res, next) => {
       }
     }
 
-    res.json({ send, deliveries, variantStats });
+    // Reaction-footer rollup — 👍/😐/👎 counts plus the 👎 "what was
+    // missing?" tallies. One delivery row per recipient, so these count
+    // people (a changed mind overwrites, never double-counts).
+    let feedback = null;
+    const reactionRows = await db('newsletter_send_deliveries')
+      .where({ send_id: req.params.id })
+      .whereNotNull('feedback_reaction')
+      .select('feedback_reaction')
+      .count('* as n')
+      .groupBy('feedback_reaction');
+    if (reactionRows.length) {
+      feedback = { reactions: {}, missing: {} };
+      for (const r of reactionRows) feedback.reactions[r.feedback_reaction] = Number(r.n);
+      const missingRows = await db('newsletter_send_deliveries')
+        .where({ send_id: req.params.id })
+        .whereNotNull('feedback_missing')
+        .select('feedback_missing')
+        .limit(5000);
+      for (const row of missingRows) {
+        let keys = row.feedback_missing;
+        if (typeof keys === 'string') { try { keys = JSON.parse(keys); } catch { keys = []; } }
+        for (const k of (Array.isArray(keys) ? keys : [])) {
+          feedback.missing[k] = (feedback.missing[k] || 0) + 1;
+        }
+      }
+    }
+
+    res.json({ send, deliveries, variantStats, feedback });
   } catch (err) { next(err); }
 });
 
@@ -659,6 +705,15 @@ router.post('/sends/:id/send', async (req, res) => {
     if (!send.html_body && !send.text_body) {
       return res.status(400).json({ error: 'body required' });
     }
+    const eventSelection = await validateFlagshipEventSelection(send);
+    if (!eventSelection.valid) {
+      return res.status(400).json({ error: 'Flagship event selection is no longer eligible.', errors: eventSelection.errors });
+    }
+    if (eventSelection.flagship && !isFlagshipDeliveryWindow(new Date())) {
+      return res.status(400).json({
+        error: 'The flagship newsletter can only be delivered Tuesday at 6:00 AM ET.',
+      });
+    }
 
     // Pre-flight 0-recipient guard for synchronous feedback. sendCampaign
     // itself re-checks (defense in depth + scheduler-tick coverage), but
@@ -768,6 +823,26 @@ router.post('/sends/:id/schedule', async (req, res, next) => {
     if (!send) return res.status(404).json({ error: 'not found' });
     if (send.status !== 'draft') return res.status(400).json({ error: 'can only schedule drafts' });
     if (!send.html_body && !send.text_body) return res.status(400).json({ error: 'body required before scheduling' });
+    const eventSelection = await validateFlagshipEventSelection(send, { reference: when });
+    if (!eventSelection.valid) {
+      return res.status(400).json({ error: 'Flagship event selection is no longer eligible.', errors: eventSelection.errors });
+    }
+    if (eventSelection.flagship && !isFlagshipScheduledTime(when)) {
+      return res.status(400).json({
+        error: 'Flagship newsletters must be scheduled for exactly Tuesday at 6:00 AM ET.',
+      });
+    }
+    if (eventSelection.flagship) {
+      const linkedCalendar = await db('newsletter_calendar').where({ send_id: send.id }).first();
+      if (linkedCalendar && (
+        !isFlagshipTargetForWeek(linkedCalendar.target_send_at, linkedCalendar.week_of)
+        || new Date(linkedCalendar.target_send_at).getTime() !== when.getTime()
+      )) {
+        return res.status(400).json({
+          error: 'Scheduled time must exactly match the linked calendar issue Tuesday at 6:00 AM ET.',
+        });
+      }
+    }
 
     const scheduled = await db('newsletter_sends').where({ id: send.id, status: 'draft' }).update({
       status: 'scheduled',
@@ -887,7 +962,7 @@ router.post('/segment-preview', async (req, res, next) => {
 });
 
 // POST /api/admin/newsletter/draft-ai — Claude drafts a newsletter
-// Body: { prompt, template?, newsletterType?, eventIds?, audience?, tone?, includeCTA? }
+// Body: { prompt, template?, newsletterType?, eventIds?, audience?, tone?, includeCTA?, issueReference? }
 //   newsletterType: when 'local-weekly-fresh-events', uses the flagship
 //     Phase 3 system prompt with structured section output + voice profile.
 //   template: 'weekend' (only remaining template). Used when
@@ -900,7 +975,9 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       return res.status(400).json({ error: 'Anthropic API not configured' });
     }
-    const { prompt, template, newsletterType, eventIds, audience, tone, includeCTA } = req.body;
+    const {
+      prompt, template, newsletterType, eventIds, audience, tone, includeCTA, issueReference,
+    } = req.body;
     if (!prompt || prompt.trim().length < 8) {
       return res.status(400).json({ error: 'prompt required (min 8 chars)' });
     }
@@ -918,6 +995,10 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     // DB-locked event facts — AI-supplied dates/venues/URLs are overwritten
     // from events_raw, not trusted from the model.
     if (isFlagshipType(newsletterType)) {
+      let editorialReference = issueReference ? new Date(issueReference) : null;
+      if (editorialReference && Number.isNaN(editorialReference.getTime())) {
+        return res.status(400).json({ error: 'issueReference must be a valid date' });
+      }
       let resolvedEventIds;
       if (Array.isArray(eventIds) && eventIds.length > 0) {
         resolvedEventIds = eventIds.filter((id) => typeof id === 'string' && UUID_RE.test(id));
@@ -929,7 +1010,9 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         // approved/eligible events (same query the autopilot uses) so the
         // flagship draft stays DB-locked instead of inviting the model to
         // invent events.
-        const { scored } = await buildDigestPlan();
+        const plan = await buildDigestPlan({ reference: editorialReference || new Date() });
+        const { scored } = plan;
+        editorialReference = editorialReference || plan.startDate;
         resolvedEventIds = scored.slice(0, 12).map((ev) => ev.id);
       }
 
@@ -946,6 +1029,7 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         audience,
         tone,
         includeCTA,
+        issueReference: editorialReference || undefined,
         persist: false,
       });
       // Return the locked event ids so the Compose flow can carry them into
@@ -973,7 +1057,7 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     // ── Legacy flow: template-guided or free-form ─────────────────────
     const TEMPLATE_GUIDANCE = {
       weekend: `
-TEMPLATE: Weekend Lineup
+TEMPLATE: Waves Newsletter
 - Lead with an emoji + a punchy, FOMO-friendly weekend headline (think "Your No-Lame-Plans Weekend Starts Here", not "Weekly Update").
 - Open with a casual, irreverent hook (1-2 sentences).
 - Body: 3-5 SWFL events. Each event uses <h2>[Event name]</h2> followed by <p><strong>[City] · [Day, time]</strong> — [one or two sentences on why it's worth going]</p>.
@@ -1279,7 +1363,7 @@ router.patch('/events/:id', async (req, res, next) => {
     const VALID_ADMIN_STATUSES = ['pending', 'approved', 'rejected', 'featured'];
     const VALID_EVENT_TYPES = ['one_time', 'annual', 'limited_run', 'recurring_series', 'special_edition', 'ongoing', 'unknown'];
     const VALID_RECURRENCE_TYPES = ['none', 'daily', 'weekly', 'monthly', 'seasonal', 'annual', 'custom', 'unknown'];
-    const VALID_FRESHNESS = ['fresh_one_time', 'fresh_annual', 'fresh_limited_run_opening', 'fresh_limited_run_closing', 'fresh_series_launch', 'fresh_special_edition', 'stale_recurring', 'expired', 'needs_review'];
+    const VALID_FRESHNESS = ['fresh_one_time', 'fresh_annual', 'fresh_limited_run_opening', 'fresh_limited_run_closing', 'fresh_special_edition', 'stale_recurring', 'expired', 'needs_review'];
     const VALID_ZONES = ['south_sarasota', 'sarasota', 'manatee', 'pinellas', 'tampa'];
 
     if (adminStatus !== undefined && !VALID_ADMIN_STATUSES.includes(adminStatus)) return res.status(400).json({ error: `invalid adminStatus: ${adminStatus}` });
@@ -1323,7 +1407,7 @@ router.patch('/events/:id', async (req, res, next) => {
           const STATUS_TO_TYPE = {
             fresh_one_time: 'one_time', fresh_annual: 'annual',
             fresh_limited_run_opening: 'limited_run', fresh_limited_run_closing: 'limited_run',
-            fresh_series_launch: 'recurring_series', fresh_special_edition: 'special_edition',
+            fresh_special_edition: 'special_edition',
           };
           if (STATUS_TO_TYPE[freshnessStatus]) {
             updates.event_type = STATUS_TO_TYPE[freshnessStatus];
@@ -1334,6 +1418,9 @@ router.patch('/events/:id', async (req, res, next) => {
         const nextFeatured = featureTransition ? (event.times_featured || 0) + 1 : event.times_featured;
         const { freshness_status, freshness_score } = classifyFreshness({
           event_type: eventType || event.event_type,
+          recurrence_type: recurrenceType || event.recurrence_type,
+          title: event.title,
+          description: event.description,
           times_featured: nextFeatured,
           start_at: event.start_at,
           end_at: event.end_at,
@@ -1400,7 +1487,7 @@ router.post('/events/bulk-action', async (req, res, next) => {
     if (action === 'feature' && count > 0) {
       const { classifyFreshness } = require('../services/event-freshness');
       const featured = await db('events_raw')
-        .select('id', 'event_type', 'times_featured', 'start_at', 'end_at')
+        .select('id', 'title', 'description', 'event_type', 'recurrence_type', 'times_featured', 'start_at', 'end_at')
         .whereIn('id', safeIds)
         .where('admin_status', 'featured');
       for (const row of featured) {
@@ -1564,19 +1651,27 @@ router.get('/events/approved-ids', async (req, res, next) => {
     const todayET = parseETDateTime(`${etDateString()}T00:00:00`);
     const cutoffET = parseETDateTime(`${etDateString(addETDays(new Date(), days))}T23:59:59`);
 
-    const rows = await db('events_raw')
-      .select('id', 'admin_status', 'start_at', 'end_at', 'event_url', 'event_type', 'freshness_status', 'times_featured')
-      .whereIn('admin_status', ['approved', 'featured'])
-      .whereNull('merged_into')
-      .where('start_at', '>=', todayET)
-      .where('start_at', '<=', cutoffET)
-      .whereNotNull('event_url')
-      .whereNotIn('freshness_status', ['expired', 'stale_recurring'])
-      .orderByRaw('CASE WHEN admin_status = \'featured\' THEN 0 ELSE 1 END')
-      .orderByRaw('freshness_score DESC NULLS LAST')
+    const query = db('events_raw as e')
+      .select(
+        'e.id', 'e.title', 'e.description', 'e.admin_status', 'e.start_at', 'e.end_at',
+        'e.event_url', 'e.event_type', 'e.recurrence_type', 'e.freshness_status',
+        'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+      )
+      .whereIn('e.admin_status', ['approved', 'featured'])
+      .whereNull('e.merged_into')
+      .where('e.start_at', '>=', todayET)
+      .where('e.start_at', '<=', cutoffET)
+      .whereNotNull('e.event_url')
+      .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+      .orderByRaw('CASE WHEN e.admin_status = \'featured\' THEN 0 ELSE 1 END')
+      .orderByRaw('e.freshness_score DESC NULLS LAST')
       .limit(20);
 
-    const eligible = rows.filter((r) => isEligibleForFreshDigest(r)).slice(0, 12);
+    const rows = await excludeRoutineRecurringFromQuery(query);
+    const nonRepeatedRows = await filterRepeatedDateIdentities(rows);
+    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows);
+
+    const eligible = dedupeDigestEvents(historicallyNewRows.filter((r) => isEligibleForFreshDigest(r))).slice(0, 12);
     res.json({ ids: eligible.map((r) => r.id), count: eligible.length });
   } catch (err) { next(err); }
 });
@@ -1586,24 +1681,21 @@ router.get('/events/approved-ids', async (req, res, next) => {
 router.post('/events/digest-plan', async (req, res, next) => {
   try {
     const { weekStart, weekEnd } = req.body || {};
-    const now = new Date();
-    const nowET = etParts(now);
-    const daysUntilThursday = (4 - nowET.dayOfWeek + 7) % 7; // 0 on Thu, 3 on Mon, 6 on Fri
-    const defaultStart = addETDays(now, daysUntilThursday);
+    const defaultWeekOf = getActiveNewsletterTuesday();
     const startDate = weekStart
       ? parseETDateTime(`${weekStart}T00:00:00`)
-      : parseETDateTime(`${etDateString(defaultStart)}T00:00:00`);
+      : parseETDateTime(`${defaultWeekOf}T00:00:00`);
     const endDate = weekEnd
       ? parseETDateTime(`${weekEnd}T23:59:59`)
       : parseETDateTime(`${etDateString(addETDays(startDate, 6))}T23:59:59`);
 
-    const rows = await db('events_raw as e')
+    const query = db('events_raw as e')
       .leftJoin('event_sources as s', 's.id', 'e.source_id')
       .select(
         'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
         'e.venue_name', 'e.city', 'e.event_url',
-        'e.event_type', 'e.freshness_status', 'e.freshness_score',
-        'e.admin_status', 'e.times_featured',
+        'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
+        'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
         'e.region_zone', 'e.family_friendly', 'e.is_free',
         's.name as source_name', 's.priority_tier as source_priority_tier',
       )
@@ -1615,9 +1707,15 @@ router.post('/events/digest-plan', async (req, res, next) => {
       .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
       .orderByRaw('e.freshness_score DESC NULLS LAST');
 
-    const eligible = rows.filter((r) => isEligibleForFreshDigest(r));
-    const scored = eligible.map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
-      .sort((a, b) => b.compositeScore - a.compositeScore);
+    const rows = await excludeRoutineRecurringFromQuery(query);
+    const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate });
+    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate });
+
+    const eligible = historicallyNewRows.filter((r) => isEligibleForFreshDigest(r, startDate));
+    const scored = dedupeDigestEvents(
+      eligible.map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
+        .sort((a, b) => b.compositeScore - a.compositeScore),
+    );
     const suppressed = rows.filter((r) => !isEligibleForFreshDigest(r))
       .map((r) => ({ id: r.id, title: r.title, reason: r.freshness_status }));
 
@@ -1648,7 +1746,7 @@ router.post('/events/digest-plan', async (req, res, next) => {
 
     const sections = {
       fresh_this_week: pick((ev) => ['one_time', 'annual', 'limited_run', 'special_edition'].includes(ev.event_type), 6).map(fmt),
-      just_starting: pick((ev) => ev.event_type === 'recurring_series' && (ev.times_featured || 0) <= 2, 2).map(fmt),
+      just_starting: pick((ev) => !ev.last_featured_at && (ev.times_featured || 0) === 0, 2).map(fmt),
       weekend_picks: pick((ev) => isWeekend(ev), 3).map(fmt),
       family_or_low_key_pick: pick((ev) => ev.family_friendly === true || ev.is_free === true, 1).map(fmt),
       road_trip_pick: pick((ev) => ev.region_zone && ev.region_zone !== majorityZone, 1).map(fmt),
@@ -1658,7 +1756,7 @@ router.post('/events/digest-plan', async (req, res, next) => {
     if (sections.fresh_this_week.length < 5) warnings.push(`Only ${sections.fresh_this_week.length} fresh events (recommended minimum 5)`);
     if (sections.family_or_low_key_pick.length === 0) warnings.push('No family-friendly or free pick found');
     if (sections.road_trip_pick.length === 0) warnings.push('No road trip pick found');
-    if (sections.just_starting.length === 0) warnings.push('No new recurring series for "Just Starting"');
+    if (sections.just_starting.length === 0) warnings.push('No newly discovered events for "Just Starting"');
 
     res.json({
       weekStart: etDateString(startDate), weekEnd: etDateString(endDate),
@@ -1889,10 +1987,10 @@ router.get('/calendar', async (req, res, next) => {
     const rawFuture = Number(req.query.futureWeeks ?? 12);
     const futureWeeks = Math.min(26, Math.max(1, Math.floor(Number.isNaN(rawFuture) ? 12 : rawFuture)));
 
-    const currentThursday = getCurrentNewsletterThursday();
+    const currentTuesday = getActiveNewsletterTuesday();
 
-    // Generate all Thursday dates in the window (ET-safe)
-    const baseDate = parseETDateTime(`${currentThursday}T12:00:00`);
+    // Generate all Tuesday dates in the window (ET-safe)
+    const baseDate = parseETDateTime(`${currentTuesday}T12:00:00`);
     const allWeeks = [];
     for (let i = -pastWeeks; i < futureWeeks; i++) {
       allWeeks.push(etDateString(addETDays(baseDate, i * 7)));
@@ -1965,7 +2063,7 @@ router.get('/calendar', async (req, res, next) => {
       };
     });
 
-    res.json({ calendar, currentWeek: currentThursday });
+    res.json({ calendar, currentWeek: currentTuesday });
   } catch (err) { next(err); }
 });
 
@@ -1977,14 +2075,14 @@ router.post('/calendar', async (req, res, next) => {
       return res.status(400).json({ error: 'weekOf must be YYYY-MM-DD format' });
     }
 
-    // Validate Thursday
+    // Validate Tuesday
     const d = new Date(weekOf + 'T12:00:00Z');
     if (isNaN(d.getTime())) return res.status(400).json({ error: 'weekOf is not a valid date' });
     // Round-trip check: ensure the date didn't normalize (e.g. Feb 30 → Mar 2)
     if (d.toISOString().split('T')[0] !== weekOf) {
       return res.status(400).json({ error: 'weekOf is not a valid calendar date' });
     }
-    if (d.getUTCDay() !== 4) return res.status(400).json({ error: 'weekOf must be a Thursday' });
+    if (d.getUTCDay() !== 2) return res.status(400).json({ error: 'weekOf must be a Tuesday' });
 
     // Validate eventIds
     if (eventIds !== undefined) {
@@ -2003,6 +2101,9 @@ router.post('/calendar', async (req, res, next) => {
       if (isNaN(sendAt.getTime())) return res.status(400).json({ error: 'Invalid targetSendAt format' });
     } else {
       sendAt = defaultTargetSendAt(weekOf);
+    }
+    if (!isFlagshipTargetForWeek(sendAt, weekOf)) {
+      return res.status(400).json({ error: 'targetSendAt must match weekOf at exactly Tuesday 6:00 AM ET' });
     }
 
     const [row] = await db('newsletter_calendar')
@@ -2046,6 +2147,9 @@ router.patch('/calendar/:id', async (req, res, next) => {
       if (typeof targetSendAt !== 'string') return res.status(400).json({ error: 'targetSendAt must be a string' });
       const parsed = parseETDateTime(targetSendAt);
       if (isNaN(parsed.getTime())) return res.status(400).json({ error: 'Invalid targetSendAt format' });
+      if (!isFlagshipTargetForWeek(parsed, entry.week_of)) {
+        return res.status(400).json({ error: 'targetSendAt must match this entry week at exactly Tuesday 6:00 AM ET' });
+      }
       updates.target_send_at = parsed;
     }
     if (status !== undefined) {
@@ -2053,7 +2157,7 @@ router.patch('/calendar/:id', async (req, res, next) => {
       if (!VALID.includes(status)) return res.status(400).json({ error: 'invalid status' });
       // 'scheduled'/'sent' are system-derived from the linked send lifecycle
       // (POST /schedule and sendCampaign drive them). Hand-setting them on a
-      // row with no send_id makes the Thursday autopilot skip that week — it
+      // row with no send_id makes the flagship autopilot skip that week — it
       // treats scheduled/sent as "already handled" and returns early — while
       // no newsletter actually exists, a silent missed week with no alert.
       if (['scheduled', 'sent'].includes(status) && !entry.send_id) {
@@ -2096,11 +2200,14 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
       return res.json({ success: true, existing: true, send: existingSend });
     }
     if (snapshot.status === 'skipped') return res.status(400).json({ error: 'Cannot draft a skipped week' });
+    if (!isFlagshipTargetForWeek(snapshot.target_send_at, wk.week_of)) {
+      return res.status(400).json({ error: 'Calendar target must match this issue Tuesday at exactly 6:00 AM ET' });
+    }
 
     const eventIds = Array.isArray(snapshot.event_ids) ? snapshot.event_ids : [];
     const prompt = snapshot.topic
-      ? `This week's theme: ${snapshot.topic}. Fresh events from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`
-      : `Fresh events this week from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`;
+      ? `This weekend's theme: ${snapshot.topic}. New events from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`
+      : `New events for the weekend ahead from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`;
     const generated = await createNewsletterDraft({
       prompt,
       eventIds,
@@ -2110,6 +2217,7 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
       audience: 'Waves subscribers — North Port to Tampa',
       tone: 'Neighborly, FOMO-driven, local friend energy',
       includeCTA: true,
+      issueReference: snapshot.target_send_at || wk.week_of,
       persist: false,
     });
 
@@ -2144,13 +2252,13 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
       }
 
       // Adopt an autopilot draft created for this same week instead of making a
-      // second one. The Thursday cron may have produced a draft while this
+      // second one. The Tuesday cron may have produced a draft while this
       // request waited on the advisory lock, and it links the calendar OUTSIDE
       // its lock — so calendar.send_id can still read null here even though a
       // draft exists. Same dedup the autopilot uses (flagship, status draft,
       // created_by NULL), bounded to this week's window so drafting a non-current
       // week can't adopt the current week's draft.
-      const weekStart = parseETDateTime(`${wk.week_of}T00:00:00`);
+      const weekStart = getNewsletterDraftWindowStart(wk.week_of);
       const weekEnd = parseETDateTime(`${etDateString(addETDays(weekStart, 7))}T00:00:00`);
       const autopilotDraft = await trx('newsletter_sends')
         .where({ newsletter_type: 'local-weekly-fresh-events', status: 'draft' })

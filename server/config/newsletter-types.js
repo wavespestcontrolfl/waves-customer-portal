@@ -22,7 +22,8 @@ const NEWSLETTER_TYPES = {
     label: 'Local Weekly Fresh Events',
     flagship: true,
     cadence: 'weekly',
-    defaultSendDay: 'Thursday',
+    defaultSendDay: 'Tuesday',
+    defaultSendTimeET: '06:00',
     voiceProfile: 'waves_phase_3_local',
     coverage: {
       southernBoundary: 'North Port',
@@ -75,8 +76,7 @@ const NEWSLETTER_TYPES = {
     label: 'Pest Insider (Monthly)',
     flagship: false,
     cadence: 'monthly',
-    // Auto-drafts the first Tuesday of the month at 7am ET (scheduler.js)
-    // — Thursdays stay owned by the weekly events guide.
+    // Auto-drafts the first Tuesday of the month at 7am ET (scheduler.js).
     defaultSendDay: 'Tuesday',
     voiceProfile: 'waves_phase_3_local',
     coverage: null,

@@ -18,7 +18,14 @@ const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = requ
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveAnswer, recordQuizResponse, getQuiz, quizBookingUrl } = require('../services/newsletter-quiz');
+const {
+  resolveReaction,
+  resolveMissingKeys,
+  recordFeedbackReaction,
+  MISSING_OPTIONS,
+} = require('../services/newsletter-feedback');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } = require('../constants/business');
+const { glassUniversalFooterHtml } = require('../services/email-template');
 
 // Per-IP rate limiter on POST /subscribe. The global /api/ limiter in
 // index.js is shared across every public endpoint, so a subscribe-spam
@@ -140,7 +147,7 @@ router.get('/unsubscribe/:token', async (req, res) => {
         <form method="POST" action="/api/public/newsletter/unsubscribe/${tokenSafe}">
           <button type="submit" name="confirm_unsubscribe" value="1" class="btn">Unsubscribe</button>
         </form>
-        <p style="margin-bottom:0; font-size:12px; color:#888;">Nothing changes until you click the button.</p>`;
+        <p style="margin-bottom:0; font-size:14px; color:#626B7A;">Nothing changes until you click the button.</p>`;
     } else {
       heading = 'Link expired or invalid.';
       bodyHtml = `<p>This unsubscribe link no longer matches a subscription.</p><p style="margin-bottom:0">Email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we'll help.</p>`;
@@ -180,7 +187,7 @@ router.get('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
           <form method="POST" action="/api/public/newsletter/quiz/${tokenSafe}/${quizIdSafe}/${answerSafe}">
             <button type="submit" class="btn">Confirm${label ? ` — ${escapeHtml(label)}` : ''}</button>
           </form>
-          <p style="margin-bottom:0; font-size:12px; color:#888;">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>
+          <p style="margin-bottom:0; font-size:14px; color:#626B7A;">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>
         `;
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
@@ -222,6 +229,108 @@ router.post('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
     logger.error(`[newsletter] quiz POST failed: ${err.message}`);
+    res.status(200).json({ ok: true });
+  }
+});
+
+// ── In-email reaction footer ─────────────────────────────────────────
+// "How was this week's newsletter? 👍 Great · 😐 Okay · 👎 Needs work"
+// (newsletter-feedback.js). Same GET-renders / POST-mutates split as the
+// quiz, AND for the same reason: corporate mail gateways pre-fetch every
+// URL in a message — some execute JS — so the delivery-row write must hang
+// off a DELIBERATE user gesture (the confirm <form> submit), never a GET or
+// an on-load script. A scanner that opens all three reaction links sees
+// only the render and writes nothing.
+
+// Shares the quiz endpoints' abuse posture: unauthenticated, so a
+// token-guessing loop needs its own cap on top of the global /api/ limiter.
+const feedbackLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Try again in a minute.' },
+});
+
+// GET /api/public/newsletter/feedback/:token/:reaction
+// Read-only confirm page. For 👎 the page doubles as the "what was missing?"
+// form (owner-specified options), so one email tap + one submit records the
+// reaction AND the follow-up in a single deliberate gesture.
+router.get('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
+  try {
+    const reaction = resolveReaction(req.params.reaction); // null → copy degrades gracefully
+    const tokenSafe = escapeHtml(req.params.token);
+    const reactionSafe = encodeURIComponent(req.params.reaction);
+    const formAction = `/api/public/newsletter/feedback/${tokenSafe}/${reactionSafe}`;
+    const pick = reaction ? `${reaction.emoji} ${reaction.label}` : null;
+
+    let heading; let bodyHtml;
+    if (reaction && reaction.key === 'needs-work') {
+      heading = 'Ouch — help us fix it.';
+      const options = MISSING_OPTIONS.map((o) => `
+            <label style="display:block;margin:0 0 10px;font-size:15px;color:#3F4A65;cursor:pointer;">
+              <input type="checkbox" name="missing" value="${escapeHtml(o.key)}" style="margin-right:8px;vertical-align:middle;" />${escapeHtml(o.label)}
+            </label>`).join('');
+      bodyHtml = `
+          <p>You picked <strong>${escapeHtml(pick)}</strong>. What was missing?</p>
+          <form method="POST" action="${formAction}">
+            ${options}
+            <button type="submit" class="btn" style="margin-top:6px;">Send feedback</button>
+          </form>
+          <p style="margin-bottom:0; font-size:14px; color:#626B7A;">Nothing is recorded until you tap the button — check any that apply (or none).</p>`;
+    } else {
+      heading = 'One tap to confirm.';
+      bodyHtml = `
+          <p>${pick
+            ? `You picked <strong>${escapeHtml(pick)}</strong>. Tap confirm and it's counted.`
+            : 'Tap confirm and your feedback is counted.'}</p>
+          <form method="POST" action="${formAction}">
+            <button type="submit" class="btn">Confirm${pick ? ` — ${escapeHtml(pick)}` : ''}</button>
+          </form>
+          <p style="margin-bottom:0; font-size:14px; color:#626B7A;">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>`;
+    }
+    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+  } catch (err) {
+    logger.error(`[newsletter] feedback GET failed: ${err.message}`);
+    res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com and we\'ll help.');
+  }
+});
+
+// POST /api/public/newsletter/feedback/:token/:reaction
+// The mutation: stamp the reaction (+ any "missing" selections) on the
+// delivery row. Fired by the confirm <form> above. Two response shapes like
+// the quiz flow — HTML for the form submit, JSON for any fetch() client.
+// Always 200 so the endpoint can't probe which tokens are real.
+router.post('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
+  try {
+    const { token, reaction } = req.params;
+    await recordFeedbackReaction({ token, reaction, missing: req.body?.missing });
+
+    const isFormSubmission = req.is('application/x-www-form-urlencoded') || req.is('multipart/form-data');
+    if (!isFormSubmission) {
+      return res.status(200).json({ ok: true });
+    }
+
+    const resolved = resolveReaction(reaction);
+    let heading; let bodyHtml;
+    if (resolved?.key === 'needs-work') {
+      const picked = resolveMissingKeys(req.body?.missing);
+      const labels = MISSING_OPTIONS.filter((o) => picked.includes(o.key)).map((o) => o.label);
+      heading = 'Got it — thanks for the straight talk.';
+      bodyHtml = `
+          <p>${labels.length
+            ? `Noted: <strong>${escapeHtml(labels.join(', '))}</strong>. Next issues will lean that way.`
+            : 'Noted. Next issues will aim closer to home.'}</p>
+          <p style="margin-bottom:0;">— The Waves Pest Control Team 🌊</p>`;
+    } else {
+      heading = 'Thanks — that helps! 🌊';
+      bodyHtml = `
+          <p>Your take is counted and shapes next week's issue.</p>
+          <p style="margin-bottom:0;">Know someone who'd dig the newsletter? Forward this week's issue their way.</p>`;
+    }
+    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+  } catch (err) {
+    logger.error(`[newsletter] feedback POST failed: ${err.message}`);
     res.status(200).json({ ok: true });
   }
 });
@@ -276,6 +385,12 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
 
 // Shared HTML page wrapper for the confirm flow's GET + POST renders.
 // Single self-contained document — no template engine, no client code.
+//
+// Glass UI (owner rule 2026-07-17: the newsletter and every secondary
+// customer page render in the glass language — see
+// docs/design/DECISIONS.md). Tokens mirror GLASS_THEME in
+// email-template.js: canonical navy #04395E ink, orb-scene background,
+// frosted card, gold action bar; 15px body, nothing under 14px.
 function renderConfirmPage(heading, bodyHtml) {
   return `
       <!doctype html>
@@ -286,17 +401,17 @@ function renderConfirmPage(heading, bodyHtml) {
         <title>${heading} — Waves Pest Control</title>
         <style>
           * { box-sizing: border-box; }
-          body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: clamp(40px, 8vw, 72px) 20px; color: #1B2C5B; background: #FAF8F3; min-height: 100vh; }
+          body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Inter, Arial, sans-serif; margin: 0; padding: clamp(40px, 8vw, 72px) 20px; color: #04395E; min-height: 100vh; background: #EDF4FA; background-image: radial-gradient(1200px 800px at -8% 12%,rgba(10,126,194,.22),transparent 60%),radial-gradient(1000px 700px at 108% 0%,rgba(56,170,225,.16),transparent 60%),radial-gradient(900px 700px at 96% 90%,rgba(6,90,140,.13),transparent 62%),radial-gradient(800px 600px at -6% 100%,rgba(240,165,0,.15),transparent 58%),linear-gradient(180deg,#EAF3FB 0%,#F6FAFE 48%,#EAF2F9 100%); background-attachment: fixed; }
           main { max-width: 520px; margin: 0 auto; }
-          h1 { font-family: 'Source Serif 4', Georgia, serif; font-size: 32px; line-height: 1.12; font-weight: 500; margin: 0 0 10px; color: #1B2C5B; letter-spacing: 0; }
-          p { line-height: 1.6; color: #3F4A65; }
-          .box { background: #fff; border: 1px solid #E7E2D7; border-radius: 14px; padding: 26px; margin-top: 24px; }
-          .email { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #1B2C5B; }
-          a { color: #1B2C5B; }
-          .btn { display:inline-block; background:#1B2C5B; color:#fff; border:1px solid #1B2C5B; border-radius:8px; padding:12px 22px; font-weight:800; letter-spacing:0; cursor:pointer; font-size:14px; }
-          .btn:hover { background:#142144; }
+          h1 { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Inter, Arial, sans-serif; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 10px; color: #04395E; }
+          p { line-height: 1.6; color: #555B69; font-size: 15px; }
+          .box { background: #FFFFFF; background: rgba(255,255,255,0.55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border: 1px solid #EFF6FC; border-radius: 20px; padding: 26px; margin-top: 24px; box-shadow: 0 18px 60px rgba(4,57,94,0.12), inset 0 1px 0 rgba(255,255,255,0.6); }
+          .email { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #04395E; }
+          a { color: #0A7EC2; }
+          .btn { display:block; width:100%; text-align:center; background:#F5B520; background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%); color:#1B2C5B; border:1px solid #FFEEB4; border-radius:10px; padding:13px 24px; font-weight:800; letter-spacing:0; cursor:pointer; font-size:15px; font-family:inherit; text-decoration:none; }
+          .btn:hover { filter: brightness(0.97); }
           form { margin: 0; padding: 0; }
-          .footer { margin-top: 32px; font-size: 13px; color: #6B7280; text-align: center; }
+          .footer { margin-top: 32px; font-size: 14px; color: #626B7A; text-align: center; }
         </style>
       </head>
       <body>
@@ -305,7 +420,7 @@ function renderConfirmPage(heading, bodyHtml) {
           <div class="box">
             ${bodyHtml}
           </div>
-          <p class="footer">Waves Pest Control · Bradenton, FL</p>
+          <div class="footer">${glassUniversalFooterHtml()}</div>
         </main>
       </body>
       </html>
@@ -339,7 +454,7 @@ router.get('/confirm/:token', async (req, res) => {
           <form method="POST" action="/api/public/newsletter/confirm/${tokenSafe}">
             <button type="submit" class="btn">Confirm subscription</button>
           </form>
-          <p style="margin-bottom:0; font-size:12px; color:#888;">If you didn't sign up, just close this tab — nothing happens until you click the button.</p>
+          <p style="margin-bottom:0; font-size:14px; color:#626B7A;">If you didn't sign up, just close this tab — nothing happens until you click the button.</p>
         `;
     } else if (result.action === 'already_active') {
       heading = "You're already in.";

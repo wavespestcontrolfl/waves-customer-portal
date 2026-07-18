@@ -26,6 +26,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { Badge, Button, Card, cn } from "../../components/ui";
+import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const INPUT_CLS =
@@ -204,7 +205,7 @@ function adminFetch(path, options = {}) {
 }
 
 // Starter HTML templates. Operator picks one → seeds the HTML body textarea.
-// "Fresh This Week" (née Weekend Lineup) is the flagship — ~60% of
+// Waves Newsletter is the flagship — ~60% of
 // historical sends and highest-engagement format. Blank is the escape
 // hatch for rare one-off free-form sends. Headlines are deliberately
 // placeholder-y so the operator (or AI Draft) can rewrite them per send —
@@ -224,7 +225,7 @@ const TEMPLATES = [
   },
   {
     key: "weekend",
-    label: "Fresh This Week",
+    label: NEWSLETTER_UI_COPY.name,
     newsletterType: "local-weekly-fresh-events",
     html: `<h1>[Punchy weekend headline — e.g., "Your No-Lame-Plans Weekend Starts Here"]</h1>
 <p>What's good, neighbor — here's what's hitting around Southwest Florida this weekend. Pick one (or three) and get out of the house.</p>
@@ -283,7 +284,7 @@ function buildEventPrompt(event) {
     .trim()
     .slice(0, 280);
   const lines = [
-    `Anchor this Weekend Lineup on this event:`,
+    `Anchor this ${NEWSLETTER_UI_COPY.name} issue on this event:`,
     `- ${event.title}`,
     `- ${dateLabel}${cityLabel ? ` · ${cityLabel}` : ""}${event.venueName ? ` · ${event.venueName}` : ""}`,
   ];
@@ -472,7 +473,7 @@ export function ComposeView({
   const [aiInitialPrompt, setAiInitialPrompt] = useState("");
 
   // Consume pendingEvent on mount (or whenever a new one arrives via
-  // tab switch). Apply the Weekend Lineup template so the body is
+  // tab switch). Apply the flagship template so the body is
   // pre-seeded, then auto-open the AI Draft modal with the event-shaped
   // prompt. Acknowledge consumption so NewsletterPage clears the
   // handoff state.
@@ -484,11 +485,10 @@ export function ComposeView({
     setAiInitialPrompt(buildEventPrompt(pendingEvent));
     setAiOpen(true);
     if (onPendingEventConsumed) onPendingEventConsumed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingEvent]);
 
   // Auto-select the flagship template for brand-new composes so the
-  // operator lands in the "Fresh This Week" flow by default. Skip when
+  // operator lands in the flagship newsletter flow by default. Skip when
   // loading an existing draft (draftId) or when event-seeded
   // (pendingEvent) — those paths set their own template.
   useEffect(() => {
@@ -499,7 +499,6 @@ export function ComposeView({
         setSelectedTemplate('weekend');
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const segmentFilter = useMemo(() => {
@@ -649,7 +648,6 @@ export function ComposeView({
       })
       .catch(() => { /* no autopilot draft — nothing to do */ });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Recalculate segment match count when the filter changes.
@@ -885,7 +883,16 @@ export function ComposeView({
     const newsletterType = tpl?.newsletterType || null;
     const res = await adminFetch("/admin/newsletter/draft-ai", {
       method: "POST",
-      body: JSON.stringify({ prompt, template, newsletterType, eventIds, audience, tone, includeCTA }),
+      body: JSON.stringify({
+        prompt,
+        template,
+        newsletterType,
+        eventIds,
+        audience,
+        tone,
+        includeCTA,
+        issueReference: scheduleAt || undefined,
+      }),
     });
     const d = res.draft || {};
     if (d.subject || d.selectedSubject) setSubject(d.subject || d.selectedSubject);
@@ -965,7 +972,7 @@ export function ComposeView({
                 onClick={() => applyTemplate('weekend')}
                 className="h-8 px-3 text-12 font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 u-focus-ring"
               >
-                Fresh This Week
+                {NEWSLETTER_UI_COPY.name}
               </button>
               <button type="button" onClick={() => applyTemplate('blank')} className="text-11 text-ink-tertiary hover:text-ink-secondary underline">Start from scratch</button>
             </div>{" "}
@@ -1465,7 +1472,9 @@ export function ComposeView({
           {" "}
           <PanelHeader
             title="Schedule"
-            hint="Queued sends fire within one minute of the target time."
+            hint={activeNewsletterType === 'local-weekly-fresh-events'
+              ? NEWSLETTER_UI_COPY.scheduleHint
+              : "Queued sends fire within one minute of the target time."}
           />{" "}
           <div className="p-4 space-y-3">
             {" "}
@@ -1499,7 +1508,9 @@ export function ComposeView({
                     hour: "numeric",
                     minute: "2-digit",
                   })} ET`
-                : "America/New_York timezone"}
+                : activeNewsletterType === 'local-weekly-fresh-events'
+                  ? NEWSLETTER_UI_COPY.scheduleHint
+                  : "America/New_York timezone"}
             </div>{" "}
           </div>{" "}
         </div>
@@ -1806,7 +1817,7 @@ function ConfirmRow({ label, value, hint }) {
 // ── Digest Planner ────────────────────────────────────────────────
 
 const SECTION_LABELS = {
-  fresh_this_week: "Fresh This Week",
+  fresh_this_week: NEWSLETTER_UI_COPY.name,
   just_starting: "Just Starting",
   weekend_picks: "Weekend Picks",
   family_or_low_key_pick: "Family / Low-Key Pick",
@@ -1842,7 +1853,7 @@ function DigestPlanner({ onDraftFromPlan }) {
     const allEvents = Object.values(plan.sections).flat();
     const ids = allEvents.map((e) => e.id);
     const summary = allEvents.slice(0, 8).map((e) => `${e.title} (${e.city || "SWFL"})`).join(", ");
-    const prompt = `Fresh events this week from North Port to Tampa: ${summary}.${homeownerTopic ? ` Homeowner Minute topic: ${homeownerTopic}.` : ""}`;
+    const prompt = `Build this ${NEWSLETTER_UI_COPY.name} issue with events from North Port to Tampa: ${summary}.${homeownerTopic ? ` Homeowner Minute topic: ${homeownerTopic}.` : ""}`;
     onDraftFromPlan({ eventIds: ids, prompt });
   };
 
@@ -1861,7 +1872,7 @@ function DigestPlanner({ onDraftFromPlan }) {
       </div>
       <div className="flex items-end gap-2">
         <div className="flex-1">
-          <label className="block text-11 text-ink-tertiary mb-0.5">Week starting (Thursday)</label>
+          <label className="block text-11 text-ink-tertiary mb-0.5">{NEWSLETTER_UI_COPY.weekStartLabel}</label>
           <input type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)}
             className="h-8 px-2 text-12 bg-white border-hairline border-zinc-300 rounded-sm w-full" />
         </div>
@@ -2078,6 +2089,8 @@ export function HistoryView() {
   // quiz row, then cached. Independent of the A/B panel (a send can have both).
   const [quizResults, setQuizResults] = useState({});
   const [quizOpenId, setQuizOpenId] = useState(null);
+  const [feedbackResults, setFeedbackResults] = useState({});
+  const [feedbackOpenId, setFeedbackOpenId] = useState(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -2156,6 +2169,24 @@ export function HistoryView() {
       }
     } catch {
       /* surfaces as 'no breakdown available' below */
+    }
+  };
+
+  // Toggle the reaction-feedback panel. First open lazy-loads /sends/:id
+  // (the detail endpoint includes the 👍/😐/👎 rollup); subsequent toggles
+  // read from the cache.
+  const toggleFeedback = async (id) => {
+    if (feedbackOpenId === id) {
+      setFeedbackOpenId(null);
+      return;
+    }
+    setFeedbackOpenId(id);
+    if (feedbackResults[id]) return;
+    try {
+      const d = await adminFetch(`/admin/newsletter/sends/${id}`);
+      setFeedbackResults((prev) => ({ ...prev, [id]: { feedback: d.feedback || null } }));
+    } catch {
+      setFeedbackResults((prev) => ({ ...prev, [id]: { error: true } }));
     }
   };
 
@@ -2273,6 +2304,16 @@ export function HistoryView() {
                           Quiz {quizIsOpen ? "▾" : "▸"}
                         </button>
                       )}
+                      {s.status === "sent" && (
+                        <button
+                          type="button"
+                          onClick={() => toggleFeedback(s.id)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-zinc-100 text-11 font-medium text-zinc-700 hover:bg-zinc-200 u-focus-ring"
+                          title={feedbackOpenId === s.id ? "Hide reader feedback" : "Show reader feedback"}
+                        >
+                          Feedback {feedbackOpenId === s.id ? "▾" : "▸"}
+                        </button>
+                      )}
                       {s.segment_filter && (
                         <Badge tone="muted">Segmented</Badge>
                       )}
@@ -2364,6 +2405,9 @@ export function HistoryView() {
                 {hasQuiz && quizIsOpen && (
                   <QuizResultsBreakdown data={quizResults[s.id]} />
                 )}
+                {feedbackOpenId === s.id && (
+                  <FeedbackBreakdown data={feedbackResults[s.id]} />
+                )}
               </div>
             );
           })}
@@ -2434,6 +2478,91 @@ function QuizResultsBreakdown({ data }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// ── Reader-feedback breakdown ────────────────────────────────────────
+//
+// 👍/😐/👎 rollup pulled from /sends/:id (server aggregates the deliveries
+// table; one row per recipient so counts are people, not clicks). The
+// "what was missing" tallies come from 👎 follow-up selections. Labels
+// mirror the server-side allowlist in newsletter-feedback.js.
+
+const FEEDBACK_REACTION_LABELS = [
+  { key: "great", label: "👍 Great" },
+  { key: "okay", label: "😐 Okay" },
+  { key: "needs-work", label: "👎 Needs work" },
+];
+const FEEDBACK_MISSING_LABELS = {
+  "closer-events": "Closer events",
+  "local-news": "More local news",
+  "restaurant-openings": "Restaurant openings",
+  "family-activities": "Family activities",
+  "home-tips": "Home tips",
+};
+
+function FeedbackBreakdown({ data }) {
+  if (!data) {
+    return <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">Loading reader feedback…</div>;
+  }
+  if (data.error) {
+    return <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">Couldn't load reader feedback.</div>;
+  }
+  const reactions = data.feedback?.reactions || {};
+  const missing = data.feedback?.missing || {};
+  const total = Object.values(reactions).reduce((sum, n) => sum + n, 0);
+  if (!total) {
+    return (
+      <div className="px-5 pb-3 -mt-2 text-11 text-ink-tertiary">
+        No reactions yet — they appear as readers tap 👍 / 😐 / 👎 in the footer.
+      </div>
+    );
+  }
+  const max = Math.max(1, ...FEEDBACK_REACTION_LABELS.map((r) => reactions[r.key] || 0));
+  const missingEntries = Object.entries(FEEDBACK_MISSING_LABELS)
+    .map(([key, label]) => ({ key, label, count: missing[key] || 0 }))
+    .filter((m) => m.count > 0);
+  return (
+    <div className="px-5 pb-4 -mt-1 space-y-3">
+      <div className="text-11 text-ink-secondary u-nums">
+        {total} reaction{total === 1 ? "" : "s"}
+      </div>
+      <div className="border-hairline border-zinc-200 rounded-sm p-3 bg-white space-y-1.5">
+        {FEEDBACK_REACTION_LABELS.map((r) => {
+          const count = reactions[r.key] || 0;
+          const share = total ? Math.round((count / total) * 100) : 0;
+          return (
+            <div key={r.key} className="flex items-center gap-2 text-12">
+              <span className="w-28 shrink-0 text-ink-secondary truncate">{r.label}</span>
+              <span className="flex-1 h-3 bg-zinc-100 rounded-sm overflow-hidden">
+                <span
+                  className="block h-full bg-zinc-900"
+                  style={{ width: `${Math.round((count / max) * 100)}%` }}
+                />
+              </span>
+              <span className="w-16 shrink-0 text-right u-nums text-ink-secondary">
+                {count} · {share}%
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {missingEntries.length > 0 && (
+        <div className="border-hairline border-zinc-200 rounded-sm p-3 bg-white">
+          <div className="text-12 font-medium text-zinc-900 mb-2">
+            👎 follow-up — what was missing
+          </div>
+          <div className="space-y-1 text-12 text-ink-secondary">
+            {missingEntries.map((m) => (
+              <div key={m.key} className="flex items-center justify-between">
+                <span>{m.label}</span>
+                <span className="u-nums">{m.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

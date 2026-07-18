@@ -43,7 +43,7 @@ function row(id, html) {
 test('hero image wins; GIFs (divider + giphy) never surface; event photos back-fill hero-less issues', async () => {
   mockRows = [
     // Standard issue: hero first, then intro GIF, divider, event photo.
-    row(1, `<div><img src="${HERO}" alt="Fresh This Week" /></div>
+    row(1, `<div><img src="${HERO}" alt="Waves Newsletter" /></div>
             <img src="${GIPHY_GIF}" alt="" />
             <img src="${DIVIDER_GIF}" alt="" />
             <img src="${EVENT_PHOTO}" alt="market" />`),

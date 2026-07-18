@@ -104,7 +104,7 @@ function buildRssXml(posts) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title>Fresh This Week — Waves Pest Control</title>
+    <title>Waves Newsletter — Local Events</title>
     <link>https://www.wavespestcontrol.com/newsletter</link>
     <description>A weekly local events guide from North Port to Tampa, powered by Waves Pest Control.</description>
     <language>en-us</language>

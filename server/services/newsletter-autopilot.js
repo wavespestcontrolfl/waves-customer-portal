@@ -1,11 +1,11 @@
 /**
  * Newsletter Autopilot — guarded auto-draft for the weekly digest.
  *
- * Called by the Thursday 7 AM ET cron in scheduler.js. Never auto-sends;
+ * Called by the Monday 7 AM ET cron in scheduler.js. Never auto-sends;
  * creates a draft in newsletter_sends for admin review + manual send.
  *
  * Flow:
- *   1. Compute the current newsletter Thursday
+ *   1. Compute the upcoming issue Tuesday
  *   2. Check newsletter_calendar for a pre-planned entry
  *   3. Skip if calendar row already has a send_id or terminal status
  *   4. Generate a digest plan from approved events (same query pattern
@@ -20,9 +20,23 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEligibleForFreshDigest, scoreFreshEvent, getCurrentNewsletterThursday, defaultTargetSendAt, weekLockKey } = require('./event-freshness');
-const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
+const {
+  isEligibleForFreshDigest,
+  scoreFreshEvent,
+  excludeRepeatedDateIdentities,
+  dedupeDigestEvents,
+  excludeRoutineRecurringFromQuery,
+  getActiveNewsletterTuesday,
+  defaultTargetSendAt,
+  getNewsletterDraftWindowStart,
+  weekLockKey,
+} = require('./event-freshness');
+const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 const { createNewsletterDraft, persistNewsletterDraft } = require('./newsletter-draft');
+const {
+  filterPreviouslyFeaturedIdentities,
+  filterRepeatedDateIdentities,
+} = require('./newsletter-event-selection');
 const { getFlagshipType } = require('../config/newsletter-types');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
@@ -35,21 +49,18 @@ const LINEUP_CAP = 12;
  * Build the digest plan — same query as POST /events/digest-plan
  * in admin-newsletter.js, but without the HTTP layer.
  */
-async function buildDigestPlan() {
-  const now = new Date();
-  const nowET = etParts(now);
-  const daysBack = (nowET.dayOfWeek - 4 + 7) % 7; // 0 on Thu, 1 Fri, … 6 Wed
-  const defaultStart = addETDays(now, -daysBack);
-  const startDate = parseETDateTime(`${etDateString(defaultStart)}T00:00:00`);
+async function buildDigestPlan({ reference = new Date() } = {}) {
+  const weekOf = getActiveNewsletterTuesday(reference);
+  const startDate = parseETDateTime(`${weekOf}T00:00:00`);
   const endDate = parseETDateTime(`${etDateString(addETDays(startDate, 6))}T23:59:59`);
 
-  const rows = await db('events_raw as e')
+  const query = db('events_raw as e')
     .leftJoin('event_sources as s', 's.id', 'e.source_id')
     .select(
       'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
       'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url', 'e.image_url',
-      'e.event_type', 'e.freshness_status', 'e.freshness_score',
-      'e.admin_status', 'e.times_featured', 'e.source_id',
+      'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
+      'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at', 'e.source_id',
       'e.region_zone', 'e.family_friendly', 'e.is_free',
       's.name as source_name', 's.priority_tier as source_priority_tier',
     )
@@ -61,12 +72,16 @@ async function buildDigestPlan() {
     .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
     .orderByRaw('e.freshness_score DESC NULLS LAST');
 
-  const eligible = rows.filter((r) => isEligibleForFreshDigest(r));
-  const scored = eligible
-    .map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
-    .sort((a, b) => b.compositeScore - a.compositeScore);
+  const rows = await excludeRoutineRecurringFromQuery(query);
 
-  return { rows, eligible, scored, startDate, endDate };
+  const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate });
+  const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate });
+  const eligible = historicallyNewRows.filter((r) => isEligibleForFreshDigest(r, startDate));
+  const scored = dedupeDigestEvents(eligible
+    .map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
+    .sort((a, b) => b.compositeScore - a.compositeScore));
+
+  return { rows, eligible, scored, startDate, endDate, weekOf };
 }
 
 /**
@@ -105,13 +120,13 @@ function preflightDigest(lineupOrPlan, reqs = {}) {
   // 2-source gate even though createNewsletterDraft() fetches only the
   // distinct rows. Events without an id can't be deduped, so keep them.
   const seenIds = new Set();
-  const events = rawEvents.filter((e) => {
+  const events = dedupeDigestEvents(excludeRepeatedDateIdentities(rawEvents.filter((e) => {
     const id = e && e.id != null ? String(e.id) : null;
     if (id === null) return true;
     if (seenIds.has(id)) return false;
     seenIds.add(id);
     return true;
-  });
+  })));
 
   const eligibleCount = events.length;
   const lineup = events.slice(0, LINEUP_CAP);
@@ -162,7 +177,7 @@ function preflightDigest(lineupOrPlan, reqs = {}) {
  * the operator sees WHY the eligible pool is thin, not just that it is.
  */
 function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
-  const lines = [`Fresh This Week autopilot skipped (week of ${weekOf}).`, '', 'Reason:'];
+  const lines = [`Waves Newsletter autopilot skipped (week of ${weekOf}).`, '', 'Reason:'];
   for (const f of report.hardFailures) lines.push(`- ${f}`);
   for (const w of report.warnings) lines.push(`- ${w} (warning)`);
   if (sourceHealthLines.length) {
@@ -170,7 +185,7 @@ function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
     for (const l of sourceHealthLines) lines.push(l);
   }
   lines.push('', 'Next actions:');
-  lines.push('- Approve more pending events for this Thu–Wed window');
+  lines.push('- Approve more pending events for this Tue–Mon window');
   lines.push('- Check failing ingestion sources (Events → Sources health)');
   lines.push('- Add/repair event URLs where missing');
   return lines.join('\n');
@@ -184,8 +199,8 @@ function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
 async function autoDraftFlagship() {
   logger.info('[newsletter-autopilot] Starting weekly auto-draft');
 
-  // 1. Compute the current newsletter Thursday
-  const weekOf = getCurrentNewsletterThursday();
+  // 1. Compute the active issue Tuesday (Monday drafts target tomorrow)
+  const weekOf = getActiveNewsletterTuesday();
   logger.info(`[newsletter-autopilot] Week of: ${weekOf}`);
 
   // 2. Check the calendar for existing entry — skip if already handled
@@ -282,7 +297,7 @@ async function autoDraftFlagship() {
 
     // Persist a durable 'skipped' marker for this week. Without it, the
     // preflight-skip path leaves no calendar row (or a 'planned' one), so the
-    // Thu–Sun 2PM catch-up cron treats the week as never-attempted and re-runs
+    // Monday 2PM / Tuesday 4:30AM catch-up jobs treat the week as never-attempted and re-run
     // autoDraftFlagship — repeating the work and the skip notification — on
     // every tick. The catch-up gate only proceeds on a missing/'planned' row,
     // so a 'skipped' status correctly retires the week. Any operator-planned
@@ -334,8 +349,8 @@ async function autoDraftFlagship() {
   // 7. Build prompt incorporating calendar data + derive event IDs from the
   //    resolved lineup (same set the preflight just validated).
   const prompt = topic
-    ? `This week's theme: ${topic}. Fresh events from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`
-    : `Fresh events this week from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`;
+    ? `This weekend's theme: ${topic}. New events from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`
+    : `New events for the weekend ahead from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`;
 
   const eventIds = lineupEvents.map((ev) => ev.id);
 
@@ -371,6 +386,7 @@ async function autoDraftFlagship() {
     homeownerMinuteTopic,
     topic,
     newsletterType: NEWSLETTER_TYPE,
+    issueReference: defaultTargetSendAt(weekOf),
     persist: false,
   });
 
@@ -383,7 +399,10 @@ async function autoDraftFlagship() {
     const existing = await trx('newsletter_sends')
       .where({ newsletter_type: NEWSLETTER_TYPE, status: 'draft' })
       .whereNull('created_by')
-      .where('created_at', '>=', plan.startDate)
+      // Drafting moved to Monday while the issue/event window starts Tuesday.
+      // Include that Monday or the serialized runner cannot see its own first
+      // draft and a catch-up/concurrent run creates a second campaign + proof.
+      .where('created_at', '>=', getNewsletterDraftWindowStart(weekOf))
       .first();
 
     if (existing) {
@@ -491,7 +510,7 @@ async function autoDraftFlagship() {
   }
 
   // 11. Proof-approval flow (gated OFF by default): email the owner a proof
-  //     copy; replying "approved" releases the list send. A proof failure
+  //     copy; replying "approved" queues Tuesday's 6 AM send. A proof failure
   //     never kills the draft — the admin notification above still fired.
   try {
     const { sendNewsletterProof } = require('./newsletter-proof');

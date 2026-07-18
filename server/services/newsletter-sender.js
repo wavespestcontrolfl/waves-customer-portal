@@ -29,6 +29,9 @@ const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, C
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
+const { hasFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
+const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
+const { validateFlagshipEventSelection } = require('./newsletter-event-selection');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -354,6 +357,26 @@ async function sendCampaign(sendId, opts = {}) {
   if (!send) throw new Error('not found');
   if (!send.html_body && !send.text_body) throw new Error('body required');
 
+  const eventSelection = await validateFlagshipEventSelection(send);
+  if (eventSelection.flagship) {
+    if (!eventSelection.valid) {
+      const err = new Error(`flagship event selection is no longer eligible: ${eventSelection.errors.join(' ')}`);
+      err.code = 'EVENT_SELECTION_INVALID';
+      throw err;
+    }
+    const now = new Date();
+    if (send.status === 'scheduled' && !isCurrentFlagshipTarget(send.scheduled_for, now)) {
+      const err = new Error('scheduled flagship target is not the current issue Tuesday at 6:00 AM ET');
+      err.code = 'FLAGSHIP_SCHEDULE_TARGET';
+      throw err;
+    }
+    if (!isFlagshipDeliveryWindow(now)) {
+      const err = new Error('flagship newsletters can only be delivered Tuesday at 6:00 AM ET');
+      err.code = 'FLAGSHIP_CADENCE_WINDOW';
+      throw err;
+    }
+  }
+
   // 0-recipient guard — runs BEFORE the atomic claim so a no-op send
   // doesn't burn the row's status from draft/scheduled to sending only
   // to immediately land as 'sent' with recipient_count=0.
@@ -447,11 +470,24 @@ async function sendCampaign(sendId, opts = {}) {
     logger.info(`[newsletter] send ${send.id} skipping ${skippedAlreadySent} recipient(s) already in non-retryable state (resume)`);
   }
 
+  // Every edition ends with the reaction footer (owner directive
+  // 2026-07-17). Assembled drafts already carry the token; hand-composed
+  // campaigns get it appended at send time so the ask is a system property
+  // — same philosophy as ensureLegalTextFooter — instead of a template
+  // author's memory item. Local copies only: the persisted html_body stays
+  // the operator's content. Deterministic, so resumes rebuild identically.
+  let bodyHtml = send.html_body || '';
+  let bodyText = send.text_body;
+  if (!hasFeedbackToken([bodyHtml, bodyText].filter(Boolean).join('\n'))) {
+    bodyHtml = `${bodyHtml}\n\n{{feedback}}`;
+    if (bodyText) bodyText = `${bodyText}\n\n{{feedback-text}}`;
+  }
+
   // Wrap the operator-written body in branded chrome (header + footer
   // + Waves logo). The unsubscribe URL is the SendGrid substitution
   // token — sendBatch injects a real per-recipient URL in its place.
   const htmlWithFooter = wrapNewsletter({
-    body: send.html_body || '',
+    body: bodyHtml,
     unsubscribeUrl: '{{unsubscribe_url}}',
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
@@ -482,8 +518,13 @@ async function sendCampaign(sendId, opts = {}) {
   // {{quiz-text:id}} — resolve to a block whose answer links carry THAT
   // recipient's engagement_token (newsletter-quiz.js). quizBody is scanned for
   // the tokens; html + text are joined so a token in either part is found.
-  const quizBody = [send.html_body, send.text_body].filter(Boolean).join('\n');
+  const quizBody = [bodyHtml, bodyText].filter(Boolean).join('\n');
   const quizEnabled = hasQuizToken(quizBody);
+  // Reaction footer ({{feedback}} / {{feedback-text}}): same per-recipient
+  // substitution mechanics as the quiz — links carry the recipient's
+  // engagement_token so a tap lands on the right delivery row. Scanned on
+  // the local copies so the send-time append above is always resolved.
+  const feedbackEnabled = hasFeedbackToken(quizBody);
 
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
@@ -532,6 +573,7 @@ async function sendCampaign(sendId, opts = {}) {
             // every quiz token in the body (default or {{quiz:id}}). Missing
             // token (shouldn't happen post-migration) → neutral link-free render.
             ...(quizEnabled ? buildQuizSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
+            ...(feedbackEnabled ? buildFeedbackSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row
@@ -558,7 +600,7 @@ async function sendCampaign(sendId, opts = {}) {
           fromName: send.from_name,
           subject: subjectForGroup,
           html: htmlWithFooter,
-          text: ensureLegalTextFooter(send.text_body, { unsubscribeUrl: '{{unsubscribe_url}}' }) || undefined,
+          text: ensureLegalTextFooter(bodyText, { unsubscribeUrl: '{{unsubscribe_url}}' }) || undefined,
           replyTo: send.reply_to,
           categories: ['newsletter', `send_${send.id}`, variant ? `variant_${variant}` : 'variant_none'],
         });
@@ -817,6 +859,28 @@ async function processScheduledSends() {
         logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
         continue;
       }
+      const eventSelection = await validateFlagshipEventSelection(row);
+      if (eventSelection.flagship) {
+        const now = new Date();
+        const currentTarget = isCurrentFlagshipTarget(row.scheduled_for, now);
+        if (!eventSelection.valid || !currentTarget || !isFlagshipDeliveryWindow(now)) {
+          const reason = !eventSelection.valid
+            ? eventSelection.errors.join(', ')
+            : !currentTarget
+              ? 'scheduled_for is not the current issue Tuesday at 6:00 AM ET'
+              : 'missed the Tuesday 6:00–6:14 AM ET delivery window';
+          logger.error(`[newsletter-scheduler] flagship send ${row.id} blocked: ${reason}`);
+          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
+            status: 'draft',
+            scheduled_for: null,
+            updated_at: new Date(),
+          });
+          if (reverted) {
+            await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+          }
+          continue;
+        }
+      }
       // Validate AI-generated sends (flagship + Pest Insider) before dispatching
       if (requiresClaimValidation(row.newsletter_type)) {
         const recipientCount = Number(
@@ -859,10 +923,7 @@ async function processScheduledSends() {
 /**
  * Advance events_raw.times_featured + last_featured_at and recompute freshness
  * for every event a sent newsletter shipped (the locked send.event_ids). This
- * is what makes the recurring-series anti-repeat gate actually decay for the
- * automated path — previously only a manual admin "feature" click bumped the
- * counter, so an approved-but-never-featured recurring event stayed
- * fresh_series_launch forever and could headline every week.
+ * preserves the feature-history signal used by editorial novelty scoring.
  */
 async function markEventsFeatured(send) {
   let ids = [];
@@ -882,7 +943,7 @@ async function markEventsFeatured(send) {
   for (const id of ids) {
     await db.transaction(async (trx) => {
       const row = await trx('events_raw').where({ id }).forUpdate()
-        .first('id', 'event_type', 'times_featured', 'start_at', 'end_at');
+        .first('id', 'title', 'description', 'event_type', 'recurrence_type', 'times_featured', 'start_at', 'end_at');
       if (!row) return;
       const nextFeatured = (row.times_featured || 0) + 1;
       const { freshness_status, freshness_score } = classifyFreshness({ ...row, times_featured: nextFeatured });

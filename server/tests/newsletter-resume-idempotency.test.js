@@ -695,9 +695,9 @@ describe('markEventsFeatured (PR D)', () => {
     expect(eventsRaw.length).toBe(0);
     expect(updates).toHaveLength(1);
     expect(updates[0].times_featured).toBe(1);
-    // recurring_series at times_featured=1 → still fresh_series_launch, score 90-10
-    expect(updates[0].freshness_status).toBe('fresh_series_launch');
-    expect(updates[0].freshness_score).toBe(80);
+    // Routine recurring series are always stale under the weekend-guide policy.
+    expect(updates[0].freshness_status).toBe('stale_recurring');
+    expect(updates[0].freshness_score).toBe(10);
     expect(updates[0].last_featured_at).toBeInstanceOf(Date);
   });
 
