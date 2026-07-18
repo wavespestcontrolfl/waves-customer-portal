@@ -357,6 +357,32 @@ describe('dispatchWithFallback', () => {
     expect(result.failures[0]).toMatchObject({ provider: PROVIDER.OPENAI, reason: 'empty_text' });
   });
 
+  // Codex 07-18 round 6 (P1): with no caller timeoutMs the chain had NO
+  // shared deadline — a stalled primary sat on the adapter's 10-minute
+  // default before the fallback leg ever started. Default chains now run
+  // under DEFAULT_FALLBACK_BUDGET_MS split across remaining legs (primary
+  // aborts at its share, fallback keeps the rest); explicit caller budgets
+  // keep their original full-remainder semantics.
+  test('no caller timeoutMs → default budget bounds both legs (primary cannot starve fallback)', async () => {
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout');
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 529 });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+    }, { text: 'write', jsonMode: false });
+    expect(result).toMatchObject({ ok: true, provider: PROVIDER.ANTHROPIC, fallbackUsed: true });
+    // OpenAI leg aborted at its per-leg share (~half of 240s), not 10 minutes
+    const openAiLegMs = timeoutSpy.mock.calls[0][0];
+    expect(openAiLegMs).toBeGreaterThan(60000);
+    expect(openAiLegMs).toBeLessThanOrEqual(120000);
+    // Anthropic leg runs budgeted: bounded timeout + SDK retries disabled
+    const anthropicOpts = mockAnthropicCreate.mock.calls.at(-1)[1];
+    expect(anthropicOpts).toMatchObject({ maxRetries: 0 });
+    expect(anthropicOpts.timeout).toBeGreaterThan(0);
+    expect(anthropicOpts.timeout).toBeLessThanOrEqual(240000);
+  });
+
   test('shares one timeout budget across primary and fallback', async () => {
     jest.spyOn(Date, 'now')
       .mockReturnValueOnce(1000)

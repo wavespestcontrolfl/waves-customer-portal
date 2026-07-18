@@ -33,6 +33,11 @@ const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 // connection and then stalls can never hang forever — it aborts and the
 // dispatcher moves to the backup provider.
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+// Total wall-clock budget for a dispatchWithFallback chain when the caller
+// supplies no timeoutMs — bounds user-facing lanes (reports, review replies,
+// SMS drafts) well under the single-adapter 10-minute default while leaving
+// room for both legs of long generations.
+const DEFAULT_FALLBACK_BUDGET_MS = 4 * 60 * 1000;
 
 // Reasoning-safe floor for GPT-5-line Responses requests. OpenAI bills
 // reasoning tokens against max_output_tokens, so a tiny caller cap (e.g. the
@@ -291,21 +296,25 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
   }
 
   const failures = [];
-  const timeoutBudgetMs = Number.isFinite(payload.timeoutMs) && payload.timeoutMs > 0
-    ? payload.timeoutMs
-    : null;
-  const deadline = timeoutBudgetMs === null ? null : Date.now() + timeoutBudgetMs;
+  // Every chain runs under a shared wall-clock deadline. Callers with an
+  // explicit timeoutMs keep their original semantics (each leg gets the full
+  // remainder — fact-check's hard 60s ceiling). Callers WITHOUT one get
+  // DEFAULT_FALLBACK_BUDGET_MS, split evenly across the remaining legs so a
+  // stalled primary aborts at its share and cannot starve the fallback —
+  // without this, a hung leg sat on the adapter's 10-minute default before
+  // failover ever started, far beyond user-facing request windows.
+  const explicitBudget = Number.isFinite(payload.timeoutMs) && payload.timeoutMs > 0;
+  const timeoutBudgetMs = explicitBudget ? payload.timeoutMs : DEFAULT_FALLBACK_BUDGET_MS;
+  const deadline = Date.now() + timeoutBudgetMs;
   for (let index = 0; index < routes.length; index += 1) {
     const route = routes[index];
-    let routePayload = payload;
-    if (deadline !== null) {
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) {
-        failures.push({ provider: route.provider, model: route.model, reason: 'timeout_budget_exhausted' });
-        break;
-      }
-      routePayload = { ...payload, timeoutMs: remainingMs };
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      failures.push({ provider: route.provider, model: route.model, reason: 'timeout_budget_exhausted' });
+      break;
     }
+    const legMs = explicitBudget ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
+    const routePayload = { ...payload, timeoutMs: legMs };
     let result;
     try {
       result = await dispatch(route, routePayload);
