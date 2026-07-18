@@ -76,21 +76,42 @@ function parseLooseJson(text) {
   return parseRepairedJson(candidate);
 }
 
-// Mechanical repair for the two syntax slips models actually produce, ported
-// from the pre-failover newsletter drafter (which repaired before failing):
+// Mechanical repair for the syntax slips models actually produce, ported from
+// the pre-failover newsletter drafter (which repaired before failing):
 // trailing commas before a closing bracket, and raw control characters inside
-// string literals. \n / \r / \t are preserved — they legitimately appear as
-// formatting BETWEEN tokens, where escaping them would corrupt valid JSON.
-// Returns the parsed value or null; never throws. Living here (not in the
-// newsletter) means every dispatchWithFallback lane recovers repairable
-// output instead of burning the leg as empty_json.
+// string literals — multiline string fields (newsletter htmlBody/textBody)
+// arrive with literal line breaks the model forgot to escape, which strict
+// JSON.parse rejects. The walk tracks string boundaries (honoring backslash
+// escapes), so control characters INSIDE a string are escaped (\n / \r / \t /
+// \uXXXX) while the same characters BETWEEN tokens — legitimate JSON
+// formatting — pass through untouched. Returns the parsed value or null;
+// never throws. Living here (not in the newsletter) means every
+// dispatchWithFallback lane recovers repairable output instead of burning the
+// leg as empty_json.
 function parseRepairedJson(raw) {
-  let fixed = String(raw).replace(/,\s*([\]}])/g, '$1'); // trailing commas
-  fixed = fixed.replace(/[\x00-\x1F\x7F]/g, (ch) => ( // unescaped control chars
-    ch === '\n' || ch === '\r' || ch === '\t'
-      ? ch
-      : `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
-  ));
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (const ch of String(raw)) {
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+      continue;
+    }
+    if (escaped) { out += ch; escaped = false; continue; }
+    if (ch === '\\') { out += ch; escaped = true; continue; }
+    if (ch === '"') { inString = false; out += ch; continue; }
+    const code = ch.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) {
+      out += ch === '\n' ? '\\n'
+        : ch === '\r' ? '\\r'
+          : ch === '\t' ? '\\t'
+            : `\\u${code.toString(16).padStart(4, '0')}`;
+      continue;
+    }
+    out += ch;
+  }
+  const fixed = out.replace(/,\s*([\]}])/g, '$1'); // trailing commas between tokens
   try { return JSON.parse(fixed); } catch { return null; }
 }
 
@@ -109,18 +130,22 @@ function providerErrorReason(provider, err) {
 }
 
 /**
- * OpenAI Responses API. System is prepended into the user text (the proven #1834
- * pattern — no separate system role). jsonMode parses the reply via parseLooseJson.
+ * OpenAI Responses API. The system prompt rides the Responses `instructions`
+ * channel (system/developer priority) — never concatenated into the user
+ * message — so on fallback legs carrying user-controlled payloads (inbound
+ * customer SMS/email bodies) customer text cannot claim the same instruction
+ * priority as voice/safety rules. This mirrors callAnthropic's real `system`
+ * field. jsonMode parses the reply via parseLooseJson.
  */
 async function callOpenAI({ model, system, text, images = [], jsonMode = true, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low' } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
   try {
-    const promptText = system ? `${system}\n\n${text || ''}` : (text || '');
-    const content = [{ type: 'input_text', text: promptText }, ...images.map(toOpenAIImage)];
+    const content = [{ type: 'input_text', text: text || '' }, ...images.map(toOpenAIImage)];
     // store:false on EVERY request through this adapter — the Responses API
     // retains application state by default, and these lanes carry customer PII
     // (inbound email sender/subject/body, call transcripts, names/addresses).
     const body = { model, input: [{ role: 'user', content }], store: false };
+    if (system) body.instructions = system;
     // Gate reasoning by cap — see OPENAI_REASONING_FLOOR_TOKENS. Big lanes
     // keep the caller's cap and the standard effort (default 'low') exactly
     // as before; tiny structured lanes drop to minimal effort with a widened

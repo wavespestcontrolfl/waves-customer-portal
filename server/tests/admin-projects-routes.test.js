@@ -787,6 +787,75 @@ describe('admin projects routes', () => {
     delete process.env.ANTHROPIC_API_KEY;
   });
 
+  // Codex 07-18: /wdo-intelligence runs on a two-provider TEXT_POLICIES lane,
+  // so the old Anthropic-only guard returned 400 "AI not configured" exactly
+  // when the OpenAI failover leg should have carried the request.
+  test('wdo intelligence 400s only when NEITHER provider key is configured', async () => {
+    const savedOpenAI = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ property_address: '100 Test St, Bradenton, FL 34202' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(400);
+        expect(body.error).toBe('AI not configured');
+      });
+    } finally {
+      if (savedOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = savedOpenAI;
+    }
+  });
+
+  test('wdo intelligence serves from the OpenAI leg when only OPENAI_API_KEY is configured', async () => {
+    const savedOpenAI = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'openai-test';
+    lookupPropertyFromAITrio.mockResolvedValue(null);
+    const realFetch = global.fetch;
+    // The route harness itself talks over fetch, so only intercept the OpenAI
+    // Responses call; everything else (the local test server) passes through.
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation((url, opts) => {
+      if (String(url).includes('api.openai.com')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            output_text: JSON.stringify({
+              suggestedFindings: {
+                inspection_scope: 'Visible and readily accessible interior areas, garage, and exterior perimeter.',
+              },
+              confidence: 'medium',
+              reviewNotes: ['Verify detached structures in the field.'],
+            }),
+          }),
+        });
+      }
+      return realFetch(url, opts);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects/wdo-intelligence`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ property_address: '100 Test St, Bradenton, FL 34202' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.suggestedFindings.inspection_scope).toContain('Visible and readily accessible');
+        expect(body.confidence).toBe('medium');
+      });
+      // The Anthropic leg had no key: it must fail closed, not be called.
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      if (savedOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = savedOpenAI;
+    }
+  });
+
   test('wdo intelligence blanks unsupported construction suggestions without supporting facts', async () => {
     process.env.ANTHROPIC_API_KEY = 'test-key';
     lookupPropertyFromAITrio.mockResolvedValue({

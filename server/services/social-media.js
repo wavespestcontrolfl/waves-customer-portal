@@ -617,8 +617,11 @@ Article summary: ${safeDesc}`,
 
   const prompt = prompts[platform] || prompts.facebook;
 
-  // Final brand-voice post copy: Sonnet first, OpenAI Terra backup.
-  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+  // Final public post copy is VOICE-owned customer-facing brand copy
+  // (models.js registry): the customerCopy policy — MODEL_VOICE first, OpenAI
+  // Terra backup — never the content-drafting lane, so a WORKHORSE
+  // tune/canary can't silently move live captions off the brand voice.
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
     text: prompt,
     jsonMode: false,
     maxTokens: 500,
@@ -694,8 +697,10 @@ Write a short professional LinkedIn post for a ${safeService} campaign in ${safe
 ${grounding}`,
   };
 
-  // Final brand-voice campaign copy: Sonnet first, OpenAI Terra backup.
-  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+  // Final public campaign copy is VOICE-owned customer-facing brand copy
+  // (models.js registry): the customerCopy policy — MODEL_VOICE first, OpenAI
+  // Terra backup — same lane as the blog-share path above.
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
     text: prompts[platform] || prompts.facebook,
     jsonMode: false,
     maxTokens: 600,

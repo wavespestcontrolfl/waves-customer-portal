@@ -1696,7 +1696,13 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), async (req, res, next) => {
   try {
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+    // Two-provider policy (visionAnalysis / contentDraft): either configured
+    // provider can serve this request, so only bail when NEITHER key exists —
+    // an Anthropic-only guard would 400 exactly when the OpenAI failover leg
+    // should be carrying the lane.
+    if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) {
+      return res.status(400).json({ error: 'AI not configured' });
+    }
 
     const customerId = req.body.customer_id || null;
     const projectId = req.body.project_id || null;

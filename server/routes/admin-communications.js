@@ -1271,10 +1271,15 @@ router.post('/rewrite-sms', async (req, res) => {
       recentMessages: req.body?.recentMessages,
     });
 
-    // Tone rewrite: Claude Sonnet first, OpenAI Terra second. Blank output is
-    // rejected so a content-filtered success still reaches the other provider.
+    // Tone rewrite: the dedicated smsToneRewrite registry route (Claude Sonnet
+    // via MODEL_SMS_SONNET — the same model/override the save-the-sale draft
+    // lane and its canary monitor share), with OpenAI Terra as the
+    // cross-provider backup. Dispatching MODEL_VOICE here instead would
+    // silently detach rewrites from the SMS override/canary contract whenever
+    // the two env vars diverge. Blank output is rejected so a content-filtered
+    // success still reaches the other provider.
     const routed = await require('../services/llm/call').dispatchWithFallback(
-      MODELS.TEXT_POLICIES.customerCopy,
+      { primary: MODELS.ROUTES.smsToneRewrite, fallback: MODELS.TEXT_POLICIES.customerCopy.fallback },
       { text: rewritePrompt, jsonMode: false, maxTokens: 500 },
       { validate: (result) => (String(result.text || '').trim() ? null : 'empty_response') },
     );
