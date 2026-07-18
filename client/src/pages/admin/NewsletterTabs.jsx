@@ -834,6 +834,11 @@ export function ComposeView({
     // this, the next save would mislabel new content with its type (e.g.
     // 'reengagement'), skipping claim validation and the public archive.
     setLoadedNewsletterType(null);
+    // Reset the audience too: a segment hydrated from the previous draft
+    // (e.g. the win-back's reengagement_due tag) must not silently carry
+    // into the NEXT campaign's POST and shrink its audience.
+    applySegmentFromFilter(null);
+    segmentDirtyRef.current = false;
   };
 
   const handleAiDraft = async ({

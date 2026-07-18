@@ -512,6 +512,20 @@ router.patch('/sends/:id', async (req, res, next) => {
       });
     }
 
+    // The win-back's audience belongs to the sunset lane: any saved segment
+    // MUST keep the reengagement_due tag, or a segment edit (or a client
+    // sending the UI-default null) would broadcast the "we'll stop sending"
+    // note to every active subscriber. Narrowing on top of the tag (region,
+    // customers-only, …) stays allowed.
+    if (segmentFilter !== undefined && send.newsletter_type === 'reengagement') {
+      const tags = Array.isArray(segmentFilter?.tags) ? segmentFilter.tags : [];
+      if (!tags.includes('reengagement_due')) {
+        return res.status(400).json({
+          error: "A re-engagement newsletter's audience must keep the 'reengagement_due' tag — the sunset lane targets exactly the flagged cohort. Narrow on top of the tag instead of replacing it.",
+        });
+      }
+    }
+
     // Validate from_email only when the caller is changing it. Skipping
     // validation on PATCHes that don't touch the field keeps existing
     // drafts editable even if the allowlist contracts.

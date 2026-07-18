@@ -6,6 +6,7 @@
  */
 
 const db = require('../models/db');
+const { REENGAGEMENT_TAG } = require('./newsletter-sunset');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -113,6 +114,15 @@ async function subscribeOrResubscribe({
     }
 
     if (existing.status === 'unsubscribed' || existing.status === 'inactive') {
+      // A sunset-suppressed row only comes back through a DELIBERATE act:
+      // the subscriber's own double-opt-in (requireConfirmation callers) or
+      // the win-back quiz confirm (newsletter-sunset.js). Trusted bulk flows
+      // (customer import, quote wizard, call pipeline) pass
+      // requireConfirmation:false and must NOT resurrect suppressed readers
+      // wholesale — skip, leaving the row untouched.
+      if (existing.status === 'inactive' && !requireConfirmation) {
+        return { subscriber: existing, action: 'skipped_inactive' };
+      }
       const updates = {
         source,
         first_name: firstName !== null ? firstName : existing.first_name,
@@ -126,10 +136,14 @@ async function subscribeOrResubscribe({
       // can move inactive → unsubscribed (old footer/List-Unsubscribe link)
       // before resubscribing, and stale markers would let the next sunset run
       // pair an old delivered win-back with the fresh subscription and
-      // suppress it immediately instead of starting a clean episode.
+      // suppress it immediately instead of starting a clean episode. The
+      // reengagement_due tag goes too: a flagged reader who unsubscribed
+      // before sunset keeps it, and a stale tag would both target the fresh
+      // subscription with the next win-back and block clean re-flagging.
       updates.deactivated_at = null;
       updates.deactivated_reason = null;
       updates.reengagement_flagged_at = null;
+      updates.tags = db.raw("COALESCE(tags, '[]'::jsonb) - ?", [REENGAGEMENT_TAG]);
       if (requireConfirmation) {
         updates.status = 'pending';
         updates.confirmation_sent_at = new Date();

@@ -76,7 +76,10 @@ function safetyValveTripped(candidateCount, activeCount) {
 // literal strings 'flagged_at' / 'deactivated_at' to compare against the
 // subscriber's OWN reengagement_flagged_at / deactivated_at column.
 // opts.signals: 'all' (default — opens/clicks/quiz, the inactivity clock) or
-// 'quiz' (quiz_answered_at only — deliberate consent, scanner-proof).
+// 'quiz' (a stay-subscribed-v1 quiz confirm ONLY — the deliberate,
+// scanner-proof consent the win-back copy promises; answering some other
+// quiz from an old issue is engagement for the clock, but it is not the
+// promised "keep me on the list" action).
 const AFTER_COLUMNS = {
   flagged_at: 'newsletter_subscribers.reengagement_flagged_at',
   deactivated_at: 'newsletter_subscribers.deactivated_at',
@@ -96,6 +99,7 @@ function engagementSubquery(after, { signals = 'all' } = {}) {
           else this.orWhere(`eng.${c}`, '>', after);
         }
       });
+    if (signals === 'quiz') this.where('eng.quiz_id', WINBACK_QUIZ_ID);
   };
 }
 
@@ -289,8 +293,13 @@ async function ensureWinbackDraft(cohort) {
   return { created: true, openSendId: row?.id ?? row };
 }
 
-// Phase D candidates — flagged, win-back DELIVERED (not just accepted) after
-// the flag date and ≥GRACE_DAYS ago, still zero engagement since flagging.
+// Phase D candidates — flagged, win-back SENT for this flag episode with the
+// grace window fully elapsed, still no stay-subscribed confirm. The grace
+// clock runs from delivered_at when the provider confirmed delivery, and
+// falls back to sent_at when it never did (hard bounce, dropped, webhook
+// gap) — without the fallback an accepted-but-never-delivered win-back
+// left the subscriber stranded forever: never suppressed, never re-sent
+// (cohortAwaitingWinback keys on sent_at), alert resolved with no outcome.
 // SELECT and UPDATE are split so the safety valve can weigh this cohort
 // BEFORE any status flips.
 async function findSunsetCandidates(now) {
@@ -304,9 +313,12 @@ async function findSunsetCandidates(now) {
         .join('newsletter_sends as ws', 'ws.id', 'wd.send_id')
         .whereRaw('wd.subscriber_id = newsletter_subscribers.id')
         .where('ws.newsletter_type', REENGAGEMENT_TYPE)
-        .whereNotNull('wd.delivered_at')
-        .whereRaw('wd.delivered_at >= newsletter_subscribers.reengagement_flagged_at')
-        .where('wd.delivered_at', '<=', graceCutoff);
+        .whereNotNull('wd.sent_at')
+        .whereRaw('wd.sent_at >= newsletter_subscribers.reengagement_flagged_at')
+        .where('wd.sent_at', '<=', graceCutoff)
+        .where(function () {
+          this.whereNull('wd.delivered_at').orWhere('wd.delivered_at', '<=', graceCutoff);
+        });
     })
     // Only a deliberate quiz confirm exempts from suppression — see
     // recoverEngagedFlagged (scanner opens/clicks are not a response).
