@@ -47,15 +47,14 @@ ${transcript}
 
 Return ONLY the JSON, no markdown formatting.`,
   });
-  const text = response.text || '';
-  const result = response.ok && response.json ? response.json : {
-      overall: 'neutral',
-      customerSatisfaction: 3,
-      keyMoments: [],
-      escalationRisk: false,
-      summary: 'Unable to parse sentiment analysis.',
-      raw: text,
-  };
+  if (!response.ok || !response.json) {
+    // An analysis outage must stay visible as an outage: a fabricated
+    // neutral/non-escalation result would be persisted below and make the
+    // call read as genuinely low-risk. Pre-failover behavior (an unavailable
+    // client threw before any metadata write) is preserved.
+    throw new Error(`Sentiment analysis unavailable: ${response.reason || 'invalid JSON from providers'}`);
+  }
+  const result = response.json;
 
   // Store sentiment result in call_log metadata
   try {

@@ -66,14 +66,19 @@ function parseLooseJson(text) {
   try { return JSON.parse(clean); } catch { /* tolerate a short preamble */ }
   const objectStart = clean.indexOf('{');
   const arrayStart = clean.indexOf('[');
-  const starts = [objectStart, arrayStart].filter((index) => index >= 0);
-  if (!starts.length) return null;
-  const start = Math.min(...starts);
-  const end = clean[start] === '[' ? clean.lastIndexOf(']') : clean.lastIndexOf('}');
-  if (end <= start) return null;
-  const candidate = clean.slice(start, end + 1);
-  try { return JSON.parse(candidate); } catch { /* fall through to mechanical repair */ }
-  return parseRepairedJson(candidate);
+  // Earliest start first (previous behavior), but a bracketed PREAMBLE before
+  // the payload ("Note [draft]: {...}") must not eat the real value — when
+  // the first candidate fails, the other bracket kind gets its own try.
+  const starts = [objectStart, arrayStart].filter((index) => index >= 0).sort((a, b) => a - b);
+  for (const start of starts) {
+    const end = clean[start] === '[' ? clean.lastIndexOf(']') : clean.lastIndexOf('}');
+    if (end <= start) continue;
+    const candidate = clean.slice(start, end + 1);
+    try { return JSON.parse(candidate); } catch { /* fall through to mechanical repair */ }
+    const repaired = parseRepairedJson(candidate);
+    if (repaired !== null) return repaired;
+  }
+  return null;
 }
 
 // Mechanical repair for the syntax slips models actually produce, ported from

@@ -6785,7 +6785,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           retryable: true,
         });
       }
-      reportCopyCacheSet(cacheKey, report);
+      // Last-resort copy is deliberately NOT cached: a transient
+      // double-provider miss must not pin the deterministic fallback for the
+      // cache TTL — the next Generate with unchanged inputs retries the
+      // providers after recovery.
       logger.warn('[generate-report] both AI providers missed; returned deterministic report copy', {
         failures: generated.failures,
       });

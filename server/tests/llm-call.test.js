@@ -37,6 +37,16 @@ describe('llm/call parsers', () => {
   // control characters before failing; the shared parser must do the same so
   // repairable output never burns a provider leg as empty_json (and the
   // newsletter path never 500s where it used to produce a draft).
+  // Codex 07-18 round 5: a bracketed PREAMBLE before the payload must not eat
+  // the real value. The earlier-start candidate is still tried first, but on
+  // failure the other bracket kind gets its own parse+repair attempt.
+  test('parseLooseJson recovers the object after a bracketed preamble (and vice versa)', () => {
+    expect(parseLooseJson('Note [draft]: {"ok":true}')).toEqual({ ok: true });
+    expect(parseLooseJson('Status {pending}: [1, 2]')).toEqual([1, 2]);
+    // both-bracket noise with no parseable payload still returns null
+    expect(parseLooseJson('Note [draft] about {things}')).toBeNull();
+  });
+
   test('parseLooseJson mechanically repairs trailing commas and control chars', () => {
     expect(parseLooseJson('{"a": 1, "b": [1, 2,],}')).toEqual({ a: 1, b: [1, 2] });
     expect(parseLooseJson('sure: {"a":1,} done')).toEqual({ a: 1 });
