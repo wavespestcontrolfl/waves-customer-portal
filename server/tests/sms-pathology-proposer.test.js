@@ -15,6 +15,7 @@ const { proposePatches, reviewPatchProposal } = require('../services/sms-patholo
 function makeProposerDb({ cells = [], entries = [], priorPending = null } = {}) {
   const inserts = [];
   const updates = [];
+  const kvWheres = [];
   const order = []; // interleaving record: proposal insert vs supersede update
   const dbi = (table) => {
     const tableKey = typeof table === 'object' ? Object.values(table)[0] : table;
@@ -24,10 +25,12 @@ function makeProposerDb({ cells = [], entries = [], priorPending = null } = {}) 
       if (name === 'update') b._update = args[0];
       if (name === 'first') b._first = true;
       if (name === 'where' && typeof args[0] === 'object') b._wheres.push(args[0]);
+      if (name === 'where' && typeof args[0] === 'string' && args.length === 3) kvWheres.push(args);
+      if (name === 'modify' && typeof args[0] === 'function') args[0](b); // run the group so inner filters record
       return b;
     };
     for (const m of ['leftJoin', 'whereRaw', 'groupBy', 'select', 'count', 'orderBy', 'where', 'limit',
-      'insert', 'returning', 'update', 'first', 'max', 'as']) b[m] = rec(m);
+      'insert', 'returning', 'update', 'first', 'max', 'as', 'modify']) b[m] = rec(m);
     b.then = (resolve, reject) => Promise.resolve().then(() => {
       if (b._insert) {
         inserts.push(b._insert);
@@ -63,6 +66,7 @@ function makeProposerDb({ cells = [], entries = [], priorPending = null } = {}) 
   };
   dbi.inserts = inserts;
   dbi.updates = updates;
+  dbi.kvWheres = kvWheres;
   dbi.order = order;
   dbi.transactionCount = () => transactions;
   return dbi;
@@ -104,6 +108,17 @@ describe('proposePatches — threshold + cap + ordering', () => {
     expect(JSON.parse(dbi.inserts[0].evidence_ids)).toContain('e0');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][1]).toMatch(/facts_block_gap/);
+  });
+
+  test('repeat proposals fetch only evidence classified after the last proposal (fresh cohort)', async () => {
+    const dbi = makeProposerDb({
+      cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '6', last_proposed_at: '2026-07-11T00:00:00Z' }],
+      entries: entryRows,
+    });
+    await proposePatches({ dbi, anthropicClient: {} });
+    const cutoff = dbi.kvWheres.find(([col, op]) => col === 'classified_at' && op === '>');
+    expect(cutoff).toBeTruthy();
+    expect(cutoff[2]).toBe('2026-07-11T00:00:00Z');
   });
 
   test('at most maxCells proposals per run, highest-evidence cells first', async () => {

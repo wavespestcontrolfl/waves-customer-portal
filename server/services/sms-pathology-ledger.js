@@ -193,12 +193,15 @@ async function classifyPathologies({ batchLimit = CLASSIFY_BATCH, dbi = db, anth
   for (const row of rows) {
     try {
       const verifierMissed = verifierMissedFromDraft(row.intended_actions);
-      const resp = await client.messages.create({
-        model: MODELS.FAST,
-        max_tokens: 400,
-        messages: [{
-          role: 'user',
-          content: buildClassifierPrompt({
+      // Cross-provider fast-structured lane (registry policy, Codex P2): a
+      // single-provider outage must not leave the night's unsafe judgments
+      // unledgered — the dispatcher walks OpenAI-fast then Claude-fast, and
+      // rejects unparseable output so the fallback leg gets its shot.
+      const { dispatchWithFallback } = require('./llm/call');
+      const routed = await dispatchWithFallback(
+        MODELS.TEXT_POLICIES.fastStructured,
+        {
+          text: buildClassifierPrompt({
             notes: row.notes,
             inbound: row.inbound_message,
             draft: row.draft_response,
@@ -206,13 +209,18 @@ async function classifyPathologies({ batchLimit = CLASSIFY_BATCH, dbi = db, anth
             intent: row.intent,
             verifierMissed,
           }),
-        }],
-      });
-      const parsed = parseClassifierResponse(resp?.content?.[0]?.text || '');
-      if (!parsed) {
-        logger.warn(`[pathology] unparseable classification for judgment ${String(row.judgment_id).slice(0, 8)}; retried next run`);
+          jsonMode: false,
+          maxTokens: 400,
+          anthropicClient: client,
+        },
+        { validate: (result) => (parseClassifierResponse(result.text || '') ? null : 'unparseable') },
+      );
+      if (!routed.ok) {
+        logger.warn(`[pathology] classification dispatch failed for judgment ${String(row.judgment_id).slice(0, 8)} (${routed.reason}); retried next run`);
         continue;
       }
+      const parsed = parseClassifierResponse(routed.text);
+      if (!parsed) continue; // validate() makes this unreachable; belt only
       await dbi('sms_pathology_entries')
         .insert({
           evidence_type: 'judgment',
@@ -223,7 +231,7 @@ async function classifyPathologies({ batchLimit = CLASSIFY_BATCH, dbi = db, anth
           prompt_version: row.prompt_version || null,
           verifier_missed: verifierMissed,
           summary: parsed.summary,
-          model: resp?.model || MODELS.FAST,
+          model: routed.model || null,
           schema_version: SCHEMA_VERSION,
         })
         .onConflict(['evidence_type', 'evidence_id'])
@@ -292,6 +300,9 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
     .groupBy('pe.surface', 'pe.failure_mode')
     .select('pe.surface', 'pe.failure_mode')
     .count('* as fresh')
+    // Carried into the evidence fetch below: a repeat proposal must be built
+    // from the entries AFTER the last one, not the same reviewed pile.
+    .select(dbi.raw('MAX(pp.last_proposed_at) as last_proposed_at'))
     .orderBy('fresh', 'desc');
 
   const eligible = cells.filter((c) => Number(c.fresh) >= minEvidence).slice(0, maxCells);
@@ -311,8 +322,16 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
   let proposed = 0;
   for (const cell of eligible) {
     try {
+      // FRESH entries only (Codex P2): the eligibility count above is scoped
+      // to after the cell's last proposal — the evidence the LLM sees (and
+      // the ids recorded on the card) must be the same cohort, or a repeat
+      // proposal would be dominated by already-reviewed failures and
+      // reproduce the stale patch the threshold exists to prevent.
       const entries = await dbi('sms_pathology_entries')
         .where({ surface: cell.surface, failure_mode: cell.failure_mode })
+        .modify((q) => {
+          if (cell.last_proposed_at) q.where('classified_at', '>', cell.last_proposed_at);
+        })
         .orderBy('classified_at', 'desc')
         .limit(25)
         .select('intent', 'prompt_version', 'verifier_missed', 'summary', 'id');
@@ -363,7 +382,9 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
           'agents',
           `Patch proposal: ${cell.surface} / ${cell.failure_mode}`,
           `${cell.fresh} recent failures share this pathology. A concrete harness patch is parked for review in Agents → Shadow Drafts. Nothing changes until you act on it.`,
-          { link: '/admin/agents' }
+          // ?tab=shadow: the bell must land the operator ON the proposal —
+          // bare /admin/agents defaults to the Overview tab.
+          { link: '/admin/agents?tab=shadow' }
         );
       } catch (err) {
         logger.warn(`[pathology] bell notification failed: ${err.message}`);
@@ -387,7 +408,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
  */
 async function getPathologySummary({ dbi = db } = {}) {
   const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
-  const [cells, recent, proposals] = await Promise.all([
+  const [cells, recent, pendingProposals, acceptedProposals] = await Promise.all([
     dbi('sms_pathology_entries')
       .groupBy('surface', 'failure_mode')
       .select('surface', 'failure_mode')
@@ -398,8 +419,16 @@ async function getPathologySummary({ dbi = db } = {}) {
       .orderBy('classified_at', 'desc')
       .limit(12)
       .select('surface', 'failure_mode', 'intent', 'prompt_version', 'verifier_missed', 'summary', 'classified_at'),
+    // PENDING cards are fetched unbounded and listed first (Codex P2): a
+    // still-actionable card must never be pushed out of the response by a
+    // pile of newer accepted history — an invisible pending proposal is a
+    // parked patch nobody can review.
     dbi('sms_patch_proposals')
-      .whereIn('status', ['pending', 'accepted'])
+      .where({ status: 'pending' })
+      .orderBy('created_at', 'desc')
+      .select('id', 'surface', 'failure_mode', 'evidence_count', 'proposal', 'status', 'reviewed_by', 'reviewed_at', 'created_at'),
+    dbi('sms_patch_proposals')
+      .where({ status: 'accepted' })
       .orderBy('created_at', 'desc')
       .limit(10)
       .select('id', 'surface', 'failure_mode', 'evidence_count', 'proposal', 'status', 'reviewed_by', 'reviewed_at', 'created_at'),
@@ -413,7 +442,7 @@ async function getPathologySummary({ dbi = db } = {}) {
       currentVersion: Number(c.current_version) || 0,
     })),
     recent,
-    proposals,
+    proposals: [...pendingProposals, ...acceptedProposals],
   };
 }
 

@@ -197,14 +197,6 @@ const gates = {
   // has to earn each intent.
   smsAutoSend: process.env.GATE_SMS_AUTO_SEND === 'true',
 
-  // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
-  // each draft_unsafe judgment into a fixed (harness surface × failure mode)
-  // cell, and weekly parks a harness-patch PROPOSAL card when a cell
-  // accumulates enough fresh evidence. Proposals never auto-apply — a prompt
-  // change is a human-shipped version bump. No sends, no customer-visible
-  // effect; burns one FAST call per unsafe judgment + ≤2 weekly DEEP calls,
-  // so prod requires explicit opt-in per house pattern.
-  smsPathologyLedger: isProd ? process.env.GATE_SMS_PATHOLOGY_LEDGER === 'true' : true,
 
   // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
   // replies for HISTORICAL inbound SMS that already have a human reply and
@@ -213,6 +205,15 @@ const gates = {
   // history is exhausted. Burns ~2 Anthropic calls per sample, so prod
   // requires explicit opt-in; flip off (or leave — it no-ops) when done.
   shadowBackfill: isProd ? process.env.GATE_SHADOW_BACKFILL === 'true' : true,
+
+  // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
+  // each draft_unsafe judgment into a fixed (harness surface × failure mode)
+  // cell, and weekly parks a harness-patch PROPOSAL card when a cell
+  // accumulates enough fresh evidence. Proposals never auto-apply — a prompt
+  // change is a human-shipped version bump. No sends, no customer-visible
+  // effect; burns one FAST call per unsafe judgment + ≤2 weekly DEEP calls,
+  // so prod requires explicit opt-in per house pattern.
+  smsPathologyLedger: isProd ? process.env.GATE_SMS_PATHOLOGY_LEDGER === 'true' : true,
 
   // AI Blog Writer — generates content via Anthropic API
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,

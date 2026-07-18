@@ -5,6 +5,14 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+// The classifier dispatches through the cross-provider fastStructured policy
+// (OpenAI primary, Claude fallback). Tests script the ANTHROPIC client and
+// rely on the OpenAI leg failing fast on a missing key — pin that state so a
+// developer shell with OPENAI_API_KEY set can't turn these into live calls.
+const priorOpenAiKey = process.env.OPENAI_API_KEY;
+beforeAll(() => { delete process.env.OPENAI_API_KEY; });
+afterAll(() => { if (priorOpenAiKey !== undefined) process.env.OPENAI_API_KEY = priorOpenAiKey; });
+
 const {
   classifyPathologies,
   SURFACES,
