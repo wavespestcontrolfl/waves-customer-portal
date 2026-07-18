@@ -359,6 +359,92 @@ const LAWN_PRICING_V2 = {
   defaultRouteDensity: 'DENSE',
   routeDensityMinutes: { DENSE: 5, NORMAL: 10, LOOSE: 15, SPARSE: 20 },
 };
+// Live server override for the lawn program minimum. The static 0 above is
+// only the DISARMED default — a live DB re-arm (pricing_config
+// lawn_pricing_v2.programMinimumMonthly, the documented no-deploy path) must
+// reach this fallback engine too, or estimates without an enriched property
+// would preview/save below-minimum rows the public route then refuses to
+// accept (codex P1 on #2827). EstimatePage fetches the row on mount and
+// applies it here; on any fetch failure the disarmed default (0) stands.
+export function applyServerLawnPricingConfig(config) {
+  const n = Number(config?.programMinimumMonthly);
+  LAWN_PRICING_V2.programMinimumMonthly = Number.isFinite(n) && n > 0 ? n : 0;
+  return LAWN_PRICING_V2.programMinimumMonthly;
+}
+
+// Admin-facing low-margin review notes (owner ruling 2026-07-17: margins are
+// surfaced, never enforced). Reads the engine's report-only signals off a
+// mapped estimate result — the marginWarnings array plus the per-line
+// belowMarginFloor / belowProgramFloor / finalMargin flags on results.pest
+// and results.tsMeta — and returns plain strings for the estimator's
+// Pricing Review Notes panel. Nothing here moves a price; the owner adjusts
+// the line in the estimator if it reads too thin.
+export function collectMarginReviewNotes(E) {
+  if (!E || typeof E !== "object") return [];
+  const notes = [];
+  const pct = (ratio) => {
+    const n = Number(ratio);
+    return Number.isFinite(n) ? `${(Math.round(n * 1000) / 10).toFixed(1)}%` : null;
+  };
+  const money = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? `$${(Math.round(n * 100) / 100).toFixed(2)}` : null;
+  };
+  const SERVICE_LABELS = {
+    pest_control: "Pest Control",
+    lawn_care: "Lawn Care",
+    tree_shrub: "Tree & Shrub",
+    mosquito: "Mosquito Control",
+    termite_bait: "Termite Bait",
+  };
+  const label = (service) => SERVICE_LABELS[service] || service || "Service";
+
+  const warnings = Array.isArray(E.marginWarnings)
+    ? E.marginWarnings
+    : Array.isArray(E.recurring?.marginWarnings)
+      ? E.recurring.marginWarnings
+      : [];
+  for (const w of warnings) {
+    if (!w) continue;
+    if (w.type === "manual_discount_below_margin_floor") {
+      const m = pct(w.margin);
+      const floor = pct(w.marginFloor);
+      notes.push(
+        `${label(w.service)}: manual discount drops the post-discount margin to ${m || "below target"}${floor ? ` (review floor ${floor})` : ""}. Nothing was capped — raise the line if it reads too thin.`,
+      );
+    } else if (w.type === "manual_discount_below_pest_program_floor") {
+      const finalAnn = money(w.finalAnnual);
+      const floorAnn = money(w.programFloorAnnual);
+      notes.push(
+        `${label(w.service)}: manual discount takes the collected annual to ${finalAnn || "below the program-floor reference"}${floorAnn ? ` — under the ${floorAnn} program-floor reference` : ""}.`,
+      );
+    } else if (w.message) {
+      notes.push(String(w.message));
+    }
+  }
+
+  const lineSignals = [
+    { row: E.results?.pest, name: "Pest Control", floorAnn: E.results?.pest?.floorAnn },
+    { row: E.results?.tsMeta, name: "Tree & Shrub", floorAnn: null },
+  ];
+  for (const { row, name, floorAnn } of lineSignals) {
+    if (!row || typeof row !== "object") continue;
+    if (row.belowMarginFloor === true) {
+      const m = pct(row.finalMargin);
+      notes.push(
+        `${name}: post-discount margin${m ? ` ${m}` : ""} is below the margin review floor. Price stands as discounted — adjust the line if needed.`,
+      );
+    }
+    if (row.belowProgramFloor === true) {
+      const floor = money(floorAnn);
+      notes.push(
+        `${name}: discounted annual is below the program-floor reference for its cadence${floor ? ` (${floor}/yr)` : ""}.`,
+      );
+    }
+  }
+  return notes;
+}
+
 // Material budgets now live in @waves/lawn-cost-floor (lawnMaterialBudget),
 // shared with the server so the table can't drift between preview and bill.
 const LAWN_PRICES = {

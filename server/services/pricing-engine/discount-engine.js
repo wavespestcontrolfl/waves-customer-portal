@@ -174,16 +174,25 @@ function applyDiscount(basePrice, discountResult, priceFloor = 0) {
 //     margin = (annual - allInAnnualCost) / annual
 // where allInAnnualCost is direct cost + admin overhead.
 //
-// ENFORCEMENT REMOVED (owner ruling 2026-07-17: "forget all floors").
-// Historically this guard lifted WaveGuard-discounted totals back to the
-// 35% margin floor, and pest additionally to its post-discount program
-// floor (PEST.floor × freqMult × visits, owner decision 2026-07-09). Since
-// the ruling, discounted prices go out exactly as computed — margins are
-// SURFACED (finalMargin here, marginFloorOk flags on quotes, the manual-
-// discount warning in estimate-engine) and the owner adjusts prices in the
-// estimator; nothing moves a price automatically. The pest floor's DB kill
-// switch (pest_base.enforce_floor_post_discount) is set false by migration
-// 20260717120000 and PEST.enforceFloorPostDiscount defaults false.
+// MARGIN-FLOOR ENFORCEMENT REMOVED (owner ruling 2026-07-17: "forget all
+// floors"). Historically this guard lifted WaveGuard-discounted totals back
+// to the 35% margin floor. Since the ruling, discounted prices go out
+// exactly as computed — margins are SURFACED (finalMargin here,
+// belowMarginFloor/belowProgramFloor flags on quotes, the manual-discount
+// warnings in estimate-engine) and the owner adjusts prices in the
+// estimator; nothing moves a price automatically. The margin floor has NO
+// re-arm key: it stays report-only.
+//
+// PEST PROGRAM FLOOR (PEST.floor × freqMult × visits, owner decision
+// 2026-07-09) is DISARMED by default — migration 20260717120000 sets
+// pest_base.enforce_floor_post_discount=false and the in-code default is
+// false. The floor REFERENCE is always computed so the belowProgramFloor
+// signal reports the comparison either way (reporting is independent of
+// enforcement). When an operator re-arms the DB flag, ENFORCEMENT comes
+// back in full and end to end: this guard lifts the saved engine totals,
+// service-pricing stamps floorPa/floorAnn tier metadata, and
+// estimate-public clamps the public/accept reprice to the same floor — so
+// saved, viewed, and accepted amounts always agree (codex P1 on #2827).
 
 // Program-floor amounts for a pest cadence. The per-visit basis is rounded
 // FIRST — matching pricePestControl's perApp = round(basePrice × freqMult)
@@ -217,14 +226,13 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   } else if (service === 'pest_control') {
     const annualCost = Number(serviceQuote.costs?.annualCost);
     if (Number.isFinite(annualCost)) annualCostAllIn = annualCost;
-    // Post-discount program floor: the collected pest annual may not drop
-    // below PEST.floor × cadence multiplier × visits — the same per-visit
-    // floor the list price honors, scaled to the quote's cadence. Both the
-    // floor value and the kill switch (enforce_floor_post_discount: false)
-    // are DB-tunable on the pricing_config pest_base row.
-    if (PEST.enforceFloorPostDiscount) {
-      programFloorAnnual = pestProgramFloorAnnual(serviceQuote.freqMult, serviceQuote.visitsPerYear);
-    }
+    // Post-discount program floor REFERENCE: PEST.floor × cadence multiplier
+    // × visits — the same per-visit floor the list price honors, scaled to
+    // the quote's cadence. Computed UNCONDITIONALLY so the belowProgramFloor
+    // signal reports the comparison even while enforcement is disarmed
+    // (codex P2 on #2827); only the lift below is gated on the DB kill
+    // switch (pricing_config pest_base.enforce_floor_post_discount).
+    programFloorAnnual = pestProgramFloorAnnual(serviceQuote.freqMult, serviceQuote.visitsPerYear);
   } else {
     return {
       finalAnnual: roundMoney(finalAnnual),
@@ -251,6 +259,38 @@ function applyMarginGuard(serviceQuote, finalAnnual, requestedDiscountPct = 0) {
   const finalMargin = hasCostBasis
     ? (candidateAnnual - annualCostAllIn) / candidateAnnual
     : null;
+
+  // Pest program floor — ENFORCED only when the DB flag is re-armed, so the
+  // saved engine total matches what estimate-public clamps the public/accept
+  // reprice to off the stamped floor metadata (never above the original
+  // undiscounted price; a legacy below-floor base stays merely undiscounted).
+  const needsFloorLift =
+    PEST.enforceFloorPostDiscount &&
+    programFloorAnnual !== null &&
+    candidateAnnual < programFloorAnnual;
+
+  if (needsFloorLift) {
+    const lifted = Math.max(candidateAnnual, programFloorAnnual);
+    const guardedAnnual = ceilMoney(hasOriginal ? Math.min(lifted, originalAnnual) : lifted);
+    const guardedMargin = hasCostBasis
+      ? (guardedAnnual - annualCostAllIn) / guardedAnnual
+      : null;
+    const actualDiscountPct = hasOriginal ? 1 - guardedAnnual / originalAnnual : 0;
+    return {
+      finalAnnual: guardedAnnual,
+      finalMargin: guardedMargin === null ? null : roundRatio(guardedMargin),
+      // Margin-floor lift stays retired (no re-arm key) — report-only.
+      marginGuardApplied: false,
+      programFloorApplied: guardedAnnual > candidateAnnual,
+      discountCapped: actualDiscountPct < requestedDiscountPct,
+      belowMarginFloor: hasCostBasis ? guardedMargin < marginFloor : false,
+      belowProgramFloor: guardedAnnual < programFloorAnnual,
+      requestedDiscountPct,
+      actualDiscountPct: roundRatio(Math.max(0, actualDiscountPct)),
+      programFloorAnnual,
+    };
+  }
+
   // Report-only since the 2026-07-17 owner ruling: the discounted price
   // stands as computed. belowMarginFloor / belowProgramFloor let callers
   // and the estimator surface "this looks low" without moving the number.

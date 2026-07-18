@@ -1737,8 +1737,10 @@ function generateEstimate(input) {
       // Pest program floor: manual owner discounts stay warn-only (deliberate
       // loss-leader pricing is an owner override), but surface a distinct
       // warning when the pest share of the pool cuts below the post-discount
-      // program floor that caps automatic WaveGuard discounts.
-      if (item.service === 'pest_control' && PEST.enforceFloorPostDiscount) {
+      // program-floor reference. The comparison reports UNCONDITIONALLY —
+      // signals are independent of the enforcement kill switch (codex P2 on
+      // #2827); only the WaveGuard lift in applyMarginGuard re-arms with it.
+      if (item.service === 'pest_control') {
         const floorAnnual = pestProgramFloorAnnual(item.freqMult, item.visitsPerYear);
         if (floorAnnual !== null && lineFinalAnnual < floorAnnual) {
           item.manualPestFloorWarning = true;

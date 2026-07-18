@@ -43,6 +43,7 @@ describe('pricing engine DB bridge', () => {
   const originalPestFloor = constants.PEST.floor;
   const originalEnforceFloor = constants.PEST.enforceFloorPostDiscount;
   const originalPestAdditionalAdjustments = { ...constants.PEST.additionalAdjustments };
+  const originalLawnProgramMinimum = constants.LAWN_PRICING_V2.programMinimumMonthly;
 
   afterEach(() => {
     constants.PEST.pestInitialRoach = originalInitialRoach;
@@ -81,6 +82,38 @@ describe('pricing engine DB bridge', () => {
       delete constants.PEST.additionalAdjustments[key];
     }
     Object.assign(constants.PEST.additionalAdjustments, originalPestAdditionalAdjustments);
+    constants.LAWN_PRICING_V2.programMinimumMonthly = originalLawnProgramMinimum;
+  });
+
+  test('lawn program minimum: absent key restores the DISARMED 0 on every sync', async () => {
+    // Same mutate-in-place trap as the pest flag (codex P2 on #2827): a
+    // temporary live re-arm of lawn_pricing_v2.programMinimumMonthly must
+    // fall back to the in-code disarmed default (0) as soon as the key —
+    // or the whole row — is removed, without a restart.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'lawn_pricing_v2',
+      data: { programMinimumMonthly: 50 },
+    }]))).resolves.toBe(true);
+    expect(constants.LAWN_PRICING_V2.programMinimumMonthly).toBe(50);
+
+    // Key removed from the row → disarmed default reasserts.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'lawn_pricing_v2',
+      data: { laborRateLoaded: constants.LAWN_PRICING_V2.laborRateLoaded },
+    }]))).resolves.toBe(true);
+    expect(constants.LAWN_PRICING_V2.programMinimumMonthly).toBe(0);
+
+    // Re-armed again, then the whole row removed (unrelated config only).
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'lawn_pricing_v2',
+      data: { programMinimumMonthly: 50 },
+    }]))).resolves.toBe(true);
+    expect(constants.LAWN_PRICING_V2.programMinimumMonthly).toBe(50);
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'global_labor_rate',
+      data: { value: constants.GLOBAL.LABOR_RATE },
+    }]))).resolves.toBe(true);
+    expect(constants.LAWN_PRICING_V2.programMinimumMonthly).toBe(0);
   });
 
   test('program-floor flag: absent key restores the DISARMED default on every sync', async () => {

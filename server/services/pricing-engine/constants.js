@@ -84,9 +84,12 @@ const PEST = {
   // Post-discount program floor DISARMED (owner ruling 2026-07-17: "forget
   // all floors" — margins are surfaced to the owner, who adjusts prices in
   // the estimator; nothing moves a price automatically). The floor value
-  // stays for reporting; the enforcement flag is the designed kill switch
-  // (mirrored to false on the pricing_config pest_base row by migration
-  // 20260717120000). Re-arm: flip the DB flag back to true.
+  // stays as a reference: the belowProgramFloor signal always reports the
+  // comparison, enforcement is the part behind this kill switch (mirrored
+  // to false on the pricing_config pest_base row by migration
+  // 20260717120000). Re-arm: flip the DB flag back to true — that restores
+  // FULL enforcement end to end (discount-engine lift at save,
+  // service-pricing floor-metadata stamping, estimate-public accept clamp).
   enforceFloorPostDiscount: false,
   footprintBrackets: [
     { sqft: 800,  adj: -r(15) },   // Was -r(20). Flattened — old value produced prices below floor.

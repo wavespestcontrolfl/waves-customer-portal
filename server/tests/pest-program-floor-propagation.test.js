@@ -63,6 +63,45 @@ describe('program floor metadata on engine tier rows + legacy mapper', () => {
     expect(mapped.results.pest).toMatchObject({ floorPa: 89, floorAnn: 356, floorMo: 29.67 });
   });
 
+  test('re-armed end to end: engine save total == public accept clamp (codex P1 #2827)', () => {
+    // The documented no-deploy re-arm (pest_base.enforce_floor_post_discount
+    // = true) must behave identically at estimate save and estimate accept.
+    constants.PEST.base = 89;
+    constants.PEST.enforceFloorPostDiscount = true;
+    const est = generateEstimate(platinumBundle());
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    // Save-time enforcement: the engine lifts the Platinum-discounted pest
+    // annual back to the quarterly program floor.
+    expect(pest.programFloorApplied).toBe(true);
+    expect(pest.annualAfterDiscount).toBeCloseTo(356, 2);
+    // The stored payload carries the same floor metadata…
+    const mapped = mapV1ToLegacyShape(est);
+    expect(mapped.results.pest).toMatchObject({ floorAnn: 356 });
+    // …and the public repricer collects exactly the same figure at accept:
+    // discounted monthly + floor lift annualizes to the engine's saved total.
+    const lift = pestFloorMonthlyLift({ result: mapped }, 'Platinum', () => 0.20);
+    const collectedAnnual = (Number(mapped.results.pest.mo) * 0.8 + lift) * 12;
+    expect(collectedAnnual).toBeCloseTo(pest.annualAfterDiscount, 6);
+  });
+
+  test('disarmed default: no metadata, no lift anywhere — save and accept agree report-only', () => {
+    constants.PEST.base = 89;
+    const est = generateEstimate(platinumBundle());
+    const pest = est.lineItems.find(i => i.service === 'pest_control');
+    // Save side: full discount stands, signal reports.
+    expect(pest.programFloorApplied).toBe(false);
+    expect(pest.annualAfterDiscount).toBeCloseTo(284.80, 2);
+    expect(pest.belowProgramFloor).toBe(true);
+    // Accept side: no floor metadata stamped → the repricer applies the full
+    // percent too. Same number both places.
+    const mapped = mapV1ToLegacyShape(est);
+    expect(mapped.results.pest.floorAnn).toBeUndefined();
+    const lift = pestFloorMonthlyLift({ result: mapped }, 'Platinum', () => 0.20);
+    expect(lift).toBe(0);
+    const collectedAnnual = (Number(mapped.results.pest.mo) * 0.8 + lift) * 12;
+    expect(collectedAnnual).toBeCloseTo(pest.annualAfterDiscount, 1);
+  });
+
   test('kill switch off → no floor metadata emitted (new estimates reprice as before)', () => {
     constants.PEST.enforceFloorPostDiscount = false;
     const est = generateEstimate(platinumBundle());
