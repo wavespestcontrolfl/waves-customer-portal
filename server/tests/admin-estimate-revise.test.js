@@ -89,6 +89,7 @@ function makeReviseDatabase({
         rawGuards.push(sql);
         return chain;
       },
+      forUpdate: () => chain,
       first: async () => estimate,
       update: (patch) => {
         updates.push(patch);
@@ -99,6 +100,10 @@ function makeReviseDatabase({
     };
     return chain;
   };
+  // The atomic revise (guarded UPDATE + learning-loop baseline capture)
+  // runs inside database.transaction — reuse the same recording builder as
+  // the trx so assertions see the guarded update unchanged.
+  database.transaction = async (callback) => callback(database);
   return { database, updates, rawGuards, groupedWheres };
 }
 
