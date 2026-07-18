@@ -618,6 +618,7 @@ const {
   getTreatmentZoneMapForScheduledService,
 } = require('../services/treatment-zone-maps');
 const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
+const { geocodeAddress } = require('../services/geocoder');
 
 router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, next) => {
   try {
@@ -704,18 +705,13 @@ router.get('/:id/geocode', async (req, res, next) => {
     if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
     }
-    const apiKey = process.env.GOOGLE_STATIC_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
-    if (!apiKey) return res.status(503).json({ error: 'Geocoding is not configured' });
     const address = [svc.line1, svc.city, svc.state, svc.zip].filter(Boolean).join(', ');
     if (!address) return res.status(422).json({ error: 'No address on file for this visit' });
-    const resp = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`
-    );
-    const body = await resp.json().catch(() => ({}));
-    if (body.status !== 'OK' || !body.results?.length) {
-      return res.status(422).json({ error: 'Could not locate this address on the map' });
-    }
-    const loc = body.results[0].geometry.location;
+    // Shared server geocoder: GOOGLE_API_KEY || GOOGLE_MAPS_API_KEY chain,
+    // in-process memo, ZERO_RESULTS caching. (The static-maps key can be
+    // API-restricted to Static Maps, so it must not be used for geocoding.)
+    const loc = await geocodeAddress(address);
+    if (!loc) return res.status(422).json({ error: 'Could not locate this address on the map' });
     return res.json({ lat: loc.lat, lng: loc.lng });
   } catch (err) {
     logger.error(`[tech-track] treatment zone geocode failed: ${err.message}`);

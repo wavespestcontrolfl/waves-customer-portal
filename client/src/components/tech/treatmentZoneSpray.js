@@ -375,6 +375,39 @@ export function startSprayEngine({
   };
 }
 
+// Build the fully-settled band offscreen in one pass. The modal composes and
+// saves the snapshot from this the moment Play starts — the animation is
+// presentation only, so closing the sheet mid-spray can never lose a trace.
+export function buildSettledAccum({ width, height, points, closed, mistColor }) {
+  const pts = closed && points.length > 2 ? [...points, points[0]] : [...points];
+  const mist = hexToRgb(mistColor);
+  const mistLight = mixWithWhite(mist, 0.55);
+  const accum = document.createElement('canvas');
+  accum.width = width;
+  accum.height = height;
+  const actx = accum.getContext('2d');
+  for (let i = 1; i < pts.length; i += 1) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const segLen = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    for (let d = 0; d <= segLen; d += STAMP_STEP) {
+      const t = d / segLen;
+      const x = a.x + (b.x - a.x) * t;
+      const y = a.y + (b.y - a.y) * t;
+      const jitter = BAND_RADIUS + (Math.random() - 0.5) * 8;
+      const g = actx.createRadialGradient(x, y, 0, x, y, jitter);
+      g.addColorStop(0, rgba(mistLight, 0.055));
+      g.addColorStop(0.6, rgba(mist, 0.035));
+      g.addColorStop(1, rgba(mist, 0));
+      actx.fillStyle = g;
+      actx.beginPath();
+      actx.arc(x, y, jitter, 0, Math.PI * 2);
+      actx.fill();
+    }
+  }
+  return accum;
+}
+
 // Composite the satellite photo + settled mist band into one PNG data URL.
 // The map <img> loads with crossOrigin="anonymous"; if the canvas still
 // taints, re-fetch the tile via fetch() (CORS-checked) and retry once.

@@ -17,6 +17,7 @@ import {
   FALLBACK_ZOOM,
   MAP_WIDTH,
   MAP_HEIGHT,
+  buildSettledAccum,
   composeSnapshot,
   loadMapImage,
   pathLengthPx,
@@ -102,7 +103,11 @@ export default function TechTreatmentZoneModal({
 
       try {
         if (!MAPS_KEY) throw new Error('Google Maps key is not configured for this build.');
-        let center = Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))
+        // null/'' must count as MISSING: Number(null) is 0, and a (0,0)
+        // center would load an open-ocean tile the tech could trace and
+        // save onto the customer report.
+        const coord = (v) => (v == null || v === '' ? null : Number(v));
+        let center = Number.isFinite(coord(lat)) && Number.isFinite(coord(lng))
           ? { lat: Number(lat), lng: Number(lng) }
           : null;
         if (!center) {
@@ -199,7 +204,6 @@ export default function TechTreatmentZoneModal({
     setSaveState(null);
     const totalPx = pathLengthPx(points, closed);
     const lastEmit = { ts: 0 };
-    let settledHandled = false;
     const engine = startSprayEngine({
       canvas,
       width: MAP_WIDTH,
@@ -217,12 +221,19 @@ export default function TechTreatmentZoneModal({
         lastEmit.ts = now;
         setStatus((prev) => (prev.phase === s.phase && prev.pct === s.pct ? prev : s));
       },
-      onSettled: (accum) => {
-        if (settledHandled) return;
-        settledHandled = true;
-        save(accum);
-      },
+      onSettled: () => {},
     });
+    // Save IMMEDIATELY with a fully-settled offscreen band — the on-screen
+    // spray is presentation. Waiting for the animation to finish let an
+    // impatient Done/backdrop tap unmount the modal before onSettled fired,
+    // silently losing the trace.
+    save(buildSettledAccum({
+      width: MAP_WIDTH,
+      height: MAP_HEIGHT,
+      points,
+      closed,
+      mistColor: MIST_COLOR,
+    }));
     return () => engine.stop();
     // deps intentionally omit `save`: points/closed/map are frozen while playing
   }, [step, runKey, mapState.status]);
@@ -422,8 +433,12 @@ export default function TechTreatmentZoneModal({
               <button style={btnStyle('ghost', false)} onClick={() => setRunKey((k) => k + 1)}>
                 Replay
               </button>
-              <button style={btnStyle('primary', false)} onClick={onClose}>
-                Done
+              <button
+                style={btnStyle('primary', saveState === 'saving')}
+                disabled={saveState === 'saving'}
+                onClick={onClose}
+              >
+                {saveState === 'saving' ? 'Saving…' : 'Done'}
               </button>
             </div>
           </>

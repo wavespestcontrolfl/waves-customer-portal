@@ -3,6 +3,7 @@ const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/cl
 const db = require('../models/db');
 const config = require('../config');
 const logger = require('./logger');
+const featureGates = require('../config/feature-gates');
 
 // Technician-traced treatment perimeter for a visit: the traced path (image +
 // geo coordinates), computed linear feet, and a composited satellite snapshot
@@ -149,9 +150,32 @@ async function getTreatmentZoneMapForScheduledService(scheduledServiceId, { knex
   );
 }
 
+// PDF cache-key component (same pattern as mosquitoReportV2PdfSignature):
+// cached report PDFs bake the traced map in, so the key must vary when the
+// map they would render changes — a GATE_TREATMENT_ZONE_MAP flip in either
+// direction or a re-trace. Returns '' whenever the gate is off or the visit
+// has no trace, so untraced records keep their pre-feature keys (no mass
+// cache bust). Fail-soft: a lookup error must never block PDF serving.
+async function treatmentZonePdfSignature(service, knex = db) {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) return '';
+    const scheduledServiceId = service?.scheduled_service_id;
+    if (!scheduledServiceId) return '';
+    const row = await knex('treatment_zone_maps')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('updated_at', 'created_at');
+    if (!row) return '';
+    const stamp = new Date(row.updated_at || row.created_at || 0).getTime();
+    return `-tz${Number.isFinite(stamp) ? stamp : 0}`;
+  } catch {
+    return '';
+  }
+}
+
 module.exports = {
   saveTreatmentZoneMap,
   getTreatmentZoneMapForScheduledService,
+  treatmentZonePdfSignature,
   normalizePathPoints,
   TREATMENT_ZONE_PREFIX,
   MAX_SNAPSHOT_BYTES,
