@@ -152,11 +152,17 @@ describe("admin navigation registry", () => {
     }
   });
 
-  it("redirects the retired turf-height review route to Schedule", () => {
+  it("keeps the turf-height review route mounted for OCR triage", () => {
+    // TurfHeightReviewPage is the only client consumer of the
+    // review/resolve endpoints in server/routes/admin-turf-height.js —
+    // the route must stay mounted (off-nav) until that workflow has a
+    // real home in Schedule.
     const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
 
-    expect(appSource).toContain(
-      '<Route path="turf-height" element={<Navigate to="/admin/schedule" replace />} />',
+    expect(appSource).toContain('<Route path="turf-height"');
+    expect(appSource).toContain("TurfHeightReviewPage");
+    expect(appSource).not.toContain(
+      '<Route path="turf-height" element={<Navigate',
     );
   });
 });

@@ -86,6 +86,8 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/contracts",
     label: "Contracts",
     icon: FileText,
+    // server/routes/admin-contracts.js is requireAdmin on every endpoint.
+    adminOnly: true,
   },
   communications: {
     id: "communications",
@@ -202,6 +204,8 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/payers",
     label: "Payers",
     icon: Building2,
+    // server/routes/admin-payers.js is requireAdmin on every endpoint.
+    adminOnly: true,
   },
   banking: {
     id: "banking",

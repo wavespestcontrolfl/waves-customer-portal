@@ -1,4 +1,11 @@
-import React, { createContext, useContext, useEffect, useId } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import useModalFocus from '../../hooks/useModalFocus';
 import { cn } from './cn';
@@ -7,9 +14,27 @@ const DialogTitleContext = createContext(null);
 
 // Hand-rolled modal. If focus-trap edge cases accumulate, swap the root
 // for @radix-ui/react-dialog (see DECISIONS.md 2026-04-18 entry on primitives).
-export function Dialog({ open, onClose, children, size = 'md', className, style }) {
+export function Dialog({
+  open,
+  onClose,
+  children,
+  size = 'md',
+  className,
+  style,
+  'aria-label': ariaLabel,
+}) {
   const panelRef = useModalFocus(open, onClose);
   const titleId = useId();
+  // aria-labelledby must reference an element that actually exists. Some
+  // dialogs (e.g. bare confirmation prompts) render only a DialogBody, so
+  // the ID is only wired up once a DialogTitle registers itself — otherwise
+  // screen readers announce a dialog with a dangling label reference.
+  // Callers without a title can pass an explicit aria-label instead.
+  const [hasTitle, setHasTitle] = useState(false);
+  const registerTitle = useCallback(() => {
+    setHasTitle(true);
+    return () => setHasTitle(false);
+  }, []);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -28,7 +53,8 @@ export function Dialog({ open, onClose, children, size = 'md', className, style 
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      aria-labelledby={titleId}
+      aria-label={ariaLabel}
+      aria-labelledby={!ariaLabel && hasTitle ? titleId : undefined}
       style={{
         paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
         paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
@@ -51,7 +77,7 @@ export function Dialog({ open, onClose, children, size = 'md', className, style 
           className
         )}
       >
-        <DialogTitleContext.Provider value={titleId}>
+        <DialogTitleContext.Provider value={{ titleId, registerTitle }}>
           {children}
         </DialogTitleContext.Provider>
       </div>
@@ -75,10 +101,16 @@ export function DialogHeader({ className, children, ...rest }) {
 }
 
 export function DialogTitle({ className, children, ...rest }) {
-  const titleId = useContext(DialogTitleContext);
+  const context = useContext(DialogTitleContext);
+  // Tell the parent Dialog a title exists so it can point aria-labelledby
+  // at us; registerTitle returns its own cleanup for unmount.
+  useEffect(
+    () => (context?.registerTitle ? context.registerTitle() : undefined),
+    [context],
+  );
   return (
     <h2
-      id={rest.id || titleId}
+      id={rest.id || context?.titleId}
       className={cn('text-18 font-medium tracking-tight text-zinc-900', className)}
       {...rest}
     >

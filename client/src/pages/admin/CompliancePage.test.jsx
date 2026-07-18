@@ -85,6 +85,7 @@ describe('CompliancePage Staff authentication', () => {
   });
 
   it('deep-links to the embedded Credentials workspace', () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     renderCompliance('/admin/compliance?source=alert&tab=credentials');
 
     expect(screen.getByText('Embedded credentials workspace')).toBeInTheDocument();
@@ -98,6 +99,7 @@ describe('CompliancePage Staff authentication', () => {
   });
 
   it('keeps tab selection in the URL without dropping other context', () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     renderCompliance('/admin/compliance?source=settings');
 
     fireEvent.click(screen.getByRole('button', { name: 'Credentials' }));
@@ -105,6 +107,25 @@ describe('CompliancePage Staff authentication', () => {
     expect(screen.getByText('Embedded credentials workspace')).toBeInTheDocument();
     expect(screen.getByTestId('location-search')).toHaveTextContent(
       '?source=settings&tab=credentials',
+    );
+  });
+
+  it('hides the admin-only Credentials tab from technician accounts', () => {
+    // /api/admin/credentials is requireAdmin while this page is
+    // requireTechOrAdmin — techs must not be offered a 403-only workspace.
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'tech' }));
+    renderCompliance('/admin/compliance?tab=credentials');
+
+    expect(
+      screen.queryByRole('button', { name: 'Credentials' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Embedded credentials workspace'),
+    ).not.toBeInTheDocument();
+    // The unrecognized deep-link falls back to the Dashboard tab.
+    expect(screen.getByRole('button', { name: 'Dashboard' })).toHaveAttribute(
+      'aria-current',
+      'page',
     );
   });
 });

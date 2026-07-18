@@ -3,7 +3,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../components/admin/AdminCommandHeader", () => ({
   default: ({ sections, activeKey, onSectionChange, ariaLabel }) => (
@@ -39,7 +39,16 @@ vi.mock("./AutoDispatchPage", () => ({
 
 import AdminDispatchPage from "./AdminDispatchPage";
 
-afterEach(cleanup);
+beforeEach(() => {
+  // The Automation tab is admin-only (requireAdmin API); default the suite
+  // to an admin session so the full tab strip renders.
+  localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+});
+
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 function LocationProbe() {
   const location = useLocation();
@@ -86,6 +95,22 @@ describe("AdminDispatchPage", () => {
         "?source=alert&tab=automation",
       );
     });
+  });
+
+  it("hides the admin-only Automation tab from technician accounts", () => {
+    // Every /api/admin/auto-dispatch endpoint is requireAdmin — techs must
+    // not be offered a workspace whose every request 403s.
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "tech" }));
+    renderSchedule("/admin/dispatch?tab=automation");
+
+    expect(
+      screen.queryByRole("button", { name: "Automation" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Embedded automation workspace"),
+    ).not.toBeInTheDocument();
+    // The unrecognized deep-link falls back to the Board tab.
+    expect(screen.getByText("Dispatch board workspace")).toBeInTheDocument();
   });
 
   it("keeps the phone workspace focused on mobile-capable sections", () => {

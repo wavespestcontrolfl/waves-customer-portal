@@ -116,7 +116,23 @@ const CONTEXT_COLORS = {
   estimates: D.teal,
 };
 
-function detectContext(pathname) {
+function detectContext(pathname, search = "") {
+  // /admin/pipeline hosts both the Leads pipeline and the consolidated
+  // Estimates workspace (the old /admin/estimates now redirects here with
+  // ?tab=…), so pathname alone can't pick the context — the tab query
+  // decides. Estimates / Create Estimate / Pricing Logic keep the
+  // quote-agent tools; Leads (or no tab) keeps lead quick actions. An
+  // ?estimateId= deep link with no tab lands on the Estimates list
+  // (EstimatesPageV2 initialTab), so it maps to estimates too.
+  if (pathname === "/admin/pipeline" || pathname.startsWith("/admin/pipeline/")) {
+    const params = new URLSearchParams(search);
+    const tab = params.get("tab");
+    if (tab === "estimates" || tab === "new" || tab === "pricing") {
+      return "estimates";
+    }
+    if (!tab && params.get("estimateId")) return "estimates";
+    return "leads";
+  }
   if (ROUTE_CONTEXT_MAP[pathname]) return ROUTE_CONTEXT_MAP[pathname];
   const routes = Object.entries(ROUTE_CONTEXT_MAP).sort(
     (a, b) => b[0].length - a[0].length,
@@ -271,7 +287,7 @@ function GlobalCommandPalette(_props, ref) {
   const location = useLocation();
   const isMobile = useIsMobile(768);
 
-  const context = detectContext(location.pathname);
+  const context = detectContext(location.pathname, location.search);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
 

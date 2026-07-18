@@ -8,7 +8,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { getAdminAuthToken } from "../../lib/adminAuth";
+import { getAdminAuthToken, getAdminUser } from "../../lib/adminAuth";
 import CredentialsPage from "./CredentialsPage";
 
 const API = "/api/admin/compliance-v2";
@@ -889,16 +889,21 @@ const COMPLIANCE_TABS = [
   { key: "log", label: "Application Log", Icon: ClipboardList },
   { key: "limits", label: "Product Limits", Icon: ShieldCheck },
   { key: "licenses", label: "Licenses", Icon: FileText },
-  { key: "credentials", label: "Credentials", Icon: BadgeCheck },
+  // Credentials embeds an admin-only workspace (/api/admin/credentials is
+  // requireAdmin) while this page itself is tech-reachable
+  // (requireTechOrAdmin) — so the tab is filtered by role below.
+  { key: "credentials", label: "Credentials", Icon: BadgeCheck, adminOnly: true },
 ];
-const COMPLIANCE_TAB_KEYS = new Set(COMPLIANCE_TABS.map(({ key }) => key));
 
 export default function CompliancePage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const isAdmin = getAdminUser()?.role === "admin";
+  const visibleTabs = COMPLIANCE_TABS.filter(
+    ({ adminOnly }) => !adminOnly || isAdmin,
+  );
+  const visibleTabKeys = new Set(visibleTabs.map(({ key }) => key));
   const requestedTab = searchParams.get("tab");
-  const tab = COMPLIANCE_TAB_KEYS.has(requestedTab)
-    ? requestedTab
-    : "dashboard";
+  const tab = visibleTabKeys.has(requestedTab) ? requestedTab : "dashboard";
   const token = getAdminAuthToken();
 
   const selectTab = (nextTab) => {
@@ -914,17 +919,19 @@ export default function CompliancePage() {
       <AdminCommandHeader
         title="Compliance"
         icon={ShieldCheck}
-        sections={COMPLIANCE_TABS}
+        sections={visibleTabs}
         activeKey={tab}
         onSectionChange={selectTab}
         ariaLabel="Compliance section"
-        navGridClassName="grid-cols-2 lg:grid-cols-5"
+        navGridClassName={
+          isAdmin ? "grid-cols-2 lg:grid-cols-5" : "grid-cols-2 lg:grid-cols-4"
+        }
       />
       {tab === "dashboard" && <DashboardTab token={token} />}
       {tab === "log" && <ApplicationLogTab token={token} />}
       {tab === "limits" && <ProductLimitsTab token={token} />}
       {tab === "licenses" && <LicensesTab token={token} />}
-      {tab === "credentials" && <CredentialsPage embedded />}
+      {tab === "credentials" && isAdmin && <CredentialsPage embedded />}
     </div>
   );
 }

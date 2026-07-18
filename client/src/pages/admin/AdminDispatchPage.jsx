@@ -42,6 +42,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { getAdminUser } from "../../lib/adminAuth";
 import AutoDispatchPage from "./AutoDispatchPage";
 import DispatchBoardPage from "./DispatchBoardPage";
 
@@ -86,9 +87,10 @@ const TAB_LIST = [
     Icon: Lightbulb,
     className: "hidden md:inline-flex",
   },
-  { key: TABS.AUTOMATION, label: "Automation", Icon: Bot },
+  // Auto-Dispatch is an owner/admin tool — every /api/admin/auto-dispatch
+  // endpoint is requireAdmin, so the tab is filtered by role below.
+  { key: TABS.AUTOMATION, label: "Automation", Icon: Bot, adminOnly: true },
 ];
-const VALID_TABS = TAB_LIST.map((t) => t.key);
 
 // Top-level tab → DispatchPageV2 internal activeTab. The schedule grid
 // inside DispatchPageV2 is keyed as 'board' (legacy), while every other
@@ -98,7 +100,10 @@ const innerActiveTabFor = (topTab) =>
 
 export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initial = VALID_TABS.includes(searchParams.get(TAB_KEY))
+  const isAdmin = getAdminUser()?.role === "admin";
+  const visibleTabs = TAB_LIST.filter(({ adminOnly }) => !adminOnly || isAdmin);
+  const validTabKeys = visibleTabs.map((t) => t.key);
+  const initial = validTabKeys.includes(searchParams.get(TAB_KEY))
     ? searchParams.get(TAB_KEY)
     : TABS.BOARD;
   const [tab, setTab] = useState(initial);
@@ -141,11 +146,15 @@ export default function AdminDispatchPage() {
         <AdminCommandHeader
           title="Schedule"
           icon={CalendarDays}
-          sections={TAB_LIST}
+          sections={visibleTabs}
           activeKey={tab}
           onSectionChange={setTab}
           ariaLabel="Schedule section"
-          navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-8"
+          navGridClassName={
+            isAdmin
+              ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"
+              : "grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+          }
           action={
             tab === TABS.SCHEDULE
               ? {
@@ -164,7 +173,7 @@ export default function AdminDispatchPage() {
       >
         {tab === TABS.BOARD ? (
           <DispatchBoardPage />
-        ) : tab === TABS.AUTOMATION ? (
+        ) : tab === TABS.AUTOMATION && isAdmin ? (
           <AutoDispatchPage embedded />
         ) : (
           <Suspense

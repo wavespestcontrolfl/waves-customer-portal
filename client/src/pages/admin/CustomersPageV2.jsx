@@ -1020,10 +1020,38 @@ export default function CustomersPageV2() {
     setShowAddModal(true);
   };
 
+  // Quick-add success handler (desktop modal + mobile sheet). Both call
+  // onCreated then onClose; on the /admin/customers/new deep-link route the
+  // close handler must not clobber the just-created profile's URL, so the
+  // created ID rides a ref for closeAddCustomer to preserve.
+  const createdCustomerIdRef = useRef(null);
+  const handleQuickAddCreated = (customer) => {
+    loadCustomers();
+    if (view === "pipeline") loadPipeline();
+    if (customer?.id) {
+      createdCustomerIdRef.current = String(customer.id);
+      // Deep-link into the newly created profile.
+      openCustomerProfile(customer.id);
+    }
+  };
+
   const closeAddCustomer = () => {
+    const createdId = createdCustomerIdRef.current;
+    createdCustomerIdRef.current = null;
     setShowAddModal(false);
     setQuickAddPreset(null);
-    if (isNewCustomerRoute) navigate("/admin/customers", { replace: true });
+    if (isNewCustomerRoute) {
+      // Leave the /new route, but keep the just-created customer's profile
+      // open (mobile call-log quick-add lands on Customer 360, not the
+      // bare directory). Cancelling without creating still goes to the
+      // directory.
+      navigate(
+        createdId
+          ? `/admin/customers?customerId=${encodeURIComponent(createdId)}`
+          : "/admin/customers",
+        { replace: true },
+      );
+    }
   };
 
   const openCustomerProfile = (customerId) => {
@@ -2146,11 +2174,7 @@ export default function CustomersPageV2() {
           onClose={closeAddCustomer}
           initialValues={quickAddPreset}
           title={quickAddPreset ? "Add Property" : "Add Customer"}
-          onCreated={(customer) => {
-            loadCustomers();
-            if (view === "pipeline") loadPipeline();
-            if (customer?.id) openCustomerProfile(customer.id);
-          }}
+          onCreated={handleQuickAddCreated}
         />
       )}
       {isMobile && (
@@ -2158,12 +2182,7 @@ export default function CustomersPageV2() {
           open={showAddModal}
           onClose={closeAddCustomer}
           initialValues={quickAddPreset}
-          onCreated={(customer) => {
-            loadCustomers();
-            if (view === "pipeline") loadPipeline();
-            // Deep-link into the newly created profile (parity with desktop QuickAdd).
-            if (customer?.id) openCustomerProfile(customer.id);
-          }}
+          onCreated={handleQuickAddCreated}
         />
       )}
 

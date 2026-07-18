@@ -356,6 +356,7 @@ const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealth
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
 const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
+const AdminTurfHeightReviewPage = lazyWithRetry(() => import('./pages/admin/TurfHeightReviewPage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
 const BillingRecoveryPage = lazyWithRetry(() => import('./pages/admin/BillingRecoveryPage'));
 const PayersPage = lazyWithRetry(() => import('./pages/admin/PayersPage'));
@@ -575,7 +576,11 @@ export default function App() {
                 />
               )}
             />
-            <Route path="turf-height" element={<Navigate to="/admin/schedule" replace />} />
+            {/* Turf-height OCR review queue stays mounted — it is the only
+                client consumer of the review/resolve endpoints in
+                server/routes/admin-turf-height.js (discrepancy / ocr_failed
+                triage) until that workflow gets a real home in Schedule. */}
+            <Route path="turf-height" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading turf height review...</div>}><AdminTurfHeightReviewPage /></Suspense>} />
             <Route path="equipment-calibration" element={<AdminTabRedirect to="/admin/equipment" tab="calibrations" />} />
             <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
             <Route

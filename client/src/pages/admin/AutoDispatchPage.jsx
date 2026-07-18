@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw, Play, ChevronRight } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { Button } from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
 // Light neutral palette — mirrors the read-only admin pages (AgentDecisionsPage).
@@ -49,6 +48,30 @@ function Chip({ children, tone = "neutral" }) {
     }}>
       {children}
     </span>
+  );
+}
+
+// Local header button — this file is Tier-2 (D palette + inline styles), so
+// it must not pull Tier-1 components/ui primitives (AGENTS.md one-style rule).
+function HeaderButton({ onClick, disabled = false, primary = false, icon: Icon, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6, minHeight: 32,
+        padding: "0 12px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+        fontFamily: "inherit", cursor: disabled ? "default" : "pointer",
+        background: primary ? D.heading : "transparent",
+        color: primary ? "#FFFFFF" : D.text,
+        border: `1px solid ${primary ? D.heading : D.border}`,
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      {Icon && <Icon size={14} aria-hidden="true" />}
+      {children}
+    </button>
   );
 }
 
@@ -114,17 +137,15 @@ export default function AutoDispatchPage({ embedded = false }) {
   return (
     <div style={{ background: D.bg, minHeight: "100%", padding: 16 }}>
       {embedded ? (
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="text-18 font-semibold text-ink-primary">Auto-Dispatch</h2>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" variant="ghost" onClick={loadRuns} className="gap-2">
-              <RefreshCw size={14} aria-hidden="true" />
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: D.heading }}>Auto-Dispatch</h2>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+            <HeaderButton onClick={loadRuns} icon={RefreshCw}>
               Refresh
-            </Button>
-            <Button size="sm" onClick={triggerDryRun} disabled={running} className="gap-2">
-              <Play size={14} aria-hidden="true" />
+            </HeaderButton>
+            <HeaderButton onClick={triggerDryRun} disabled={running} icon={Play} primary>
               {running ? "Running…" : "Run dry-run"}
-            </Button>
+            </HeaderButton>
           </div>
         </div>
       ) : (

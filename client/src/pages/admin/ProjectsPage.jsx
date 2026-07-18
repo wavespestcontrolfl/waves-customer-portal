@@ -66,7 +66,7 @@ function useConfirmDialog() {
     return () => clearTimeout(t);
   }, [pending]);
   const element = pending ? (
-    <Dialog open size="sm" onClose={handleCancel}>
+    <Dialog open size="sm" onClose={handleCancel} aria-label="Confirmation">
       <DialogBody>
         <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
           {pending.message}
