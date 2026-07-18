@@ -36,6 +36,19 @@ const recentChargesLimiter = rateLimit({
  * Stripe charge id so revenue reporting, receipts, and autopay state stay in sync.
  */
 
+// Mirror of the /reconcile validity guards: refunded, disputed, and non-USD
+// charges are unreconcilable there, so offering them in the picker only
+// produces guaranteed 400s — and Stripe keeps refunded charges in status
+// 'succeeded', so the status check alone doesn't exclude them. Also keeps
+// dead entries from crowding valid ones out of the 20-slot list.
+function chargeIsReconcilable(charge) {
+  return charge.status === 'succeeded'
+    && !charge.refunded
+    && !(Number(charge.amount_refunded) > 0)
+    && !charge.disputed
+    && String(charge.currency || '').toLowerCase() === 'usd';
+}
+
 // GET /recent-charges — last 20 Stripe charges not yet linked to an invoice
 router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
   try {
@@ -57,7 +70,7 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
     const linkedSet = new Set([...linked, ...booked].map(r => r.stripe_charge_id));
 
     const unlinked = charges.data
-      .filter(c => c.status === 'succeeded' && !linkedSet.has(c.id))
+      .filter(c => chargeIsReconcilable(c) && !linkedSet.has(c.id))
       .slice(0, 20)
       .map(c => ({
         id: c.id,

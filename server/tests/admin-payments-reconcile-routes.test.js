@@ -461,6 +461,19 @@ describe('GET /recent-charges — reconcilable entries only', () => {
     ...overrides,
   });
 
+  test('excludes refunded, disputed, and non-USD charges — the /reconcile guard would 400 them', async () => {
+    mockChargesList.mockResolvedValue({ data: [
+      listedCharge('ch_refunded', { refunded: true, amount_refunded: 10000 }),
+      listedCharge('ch_partial', { amount_refunded: 500 }),
+      listedCharge('ch_disputed', { disputed: true }),
+      listedCharge('ch_eur', { currency: 'eur' }),
+      listedCharge('ch_free'),
+    ] });
+    const { status, body } = await get('/api/admin/payments-reconcile/recent-charges');
+    expect(status).toBe(200);
+    expect(body.charges.map((c) => c.id)).toEqual(['ch_free']);
+  });
+
   test('excludes ledger-booked charges as well as invoice-linked ones', async () => {
     mockChargesList.mockResolvedValue({ data: [
       listedCharge('ch_booked_ledger'),   // payments row, NO invoice stamp — the 409-guaranteed case
