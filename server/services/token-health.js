@@ -32,9 +32,13 @@ async function getStoredGbpRefreshToken(locationKey) {
   }
 }
 
-async function fetchGraph(path, token, version = 'v25.0') {
+async function fetchGraph(path, token, version = 'v25.0', { method, body } = {}) {
   const separator = path.includes('?') ? '&' : '?';
-  const res = await fetch(`https://graph.facebook.com/${version}${path}${separator}access_token=${encodeURIComponent(token)}`);
+  const url = `https://graph.facebook.com/${version}${path}${separator}access_token=${encodeURIComponent(token)}`;
+  // Plain reads keep the bare fetch(url) shape; only non-GET probes send an init.
+  const res = method
+    ? await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    : await fetch(url);
   const data = await res.json();
   return { res, data };
 }
@@ -403,6 +407,29 @@ async function probeMetaResource(token, path, laneLabel, version) {
   }
 }
 
+// The CAPI lane POSTs events to /{pixel}/events — a capability a system-user
+// token can hold WITHOUT being able to read the pixel object itself (GET
+// /{pixel} needs ads_read-style asset access the lane never uses; prod's
+// working token fails that read with "(#100) Missing Permission"). So probe
+// the events edge directly with an empty batch: Graph authorizes the request
+// BEFORE validating the payload, so "param data must be non-empty" proves
+// access without sending anything, while permission/token errors surface as
+// themselves.
+async function probeCapiEventsAccess(token, pixelId, version) {
+  try {
+    const { res, data } = await fetchGraph(`/${encodeURIComponent(pixelId)}/events`, token, version, {
+      method: 'POST',
+      body: { data: [] },
+    });
+    const message = data?.error?.message || '';
+    if (/param data\b.*non-?empty|data (is )?required/i.test(message)) return null; // authorized, payload rejected as designed
+    if (res.ok && !data?.error) return null;
+    return { status: graphErrorStatus(data?.error?.code), message: `pixel Events API probe failed: ${message || `HTTP ${res.status}`}` };
+  } catch (err) {
+    return { status: 'error', message: `pixel Events API probe failed: ${err.message}` };
+  }
+}
+
 function metaAdsActId() {
   const raw = String(process.env.META_ADS_ACCOUNT_ID || '').trim();
   if (!raw) return null;
@@ -464,8 +491,8 @@ const checkMetaCapi = () => {
   return checkMetaAdToken('meta_capi', 'META_CAPI_ACCESS_TOKEN', async (token) => {
     const pixel = String(process.env.META_CAPI_PIXEL_ID || '').trim();
     if (!pixel) return { status: 'not_configured', message: 'META_CAPI_PIXEL_ID is not set — the CAPI lane cannot run' };
-    // Reading the pixel object requires access to the pixel CAPI posts events to.
-    return probeMetaResource(token, `/${encodeURIComponent(pixel)}?fields=id`, 'pixel access', version);
+    // Probe the events edge the lane actually posts to — see probeCapiEventsAccess.
+    return probeCapiEventsAccess(token, pixel, version);
   }, version);
 };
 const checkMetaAudiences = () => {
