@@ -393,6 +393,24 @@ async function guardClarifySend(draft, res, releaseFields = {}) {
     if (missing.length && !stillMissing.length) {
       return retire('Clarify draft retired — the customer already provided the missing details.');
     }
+    if (stillMissing.length && stillMissing.length < missing.length) {
+      // Partial answer: never re-ask what the contact already supplied —
+      // rewrite the pending copy down to what's STILL missing before the
+      // send. The approve path sends draft_response (rewritten here); an
+      // owner-typed revision is deliberately untouched.
+      const { _private: clarify } = require('../services/estimate-clarify-asks');
+      const rewritten = clarify.composeClarifyBody({
+        missing: stillMissing,
+        firstName: lead?.first_name || customer?.first_name || null,
+      });
+      const rewrittenFlags = { ...flags, missing: stillMissing };
+      await db('message_drafts').where({ id: draft.id }).update({
+        draft_response: rewritten,
+        flags: JSON.stringify(rewrittenFlags),
+      });
+      draft.draft_response = rewritten;
+      draft.flags = JSON.stringify(rewrittenFlags);
+    }
   } catch (err) {
     await releaseDraftClaim(draft.id, releaseFields);
     res.status(503).json({ error: 'Clarify staleness check unavailable — draft left pending, try again' });
