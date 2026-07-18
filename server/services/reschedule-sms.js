@@ -49,6 +49,12 @@ class RescheduleSMS {
     } catch (e) {
       logger.warn(`[reschedule-sms] Failed to parse notes for log ${pending.id}: ${e.message}`);
     }
+    // A log without reply options can never be acted on here — rain-outs
+    // stopped attaching options (the moved SMS asks for no reply, only a
+    // self-serve link), so claiming their rows would swallow the customer's
+    // next inbound (e.g. a "call me" would get the canned ack and never
+    // reach the office). Fall through to normal inbound handling instead.
+    if (!options.option1 && !options.option2) return null;
     const reply = (messageBody || '').trim().toLowerCase();
     const responseTime = pending.sms_sent_at ? Math.round((Date.now() - new Date(pending.sms_sent_at).getTime()) / 60000) : null;
 

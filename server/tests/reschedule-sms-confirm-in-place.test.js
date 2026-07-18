@@ -248,4 +248,21 @@ describe('handleRescheduleReply — confirm-in-place', () => {
       'weather_rain', 'customer_sms',
     );
   });
+
+  test('a pending log WITHOUT options is ignored — inbound falls through to normal handling', async () => {
+    // Modern rain-outs attach no options (the moved SMS asks for no reply,
+    // only a self-serve link). Their log rows must not swallow the
+    // customer's next inbound — a "call me" here would otherwise get the
+    // canned ack and never reach the office.
+    wireDb({
+      reschedule_log: [
+        chain({ first: jest.fn().mockResolvedValue({ ...pendingRow(), notes: null }) }),
+      ],
+    });
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', 'can you call me?');
+
+    expect(result).toBeNull();
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
 });

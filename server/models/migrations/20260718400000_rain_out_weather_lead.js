@@ -71,12 +71,34 @@ async function spliceRow(knex, splice, variables) {
   });
 }
 
+// Rendering prefers an active variant's body over the base row
+// (admin-sms-templates getTemplate → selectVariant), so variants must get
+// the same splice or their sends would silently keep the old lead. Prod has
+// zero rain_out_moved variants as of 2026-07-18 (verified read-only) — this
+// covers any added later. All statuses are spliced so a retired variant
+// can't resurrect old copy on reactivation.
+async function spliceVariants(knex, splice) {
+  if (!(await knex.schema.hasTable('sms_template_variants'))) return;
+  const rows = await knex('sms_template_variants').where({ template_key: TEMPLATE_KEY });
+  const cols = rows.length ? await knex('sms_template_variants').columnInfo() : null;
+  for (const row of rows) {
+    const body = splice(row.body);
+    if (body === row.body) continue;
+    await knex('sms_template_variants').where({ id: row.id }).update({
+      body,
+      ...(cols.updated_at ? { updated_at: new Date() } : {}),
+    });
+  }
+}
+
 exports.up = async function up(knex) {
   await spliceRow(knex, transformBody, VARIABLES);
+  await spliceVariants(knex, transformBody);
 };
 
 exports.down = async function down(knex) {
   await spliceRow(knex, revertBody, VARIABLES_OLD);
+  await spliceVariants(knex, revertBody);
 };
 
 // Exported for the fixture test against the verbatim prod body.

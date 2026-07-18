@@ -352,6 +352,32 @@ router.post('/:id/rain-out', async (req, res, next) => {
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }
 
+    // Re-arm each moved stop's appointment reminder onto the new slot —
+    // mirrors the admin-dispatch rain-out route. Without this, a tech
+    // moving a stop to a future day left appointment_reminders on the old
+    // slot, so the 24h/72h reminders fired for a time nobody was coming.
+    // The rain-out sends its own "we moved you" SMS inside commit(), so
+    // sendNotification is always false; coverDueWindows + notice-sent only
+    // when that SMS actually went out (otherwise leave the reminder
+    // pending so the cron still reminds the customer on the new slot).
+    const AppointmentReminders = require('../services/appointment-reminders');
+    for (const moved of result.results || []) {
+      if (!moved.ok) continue;
+      try {
+        const startHHMM = (moved.newWindow && moved.newWindow.start) || '08:00';
+        await AppointmentReminders.handleReschedule(
+          moved.id,
+          `${String(moved.newDate).split('T')[0]}T${startHHMM}`,
+          { sendNotification: false, coverDueWindows: moved.smsSent === true },
+        );
+        if (moved.smsSent === true) {
+          await AppointmentReminders.markRescheduleNoticeSent(moved.id);
+        }
+      } catch (err) {
+        logger.warn(`[tech-track] rain-out committed for ${moved.id}, but reminder sync failed: ${err.message}`);
+      }
+    }
+
     logger.info(
       `[tech-track] rain-out service=${req.params.id} tech=${req.technicianId} ` +
       `scope=${scope === 'route' ? 'route' : 'job'} moved=${result.movedCount} failed=${result.failedCount}`
