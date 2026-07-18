@@ -34,15 +34,22 @@ const AGREEMENT_THRESHOLD = 0.95;
 // extractor that 100% schema-failed) would otherwise dilute the metrics and
 // let a stale ≥95% sample green-light a freshly-changed extractor. Mirror the
 // processor's route resolution; override via env if those change.
-const CURRENT_PRIMARY = process.env.CALL_EXTRACTION_MODEL
-  || ({ openai: 'gpt-5.6-sol', anthropic: MODELS.CALL_EXTRACTION_ANTHROPIC, gemini: process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro' })[process.env.CALL_EXTRACTION_PROVIDER || 'openai']
-  || 'gpt-5.6-sol';
-// The gate must cover the WHOLE route: fallback-produced rows stamp the
-// fallback model, and production routes from those too — excluding them
-// would let an unassessed fallback cohort bias the metrics.
+// Mirrors the processor's PER-PROVIDER route resolution exactly:
+// CALL_EXTRACTION_MODEL is the OpenAI leg's override ONLY — under a
+// gemini/anthropic rollback a lingering OpenAI override must not make this
+// gate evaluate the wrong cohort.
+const ROUTE_PROVIDER = process.env.CALL_EXTRACTION_PROVIDER || 'openai';
+const ROUTE_MODEL_FOR = {
+  openai: process.env.CALL_EXTRACTION_MODEL || 'gpt-5.6-sol',
+  anthropic: MODELS.CALL_EXTRACTION_ANTHROPIC,
+  gemini: process.env.GEMINI_EXTRACTION_MODEL || 'gemini-2.5-pro',
+};
+const CURRENT_PRIMARY = ROUTE_MODEL_FOR[ROUTE_PROVIDER] || ROUTE_MODEL_FOR.openai;
+// The query covers the WHOLE route (fallback rows stamp the fallback
+// model), but the gate itself scores the primary cohort alone — see below.
 const CURRENT_ROUTE_MODELS = [...new Set([
   CURRENT_PRIMARY,
-  (process.env.CALL_EXTRACTION_PROVIDER || 'openai') === 'anthropic' ? 'gpt-5.6-sol' : MODELS.CALL_EXTRACTION_ANTHROPIC,
+  ROUTE_PROVIDER === 'anthropic' ? ROUTE_MODEL_FOR.openai : MODELS.CALL_EXTRACTION_ANTHROPIC,
 ])];
 const CURRENT_PROMPT_VERSION = PROMPT_HASH;
 
