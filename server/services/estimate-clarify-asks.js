@@ -26,7 +26,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { normalizeE164 } = require('./click-followup-gate');
 
 const RECENT_SENT_WINDOW_MS = 7 * 86400000;
 
@@ -89,12 +88,16 @@ async function parkClarifyAsk({
     if (!clarifyAsksEnabled()) return { parked: false, skipped: 'gate_off' };
     const askable = missing.filter((item) => ASKABLE_MISSING.has(item));
     if (!askable.length) return { parked: false, skipped: 'nothing_askable' };
-    // A REAL 10-digit destination or nothing — click-followup-gate's last10
-    // passes short digit fragments through, which must not queue an
-    // undeliverable draft.
+    // A REAL US destination or nothing: exactly 10 digits, or 11 with a
+    // leading country 1. Shorter fragments, extensions ("… ext 9"), and
+    // non-US lengths must not queue a draft that fails at Twilio after the
+    // owner already approved it. toPhone derives from THESE digits, never a
+    // normalizer's unvalidated passthrough.
     const allDigits = String(phone || '').replace(/\D/g, '');
-    if (allDigits.length < 10) return { parked: false, skipped: 'no_usable_phone' };
-    const digits = allDigits.slice(-10);
+    const digits = allDigits.length === 10
+      ? allDigits
+      : (allDigits.length === 11 && allDigits.startsWith('1') ? allDigits.slice(1) : null);
+    if (!digits) return { parked: false, skipped: 'no_usable_phone' };
 
     const sourceRef = `clarify:${digits}`;
     // One OPEN clarify per phone; no re-ask soon after a sent one. "Open"
@@ -127,7 +130,7 @@ async function parkClarifyAsk({
           flags: JSON.stringify({
             estimate_clarify: true,
             missing: askable,
-            toPhone: normalizeE164(phone),
+            toPhone: `+1${digits}`,
             lead_id: leadId || null,
             estimate_id: estimateId || null,
             source,

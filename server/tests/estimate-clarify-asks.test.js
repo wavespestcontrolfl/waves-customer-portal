@@ -40,19 +40,6 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: (key) => mockIsEnabled(key),
 }));
 
-// REAL helper semantics (click-followup-gate.js:65-72) — the module pulls
-// db at load, so it's mocked, but the mock must not be kinder than the
-// real thing (a nulling last10 mock masked a short-number bug once).
-jest.mock('../services/click-followup-gate', () => ({
-  normalizeE164: (phone) => {
-    const trimmed = String(phone || '').trim();
-    if (!trimmed) return null;
-    const digits = trimmed.replace(/\D/g, '');
-    if (digits.length === 10) return `+1${digits}`;
-    if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-    return trimmed.startsWith('+') ? trimmed : trimmed;
-  },
-}));
 
 const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({
@@ -102,14 +89,18 @@ describe('parkClarifyAsk', () => {
     expect(mockState.inserts).toHaveLength(0);
   });
 
-  test('short digit fragments never queue — a real 10-digit destination or nothing', async () => {
-    // click-followup-gate's last10 passes short fragments through; the
-    // service enforces >=10 digits itself.
-    for (const bad of ['555-01', '941555', '', null]) {
+  test('only real US destinations queue — 10 digits or 11 with leading 1, nothing else', async () => {
+    // Shorter fragments, extension suffixes, and non-US lengths all fail at
+    // Twilio AFTER the owner approved — reject at park time instead.
+    for (const bad of ['555-01', '941555', '9415550142 ext 9', '+44 20 7946 0958', '', null]) {
       const result = await parkClarifyAsk({ ...BASE, phone: bad });
       expect(result.skipped).toBe('no_usable_phone');
     }
     expect(mockState.inserts).toHaveLength(0);
+
+    const ok = await parkClarifyAsk({ ...BASE, phone: '+1 (941) 555-0142' });
+    expect(ok.parked).toBe(true);
+    expect(JSON.parse(mockState.inserts[0].flags).toPhone).toBe('+19415550142');
   });
 
   test('a lost insert race (23505 on the partial unique index) is the deduped outcome', async () => {
