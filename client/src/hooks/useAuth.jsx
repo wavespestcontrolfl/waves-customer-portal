@@ -48,6 +48,13 @@ export function AuthProvider({ children }) {
   // (empty deps ⇒ stale closure) — the transient branch needs to know
   // whether a session is already on screen.
   const customerRef = useRef(null);
+  // Session epoch: bumped on every identity transition (login, logout,
+  // property switch, cross-tab adoption). Async auth flows capture the epoch
+  // when they START and discard their response if it moved while in flight —
+  // a delayed /auth/select-property response must not rewrite tokens after
+  // Sign out, and a slow /auth/me must not paint a previous identity over
+  // the one the current token authenticates (last-response-wins).
+  const sessionEpochRef = useRef(0);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -67,16 +74,22 @@ export function AuthProvider({ children }) {
     // `refreshCustomer` gets used as an event handler, so `attempt` may be
     // anything — only our own retry chain passes a number.
     const n = Number.isFinite(Number(attempt)) ? Number(attempt) : 0;
+    const epoch = sessionEpochRef.current;
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
     }
     try {
       const data = await api.getMe();
+      // The session changed while this response was in flight (logout,
+      // property switch, cross-tab adoption) — a load for the NEW epoch is
+      // already running; applying this one would paint a stale identity.
+      if (sessionEpochRef.current !== epoch) return;
       customerRef.current = data;
       setCustomer(data);
       try {
         const propertyData = await api.getAuthProperties();
+        if (sessionEpochRef.current !== epoch) return;
         setProperties(propertyData.properties || []);
         setPropertiesError(null);
       } catch (propertyErr) {
@@ -91,6 +104,10 @@ export function AuthProvider({ children }) {
       // app only; no-op on web). See native/nativePush.js.
       flushNativePushToken();
     } catch (err) {
+      // A stale failure must act on NOTHING: in particular, a 401 for a
+      // token that has since been replaced would clear the NEW session's
+      // credentials.
+      if (sessionEpochRef.current !== epoch) return;
       console.error('Failed to load customer:', err);
       // Only a real auth rejection invalidates the session — a network drop
       // or server 5xx on launch must not wipe a valid 30-day login.
@@ -140,6 +157,7 @@ export function AuthProvider({ children }) {
         retryTimer.current = null;
       }
       if (!token) {
+        sessionEpochRef.current += 1;
         api.clearTokens();
         customerRef.current = null;
         setCustomer(null);
@@ -151,6 +169,7 @@ export function AuthProvider({ children }) {
       }
       const nextId = tokenCustomerId(token);
       const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token);
+      sessionEpochRef.current += 1;
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not
@@ -187,7 +206,11 @@ export function AuthProvider({ children }) {
       // A prior native logout may still be using the old credentials to
       // unsubscribe this device. Never let that cleanup erase a new login.
       if (logoutTokenReleaseRef.current) await logoutTokenReleaseRef.current;
+      const epoch = sessionEpochRef.current;
       const data = await api.verifyCode(phone, code);
+      // Another tab logged in / adopted a session while the code verified.
+      if (sessionEpochRef.current !== epoch) return false;
+      sessionEpochRef.current += 1;
       api.setTokens(data.token, data.refreshToken);
       setProperties(data.properties || []);
       setPropertiesError(null);
@@ -200,6 +223,10 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    // Invalidate every in-flight auth response (property switch, /auth/me)
+    // — without this, a delayed switch response re-writes tokens after
+    // sign-out and walks the user back into the portal.
+    sessionEpochRef.current += 1;
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -262,7 +289,14 @@ export function AuthProvider({ children }) {
   const switchProperty = async (customerId) => {
     setError(null);
     try {
+      const epoch = sessionEpochRef.current;
       const data = await api.selectAuthProperty(customerId);
+      // Signed out (or superseded by another transition) while the switch
+      // was in flight — the response must not restore credentials. The
+      // server has revoked the family on logout, so the returned tokens are
+      // a ≤15-minute zombie; never adopt them.
+      if (sessionEpochRef.current !== epoch) return false;
+      sessionEpochRef.current += 1;
       api.setTokens(data.token, data.refreshToken);
       // Re-point this device's push subscription at the newly selected
       // customer — otherwise pushes keep flowing to the previous property.

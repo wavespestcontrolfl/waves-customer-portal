@@ -16,6 +16,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import { etDateString } from '../lib/timezone';
+import { getConsentText } from '../lib/paymentMethodConsentText';
 import { getStripe } from '../lib/stripeLoader';
 import {
   buildSetupIntentReturnUrl,
@@ -4239,6 +4240,26 @@ function BillingTab({ customer }) {
       await refreshCards();
       setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
+      if (err.status === 409 && err.code === 'consent_required') {
+        // The default role carries Auto Pay, and this method has no
+        // recurring-charge authorization on record (e.g. it was saved for
+        // an estimate card hold). Show the verbatim authorization copy;
+        // agreeing re-submits with consent_accepted and the server records
+        // the consent row before any flag moves.
+        const agreed = await showCustomerConfirm(getConsentText(err.methodType || 'card'), {
+          title: 'Authorize Auto Pay on this method',
+          confirmLabel: 'Agree & Set Default',
+        });
+        if (!agreed) return;
+        try {
+          await api.setDefaultCard(cardId, { consent_accepted: true });
+          await refreshCards();
+          setAutopayRefreshKey((k) => k + 1);
+        } catch (retryErr) {
+          showCustomerAlert(retryErr.message || 'Failed to set default card');
+        }
+        return;
+      }
       showCustomerAlert(err.message || 'Failed to set default card');
     }
   };
@@ -8186,6 +8207,14 @@ function MyPlanTab({ customer, focusService }) {
     ? Math.max(1, Math.round((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)))
     : 0;
   const tierServiceLimit = activeTierName ? (TIER_SERVICES[activeTierName] || 1) : 0;
+  // Pause/Cancel are only offered when there is something to pause or cancel —
+  // mirrors the server's nothing_to_cancel guard on POST /api/requests (an
+  // active plan, an upcoming visit, or live billing). A tier-'none' account
+  // with only one-time history gets no account-wide churn control. Rendered
+  // only at planStatus 'ready', so nextService/upcomingServices are loaded.
+  const hasCancellableAccount = !!activeTierName || !!nextService
+    || upcomingServices.length > 0
+    || Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0) > 0;
 
   const detectCatalogServiceId = (service) => {
     for (const svc of SERVICE_CATALOG) {
@@ -8992,6 +9021,7 @@ function MyPlanTab({ customer, focusService }) {
             </div>
           </section>
 
+          {hasCancellableAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Account Options</div>
             {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
@@ -9155,6 +9185,7 @@ function MyPlanTab({ customer, focusService }) {
               </div>
             )}
           </section>
+          )}
         </aside>
       </div>
 

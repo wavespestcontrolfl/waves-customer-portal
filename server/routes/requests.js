@@ -9,7 +9,8 @@ const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
-const { processCancellationRequest } = require('../services/cancellation-processor');
+const { processCancellationRequest, CANCELLABLE_STATUSES } = require('../services/cancellation-processor');
+const { etDateString } = require('../utils/datetime-et');
 const {
   MAX_PHOTOS,
   MAX_ENCODED_PHOTO_CHARS,
@@ -179,6 +180,50 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           createdAt: priorCancellation.created_at,
         },
       });
+    }
+
+    // A cancellation must have something to cancel. The client gates the
+    // Pause/Cancel controls, but the API accepts category 'cancellation' from
+    // any authenticated customer — without this guard an account with no
+    // recurring series, no upcoming visits and no billing (tier 'none',
+    // one-time history only) could still churn itself account-wide, and the
+    // processor's wind-down (autopay off, retries disarmed, churn stamps) is
+    // not reversible from the portal. Eligibility mirrors what the processor
+    // acts on: an ongoing series, an upcoming cancellable visit (same
+    // predicate as its sweep, incl. the date-exempt 'rescheduled' intents),
+    // or live billing. Deliberately NO repair re-run here: an ACTIVE account
+    // failing this check has nothing safe to re-process — re-running against
+    // a re-won customer with an old cancellation request would re-churn them;
+    // the partial-failure repair paths are the 60s dedupe above and the
+    // inactive-retry path, and a partial run already raised a review alert.
+    if (category === 'cancellation') {
+      const [recurringRow, upcomingRow, billingRow] = await Promise.all([
+        db('scheduled_services')
+          .where({ customer_id: req.customer.id, recurring_ongoing: true })
+          .first('id'),
+        db('scheduled_services')
+          .where({ customer_id: req.customer.id })
+          .whereIn('status', CANCELLABLE_STATUSES)
+          .where(function () {
+            this.where('scheduled_date', '>=', etDateString()).orWhere('status', 'rescheduled');
+          })
+          .first('id'),
+        db('customers')
+          .where({ id: req.customer.id })
+          .first('monthly_rate', 'next_charge_date'),
+      ]);
+      const hasSomethingToCancel =
+        !!recurringRow ||
+        !!upcomingRow ||
+        Number(billingRow?.monthly_rate) > 0 ||
+        billingRow?.next_charge_date != null;
+      if (!hasSomethingToCancel) {
+        return res.status(400).json({
+          error:
+            'There is no active plan, recurring service, or upcoming visit on this account to cancel. Please call our office if you need help with your account.',
+          code: 'nothing_to_cancel',
+        });
+      }
     }
 
     const [request] = await db('service_requests')
@@ -398,7 +443,9 @@ router.get('/', authenticate, async (req, res, next) => {
         'service_requests.urgency',
         'service_requests.location_on_property as locationOnProperty',
         'service_requests.status',
-        'service_requests.photos',
+        // photos intentionally omitted — up to 3×~6.7MB base64 strings per row
+        // (50-row default page ≈ 1GB worst case) that the portal list never
+        // renders. Anything that needs the attachments must fetch per-request.
         // admin_notes intentionally omitted — internal field, not customer-facing.
         'service_requests.created_at as createdAt',
         'service_requests.resolved_at as resolvedAt',
