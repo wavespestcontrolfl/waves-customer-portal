@@ -38,11 +38,12 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 // Two AI composers write sendable drafts today: the call-triggered engine
-// AND the Agent Estimate workspace both stamp source='estimator_engine';
-// the legacy IB quoting tool stamps source='ai_agent'. Everything else
-// (manual, quote_wizard, lead_webhook, sms_intake, lead_agent) is out of
-// scope for edit distance — human-authored, customer-self-served, or bare
-// unpriced intake shells.
+// AND the Agent Estimate workspace both stamp source='estimator_engine'
+// (the SMS-thread lane included — it shares the engine pipeline); the
+// legacy IB quoting tool stamps source='ai_agent'. Everything else
+// (manual, quote_wizard, email_inquiry, lead_webhook, sms_intake,
+// lead_agent) is out of scope for edit distance — human-authored,
+// customer-self-served, template-built, or bare unpriced intake shells.
 const AI_DRAFT_SOURCES = new Set(['estimator_engine', 'ai_agent']);
 
 function parseData(raw) {
