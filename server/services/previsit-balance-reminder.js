@@ -105,6 +105,21 @@ function previsitBalanceReminderEligible({
   return { send: true, duesLate, overdueDue };
 }
 
+// scheduled_date is a DATE column that arrives as a JS Date or a
+// 'YYYY-MM-DD' string depending on the driver — either way the customer
+// copy must render a friendly date ('July 28, 2026'), never an ISO string
+// or a GMT timestamp (Codex r9). Noon-Z anchor keeps the calendar day
+// stable in ET; anything unparseable passes through untouched.
+function friendlyVisitDate(value) {
+  const dateStr = value instanceof Date
+    ? value.toISOString().slice(0, 10)
+    : String(value || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return String(value || '');
+  return new Date(`${dateStr}T12:00:00Z`).toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
+  });
+}
+
 async function smsTemplateActive() {
   try {
     const row = await db('sms_templates').where({ template_key: TEMPLATE_KEY }).first('is_active');
@@ -284,7 +299,7 @@ async function runSweep({ now = new Date() } = {}) {
           first_name: visit.first_name || 'there',
           amount: amount.toFixed(2),
           service_type: visit.service_type || 'service',
-          visit_date: visit.scheduled_date,
+          visit_date: friendlyVisitDate(visit.scheduled_date),
           billing_url: BILLING_PORTAL_URL,
         });
         if (!body) throw new Error('template rendered empty (inactive or missing)');
@@ -317,7 +332,7 @@ async function runSweep({ now = new Date() } = {}) {
           customerId: visit.customer_id,
           amount: `$${amount.toFixed(2)}`,
           serviceType: visit.service_type || 'service',
-          visitDate: visit.scheduled_date,
+          visitDate: friendlyVisitDate(visit.scheduled_date),
           billingUrl: BILLING_PORTAL_URL,
           idempotencyKey: `${EMAIL_TEMPLATE_KEY}:${visit.id}`,
         });
@@ -351,6 +366,7 @@ module.exports = {
   runSweep,
   previsitBalanceReminderEligible,
   duesObligation,
+  friendlyVisitDate,
   overdueRecurringInvoices,
   TEMPLATE_KEY,
   EMAIL_TEMPLATE_KEY,

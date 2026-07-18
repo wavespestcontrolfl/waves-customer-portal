@@ -1,4 +1,20 @@
-const { previsitBalanceReminderEligible, duesObligation, DUES_GRACE_DAYS } = require('../services/previsit-balance-reminder');
+const { previsitBalanceReminderEligible, duesObligation, friendlyVisitDate, DUES_GRACE_DAYS } = require('../services/previsit-balance-reminder');
+
+// Customer copy must never show an ISO string or a GMT timestamp (Codex r9).
+describe('friendlyVisitDate', () => {
+  test('formats a YYYY-MM-DD string as a friendly date', () => {
+    expect(friendlyVisitDate('2026-07-28')).toBe('July 28, 2026');
+  });
+
+  test('formats a JS Date (pg DATE at UTC midnight) on the correct calendar day', () => {
+    expect(friendlyVisitDate(new Date('2026-07-28T00:00:00Z'))).toBe('July 28, 2026');
+  });
+
+  test('passes unparseable values through untouched', () => {
+    expect(friendlyVisitDate('soon')).toBe('soon');
+    expect(friendlyVisitDate(null)).toBe('');
+  });
+});
 
 // The owner rule this encodes: the reminder is tied to the upcoming visit's
 // lane, not just the customer. Recurring debt + one-time visit = silence.

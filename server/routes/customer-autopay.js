@@ -169,6 +169,11 @@ router.get('/', async (req, res, next) => {
       autopay_payment_method_id: hasAutopayMethod ? chargeableAutopayMethod.id : null,
       billing_day: customer.billing_day || 1,
       billing_mode: billingMode,
+      // Resolver verdict for NULL modes (GUARD 3c parity) — the client
+      // cannot resolve (no tier in this payload), so it needs the server's
+      // answer to avoid falling back to a monthly_rate "next charge" the
+      // cron will never run (Codex r9).
+      non_monthly_billing: nonMonthlyBilling,
       next_charge_date: nonMonthlyBilling || !hasMonthlyRate ? null : customer.next_charge_date,
       next_charge_amount: nextCharge?.total ?? null,
       next_charge_base_amount: nextCharge?.base ?? null,

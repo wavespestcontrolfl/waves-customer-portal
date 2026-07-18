@@ -4217,8 +4217,13 @@ function BillingTab({ customer }) {
   // is used at renewal.
   const annualPrepayBilling = autopay?.billing_mode === 'annual_prepay';
   // Explicit per-visit lanes invoice each completed service — the monthly
-  // cron skips them, so monthly projection copy is wrong here too (Codex r6).
-  const perVisitBilling = autopay?.billing_mode === 'per_visit' || autopay?.billing_mode === 'one_time';
+  // cron skips them, so monthly projection copy is wrong here too (Codex
+  // r6). NULL modes the SERVER resolved non-monthly (non_monthly_billing)
+  // read as per-visit for copy as well — the client has no tier to resolve
+  // with, and a monthly_rate fallback would promise a charge the cron will
+  // never run (Codex r9).
+  const perVisitBilling = autopay?.billing_mode === 'per_visit' || autopay?.billing_mode === 'one_time'
+    || (autopay?.non_monthly_billing === true && !perApplicationBilling && !annualPrepayBilling);
   const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling || perVisitBilling;
   const amountDue = Number(autopayState === 'active'
     ? (autopay?.next_charge_amount ?? (nonMonthlyBilling ? 0 : autopay?.monthly_rate) ?? 0)

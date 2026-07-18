@@ -255,8 +255,14 @@ export default function AutopayCard({ onStateChange }) {
   const annualPrepayBilling = data.billing_mode === 'annual_prepay';
   // Explicit per-visit lanes invoice each completed service (saved method
   // collects per invoice) — the monthly cron skips them too, so the monthly
-  // projection copy is wrong for them as well (Codex r6).
-  const perVisitBilling = data.billing_mode === 'per_visit' || data.billing_mode === 'one_time';
+  // projection copy is wrong for them as well (Codex r6). NULL modes the
+  // SERVER resolved non-monthly (non_monthly_billing — the client has no
+  // tier to resolve with) read as per-visit for copy too: the cron skips
+  // them and their visits invoice individually, so falling back to a
+  // monthly_rate "Next charge" would promise a charge that never runs
+  // (Codex r9).
+  const perVisitBilling = data.billing_mode === 'per_visit' || data.billing_mode === 'one_time'
+    || (data.non_monthly_billing === true && !perApplicationBilling && !annualPrepayBilling);
   const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling || perVisitBilling;
   const nextChargeAmount = Number(next_charge_amount ?? (nonMonthlyBilling ? 0 : monthly_rate) ?? 0);
   // NULL monthly_rate = unpriced (manual quote pending), never a real $0.00
