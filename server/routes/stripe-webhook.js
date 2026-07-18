@@ -3198,12 +3198,26 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
             await trx('payment_methods')
               .where({ customer_id: customer.id })
               .update({ is_default: false, autopay_enabled: false });
-            await trx('payment_methods')
-              .where({ id: fallbackCard.id })
+            // The card was resolved OUTSIDE this transaction — if it was
+            // removed in between, this customer-scoped flip hits 0 rows,
+            // and repointing the customer at the dead id would leave
+            // autopay armed with no chargeable row: the retry sweep then
+            // final-fails 'No Stripe autopay payment method on file'
+            // instead of parking. 0 rows → the same disarm as no-fallback
+            // (all method flags are already cleared above).
+            const flipped = await trx('payment_methods')
+              .where({ id: fallbackCard.id, customer_id: customer.id })
               .update({ is_default: true, autopay_enabled: true });
-            await trx('customers')
-              .where({ id: customer.id })
-              .update({ autopay_payment_method_id: fallbackCard.id });
+            if (flipped > 0) {
+              await trx('customers')
+                .where({ id: customer.id })
+                .update({ autopay_payment_method_id: fallbackCard.id });
+            } else {
+              await trx('customers')
+                .where({ id: customer.id })
+                .update({ autopay_enabled: false });
+              logger.warn(`[stripe-webhook] fallback card ${fallbackCard.id} vanished before promotion for customer ${customer.id} — autopay disarmed, balance parked for manual follow-up`);
+            }
           } else {
             // No enrollment-consented card → DISARM, not just log: the
             // failed payment row is already armed for the retry sweep, and

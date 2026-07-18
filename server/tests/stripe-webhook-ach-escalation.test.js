@@ -73,6 +73,7 @@ function resetMockState() {
     consentRows: [],        // payment_method_consents rows (real helper reads these)
     lastAutopayToggle: null, // latest autopay_log enable/disable row
     failConsentLookup: false, // consent-helper db reads throw (fail-closed path)
+    vanishCardAfterResolve: false, // simulate card deletion between resolution and the trx
     customerUpdates: [],
     trxUpdates: [],
     failCustomerUpdate: false,
@@ -110,9 +111,13 @@ function mockMakeTrxBuilder(table) {
       mockState.customerUpdates.push(patch);
     }
     if (table === 'payment_methods') {
+      let matched = 0;
       for (const row of mockState.paymentMethodRows) {
-        if (mockRowMatches(row, b._wheres)) Object.assign(row, patch);
+        if (mockRowMatches(row, b._wheres)) { Object.assign(row, patch); matched += 1; }
       }
+      // Real knex returns the affected-row count — the TOCTOU guard
+      // (vanished fallback card) branches on it.
+      return matched;
     }
     return 1;
   };
@@ -144,7 +149,16 @@ jest.mock('../models/db', () => {
     // saved cards and their consent rows.
     b.then = (resolve, reject) => (async () => {
       if (mockState.failConsentLookup) throw new Error('consent lookup failed');
-      if (table === 'payment_methods') return mockState.paymentMethodRows.filter((r) => mockRowMatches(r, b._wheres));
+      if (table === 'payment_methods') {
+        const rows = mockState.paymentMethodRows.filter((r) => mockRowMatches(r, b._wheres));
+        // TOCTOU simulation: the resolver has now READ the card — delete it
+        // before the escalation transaction runs its flip.
+        if (mockState.vanishCardAfterResolve) {
+          mockState.vanishCardAfterResolve = false;
+          mockState.paymentMethodRows = mockState.paymentMethodRows.filter((r) => r.method_type !== 'card');
+        }
+        return rows;
+      }
       if (table === 'payment_method_consents') return mockState.consentRows.filter((r) => mockRowMatches(r, b._wheres));
       return [];
     })().then(resolve, reject);
@@ -444,5 +458,35 @@ describe('handleAchFailure — expired-card fallback exclusion (Codex round 2)',
     expect(mockState.customerUpdates).toContainEqual(
       expect.objectContaining({ autopay_payment_method_id: 'pm-card' }),
     );
+  });
+});
+
+// Codex round 3 (07-18, P2): the fallback card is resolved OUTSIDE the
+// escalation transaction — if it is removed in that window, the flip
+// update hits 0 rows and the old code still repointed the customer at the
+// dead id with autopay left armed, so the retry sweep final-failed with
+// 'No Stripe autopay payment method on file' instead of parking.
+describe('handleAchFailure — fallback card vanishes before the transaction (Codex round 3)', () => {
+  test('0-row flip → disarm path, never a dead pointer', async () => {
+    mockState.recentFailures = 3;
+    mockState.paymentMethodRows = [BANK_ROW(), CARD_ROW()];
+    mockState.consentRows = [CARD_CONSENT()];
+    mockState.vanishCardAfterResolve = true;
+
+    await expect(handleAchFailure(PI, 'R01', 'evt_toctou')).resolves.toBeUndefined();
+
+    // No dead pointer stored…
+    expect(mockState.customerUpdates.some((p) => p.autopay_payment_method_id)).toBe(false);
+    // …the sweep's stop condition is set…
+    expect(mockState.customerUpdates).toContainEqual(
+      expect.objectContaining({ autopay_enabled: false }),
+    );
+    expect(mockState.customerUpdates).toContainEqual(
+      expect.objectContaining({ ach_status: 'suspended' }),
+    );
+    // …and the surviving bank row is not chargeable.
+    const bank = mockState.paymentMethodRows.find((r) => r.id === 'pm-bank');
+    expect(bank.autopay_enabled).toBe(false);
+    expect(await getChargeableAutopayMethod({ id: 'cust-1' }, stubKnex)).toBeFalsy();
   });
 });
