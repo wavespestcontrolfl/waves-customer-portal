@@ -14,6 +14,7 @@
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
+ *   GATE_CALL_RESEARCH_MINER=true (nightly voice-of-customer call-research mining)
  *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
@@ -152,6 +153,13 @@ const gates = {
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
+
+  // Call-Research Miner (voice-of-customer corpus) — nightly extraction of
+  // verbatim double-redacted quote chunks from call transcripts into
+  // call_research_chunks (research taxonomy, reader-not-ingestor). Paid
+  // Gemini extraction per new call (pennies nightly). No sends, no
+  // customer-visible effect; prod opt-in per house pattern.
+  callResearchMiner: isProd ? process.env.GATE_CALL_RESEARCH_MINER === 'true' : true,
 
   // Call re-transcription backfill (voice-corpus training) — hourly, batched
   // upgrade of consented legacy call recordings to diarized transcripts via

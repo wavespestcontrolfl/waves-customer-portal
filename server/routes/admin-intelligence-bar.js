@@ -50,6 +50,7 @@ const { APIFY_OPS_TOOLS, executeApifyOpsTool } = require('../services/intelligen
 const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intelligence-bar/social-ops-tools');
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
+const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
@@ -119,6 +120,7 @@ const APIFY_OPS_TOOL_NAMES = new Set(APIFY_OPS_TOOLS.map(t => t.name));
 const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
 const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
+const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
 // about deploys, errors, or webhook health) and shares the admin-only guard
 // that OPS_TOOLS established — technician tokens never see or execute them.
@@ -137,8 +139,10 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // Base toolset for every admin context: core customer/schedule/revenue tools
 // plus read-only comms tools and the email read+reply subset, so SMS/call
 // history and the inbox are visible from any page — not just the
-// Communications/Email pages.
-const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS];
+// Communications/Email pages. Call-research rides here too: voice-of-customer
+// questions ("what do callers say about X?") come from any page, and the
+// tool surfaces only redacted text — no names, no customer ids.
+const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS, ...CALL_RESEARCH_TOOLS];
 
 function toolsNamed(tools, names) {
   const allowed = new Set(names);
@@ -1158,6 +1162,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (JOB_HEALTH_TOOL_NAMES.has(toolName)) {
     return executeJobHealthTool(toolName, input);
+  }
+  if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
+    return executeCallResearchTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);
