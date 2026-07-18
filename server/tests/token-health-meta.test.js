@@ -341,7 +341,30 @@ describe('token health meta checks', () => {
     expect(result.lastError).toMatch(/META_CAPI_PIXEL_ID/);
   });
 
-  test('meta_capi healthy requires debug_token AND a pixel-access probe', async () => {
+  test('meta_capi healthy requires debug_token AND Events API access to the pixel', async () => {
+    process.env.META_CAPI_ACCESS_TOKEN = 'capi-token';
+    process.env.META_CAPI_PIXEL_ID = '987654321';
+    global.fetch = jest.fn(async (url, opts) => {
+      const text = String(url);
+      if (text.includes('/debug_token')) {
+        return { ok: true, status: 200, json: async () => ({ data: { is_valid: true, expires_at: 0 } }) };
+      }
+      if (text.includes('/987654321/events')) {
+        // Empty-batch probe: Graph authorizes first, then rejects the payload —
+        // this param error is the healthy signal (nothing was sent).
+        expect(opts).toMatchObject({ method: 'POST' });
+        expect(JSON.parse(opts.body)).toEqual({ data: [] });
+        return { ok: false, status: 400, json: async () => ({ error: { message: '(#100) param data must be non-empty.', type: 'OAuthException', code: 100 } }) };
+      }
+      throw new Error(`Unexpected fetch URL: ${text}`);
+    });
+    const tokenHealth = require('../services/token-health');
+    const result = await tokenHealth.checkSingle('meta_capi');
+    expect(result).toMatchObject({ platform: 'meta_capi', status: 'healthy', lastError: null });
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/987654321/events'), expect.objectContaining({ method: 'POST' }));
+  });
+
+  test('meta_capi: a valid token WITHOUT Events API access to the pixel is NOT healthy', async () => {
     process.env.META_CAPI_ACCESS_TOKEN = 'capi-token';
     process.env.META_CAPI_PIXEL_ID = '987654321';
     global.fetch = jest.fn(async (url) => {
@@ -349,15 +372,17 @@ describe('token health meta checks', () => {
       if (text.includes('/debug_token')) {
         return { ok: true, status: 200, json: async () => ({ data: { is_valid: true, expires_at: 0 } }) };
       }
-      if (text.includes('/987654321?fields=id')) {
-        return { ok: true, status: 200, json: async () => ({ id: '987654321' }) };
+      if (text.includes('/987654321/events')) {
+        // Same error CODE (100) as the healthy param rejection — classification
+        // must key on the message, not the code.
+        return { ok: false, status: 400, json: async () => ({ error: { message: '(#100) Missing Permission', type: 'OAuthException', code: 100 } }) };
       }
       throw new Error(`Unexpected fetch URL: ${text}`);
     });
     const tokenHealth = require('../services/token-health');
     const result = await tokenHealth.checkSingle('meta_capi');
-    expect(result).toMatchObject({ platform: 'meta_capi', status: 'healthy', lastError: null });
-    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/987654321?fields=id'));
+    expect(result.status).toBe('error');
+    expect(result.lastError).toMatch(/pixel Events API probe failed.*Missing Permission/);
   });
 
   test('meta_ads: a valid-but-wrong-account token is NOT healthy (lane probe fails)', async () => {
