@@ -219,6 +219,10 @@ const READ_ONLY = [
   'get_recent_merged_prs', 'get_commit_info',
   'get_app_store_status', 'get_play_store_status',
   'get_growthbook_experiments', 'get_growthbook_features',
+  'get_google_ads_serving_status', 'get_google_ads_disapprovals',
+  'get_integration_token_health',
+  'get_email_suppressions', 'check_email_suppression',
+  'get_dataforseo_balance', 'get_gbp_status', 'get_ga4_snapshot',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {

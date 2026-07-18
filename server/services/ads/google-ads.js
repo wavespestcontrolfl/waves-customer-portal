@@ -521,6 +521,9 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
 
 module.exports = {
   isConfigured,
+  // Read-only GAQL access for the Intelligence Bar ops tools — mutations
+  // stay behind the exported budget/status functions above.
+  getCustomer,
   syncCampaigns,
   syncDailyPerformance,
   syncSearchTerms,
