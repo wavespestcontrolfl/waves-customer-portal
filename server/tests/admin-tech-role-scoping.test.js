@@ -299,6 +299,7 @@ describe('customer routes: requireAdmin on non-tech surfaces', () => {
     ['GET', '/api/admin/customers/cust-own/timeline'],
     ['GET', '/api/admin/customers/cust-own/credits'],
     ['GET', '/api/admin/customers/cust-own/schedule-estimates'],
+    ['GET', '/api/admin/customers/cust-own/properties'],
     ['PUT', '/api/admin/customers/cust-own/stage'],
     ['POST', '/api/admin/customers/cust-own/tags'],
     ['DELETE', '/api/admin/customers/cust-own/tags/vip'],
@@ -394,14 +395,15 @@ describe('techSafe360Payload', () => {
     for (const key of TECH_360_STRIPPED_KEYS) expect(safe).not.toHaveProperty(key);
     for (const field of TECH_360_STRIPPED_CUSTOMER_FIELDS) expect(safe.customer).not.toHaveProperty(field);
     expect(safe.customer).toEqual(expect.objectContaining({ id: 'c1', tier: 'gold' }));
-    // Sibling-property addresses never ride a per-customer authorization.
+    // Sibling-property addresses never ride a per-customer authorization,
+    // and estimate rows (public bearer tokens) are office-only.
     expect(safe).not.toHaveProperty('accountProperties');
+    expect(safe).not.toHaveProperty('estimates');
     // Field-relevant context survives.
     expect(safe.preferences).toEqual({ gate_code: '1234' });
     expect(safe.services).toHaveLength(1);
     expect(safe.upcomingScheduled).toHaveLength(1);
     expect(safe.photos).toHaveLength(1);
-    expect(safe.estimates).toHaveLength(1);
     // Original payload untouched (admin path reuses it).
     expect(payload.cards).toHaveLength(1);
     expect(payload.customer.monthlyRate).toBe(89);

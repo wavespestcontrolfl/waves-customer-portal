@@ -116,6 +116,10 @@ const TECH_360_STRIPPED_KEYS = [
   // Sibling properties on the account: authorization is per-customer, so an
   // assignment at ONE property must not expose the addresses of the others.
   'accountProperties',
+  // Estimate rows carry permanent public bearer tokens (customer-facing
+  // accept/decline actions) plus decline data — office-only. No tech
+  // surface reads estimates from the 360 payload.
+  'estimates',
 ];
 const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'payerId', 'billingMode', 'monthlyRate', 'annualValue', 'lifetimeRevenue',
@@ -1557,11 +1561,11 @@ router.get('/:id/cards', async (req, res, next) => {
 
 // GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
 // Lazily backfills a primary property for customers created after the migration.
-router.get('/:id/properties', async (req, res, next) => {
+// requireAdmin: returns every active property address on the account — a
+// per-customer assignment must not reveal sibling addresses, and no tech
+// surface calls this (the property writes below were already admin-only).
+router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
-    if (!(await technicianServicesCustomer(req, req.params.id))) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);

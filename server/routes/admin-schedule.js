@@ -5632,10 +5632,13 @@ router.post('/:id/invoice', async (req, res, next) => {
 router.put('/:id/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, requestReview } = req.body;
-    // Technician tokens: LIVE own visits only — the predicate rides the
-    // SELECT the whole transition works from.
+    // Technician tokens: own CURRENT visits (completed-in-window included,
+    // NOT the live-only predicate) — a committed completion whose response
+    // was lost must stay retryable so the route's same-status idempotency
+    // can rerun post-commit side effects. Transitions AWAY from terminal
+    // states are already rejected one-way by the guards below.
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
-      .modify((q) => technicianLiveVisitFilter(req, q))
+      .modify((q) => technicianCurrentVisitFilter(req, q))
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'customers.first_name', 'customers.phone as cust_phone',
@@ -5740,7 +5743,7 @@ router.put('/:id/status', async (req, res, next) => {
         // lands. The lock also serializes against /:id/assign until this
         // transition commits.
         if (isTechnicianRequest(req)) {
-          const still = await technicianLiveVisitFilter(
+          const still = await technicianCurrentVisitFilter(
             req,
             trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
           ).forUpdate().first('scheduled_services.id');
