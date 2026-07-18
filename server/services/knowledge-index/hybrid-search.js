@@ -30,6 +30,15 @@ const { toVectorLiteral } = require('./ingest');
 
 const RRF_K = 60;
 const LIST_LIMIT = 20;
+// Chunk-level lists overfetch so rrfFuse's per-document collapse still sees
+// LIST_LIMIT distinct documents even when one long document matches with
+// many chunks (fuse counts ranks per document, not per chunk).
+const CHUNK_FETCH_LIMIT = 100;
+// Cosine-similarity floor for the vector list: without it, an off-topic
+// query still "matches" its nearest 20 chunks and vector-only rows surface
+// as unrelated citations. 0.30 is a conservative floor for
+// text-embedding-3-small — on-topic pairs typically score well above it.
+const MIN_VECTOR_SIMILARITY = 0.30;
 const MAX_PER_SOURCE = 6;
 
 const docKey = (source, sourceId) => `${source}:${sourceId}`;
@@ -65,10 +74,11 @@ async function vectorList(query) {
   const literal = toVectorLiteral(embedded.vector);
   const rows = await db('knowledge_embeddings')
     .whereNotNull('embedding')
+    .whereRaw('1 - (embedding <=> ?::vector) >= ?', [literal, MIN_VECTOR_SIMILARITY])
     .select('source', 'source_id', 'title', 'content', 'metadata',
       db.raw('1 - (embedding <=> ?::vector) as similarity', [literal]))
     .orderByRaw('embedding <=> ?::vector', [literal])
-    .limit(LIST_LIMIT);
+    .limit(CHUNK_FETCH_LIMIT);
   return {
     usedVector: true,
     list: rows.map((r) => ({ key: docKey(r.source, r.source_id), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata })),
@@ -81,7 +91,7 @@ async function chunkFtsList(query) {
     .select('source', 'source_id', 'title', 'content', 'metadata',
       db.raw("ts_rank(search_vector, websearch_to_tsquery('english', ?)) as rank", [query]))
     .orderBy('rank', 'desc')
-    .limit(LIST_LIMIT);
+    .limit(CHUNK_FETCH_LIMIT);
   return rows.map((r) => ({ key: docKey(r.source, r.source_id), source: r.source, sourceId: r.source_id, title: r.title, snippet: r.content, metadata: r.metadata }));
 }
 

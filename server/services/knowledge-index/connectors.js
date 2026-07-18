@@ -56,7 +56,10 @@ async function loadKb() {
 
 // ── service: services catalog ───────────────────────────────────────
 async function loadServices() {
+  // Same visibility filter as service-library.js — retired/archived catalog
+  // rows must not resurface as knowledge.
   const rows = await db('services')
+    .where({ is_active: true, is_archived: false })
     .select('service_key', 'name', 'short_name', 'description', 'category', 'subcategory', 'frequency', 'visits_per_year', 'updated_at');
   return rows.map((r) => ({
     sourceId: r.service_key,
@@ -112,27 +115,43 @@ function loadProtocols() {
 
 // ── lawn_module: service-outline content modules (approved) ────────
 async function loadLawnModules() {
+  // Mirrors lawn-service-outline.js loadApprovedModules: currently-valid
+  // approved rows, newest version per key — a superseded approved version
+  // must neither be indexed nor collide on (source, source_id, chunk_index).
   const rows = await db('lawn_service_content_modules')
     .where({ status: 'approved' })
-    .select('key', 'title', 'audience', 'plain_text', 'updated_at');
-  return rows.map((r) => ({
+    .where(function () {
+      this.whereNull('valid_to').orWhere('valid_to', '>', db.fn.now());
+    })
+    .orderBy('version', 'desc')
+    .select('key', 'title', 'audience', 'plain_text', 'version', 'updated_at');
+  const newestByKey = new Map();
+  for (const r of rows) if (!newestByKey.has(r.key)) newestByKey.set(r.key, r);
+  return [...newestByKey.values()].map((r) => ({
     sourceId: r.key,
     title: r.title,
     content: clean(r.plain_text),
-    metadata: { audience: r.audience },
+    metadata: { audience: r.audience, version: r.version },
     sourceUpdatedAt: r.updated_at,
   }));
 }
 
 // ── jurisdiction: county fertilizer rules ──────────────────────────
 async function loadJurisdictions() {
+  // Row identity is (jurisdiction_id, version) — county names repeat across
+  // municipal rules and versions, so the connector keys by jurisdiction_id
+  // and keeps only the newest approved version of each.
   const rows = await db('jurisdiction_fertilizer_rules')
-    .select('county', 'public_summary', 'admin_summary', 'updated_at');
-  return rows.map((r) => ({
-    sourceId: r.county,
-    title: `${r.county} County fertilizer rules`,
+    .where({ status: 'approved' })
+    .orderBy('version', 'desc')
+    .select('jurisdiction_id', 'jurisdiction_name', 'county', 'municipality', 'version', 'public_summary', 'admin_summary', 'updated_at');
+  const newestById = new Map();
+  for (const r of rows) if (!newestById.has(r.jurisdiction_id)) newestById.set(r.jurisdiction_id, r);
+  return [...newestById.values()].map((r) => ({
+    sourceId: r.jurisdiction_id,
+    title: `${r.jurisdiction_name || r.municipality || `${r.county} County`} fertilizer rules`,
     content: joinParts([r.public_summary, r.admin_summary]),
-    metadata: { county: r.county },
+    metadata: { county: r.county, municipality: r.municipality, version: r.version },
     sourceUpdatedAt: r.updated_at,
   }));
 }
