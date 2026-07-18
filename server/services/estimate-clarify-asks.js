@@ -148,6 +148,9 @@ async function parkClarifyAsk({
           this.whereIn('status', ['pending', 'approved', 'revised']).whereNull('sent_at');
         }).orWhere('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS));
       })
+      // An open draft (sent_at null) outranks a recently sent one for the
+      // merge path.
+      .orderByRaw('sent_at asc nulls first')
       .first();
     const linkage = { customerId, leadId, estimateId, source, channelProvenance };
     if (existing) {
@@ -162,7 +165,22 @@ async function parkClarifyAsk({
         await mergePendingClarify(existing, { askable, firstName, linkage });
         return { parked: false, skipped: 'merged_into_open_clarify', draftId: existing.id };
       }
-      return { parked: false, skipped: 'open_or_recent_clarify', draftId: existing.id };
+      // Recent-sent cooldown — EXCEPT when that ask was PARTIALLY answered
+      // and this request covers only what is still unanswered: the customer
+      // answered half, and the other half must not be silenced for seven
+      // days (the resumed pipeline re-asks it through this exact path).
+      let sentFlags = {};
+      try {
+        sentFlags = typeof existing.flags === 'string' ? JSON.parse(existing.flags) : (existing.flags || {});
+      } catch { sentFlags = {}; }
+      const remaining = Array.isArray(sentFlags.missing) ? sentFlags.missing : [];
+      const partiallyAnswered = Array.isArray(sentFlags.answer_recorded) && sentFlags.answer_recorded.length > 0;
+      const asksOnlyRemaining = remaining.length > 0 && askable.every((item) => remaining.includes(item));
+      if (!(partiallyAnswered && asksOnlyRemaining)) {
+        return { parked: false, skipped: 'open_or_recent_clarify', draftId: existing.id };
+      }
+      // fall through: park a fresh ask for the remainder (the partial
+      // unique index only covers OPEN drafts, so the sent row won't conflict).
     }
 
     const body = composeClarifyBody({ missing: askable, firstName });
@@ -279,6 +297,10 @@ async function handleClarifyReply({ phone, body }) {
       .where({ intent: 'estimate_clarify', source_ref: `clarify:${digits}` })
       .whereNotNull('sent_at')
       .where('sent_at', '>=', new Date(Date.now() - RECENT_SENT_WINDOW_MS))
+      // Consumed asks (every item answered) leave reply routing — later
+      // chit-chat ("thanks, sounds good") must not overwrite real answers
+      // or re-trigger drafting.
+      .whereRaw("(flags->>'answered_at') is null")
       .orderBy('sent_at', 'desc')
       .first();
     if (!awaiting) return { handled: false };
@@ -287,6 +309,8 @@ async function handleClarifyReply({ phone, body }) {
     try {
       flags = typeof awaiting.flags === 'string' ? JSON.parse(awaiting.flags) : (awaiting.flags || {});
     } catch { flags = {}; }
+    // flags.missing holds only the STILL-UNANSWERED items (recorded ones
+    // are removed below), so partial-answer follow-ups route correctly.
     const missing = Array.isArray(flags.missing) ? flags.missing : [];
     if (!missing.length) return { handled: false };
 
@@ -308,26 +332,37 @@ async function handleClarifyReply({ phone, body }) {
       }
     }
     if (missing.includes('specific_service')) {
-      // Whatever isn't the address is the service answer — raw, bounded;
-      // the composer and readiness gate judge concreteness downstream.
+      // The classifier is the acceptance bar — length alone would record
+      // "thanks, sounds good" as the requested service. The RAW text is
+      // stored (label semantics preserved); the classifier only vouches
+      // that it actually names a service.
       let serviceText = capturedAddress ? text.replace(capturedAddress, ' ') : text;
       serviceText = serviceText.replace(/\s+/g, ' ').replace(/^[\s,\-–—:]+|[\s,\-–—:]+$/g, '').trim();
       if (serviceText.length >= 3 && serviceText.length <= 80) {
-        if (flags.lead_id) {
-          await db('leads').where({ id: flags.lead_id }).whereNull('deleted_at')
-            .update({ service_interest: serviceText });
+        const { classifyServiceIntent } = require('./sms-service-intent');
+        const cls = await classifyServiceIntent(serviceText);
+        if (cls?.interest) {
+          if (flags.lead_id) {
+            await db('leads').where({ id: flags.lead_id }).whereNull('deleted_at')
+              .update({ service_interest: serviceText });
+          }
+          recorded.push('specific_service');
         }
-        recorded.push('specific_service');
       }
     }
     if (!recorded.length) return { handled: false };
 
-    // Answer bookkeeping so operators see WHY the draft resolved.
+    // Lifecycle bookkeeping: recorded items leave the missing set; the ask
+    // is consumed (answered_at) only when nothing remains. A partial
+    // answer keeps the draft routable for its remaining item, and the
+    // park-time cooldown exception lets the remainder be re-asked.
+    const remaining = missing.filter((item) => !recorded.includes(item));
     await db('message_drafts').where({ id: awaiting.id }).update({
       flags: JSON.stringify({
         ...flags,
-        answered_at: new Date().toISOString(),
-        answer_recorded: recorded,
+        missing: remaining,
+        answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
+        ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
       }),
     });
 

@@ -19,6 +19,8 @@ jest.mock('../models/db', () => {
       whereNotNull() { return builder; },
       orWhere() { return builder; },
       orderBy() { return builder; },
+      orderByRaw() { return builder; },
+      whereRaw() { return builder; },
       first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
@@ -58,6 +60,14 @@ const mockSmsThreadDraftsEnabled = jest.fn();
 jest.mock('../services/estimator-engine/sms-thread', () => ({
   smsThreadDraftsEnabled: () => mockSmsThreadDraftsEnabled(),
   startSmsThreadDraft: (...args) => mockStartSmsThreadDraft(...args),
+}));
+
+// Service replies are classifier-gated; the regex leg of the real
+// classifier accepts obvious service words and rejects chit-chat.
+jest.mock('../services/sms-service-intent', () => ({
+  classifyServiceIntent: async (text) => (/pest|lawn|mosquito|termite/i.test(String(text))
+    ? { interest: 'pest', confidence: 0.9, method: 'regex' }
+    : null),
 }));
 
 const {
@@ -135,6 +145,19 @@ describe('parkClarifyAsk', () => {
     expect(result).toEqual({ parked: false, skipped: 'open_or_recent_clarify', draftId: 'draft-0' });
     expect(mockState.inserts).toHaveLength(0);
     expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('the cooldown yields when a partially answered ask leaves this item unanswered', async () => {
+    // Address answered, service still open: the resumed pipeline's re-ask
+    // for the remainder must not be silenced for seven days.
+    mockState.existingDraft = {
+      id: 'draft-0',
+      status: 'sent',
+      flags: JSON.stringify({ missing: ['specific_service'], answer_recorded: ['street_address'] }),
+    };
+    const result = await parkClarifyAsk({ ...BASE, missing: ['specific_service'] });
+    expect(result.parked).toBe(true);
+    expect(mockState.inserts).toHaveLength(1);
   });
 
   test('a same-items pending dedupe still refreshes linkage to the newest request', async () => {
@@ -282,6 +305,33 @@ describe('handleClarifyReply', () => {
     const result = await handleClarifyReply({ phone: '9415550142', body: 'ok thanks' });
     expect(result.handled).toBe(false);
     expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('a partial answer keeps the ask alive for the remaining item', async () => {
+    mockState.existingDraft = AWAITING(['street_address', 'specific_service']);
+    const result = await handleClarifyReply({ phone: '9415550142', body: '123 Main St, Sarasota' });
+    expect(result.handled).toBe(true);
+    const bookkeeping = mockState.updates.find((u) => u.table === 'message_drafts');
+    const flags = JSON.parse(bookkeeping.payload.flags);
+    expect(flags.missing).toEqual(['specific_service']);
+    expect(flags.answer_recorded).toEqual(['street_address']);
+    expect(flags.answered_at).toBeUndefined();
+  });
+
+  test('chit-chat never records as the service — the classifier is the bar', async () => {
+    mockState.existingDraft = AWAITING(['specific_service']);
+    const result = await handleClarifyReply({ phone: '9415550142', body: 'thanks, sounds good' });
+    expect(result.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('a fully answered ask is stamped consumed', async () => {
+    mockState.existingDraft = AWAITING(['street_address']);
+    await handleClarifyReply({ phone: '9415550142', body: '123 Main St, Sarasota' });
+    const bookkeeping = mockState.updates.find((u) => u.table === 'message_drafts');
+    const flags = JSON.parse(bookkeeping.payload.flags);
+    expect(flags.missing).toEqual([]);
+    expect(flags.answered_at).toBeTruthy();
   });
 
   test('SMS engine lane off: the answer is still recorded, no resume fires', async () => {

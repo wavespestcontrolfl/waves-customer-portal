@@ -221,11 +221,15 @@ async function handleIntakeReply(customer, body) {
       }
     }
     if (hasAddress) {
-      // Address already on file — create draft + notify immediately.
+      // The linked shell stays truthful BEFORE any engine handoff: form
+      // leads already carry an open empty-address shell, and the engine's
+      // conservative duplicate guard blocks against it — the captured
+      // address/service must land on the shell either way (engine path
+      // dedupes against a complete row; legacy path prices it manually).
+      const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
       if (await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
         return { handled: true, next: 'estimate_drafted' };
       }
-      const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
       await db('customers').where({ id: customer.id }).update({
         lead_intake_status: 'estimate_drafted',
       });
@@ -281,11 +285,12 @@ async function handleIntakeReply(customer, body) {
       return { handled: false };
     }
 
+    // Shell first, handoff second — same truthfulness rule as the
+    // awaiting_service branch above.
+    const estimate = await createOrUpdateDraftEstimate(customer, interest);
     if (await engineDraftHandoff(customer, body, `address captured (${interest})`)) {
       return { handled: true, next: 'estimate_drafted' };
     }
-
-    const estimate = await createOrUpdateDraftEstimate(customer, interest);
     await db('customers').where({ id: customer.id }).update({
       lead_intake_status: 'estimate_drafted',
       updated_at: new Date(),
