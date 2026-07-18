@@ -194,7 +194,12 @@ async function main() {
 
   await db.destroy();
 
-  const schemaPassRate = validCount / rows.length;
+  // Every fallback-stamped row IS a primary failure (the fallback only runs
+  // after the primary leg failed transport or schema) — so the primary's
+  // schema-pass denominator must include them, or a fallback-rescued
+  // primary reads as a clean 100%.
+  const primaryAttempts = rows.length + fallbackRows.length;
+  const schemaPassRate = primaryAttempts ? validCount / primaryAttempts : 0;
   const agreementRate = (agree + disagree) ? agree / (agree + disagree) : 0;
 
   const pass = (b) => (b ? 'PASS ✅' : 'FAIL ❌');
@@ -206,7 +211,7 @@ async function main() {
     if (fallbackRows.length === 0) {
       console.log(`Fallback leg ${fallbackModel}: 0 shadow rows — UNASSESSED. An outage failover would run an untested model; bake it off (or eyeball its first shadow rows) before relying on it.`);
     } else {
-      console.log(`Fallback leg ${fallbackModel}: ${fallbackRows.length} row(s), ${fbValid} valid (${Math.round((fbValid / fallbackRows.length) * 100)}% schema-pass) — reported only, NOT gated.`);
+      console.log(`Fallback leg ${fallbackModel}: ${fallbackRows.length} row(s), ${fbValid} valid (${Math.round((fbValid / fallbackRows.length) * 100)}% schema-pass) — each one is also a PRIMARY failure and counts against the primary schema-pass denominator below.`);
     }
   }
   console.log('');

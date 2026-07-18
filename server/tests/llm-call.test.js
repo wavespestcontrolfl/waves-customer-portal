@@ -16,7 +16,7 @@ const {
   parseLooseJson,
   providerErrorReason,
 } = require('../services/llm/call');
-const { PROVIDER, ROUTES, FLAGSHIP, OPENAI_BEST, GEMINI_VISION_BEST } = require('../config/models');
+const { PROVIDER, ROUTES, FLAGSHIP, OPENAI_BEST, GEMINI_VISION_BEST, CALL_EXTRACTION_ANTHROPIC } = require('../config/models');
 
 describe('llm/call parsers', () => {
   test('extractOpenAIText reads output_text and the output[].content walk', () => {
@@ -99,7 +99,7 @@ describe('callAnthropic temperature-deprecation retry', () => {
     mockAnthropicCreate
       .mockRejectedValueOnce(new Error('400 {"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."}}'))
       .mockResolvedValueOnce({ content: [{ type: 'text', text: '{"ok":true}' }] });
-    const res = await callAnthropic({ model: 'claude-opus-4-8', text: 'hi', jsonMode: true, maxTokens: 32, temperature: 0 });
+    const res = await callAnthropic({ model: CALL_EXTRACTION_ANTHROPIC, text: 'hi', jsonMode: true, maxTokens: 32, temperature: 0 });
     expect(res.ok).toBe(true);
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(2);
     expect(mockAnthropicCreate.mock.calls[0][0].temperature).toBe(0);
@@ -108,7 +108,7 @@ describe('callAnthropic temperature-deprecation retry', () => {
 
   test('other 400s do not retry', async () => {
     mockAnthropicCreate.mockRejectedValue(new Error('400 invalid_request_error: max_tokens too large'));
-    const res = await callAnthropic({ model: 'claude-opus-4-8', text: 'hi', maxTokens: 32, temperature: 0 });
+    const res = await callAnthropic({ model: CALL_EXTRACTION_ANTHROPIC, text: 'hi', maxTokens: 32, temperature: 0 });
     expect(res.ok).toBe(false);
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
   });

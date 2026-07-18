@@ -245,21 +245,27 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     // (e.g. the fact-check publish lock, dispatchWithFallback's shared
     // deadline) need it to be a true wall-clock ceiling; the pre-failover
     // fact-check client was constructed with maxRetries:0 for the same reason.
-    const create = (request) => (timeoutMs
-      ? client.messages.create(request, { timeout: timeoutMs, maxRetries: 0 })
+    const startedAtMs = Date.now();
+    const create = (request, budgetMs) => (budgetMs
+      ? client.messages.create(request, { timeout: budgetMs, maxRetries: 0 })
       : client.messages.create(request));
     let resp;
     try {
-      resp = await create(req);
+      resp = await create(req, timeoutMs);
     } catch (err) {
       // Newer Anthropic models (Opus 4.8+, Fable) reject sampling controls
       // with a 400 "`temperature` is deprecated for this model". Callers
       // pinning temp 0 for cross-provider greedy decode (extraction routes)
-      // shouldn't lose the whole leg over it — strip and retry once.
-      if (req.temperature !== undefined && /temperature.*deprecated/i.test(err?.message || '')) {
+      // shouldn't lose the whole leg over it — strip and retry once, within
+      // whatever remains of the ORIGINAL budget so two attempts can never
+      // exceed dispatchWithFallback's shared wall-clock deadline.
+      const remainingMs = timeoutMs ? timeoutMs - (Date.now() - startedAtMs) : undefined;
+      if (req.temperature !== undefined
+          && /temperature.*deprecated/i.test(err?.message || '')
+          && (!timeoutMs || remainingMs > 0)) {
         logger.warn(`[llm] ${model} rejects temperature — retrying without sampling controls`);
         const { temperature: _dropped, ...bare } = req;
-        resp = await create(bare);
+        resp = await create(bare, remainingMs);
       } else {
         throw err;
       }
