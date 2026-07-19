@@ -377,6 +377,35 @@ describe('POST /:id/send concurrency claim', () => {
     });
   });
 
+  test('a crashed (stale) send claim is recovered by the edit lock instead of blocking forever', async () => {
+    // delivery_status stuck at 'sending' with a >10-minute-old updated_at =
+    // a crashed send. The mutation lock must recover it (delivery_status →
+    // 'failed', token cleared) and let the operator's change proceed.
+    const projects = chain({
+      first: jest.fn().mockResolvedValue(wdoProject({
+        delivery_status: 'sending',
+        updated_at: '2026-06-01T00:00:00Z',
+      })),
+    });
+    const photos = chain({ update: jest.fn().mockResolvedValue(1) });
+    mockTables({ projects, project_photos: photos });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-9`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caption: 'Recovered edit' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(projects.update).toHaveBeenCalledWith(expect.objectContaining({
+        delivery_status: 'failed',
+        delivery_claim_token: null,
+      }));
+      expect(photos.update).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('photo mutations 409 while the payment-hold release is delivering', async () => {
     // The release sweep claims report_hold_status='releasing' without ever
     // setting delivery_status — the photo guard must respect that claim too.

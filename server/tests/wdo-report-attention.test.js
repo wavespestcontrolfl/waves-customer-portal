@@ -163,6 +163,20 @@ describe('runWdoReportAttentionSweep', () => {
     expect(apptChain.leftJoin).toHaveBeenCalledWith('services as s', 's.id', 'ss.service_id');
   });
 
+  test('held pay-before-report drafts are excluded from signed-unsent', async () => {
+    isEnabled.mockReturnValue(true);
+    const projectsChains = [];
+    db.mockImplementation((table) => {
+      const c = chain();
+      if (table === 'projects') projectsChains.push(c);
+      return c;
+    });
+    await runWdoReportAttentionSweep();
+    // First projects query = signedUnsent: held/releasing rows are parked by
+    // design (pay-before-report), not stalled — they must not ring here.
+    expect(projectsChains[0].whereRaw).toHaveBeenCalledWith(expect.stringContaining("NOT IN ('held', 'releasing')"));
+  });
+
   test('a failed bell insert fails the sweep instead of recording a ring', async () => {
     isEnabled.mockReturnValue(true);
     NotificationService.notifyAdmin.mockResolvedValue(null); // insert failed

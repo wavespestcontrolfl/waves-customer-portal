@@ -42,6 +42,11 @@ async function findAttentionItems(now = new Date()) {
   const signedUnsent = await db('projects')
     .where({ project_type: 'wdo_inspection', status: 'draft' })
     .whereNotNull('wdo_signature')
+    // Pay-before-report holds park signed drafts INTENTIONALLY (status stays
+    // 'draft' until the invoice is paid) — those aren't stalled, and failing
+    // holds already ring via the stuck-hold bucket. Excluding them keeps
+    // this bucket exception-only.
+    .whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')")
     .whereRaw("coalesce((wdo_signature->>'signed_at')::timestamptz, updated_at) < ?", [
       new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3),
     ])

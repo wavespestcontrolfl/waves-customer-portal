@@ -2394,16 +2394,33 @@ async function refreshWdoSignatureStaleness(req, before, after, { connection = d
 // path needs it to compute staleness from locked state).
 async function lockProjectForPhotoMutation(project, trx, what = 'the photo change', columns = ['wdo_signature', 'delivery_status', 'project_type', 'report_hold_status']) {
   const query = trx('projects').where({ id: project.id }).forUpdate();
-  const locked = await (columns ? query.first(...columns) : query.first());
-  // Two in-flight delivery claims to respect: the shared send claim
-  // (delivery_status) AND the payment-hold release sweep's claim
-  // (report_hold_status='releasing') — the release path builds and emails
-  // the FDACS addendum without ever setting delivery_status.
-  if (String(locked?.delivery_status || '') === 'sending'
-    || String(locked?.report_hold_status || '') === 'releasing') {
+  const cols = columns ? [...new Set([...columns, 'updated_at'])] : null;
+  const locked = await (cols ? query.first(...cols) : query.first());
+  const sendInProgress = () => {
     const err = new Error(`This report is being sent right now — retry ${what} in a moment.`);
     err.code = 'send_in_progress';
     throw err;
+  };
+  // Two in-flight delivery claims to respect: the shared send claim
+  // (delivery_status) AND the payment-hold release sweep's claim
+  // (report_hold_status='releasing') — the release path builds and emails
+  // the FDACS addendum without ever setting delivery_status. The release
+  // claim needs no expiry here: the release sweep recovers its own stalls.
+  if (String(locked?.report_hold_status || '') === 'releasing') sendInProgress();
+  if (String(locked?.delivery_status || '') === 'sending') {
+    // Mirror the send routes' 10-minute stale recovery: without it a
+    // CRASHED send claim would 409 every edit/photo/signature change
+    // indefinitely — the operator couldn't fix the very report that's
+    // stuck. Unknown/unparseable age counts as fresh (reject) — the safe
+    // direction. Recovery normalizes to 'failed', same as the send revert.
+    const claimedAtMs = locked?.updated_at ? new Date(locked.updated_at).getTime() : Date.now();
+    const ageMs = Date.now() - claimedAtMs;
+    if (!(ageMs > 10 * 60 * 1000)) sendInProgress();
+    await trx('projects').where({ id: project.id }).update({
+      delivery_status: 'failed',
+      delivery_claim_token: null,
+      updated_at: db.fn.now(),
+    });
   }
   return locked;
 }
@@ -3197,7 +3214,20 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
       tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
     }
-    await db('projects').where({ id: req.params.id }).update(tokenUpdate);
+    // Token-fenced like the finalize below: a stalled request that resumes
+    // after a stale takeover must not overwrite the new owner's
+    // report_token / portal fields with its own pre-delivery stamp.
+    const stamped = await db('projects')
+      .where({ id: req.params.id, delivery_claim_token: sendClaimToken })
+      .update(tokenUpdate);
+    if (!stamped) {
+      await revertManualHoldClaim();
+      logger.error(`[projects] send superseded before token stamp for ${project.id} — claim taken over by a newer request`);
+      return res.status(409).json({
+        error: 'This send was superseded by a newer request — refresh and check the report status.',
+        code: 'send_superseded',
+      });
+    }
 
     const updatedProject = await db('projects').where({ id: req.params.id }).first();
     const reportPath = await projectReportPathForProject(db, updatedProject, customer || {});
@@ -4079,18 +4109,9 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
     // point re-verifies the hash) nor erase a stale flag it never saw.
     try {
       await db.transaction(async (trx) => {
-        const locked = await trx('projects')
-          .where({ id: project.id })
-          .forUpdate()
-          .first('delivery_status', 'report_hold_status');
-        // Same two claims the photo-mutation lock respects: the shared send
-        // claim and the payment-hold release sweep's 'releasing' claim.
-        if (String(locked?.delivery_status || '') === 'sending'
-          || String(locked?.report_hold_status || '') === 'releasing') {
-          const err = new Error('This report is being sent right now — retry the signature in a moment.');
-          err.code = 'send_in_progress';
-          throw err;
-        }
+        // Same lock/guard as photo mutations — including the crashed-claim
+        // recovery, so a dead send can't block re-signing indefinitely.
+        await lockProjectForPhotoMutation(project, trx, 'the signature');
         signature.photo_set_hash = wdoPhotoSetHash(await loadWdoAddendumPhotoRows(project, trx));
         await trx('projects').where({ id: project.id }).update({ wdo_signature: JSON.stringify(signature), updated_at: db.fn.now() });
       });
@@ -4536,7 +4557,23 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (projectCols.completion_profile_snapshot && portalAttachment.completionProfile) {
       tokenUpdate.completion_profile_snapshot = JSON.stringify(portalAttachment.completionProfile);
     }
-    await db('projects').where({ id: project.id }).update(tokenUpdate);
+    // Token-fenced like /send's stamp: a resumed stalled request must not
+    // overwrite the takeover owner's token/portal/hold fields.
+    const stamped = await db('projects')
+      .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
+      .update(tokenUpdate);
+    if (!stamped) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] invoice claim release after superseded stamp failed for ${invoice.id}: ${err.message}`));
+      claimedInvoice = null;
+      await reverseProjectCreditOnAbort();
+      logger.error(`[projects] combined send superseded before token stamp for ${project.id} — claim taken over by a newer request`);
+      return res.status(409).json({
+        error: 'This send was superseded by a newer request — refresh and check the report status.',
+        code: 'send_superseded',
+      });
+    }
     const refreshed = await db('projects').where({ id: project.id }).first();
     const reportPath = await projectReportPathForProject(db, refreshed, customer);
     const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
