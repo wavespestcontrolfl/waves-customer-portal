@@ -37,7 +37,7 @@ export default function FrequencySlider({ frequencies, selected, onChange, disab
       style={{ padding: '0 0 8px', marginBottom: 8, opacity: disabled ? 0.68 : 1 }}
     >
       <div style={{
-        fontSize: 13, fontWeight: 600, color: W.textCaption,
+        fontSize: 14, fontWeight: 600, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 12,
       }}>
         How often?
