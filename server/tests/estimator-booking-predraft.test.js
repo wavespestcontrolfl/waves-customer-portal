@@ -162,6 +162,7 @@ describe('maybePreDraftForBooking — filters', () => {
       { id: 'catalog-1', service_key: 'lawn_inspection', name: 'Waves Assessment' },
       CUSTOMER,
       BOOKING({ service_type: 'Consultation (legacy)' }), // in-lock re-read
+      { id: 'catalog-1', service_key: 'lawn_inspection', name: 'Waves Assessment' }, // identity recheck lookup
       null,
     ];
     const result = await maybePreDraftForBooking('svc-1');
@@ -186,6 +187,7 @@ describe('maybePreDraftForBooking — call delegation', () => {
     mockState.firstQueue = [
       BOOKING({ source_call_log_id: 'call-7' }),
       BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation authoritative re-read
+      BOOKING({ source_call_log_id: 'call-7' }), // linkage-trx FOR UPDATE revalidation
     ];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
     const result = await maybePreDraftForBooking('svc-1');
@@ -203,14 +205,10 @@ describe('maybePreDraftForBooking — call delegation', () => {
     expect(mockState.updates[0].payload.estimate_data.__raw[1]).toEqual(['svc-1']);
     expect(mockState.whereRaws.some((w) => w.table === 'estimates'
       && w.args[0].includes("'scheduled_service_id') is null"))).toBe(true);
-    // The booking-liveness predicate is INSIDE the same statement — a
-    // separate check would race a cancellation committing between check
-    // and write (codex round 3).
-    const guard = mockState.whereRaws.find((w) => w.table === 'estimates' && w.args[0].includes('exists (select 1 from scheduled_services'));
-    expect(guard).toBeTruthy();
-    expect(guard.args[0]).toContain('source_estimate_id is null');
-    expect(guard.args[0]).toContain('status not in');
-    expect(guard.args[1]).toEqual(['svc-1', 'completed', 'cancelled', 'rescheduled', 'skipped', 'no_show']);
+    // The linkage revalidates the booking under a FOR UPDATE row lock in
+    // its own transaction — a bare EXISTS predicate would not serialize
+    // against a cancellation committing behind its snapshot (codex round 4).
+    expect(mockState.forUpdates).toContain('scheduled_services');
   });
 
   test('a booking that died before the delegation starts never runs the engine', async () => {
@@ -223,19 +221,28 @@ describe('maybePreDraftForBooking — call delegation', () => {
     expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
   });
 
-  test('a booking that dies DURING the engine run keeps the draft; the linkage UPDATE itself refuses dead visits', async () => {
+  test('a booking that dies DURING the engine run keeps the draft but never links the dead visit', async () => {
     mockState.firstQueue = [
       BOOKING({ source_call_log_id: 'call-7' }),
       BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation re-read: alive
+      BOOKING({ source_call_log_id: 'call-7', status: 'cancelled' }), // linkage-trx re-read: dead
     ];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
     const result = await maybePreDraftForBooking('svc-1');
-    // The quote was promised on the CALL — the draft stands. The dead-visit
-    // exclusion is not a separate racy SELECT: the liveness predicate rides
-    // inside the linkage UPDATE statement (asserted in the happy-path test),
-    // so PostgreSQL evaluates it against committed state at write time.
+    // The quote was promised on the CALL — the draft stands; the linkage
+    // transaction's locked revalidation refuses the dead visit.
     expect(result.drafted).toBe(true);
-    expect(mockState.updates).toHaveLength(1);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('a booking retyped away from Waves Assessment mid-flight never delegates', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7', service_type: 'Quarterly Pest Control', service_id: null }), // re-read: retyped
+    ];
+    const result = await maybePreDraftForBooking('svc-1');
+    expect(result).toEqual({ drafted: false, skipped: 'not_assessment' });
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
   });
 });
 

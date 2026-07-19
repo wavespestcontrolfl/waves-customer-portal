@@ -69,30 +69,43 @@ async function isAssessmentBooking(booking) {
 }
 
 // Merge the booking linkage into an engine-created draft's estimate_data.
-// ONE atomic jsonb_set guarded by a missing-key predicate: a
+// Runs in its own transaction holding the scheduled_services row FOR UPDATE
+// while it revalidates liveness, provenance, and assessment identity — a
+// bare EXISTS predicate reads a statement snapshot but does not lock the
+// row, so a cancellation/reschedule/estimate-born flip could commit right
+// behind it and leave the draft linked to a dead visit. The estimate write
+// itself is ONE atomic jsonb_set guarded by a missing-key predicate: a
 // read-modify-write of the whole blob could overwrite a concurrent admin
-// revision's estimate_data with a stale snapshot (quote data loss). An
+// revision's estimate_data with a stale snapshot (quote data loss), and an
 // existing linkage (the call pipeline stitches this key when one call
-// produced both rows) wins via the predicate. The booking-liveness
-// predicate rides INSIDE the same statement — a separate SELECT would race
-// a cancellation committing between check and write, leaving the draft
-// linked to a dead visit. Fail-soft.
+// produced both rows) wins via the predicate. Fail-soft.
 async function linkEstimateToBooking(estimateId, scheduledServiceId) {
   try {
-    const terminals = [...TERMINAL_BOOKING_STATUSES];
-    await db('estimates')
-      .where({ id: estimateId })
-      .whereRaw("(estimate_data ->> 'scheduled_service_id') is null")
-      .whereRaw(
-        `exists (select 1 from scheduled_services ss where ss.id = ? and ss.source_estimate_id is null and ss.status not in (${terminals.map(() => '?').join(', ')}))`,
-        [String(scheduledServiceId), ...terminals],
-      )
-      .update({
-        estimate_data: db.raw(
-          "jsonb_set(coalesce(estimate_data, '{}'::jsonb), '{scheduled_service_id}', to_jsonb(?::text))",
-          [String(scheduledServiceId)],
-        ),
-      });
+    await db.transaction(async (trx) => {
+      const fresh = await trx('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .forUpdate()
+        .first();
+      if (!fresh
+        || TERMINAL_BOOKING_STATUSES.has(String(fresh.status || ''))
+        || fresh.source_estimate_id
+        || !(await isAssessmentBooking(fresh))) {
+        logger.info('[booking-predraft] linkage skipped — booking no longer an eligible live assessment', {
+          scheduledServiceId,
+          estimateId,
+        });
+        return;
+      }
+      await trx('estimates')
+        .where({ id: estimateId })
+        .whereRaw("(estimate_data ->> 'scheduled_service_id') is null")
+        .update({
+          estimate_data: db.raw(
+            "jsonb_set(coalesce(estimate_data, '{}'::jsonb), '{scheduled_service_id}', to_jsonb(?::text))",
+            [String(scheduledServiceId)],
+          ),
+        });
+    });
   } catch (err) {
     logger.warn(`[booking-predraft] booking linkage merge failed for estimate ${estimateId}: ${err.message}`);
   }
@@ -127,10 +140,16 @@ async function maybePreDraftForBooking(scheduledServiceId) {
         return { drafted: false, skipped: 'booking_terminal' };
       }
       if (freshBooking.source_estimate_id) return { drafted: false, skipped: 'estimate_born' };
+      // Identity too: admin update-details can retype the visit while this
+      // hook is detached — a booking edited away from Waves Assessment no
+      // longer justifies a quote delegation.
+      if (!(await isAssessmentBooking(freshBooking))) {
+        return { drafted: false, skipped: 'not_assessment' };
+      }
 
       const { maybeDraftEstimateForCall } = require('./index');
       const outcome = await maybeDraftEstimateForCall({
-        callLogId: booking.source_call_log_id,
+        callLogId: freshBooking.source_call_log_id || booking.source_call_log_id,
         quotePromised: true,
       });
       if (outcome?.estimateId) {
@@ -165,29 +184,6 @@ async function maybePreDraftForBooking(scheduledServiceId) {
     } = require('../estimate-automation-duplicates');
 
     const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Customer';
-    const address = booking.service_address_line1
-      ? [booking.service_address_line1, booking.service_address_city].filter(Boolean).join(', ')
-      : (customer.address_line1 || '');
-    // Assessments are often booked days out — the draft must outlive the
-    // visit it exists to accelerate. scheduled_date is an ET business date;
-    // a naive new Date('YYYY-MM-DD') reads as UTC midnight (prior ET
-    // evening, drifting across DST), so derive the instant as ET noon via
-    // the shared helper. Knex may hand the column back as a string or a
-    // Date — normalize to the date string first.
-    const { parseETDateTime } = require('../../utils/datetime-et');
-    let expiryBase = new Date();
-    if (booking.scheduled_date) {
-      const dateStr = booking.scheduled_date instanceof Date
-        ? booking.scheduled_date.toISOString().slice(0, 10)
-        : String(booking.scheduled_date).slice(0, 10);
-      const parsed = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
-        ? parseETDateTime(`${dateStr}T12:00`)
-        : null;
-      if (parsed && !Number.isNaN(parsed.getTime())) expiryBase = parsed;
-    }
-    const expiresAt = new Date(
-      Math.max(expiryBase.getTime(), Date.now()) + 14 * 86400000,
-    );
 
     // withAutomatedEstimatePhoneLock degrades to a bare (unserialized)
     // callback when the customer has no usable phone — concurrent hook
@@ -220,6 +216,38 @@ async function maybePreDraftForBooking(scheduledServiceId) {
         return { drafted: false, skipped: 'booking_terminal' };
       }
       if (freshBooking.source_estimate_id) return { drafted: false, skipped: 'estimate_born' };
+      // Identity too, not just liveness: admin update-details can change
+      // service_type/service_id while the hook is detached — a booking
+      // edited away from Waves Assessment must not seed a draft.
+      if (!(await isAssessmentBooking(freshBooking))) {
+        return { drafted: false, skipped: 'not_assessment' };
+      }
+
+      // All insertion context derives from the FRESH row — the pre-lock
+      // snapshot's address/date/type can be stale for the same reason.
+      const address = freshBooking.service_address_line1
+        ? [freshBooking.service_address_line1, freshBooking.service_address_city].filter(Boolean).join(', ')
+        : (customer.address_line1 || '');
+      // Assessments are often booked days out — the draft must outlive the
+      // visit it exists to accelerate. scheduled_date is an ET business
+      // date; a naive new Date('YYYY-MM-DD') reads as UTC midnight (prior
+      // ET evening, drifting across DST), so derive the instant as ET noon
+      // via the shared helper. Knex may hand the column back as a string or
+      // a Date — normalize to the date string first.
+      const { parseETDateTime } = require('../../utils/datetime-et');
+      let expiryBase = new Date();
+      if (freshBooking.scheduled_date) {
+        const dateStr = freshBooking.scheduled_date instanceof Date
+          ? freshBooking.scheduled_date.toISOString().slice(0, 10)
+          : String(freshBooking.scheduled_date).slice(0, 10);
+        const parsed = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+          ? parseETDateTime(`${dateStr}T12:00`)
+          : null;
+        if (parsed && !Number.isNaN(parsed.getTime())) expiryBase = parsed;
+      }
+      const expiresAt = new Date(
+        Math.max(expiryBase.getTime(), Date.now()) + 14 * 86400000,
+      );
 
       // Per-booking idempotency: the tagger hook replays (admin
       // regenerate-brief), and the duplicate guard alone stops covering us
@@ -269,10 +297,10 @@ async function maybePreDraftForBooking(scheduledServiceId) {
           scheduled_service_id: booking.id,
           bookingPreDraft: {
             scheduledServiceId: booking.id,
-            scheduledDate: booking.scheduled_date || null,
-            serviceType: booking.service_type || null,
-            bookingSource: booking.booking_source || booking.source || null,
-            sourceAction: booking.source_action || null,
+            scheduledDate: freshBooking.scheduled_date || null,
+            serviceType: freshBooking.service_type || null,
+            bookingSource: freshBooking.booking_source || freshBooking.source || null,
+            sourceAction: freshBooking.source_action || null,
           },
         }),
       }).returning('*');
