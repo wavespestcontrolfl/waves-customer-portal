@@ -343,11 +343,8 @@ function draftMessageType(draft, legacyValue) {
 // draft retired (rejected) + 409; transient lookup failure → fail closed,
 // claim released, 503. Suppression/consent are re-checked by
 // sendCustomerMessage regardless. Narrowly scoped to
-// intent='estimate_clarify'.
-// 'unresponsive' counts as closed here — the staleness sweep and admin lead
-// flows treat it as terminal, and a clarify question is by definition a
-// response request the contact has already stopped answering.
-const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive']);
+// intent='estimate_clarify'. The staleness rules themselves (closed-lead
+// statuses, answer-arrived detection) live in claimClarifyDispatch.
 async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = false } = {}) {
   if (draft.intent !== 'estimate_clarify') return { blocked: false };
   if (!isEnabled('estimateClarifyAsks')) {
@@ -359,91 +356,61 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
     return { blocked: true };
   }
 
-  const flags = parseFlags(draft.flags);
-  const missing = Array.isArray(flags.missing) ? flags.missing : [];
-  const retire = async (message) => {
-    await db('message_drafts').where({ id: draft.id }).update({ status: 'rejected' });
-    res.status(409).json({ error: message, code: 'CLARIFY_STALE' });
+  // The staleness re-read, partial-answer rewrite, and sent_at stamp all
+  // commit atomically under the per-phone clarify lock (the same lock every
+  // reply/park writer holds) — see claimClarifyDispatch. From the 'send'
+  // outcome on, the draft reads as SENT: a Twilio failure downstream MUST
+  // reconcile via releaseFailedSendClaim, never plain releaseDraftClaim.
+  const { claimClarifyDispatch } = require('../services/estimate-clarify-asks');
+  const verdict = await claimClarifyDispatch({ draft, isRevision });
+  if (verdict.outcome === 'retired') {
+    res.status(409).json({ error: verdict.message, code: 'CLARIFY_STALE' });
     return { blocked: true };
-  };
-  try {
-    const [lead, customer, estimate] = await Promise.all([
-      // whereNull(deleted_at): a soft-deleted lead reads as gone, retiring
-      // the draft — matching how every other lead query treats deletion.
-      flags.lead_id ? db('leads').where({ id: flags.lead_id }).whereNull('deleted_at').first() : null,
-      draft.customer_id ? db('customers').where({ id: draft.customer_id }).whereNull('deleted_at').first() : null,
-      flags.estimate_id ? db('estimates').where({ id: flags.estimate_id }).first() : null,
-    ]);
-    if (flags.lead_id && !lead) {
-      return await retire('Clarify draft retired — the linked lead no longer exists.');
-    }
-    if (draft.customer_id && !customer) {
-      // Parity with the lead check — an archived/deleted customer must not
-      // receive a stale clarification.
-      return await retire('Clarify draft retired — the linked customer no longer exists.');
-    }
-    if (lead && CLOSED_LEAD_STATUSES.has(String(lead.status || ''))) {
-      return await retire('Clarify draft retired — the linked lead is closed.');
-    }
-    if (flags.estimate_id && !estimate) {
-      // Parity with the linked-lead check: deleting the shell estimate is a
-      // deliberate operator action — the clarification is obsolete.
-      return await retire('Clarify draft retired — the linked estimate no longer exists.');
-    }
-    if (estimate && (estimate.sent_at || estimate.status !== 'draft')) {
-      return await retire('Clarify draft retired — the linked estimate already moved past draft.');
-    }
-    // Answer-arrived recheck: retire only when EVERY asked item is now
-    // known — a partially answered ask is still actionable.
-    // The linked draft estimate's address counts too — operators resolve
-    // missing addresses directly on the estimate row.
-    const hasAddressNow = [lead?.address, customer?.address_line1, estimate?.address]
-      .some((value) => value && /\d/.test(String(value)));
-    const { hasConcreteServiceInterest } = require('../services/lead-estimate-automation');
-    // ONLY the lead row answers a service ask: customers.lead_service_interest
-    // is persistent leftover state from prior intake flows and would retire
-    // brand-new "which service?" questions as already answered.
-    const hasServiceNow = hasConcreteServiceInterest(lead?.service_interest);
-    const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
-      || (item === 'specific_service' && !hasServiceNow));
-    if (missing.length && !stillMissing.length) {
-      return await retire('Clarify draft retired — the customer already provided the missing details.');
-    }
-    if (stillMissing.length && stillMissing.length < missing.length) {
-      // Partial answer: never re-ask what the contact already supplied —
-      // rewrite the pending copy down to what's STILL missing before the
-      // send. The approve path sends draft_response (rewritten here); an
-      // owner-typed revision is deliberately untouched.
-      const { _private: clarify } = require('../services/estimate-clarify-asks');
-      const rewritten = clarify.composeClarifyBody({
-        missing: stillMissing,
-        firstName: lead?.first_name || customer?.first_name || null,
-      });
-      const rewrittenFlags = { ...flags, missing: stillMissing };
-      await db('message_drafts').where({ id: draft.id }).update({
-        draft_response: rewritten,
-        flags: JSON.stringify(rewrittenFlags),
-      });
-      if (isRevision) {
-        // The owner's revision was typed against the stale multi-question
-        // copy — it must not go out as-is. Claim released; the queue now
-        // shows the rewritten single question.
-        await releaseDraftClaim(draft.id, releaseFields);
-        res.status(409).json({
-          error: 'The customer already supplied part of this — the draft was rewritten to what is still missing. Review the new copy and try again.',
-          code: 'CLARIFY_UPDATED',
-        });
-        return { blocked: true };
-      }
-      draft.draft_response = rewritten;
-      draft.flags = JSON.stringify(rewrittenFlags);
-    }
-  } catch (err) {
+  }
+  if (verdict.outcome === 'rewritten') {
+    // The owner's revision was typed against the stale multi-question copy —
+    // it must not go out as-is. Claim released; the queue now shows the
+    // rewritten single question.
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(409).json({
+      error: 'The customer already supplied part of this — the draft was rewritten to what is still missing. Review the new copy and try again.',
+      code: 'CLARIFY_UPDATED',
+    });
+    return { blocked: true };
+  }
+  if (verdict.outcome !== 'send') {
     await releaseDraftClaim(draft.id, releaseFields);
     res.status(503).json({ error: 'Clarify staleness check unavailable — draft left pending, try again' });
     return { blocked: true };
   }
-  return { blocked: false };
+  draft.draft_response = verdict.body;
+  draft.flags = JSON.stringify(verdict.flags);
+  return {
+    blocked: false,
+    dispatchCommitted: true,
+    dispatchedMissing: Array.isArray(verdict.flags.missing) ? verdict.flags.missing : [],
+  };
+}
+
+// Post-guard failure release. A clarify draft past its dispatch decision
+// carries a sent_at stamp — plain releaseDraftClaim would strand it looking
+// sent (poisoning the 7-day cooldown) and could collide with the one-open-
+// per-phone unique index, so it reconciles under the clarify lock instead.
+async function releaseFailedSendClaim(draft, clarifyGuard, releaseFields = {}) {
+  if (draft.intent === 'estimate_clarify' && clarifyGuard?.dispatchCommitted) {
+    const { reopenClarifyAfterFailedSend } = require('../services/estimate-clarify-asks');
+    const result = await reopenClarifyAfterFailedSend({
+      draftId: draft.id,
+      dispatchedMissing: clarifyGuard.dispatchedMissing,
+      releaseFields,
+    });
+    if (result.reopened || result.retired) return;
+    // Reconciliation itself failed (transient DB error): best-effort clear of
+    // the stamp so the cooldown can't key on a send that never happened.
+    await releaseDraftClaim(draft.id, { ...releaseFields, sent_at: null });
+    return;
+  }
+  await releaseDraftClaim(draft.id, releaseFields);
 }
 
 async function guardCampaignSend(draft, req, res, releaseFields = {}) {
@@ -671,7 +638,7 @@ router.put('/:id/approve', async (req, res, next) => {
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
-      await releaseDraftClaim(draft.id);
+      await releaseFailedSendClaim(draft, clarifyGuard);
       return res.status(400).json({ error: 'Cannot determine recipient phone' });
     }
 
@@ -706,11 +673,11 @@ router.put('/:id/approve', async (req, res, next) => {
         },
       });
     } catch (sendErr) {
-      await releaseDraftClaim(draft.id);
+      await releaseFailedSendClaim(draft, clarifyGuard);
       throw sendErr;
     }
     if (!smsResult.sent) {
-      await releaseDraftClaim(draft.id);
+      await releaseFailedSendClaim(draft, clarifyGuard);
       return blockedSendResponse(res, smsResult);
     }
     // Suppression sentinel (campaign drafts): sent:true but nothing actually
@@ -796,7 +763,7 @@ router.put('/:id/revise', async (req, res, next) => {
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
 
     if (!toPhone) {
-      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
       return res.status(400).json({ error: 'Cannot determine recipient' });
     }
 
@@ -831,11 +798,11 @@ router.put('/:id/revise', async (req, res, next) => {
         },
       });
     } catch (sendErr) {
-      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
       throw sendErr;
     }
     if (!smsResult.sent) {
-      await releaseDraftClaim(draft.id, { revised_response: null, final_response: null });
+      await releaseFailedSendClaim(draft, clarifyGuard, { revised_response: null, final_response: null });
       return blockedSendResponse(res, smsResult);
     }
     // Suppression sentinel (campaign drafts) — same contract as approve: a
