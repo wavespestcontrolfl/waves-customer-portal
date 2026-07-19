@@ -36,7 +36,12 @@ exports.up = async function up(knex) {
   const updated = await knex('services')
     .where({ service_key: SERVICE_KEY })
     // Only the untouched default shape — an admin-edited row is theirs.
+    // BOTH conditions matter: the service-library UI stamps source
+    // 'manual' while an operator can deliberately save false/0/false, so
+    // values alone can't prove the row is untouched (codex P2 r1). The
+    // source list mirrors service-closeout-requirements INFERRED_SOURCES.
     .where({ requires_application_log: false, required_photo_count: 0, requires_customer_notice: false })
+    .whereIn('closeout_requirements_source', ['inferred_v1', 'default', 'fallback_inference'])
     .update({
       requires_application_log: true,
       required_photo_count: 2,
