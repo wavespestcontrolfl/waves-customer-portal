@@ -13132,9 +13132,11 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         // Armed margin floor rides the entry so downstream repricers (the
         // split-section ladder) clamp the same way this ladder does — a
         // section card must never offer a cadence below the floor the
-        // combo/accept path collects (codex P2 round 11 on #2827).
+        // combo/accept path collects (codex P2 round 11 on #2827). CEILED
+        // to the cent, matching clampLawnLadderEntry's own rule, so
+        // 12 × monthly never lands under the annual floor (round 12).
         ...(marginFloorArmed && rowMarginFloorAnnual > 0
-          ? { marginFloorMonthly: roundMonthly(rowMarginFloorAnnual / 12) }
+          ? { marginFloorMonthly: Math.ceil((rowMarginFloorAnnual / 12) * 100) / 100 }
           : {}),
         flooredAtMinimum: flooredAtMinimum === true || enginePinnedAtMinimum,
         recommended: row.recommended === true || row.isRecommended === true,
@@ -14265,7 +14267,7 @@ const NON_PEST_RESULT_ROWS = {
 // serviceKey -> { tierKey -> { mo, ann, pa, v, recommended, selected } } from the
 // stored tier rows. These are PRE-discount per-tier prices; shapeFromV1 applies
 // the discounts when it recomputes the bundle total for a given combination.
-function nonPestTierBaseMap(resultStats = {}, programMinMonthly) {
+function nonPestTierBaseMap(resultStats = {}, programMinMonthly, { lawnCostFloorArmed } = {}) {
   const out = {};
   for (const [serviceKey, [rowsKey, tierKeyFn]] of Object.entries(NON_PEST_RESULT_ROWS)) {
     const rows = Array.isArray(resultStats?.[rowsKey]) ? resultStats[rowsKey] : [];
@@ -14284,10 +14286,18 @@ function nonPestTierBaseMap(resultStats = {}, programMinMonthly) {
       // Stored lawn rows on old estimates predate the program minimum —
       // clamp the combo base so shapeFromV1 never sums a below-floor lawn
       // component (its per-service discount hook re-clamps post-WaveGuard).
+      // With the cost floor ARMED, the base also lifts to the row's own
+      // floor — the same armed selection lift clampLawnLadderEntry applies
+      // to the section ladder, so the combo total a customer accepts equals
+      // the floor-clamped card they selected (codex P2 round 12 on #2827).
       if (serviceKey === 'lawn_care') {
         const minMonthly = threadedProgramMinMonthly(programMinMonthly);
-        if (minMonthly > 0 && mo != null && mo < minMonthly) {
-          mo = minMonthly;
+        const armedFloorMonthly = lawnCostFloorArmed === true
+          ? (lawnRowFloorMonthly(row) ?? 0)
+          : 0;
+        const liftTo = Math.max(minMonthly > 0 ? minMonthly : 0, armedFloorMonthly);
+        if (liftTo > 0 && mo != null && mo < liftTo) {
+          mo = liftTo;
           ann = roundMonthly(mo * 12);
           pa = v ? roundMonthly(ann / v) : pa;
         }
@@ -14324,7 +14334,10 @@ function applySelectedTierToServiceRow(svc, tier) {
 }
 
 // Monthly cost floor a stored lawn row carries (reporting fields ride every
-// quote; arming is decided by the caller — value extraction only).
+// quote; arming is decided by the caller — value extraction only). CEILED
+// to the cent — nearest-cent rounding could put 12 × monthly a cent under
+// the annual floor and let a discounted tier accept below it, defeating
+// clampLawnLadderEntry's own ceil rule (codex P2 round 12 on #2827).
 function lawnRowFloorMonthly(row) {
   const floorAnnual = Number(
     row?.marginFloorAnnual
@@ -14333,7 +14346,9 @@ function lawnRowFloorMonthly(row) {
     ?? row?.minimumCollectedAnnualPrice
     ?? row?.costFloorAnnual,
   );
-  return Number.isFinite(floorAnnual) && floorAnnual > 0 ? roundMonthly(floorAnnual / 12) : null;
+  return Number.isFinite(floorAnnual) && floorAnnual > 0
+    ? Math.ceil((floorAnnual / 12) * 100) / 100
+    : null;
 }
 
 // Authoritative shapeFromV1 entry for one cadence combination. `selection` maps
@@ -14368,7 +14383,7 @@ function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false, p
   if (!v1 || !Array.isArray(v1.services)) return null;
   const hasPest = Array.isArray(v1.pestTiers) && v1.pestTiers.length > 0;
   if (!hasPest) return null;
-  const tierBaseMap = nonPestTierBaseMap(resultStats, programMinMonthly);
+  const tierBaseMap = nonPestTierBaseMap(resultStats, programMinMonthly, { lawnCostFloorArmed });
   const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
   const selectableNonPest = recurringKeys.filter(
     (k) => tierBaseMap[k] && Object.keys(tierBaseMap[k]).length > 1,

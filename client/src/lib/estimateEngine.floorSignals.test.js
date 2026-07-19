@@ -253,6 +253,29 @@ describe("fallback lawn margin visibility — report-only WaveGuard breach warni
   });
 });
 
+describe("collectMarginReviewNotes — standing lawn margin (no discount) — codex P2 round 12 #2827", () => {
+  it("surfaces a thin market-priced lawn line with no discounts at all", () => {
+    // 12,000 sqft standard/6x St. Augustine is a thin-margin cell at its
+    // MARKET price — no WaveGuard (single service), no manual discount, so
+    // the discount warnings stay silent, but the owner still needs the
+    // report-only note before sending.
+    const est = calculateEstimate(lawnInput({ measuredTurfSf: 12000, lawnFreq: "6" }));
+    expect(est.error).toBeUndefined();
+    const notes = collectMarginReviewNotes(est);
+    expect(notes.some((n) => n.startsWith("Lawn Care") && n.includes("35%"))).toBe(true);
+  });
+
+  it("does not double-note lawn when a discount warning already covers it", () => {
+    const est = calculateEstimate(lawnInput({
+      measuredTurfSf: 12000,
+      lawnFreq: "6",
+      manualDiscount: { type: "PERCENT", value: 40 },
+    }));
+    const notes = collectMarginReviewNotes(est);
+    expect(notes.filter((n) => n.startsWith("Lawn Care")).length).toBe(1);
+  });
+});
+
 describe("collectMarginReviewNotes — report-only low-margin signals for the estimator panel", () => {
   it("returns [] for empty/missing input and for estimates without signals", () => {
     expect(collectMarginReviewNotes(null)).toEqual([]);

@@ -476,6 +476,35 @@ export function collectMarginReviewNotes(E) {
       );
     }
   }
+
+  // Standing lawn margin — no discount involved: a market-priced lawn line
+  // already under the 35% review margin gets a report-only note too, since
+  // enforcement is disarmed and this visibility IS the policy (codex P2
+  // round 12 on #2827). Reads the fallback rows (costs.total vs annual) and
+  // the mapped shapes (prov.margin / lawnMeta.margin). Skipped when a
+  // discount warning above already covers the lawn line.
+  if (!notes.some((n) => n.startsWith("Lawn Care"))) {
+    const lawnRows = Array.isArray(E.results?.lawn) ? E.results.lawn : [];
+    const selectedLawn = lawnRows.find((t) => t?.recommended === true) || null;
+    let lawnMargin = null;
+    if (selectedLawn) {
+      const ann = Number(selectedLawn.ann ?? selectedLawn.annual);
+      const cost = Number(selectedLawn.costs?.total);
+      if (Number.isFinite(ann) && ann > 0 && Number.isFinite(cost)) {
+        lawnMargin = (ann - cost) / ann;
+      } else {
+        const provMargin = Number(selectedLawn.prov?.margin ?? E.results?.lawnMeta?.margin);
+        if (Number.isFinite(provMargin)) lawnMargin = provMargin;
+      }
+    } else if (Number.isFinite(Number(E.results?.lawnMeta?.margin))) {
+      lawnMargin = Number(E.results.lawnMeta.margin);
+    }
+    if (lawnMargin != null && lawnMargin < 0.35 - 1e-4) {
+      notes.push(
+        `Lawn Care: collected margin ${pct(lawnMargin) || "below target"} is under the 35% review floor at the quoted price. Nothing was capped — adjust the line if it reads too thin.`,
+      );
+    }
+  }
   return notes;
 }
 

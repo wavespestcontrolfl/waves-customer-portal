@@ -175,8 +175,9 @@ describe('comboPricingEntry — authoritative total via shapeFromV1', () => {
       pest_control: 'quarterly',
       lawn_care: 'standard',
     }, { lawnCostFloorArmed: true });
-    // pest 60*0.9 = 54 ; lawn 60*0.9 = 54 → clamped at 700/12 = 58.33 → 112.33
-    expect(armed.monthly).toBe(112.33);
+    // pest 60*0.9 = 54 ; lawn 60*0.9 = 54 → clamped at ceil(700/12) = 58.34
+    // (cent-ceiled so 12× never lands under the floor) → 112.34
+    expect(armed.monthly).toBe(112.34);
 
     // A floor ABOVE the authored base never raises the price — the line is
     // merely undiscountable (Enhanced: base 66.75, floor 810/12 = 67.5).
@@ -328,18 +329,56 @@ describe('bundleSectionLadderForService — non-pest section own-cadence slider'
     // Standard: 45.5 × 0.9 = 40.95 → clamped at 516/12 = 43.
     expect(byKey.standard.monthly).toBe(43);
     expect(byKey.standard.flooredAtMinimum).toBe(true);
-    // Enhanced: floor 850/12 = 70.83 ABOVE the 66.75 stored monthly — the
-    // upstream ladder's armed re-clamp (clampLawnLadderEntry, #2795
+    // Enhanced: floor ceil(850/12) = 70.84 ABOVE the 66.75 stored monthly —
+    // the upstream ladder's armed re-clamp (clampLawnLadderEntry, #2795
     // save==accept semantics) already lifted the ENTRY to its floor, and
     // the section inherits that base: the card shows exactly what accept
     // collects.
-    expect(byKey.enhanced.monthly).toBe(70.83);
+    expect(byKey.enhanced.monthly).toBe(70.84);
     // Premium: 89 × 0.9 = 80.1 sits above its 43 floor — untouched.
     expect(byKey.premium.monthly).toBe(80.1);
 
     // Disarmed (no stamp): same rows reprice with the full discount.
     const disarmed = bundleSectionLadderForService('lawn_care', { results: estData.results }, lawnSvc, 0.10);
     expect(Object.fromEntries(disarmed.map((e) => [e.key, e])).standard.monthly).toBe(40.95);
+  });
+
+  test('margin-floor monthly CEILS to the cent — 12× the clamp never lands under the annual floor (codex P2 round 12 #2827)', () => {
+    // $630.85/yr floor: nearest-cent monthly (52.57) × 12 = 630.84 would
+    // accept a cent under the floor; the ceil rule gives 52.58.
+    const estData = {
+      pricingMetadata: { lawnCostFloorArmed: true },
+      results: {
+        lawn: [
+          { name: 'Standard', v: 6, mo: 60, ann: 720, pa: 120, costFloorAnnual: 630.85 },
+          { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 630.85 },
+        ],
+      },
+    };
+    const ladder = bundleSectionLadderForService('lawn_care', estData, lawnSvc, 0.20);
+    const byKey = Object.fromEntries(ladder.map((e) => [e.key, e]));
+    // Standard: 60 × 0.8 = 48 → clamped at ceil(630.85/12) = 52.58.
+    expect(byKey.standard.monthly).toBe(52.58);
+    expect(byKey.standard.monthly * 12).toBeGreaterThanOrEqual(630.85);
+  });
+
+  test('the combo base map lifts a below-floor lawn base while armed — card == accepted combo (codex P2 round 12 #2827)', () => {
+    const stats = {
+      lawn: [
+        { name: 'Standard', v: 6, mo: 45.5, ann: 546, pa: 91, costFloorAnnual: 570 },
+        { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true, costFloorAnnual: 570 },
+      ],
+    };
+    // Armed: the 45.5 base lifts to the row's 570/12 = 47.5 floor — the
+    // same armed selection lift the section ladder shows, so the backing
+    // combo resolves the price the customer actually saw.
+    const armed = nonPestTierBaseMap(stats, undefined, { lawnCostFloorArmed: true });
+    expect(armed.lawn_care.standard).toMatchObject({ mo: 47.5, ann: 570 });
+    // Enhanced sits above its floor — untouched.
+    expect(armed.lawn_care.enhanced).toMatchObject({ mo: 66.75, ann: 801 });
+    // Disarmed default: reporting fields move nothing.
+    const disarmed = nonPestTierBaseMap(stats);
+    expect(disarmed.lawn_care.standard).toMatchObject({ mo: 45.5, ann: 546 });
   });
 
   test('no discount applied when the rate is 0 (Bronze / single-service)', () => {
