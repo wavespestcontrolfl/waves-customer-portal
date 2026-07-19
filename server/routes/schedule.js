@@ -70,7 +70,10 @@ router.get('/', async (req, res, next) => {
         technician: s.technician_name,
         customerConfirmed: s.customer_confirmed,
         confirmedAt: s.confirmed_at,
-        notes: s.notes,
+        // scheduled_services.notes is staff/automation scratch (migration
+        // bookkeeping, internal pricing, scheduler stamps) — hidden from the
+        // customer payload by owner directive 2026-07-19. Nothing in the
+        // portal client rendered it; it only rode the JSON.
         // Plan-coverage signals so the portal can distinguish recurring WaveGuard
         // visits from one-time visits and free re-service callbacks.
         isRecurring: s.is_recurring === true,
