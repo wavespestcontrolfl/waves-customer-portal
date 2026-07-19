@@ -4,7 +4,13 @@ const logger = require('./logger');
 const DEFAULT_DELAY_MINUTES = 5;
 const DEFAULT_LIMIT = 10;
 const DEFAULT_STALE_CLAIM_MINUTES = 30;
-const DEFAULT_ALLOWED_REVIEW_REASONS = ['property_measurements_defaulted'];
+// EMPTY by default: no review reason is auto-send safe out of the box.
+// 'property_measurements_defaulted' used to be allow-listed, which let
+// quotes priced off SYNTHETIC 2,000/8,000 sqft defaults go out unreviewed —
+// a lead with no measurements can auto-send a badly wrong number. Drafts
+// with any review reason now park for a human pass; re-allow specific
+// reasons deliberately via LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS.
+const DEFAULT_ALLOWED_REVIEW_REASONS = [];
 
 function parseJsonObject(value) {
   if (!value) return {};

@@ -11,7 +11,7 @@
  */
 
 const { reconcileLawnReport } = require('../services/service-report/report-consistency');
-const { structuredCustomerConcern } = require('../services/service-report/report-data');
+const { structuredCustomerConcern, stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
 
 function reportInput({ allReady = true, petAdvisory = 'Keep pets off treated beds and foliage until dry.' } = {}) {
   return {
@@ -108,5 +108,29 @@ describe('structuredCustomerConcern (concern-card key mismatch)', () => {
     expect(structuredCustomerConcern({})).toBe('');
     expect(structuredCustomerConcern({ customerConcernText: '   ' })).toBe('');
     expect(structuredCustomerConcern()).toBe('');
+  });
+});
+
+describe('stripLiveOnlyScheduleFields (shared by route + queued PDF renderer)', () => {
+  // Cached PDFs are content-key-insensitive snapshots — schedule fields
+  // rendered into them outlive any reschedule (codex P2 r2: the pdf-queue
+  // path bypassed the route-level strip, so the strip is shared).
+  test('removes nextAppointment and the V2 snapshot nextVisit, preserves the rest', () => {
+    const data = {
+      serviceLine: 'tree_shrub',
+      nextAppointment: { date: '2026-07-24' },
+      reportV2: { snapshot: { nextVisit: { label: 'Friday, July 24' }, status: 'healthy' } },
+    };
+    const out = stripLiveOnlyScheduleFields(data);
+    expect(out).toBe(data);
+    expect(data.nextAppointment).toBeUndefined();
+    expect(data.reportV2.snapshot.nextVisit).toBeUndefined();
+    expect(data.reportV2.snapshot.status).toBe('healthy');
+  });
+
+  test('null-safe on payloads without a V2 snapshot', () => {
+    expect(stripLiveOnlyScheduleFields(null)).toBeNull();
+    expect(() => stripLiveOnlyScheduleFields({ nextAppointment: null })).not.toThrow();
+    expect(() => stripLiveOnlyScheduleFields({ reportV2: {} })).not.toThrow();
   });
 });

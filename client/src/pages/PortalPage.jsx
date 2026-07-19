@@ -4007,6 +4007,16 @@ function BillingTab({ customer }) {
   const [achOffered, setAchOffered] = useState(false);
   const [bankPendingNotice, setBankPendingNotice] = useState(false);
   const [bankPendingVerifyUrl, setBankPendingVerifyUrl] = useState('');
+  // Set-default consent retry: the default role carries Auto Pay, and a
+  // method with no enrollment-scoped consent row 409s. The retry must
+  // present the REAL SaveCardConsent checkbox — the recorded snapshot's
+  // copy is checkbox-phrased ("By checking this box…"), so a generic
+  // Agree dialog would record consent for a box never checked.
+  const [defaultConsentPrompt, setDefaultConsentPrompt] = useState(null); // { cardId, methodType } | null
+  const [defaultConsentChecked, setDefaultConsentChecked] = useState(false);
+  const [defaultConsentSaving, setDefaultConsentSaving] = useState(false);
+  useLockBodyScroll(!!defaultConsentPrompt);
+  const defaultConsentDialogRef = useModalFocus(!!defaultConsentPrompt, () => setDefaultConsentPrompt(null));
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
@@ -4239,8 +4249,32 @@ function BillingTab({ customer }) {
       await refreshCards();
       setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
+      if (err.status === 409 && err.code === 'consent_required') {
+        // The default role carries Auto Pay, and this method has no
+        // recurring-charge authorization on record (e.g. it was saved for
+        // an estimate card hold). Open the checkbox modal — the retry with
+        // consent_accepted only fires after the box is actually ticked.
+        setDefaultConsentChecked(false);
+        setDefaultConsentPrompt({ cardId, methodType: err.methodType || 'card' });
+        return;
+      }
       showCustomerAlert(err.message || 'Failed to set default card');
     }
+  };
+
+  const confirmDefaultConsent = async () => {
+    if (!defaultConsentPrompt) return;
+    setDefaultConsentSaving(true);
+    try {
+      await api.setDefaultCard(defaultConsentPrompt.cardId, { consent_accepted: true });
+      setDefaultConsentPrompt(null);
+      await refreshCards();
+      setAutopayRefreshKey((k) => k + 1);
+    } catch (retryErr) {
+      setDefaultConsentPrompt(null);
+      showCustomerAlert(retryErr.message || 'Failed to set default card');
+    }
+    setDefaultConsentSaving(false);
   };
 
   const card = {
@@ -4914,6 +4948,51 @@ function BillingTab({ customer }) {
           </div>
         )}
       </div>
+
+      {/* ── Set-default Auto Pay consent modal (checkbox required) ── */}
+      {defaultConsentPrompt && (
+        <div data-glass-scrim="" style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 9999, padding: 20,
+        }} onClick={(e) => { if (e.target === e.currentTarget) setDefaultConsentPrompt(null); }}>
+          <div ref={defaultConsentDialogRef} role="dialog" aria-modal="true" aria-label="Authorize Auto Pay" data-glass="modal" style={{
+            background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
+            maxHeight: '100%', boxSizing: 'border-box', overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+            border: '1px solid #E7E2D7',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>Authorize Auto Pay</div>
+              <button type="button" aria-label="Close" onClick={() => setDefaultConsentPrompt(null)} style={{
+                background: 'transparent', border: 'none', cursor: 'pointer', color: muted, lineHeight: 1,
+                width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}><Icon name="close" size={20} strokeWidth={2} /></button>
+            </div>
+            <div style={{ fontSize: 14, color: muted, lineHeight: 1.5, marginBottom: 14 }}>
+              Your default payment method is used for Auto Pay, and this method was saved
+              without an Auto Pay authorization. Check the box below to authorize it.
+            </div>
+            <SaveCardConsent
+              checked={defaultConsentChecked}
+              onChange={setDefaultConsentChecked}
+              methodType={defaultConsentPrompt.methodType}
+              headline="Use this payment method for Auto Pay"
+            />
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 16 }}>
+              <button type="button" onClick={() => setDefaultConsentPrompt(null)} style={secondaryButton}>Cancel</button>
+              <button
+                type="button"
+                disabled={!defaultConsentChecked || defaultConsentSaving}
+                onClick={confirmDefaultConsent}
+                style={{ ...primaryButton, opacity: (!defaultConsentChecked || defaultConsentSaving) ? 0.55 : 1, cursor: (!defaultConsentChecked || defaultConsentSaving) ? 'default' : 'pointer' }}
+              >
+                {defaultConsentSaving ? 'Saving...' : 'Agree & Set Default'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Stripe Add Card Modal ── */}
       {showAddCard && (
@@ -8122,6 +8201,13 @@ function MyPlanTab({ customer, focusService }) {
   // Server-resolved lane verdict for NULL modes — see the dashboard summary
   // (Codex r10).
   const [resolvedNonMonthly, setResolvedNonMonthly] = useState(false);
+  // Server-computed cancellation-eligibility verdict — the SAME predicate
+  // POST /api/requests enforces (cancellation-eligibility service), served
+  // on /api/schedule. Client-side approximations of it drifted three times
+  // in review (rescheduled date-exemption, armed next_charge_date,
+  // dispatch-owned pending rows), so the gate consumes the server's answer.
+  // null = payload didn't carry the field (older cached bundle mid-deploy).
+  const [serverCancellable, setServerCancellable] = useState(null);
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
@@ -8141,6 +8227,9 @@ function MyPlanTab({ customer, focusService }) {
     ]).then(([nextData, scheduleData, servicesData]) => {
       setNextService(nextData.next || null);
       setUpcomingServices(scheduleData.upcoming || []);
+      setServerCancellable(typeof scheduleData.hasCancellableWork === 'boolean'
+        ? scheduleData.hasCancellableWork
+        : null);
       setServiceHistory(servicesData.services || []);
       setPlanStatus('ready');
     }).catch((err) => {
@@ -8186,6 +8275,20 @@ function MyPlanTab({ customer, focusService }) {
     ? Math.max(1, Math.round((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)))
     : 0;
   const tierServiceLimit = activeTierName ? (TIER_SERVICES[activeTierName] || 1) : 0;
+  // Pause/Cancel are only offered when there is something to pause or cancel.
+  // When the schedule payload carries the server's nothing_to_cancel verdict
+  // (same shared predicate POST /api/requests enforces), it is AUTHORITATIVE
+  // both ways — client-visible signals can't reproduce cases like a
+  // live-track-only visit the sweep would never cancel. The client-side belt
+  // exists only for a payload missing the field (mid-deploy cache), so an
+  // obviously-active account never loses the controls. A tier-'none'
+  // account with only one-time history gets no account-wide churn control.
+  // Rendered only at planStatus 'ready', so the schedule data is loaded.
+  const hasCancellableAccount = serverCancellable !== null
+    ? serverCancellable
+    : (!!activeTierName || !!nextService
+      || upcomingServices.length > 0
+      || Number(customer?.monthlyRate ?? customer?.monthly_rate ?? 0) > 0);
 
   const detectCatalogServiceId = (service) => {
     for (const svc of SERVICE_CATALOG) {
@@ -8992,6 +9095,7 @@ function MyPlanTab({ customer, focusService }) {
             </div>
           </section>
 
+          {hasCancellableAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Account Options</div>
             {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
@@ -9155,6 +9259,7 @@ function MyPlanTab({ customer, focusService }) {
               </div>
             )}
           </section>
+          )}
         </aside>
       </div>
 

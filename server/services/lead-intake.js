@@ -56,9 +56,64 @@ function looksLikeAddress(body) {
   return false;
 }
 
+// Combined replies ("Pest control — 123 Main St, Sarasota") carry the
+// address in the SAME message the service classifier consumes. Capture the
+// street-shaped tail: among every digit-run start, the LATEST whose tail
+// carries a street suffix (latest wins so "I have 2 dogs, ... 123 Main St"
+// captures the street, not the dogs). Conservative — no suffix, no capture;
+// the awaiting_address state still handles a follow-up reply.
+// A KNOWN-service tail on a captured address ("123 Main St, pest control")
+// belongs to the service, not the address — the classifier reads the full
+// body separately, so the tail is simply dropped here.
+const SERVICE_TAIL_RE = /[,\s]+((?:quarterly\s+|monthly\s+|recurring\s+|one[-\s]?time\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\s+(?:control|care|service|treatment|program|removal))?)\s*$/i;
+function stripServiceTailFromAddress(address) {
+  let out = String(address || '').trim();
+  while (SERVICE_TAIL_RE.test(out)) {
+    out = out.replace(SERVICE_TAIL_RE, '').replace(/[,\s]+$/, '').trim();
+  }
+  return out;
+}
+
+function extractAddressCandidate(body) {
+  const text = String(body || '');
+  let best = null;
+  for (const match of text.matchAll(/\d{1,6}\s+[A-Za-z]/g)) {
+    // Cut the tail at the first clause boundary so trailing prose ("… 123
+    // Main St for ants, they're everywhere") doesn't ride into
+    // address_line1 — commas stay (city/zip live after them).
+    // Clause boundary first, then service-introducing prose ("123 Main St
+    // for ants") — connector words end the address ("Fort Myers" survives:
+    // \bfor\b never matches inside Fort).
+    const clause = text.slice(match.index).split(/[.;!?\n]/)[0];
+    const candidate = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
+    if (candidate.length >= 6 && candidate.length <= 160 && STREET_SUFFIX_RE.test(candidate)) {
+      best = candidate;
+    }
+  }
+  if (best) {
+    const stripped = stripServiceTailFromAddress(best);
+    best = stripped.length >= 6 ? stripped : null;
+  }
+  return best;
+}
+
 async function createOrUpdateDraftEstimate(customer, interest) {
+  // Update ONLY the intake's own shell (unpriced sms_intake/lead_webhook
+  // row) — a newer priced or quote-wizard draft on the same customer must
+  // never have its service/address overwritten by an intake reply. With no
+  // shell, the create path's phone duplicate guard decides.
   const existingDraft = await db('estimates')
     .where({ customer_id: customer.id, status: 'draft' })
+    .whereIn('source', ['sms_intake', 'lead_webhook'])
+    .where(function unpriced() {
+      this.whereNull('monthly_total').orWhere('monthly_total', 0);
+    })
+    .where(function noOnetime() {
+      this.whereNull('onetime_total').orWhere('onetime_total', 0);
+    })
+    .where(function noAnnual() {
+      this.whereNull('annual_total').orWhere('annual_total', 0);
+    })
     .orderBy('created_at', 'desc')
     .first();
 
@@ -187,10 +242,57 @@ async function handleIntakeReply(customer, body) {
     });
     customer.lead_service_interest = cls.interest;
 
-    const hasAddress = !!(customer.address_line1 && String(customer.address_line1).trim());
+    // Clarify lifecycle bookkeeping: this state machine consumes replies
+    // itself, so a sent clarify that asked for these items must be stamped
+    // answered here — otherwise its cooldown suppresses a later
+    // independent ask. Fail-soft, bookkeeping only.
+    try {
+      const { recordClarifyAnswer } = require('./estimate-clarify-asks');
+      await recordClarifyAnswer({ phone: customer.phone, items: ['specific_service'] });
+    } catch (e) {
+      logger.warn(`[lead-intake] clarify bookkeeping failed: ${e.message}`);
+    }
+
+    let hasAddress = !!(customer.address_line1 && String(customer.address_line1).trim());
+    if (!hasAddress) {
+      // Combined-reply capture: without it the machine advances to
+      // awaiting_address, DROPS the address it was just given, and the
+      // clarify cooldown suppresses the re-ask — the quote strands.
+      const combinedAddress = extractAddressCandidate(body);
+      if (combinedAddress) {
+        await db('customers').where({ id: customer.id }).update({ address_line1: combinedAddress });
+        customer.address_line1 = combinedAddress;
+        hasAddress = true;
+        try {
+          const { recordClarifyAnswer } = require('./estimate-clarify-asks');
+          await recordClarifyAnswer({ phone: customer.phone, items: ['street_address'] });
+        } catch (e) {
+          logger.warn(`[lead-intake] clarify bookkeeping failed: ${e.message}`);
+        }
+      }
+    }
     if (hasAddress) {
-      // Address already on file — create draft + notify immediately.
-      if (await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
+      // Shell-aware handoff: a pre-existing open shell (form leads) would
+      // block the engine's priced draft via the conservative duplicate
+      // guard — running the DEEP composer into that wall wastes the run
+      // and strands an incomplete shell. With a shell present, the legacy
+      // path below patches it (address/service) and notifies; the engine
+      // lane is for shell-less SMS-origin leads only.
+      const existingShell = await db('estimates')
+        .where({ customer_id: customer.id, status: 'draft' })
+        // Only true SHELLS bypass the engine: unpriced intake/webhook rows.
+        // An unrelated priced draft (existing customer) must not disable
+        // the lane — the engine's address-aware duplicate guard owns that.
+        .whereIn('source', ['sms_intake', 'lead_webhook'])
+        .where(function unpriced() {
+          this.whereNull('monthly_total').orWhere('monthly_total', 0);
+        })
+        .where(function noOnetime() {
+          this.whereNull('onetime_total').orWhere('onetime_total', 0);
+        })
+        .orderBy('created_at', 'desc')
+        .first();
+      if (!existingShell && await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
         return { handled: true, next: 'estimate_drafted' };
       }
       const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
@@ -209,6 +311,24 @@ async function handleIntakeReply(customer, body) {
     await db('customers').where({ id: customer.id }).update({
       lead_intake_status: 'awaiting_address',
     });
+    // Ask-the-customer loop (GATE_ESTIMATE_CLARIFY_ASKS): the machine now
+    // WAITS for an address but nothing asks for one — the auto-reply's menu
+    // prompt was deliberately removed. Park an approval-gated clarifying
+    // SMS so the question goes out only on the owner's click. Fail-soft.
+    try {
+      const { parkClarifyAsk } = require('./estimate-clarify-asks');
+      await parkClarifyAsk({
+        missing: ['street_address'],
+        phone: customer.phone,
+        firstName: customer.first_name,
+        customerId: customer.id,
+        source: 'lead_intake_awaiting_address',
+        // Mid-SMS-conversation — the contact is texting this number now.
+        channelProvenance: 'sms',
+      });
+    } catch (e) {
+      logger.error(`[lead-intake] clarify ask failed: ${e.message}`);
+    }
     logger.info(`[lead-intake] Awaiting address from ${customer.first_name} after selecting ${cls.interest}`);
     return { handled: false };
   }
@@ -224,6 +344,13 @@ async function handleIntakeReply(customer, body) {
       address_line1: address,
     });
     customer.address_line1 = address;
+    // Clarify lifecycle bookkeeping — see the awaiting_service branch.
+    try {
+      const { recordClarifyAnswer } = require('./estimate-clarify-asks');
+      await recordClarifyAnswer({ phone: customer.phone, items: ['street_address'] });
+    } catch (e) {
+      logger.warn(`[lead-intake] clarify bookkeeping failed: ${e.message}`);
+    }
 
     const interest = customer.lead_service_interest;
     if (!interest) {
@@ -231,7 +358,23 @@ async function handleIntakeReply(customer, body) {
       return { handled: false };
     }
 
-    if (await engineDraftHandoff(customer, body, `address captured (${interest})`)) {
+    // Shell-aware handoff — same rule as the awaiting_service branch: the
+    // engine only runs when no open shell would block its priced draft.
+    const existingShell = await db('estimates')
+      .where({ customer_id: customer.id, status: 'draft' })
+      .whereIn('source', ['sms_intake', 'lead_webhook'])
+      .where(function unpriced() {
+        this.whereNull('monthly_total').orWhere('monthly_total', 0);
+      })
+      .where(function noOnetime() {
+        this.whereNull('onetime_total').orWhere('onetime_total', 0);
+      })
+      .where(function noAnnual() {
+        this.whereNull('annual_total').orWhere('annual_total', 0);
+      })
+      .orderBy('created_at', 'desc')
+      .first();
+    if (!existingShell && await engineDraftHandoff(customer, body, `address captured (${interest})`)) {
       return { handled: true, next: 'estimate_drafted' };
     }
 

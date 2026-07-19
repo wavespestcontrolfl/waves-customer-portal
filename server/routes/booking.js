@@ -1021,12 +1021,32 @@ router.get('/availability', async (req, res, next) => {
   }
 });
 
+// parseWhen below is a paid model call with no dedicated limiter — the
+// general API limit (1,500/15min) left a wide-open per-IP AI spend budget.
+// Generous for a real funnel session (a customer refines "when" a handful
+// of times), tight against scripted floods. Mirrors captureIntentLimiter's
+// two-layer style.
+const findSlotsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many searches — please try again in a minute.' },
+});
+const findSlotsHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many searches — please try again later.' },
+});
+
 // POST /api/booking/find-slots — Waves AI date/time search.
 //   body: { query, lat, lng, address, city, estimate_id, service_type, duration_minutes }
 //   Parses the natural-language "when" into a date window + time-of-day, then
 //   returns the matching open slots (same shape as /availability) plus a short
 //   summary line and a `nearby` flag for the soft route-density message.
-router.post('/find-slots', async (req, res, next) => {
+router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('selfBooking')) {
@@ -2104,9 +2124,31 @@ function toPublicBookingShape(row) {
   return out;
 }
 
+// Confirm commits REAL calendar capacity (and can create a new customer
+// profile), and previously ran under only the general 1,500-request limit —
+// enough for one IP to hoard many days of caps across the 90-day horizon.
+// A household books a visit or two; 6/min absorbs double-submits and
+// back-and-forth, 20/day bounds hoarding from a single IP. (Signed slot
+// offers + per-day caps bound the damage further; a distributed attacker is
+// out of scope for an IP limiter.) Mirrors captureIntentLimiter's style.
+const bookingConfirmLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many booking attempts — please wait a minute and try again.' },
+});
+const bookingConfirmDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many booking attempts today — call (941) 297-5749 and a real person will help right away.' },
+});
+
 // POST /api/booking/confirm — thin HTTP adapter over createSelfBooking. The
 // selfBooking gate lives here (a caller concern); the service is gate-agnostic.
-router.post('/confirm', async (req, res, next) => {
+router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('selfBooking')) {

@@ -2,6 +2,11 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
+const { noStore } = require('../middleware/no-store');
+
+// Every response here is keyed by a bearer token in the URL and carries
+// financial/personal data — never cacheable, never indexable.
+router.use(noStore);
 const InvoiceService = require('../services/invoice');
 const InvoiceAttachments = require('../services/invoice-attachments');
 const StripeService = require('../services/stripe');

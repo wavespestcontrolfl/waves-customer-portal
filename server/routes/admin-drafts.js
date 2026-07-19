@@ -115,6 +115,30 @@ function sendPolicyForDraft(draft, recipient) {
       },
     };
   }
+  if (draft.intent === 'estimate_clarify') {
+    // Clarify asks answer the contact's OWN quote request, so they ride the
+    // transactional estimate rails, never the conversational fallthrough.
+    // Consent is only ASSERTED when the phone's recorded provenance
+    // supports SMS contact — they texted us, called us, or self-submitted
+    // the number on our quote form (the basis the form's SMS auto-reply
+    // already sends under). An email-extracted phone asserts nothing:
+    // consentBasis stays undefined and the messaging validator's
+    // fail-closed path owns the verdict. Draft creation is never itself
+    // consent evidence.
+    const flags = parseFlags(draft.flags);
+    const provenance = flags.channel_provenance || null;
+    const smsProvenance = ['sms', 'voice', 'web_form'].includes(provenance);
+    return {
+      audience: recipient.customerId ? 'customer' : 'lead',
+      purpose: 'estimate_followup',
+      estimateId: flags.estimate_id || undefined,
+      consentBasis: (recipient.customerId || !smsProvenance) ? undefined : {
+        status: 'transactional_allowed',
+        source: `estimate_clarify_${provenance}`,
+        capturedAt: draft.created_at || new Date().toISOString(),
+      },
+    };
+  }
   return draftSendPolicyFields(draft, recipient);
 }
 
@@ -310,6 +334,118 @@ function draftMessageType(draft, legacyValue) {
  *   { blocked: false, customer }         — proceed; customer carries
  *                                          nearest_location_id for the send
  */
+// Clarify-ask drafts (services/estimate-clarify-asks.js): the writer's gate
+// must hold at APPROVAL time too — GATE_ESTIMATE_CLARIFY_ASKS turned off
+// while a draft sits pending means the owner shut the lane; the click must
+// not send. And the QUESTION must still be needed: the answer can arrive,
+// the linked estimate can move past draft, or the lead can close while the
+// draft sits pending — approving then would text a stale question. Stale →
+// draft retired (rejected) + 409; transient lookup failure → fail closed,
+// claim released, 503. Suppression/consent are re-checked by
+// sendCustomerMessage regardless. Narrowly scoped to
+// intent='estimate_clarify'.
+// 'unresponsive' counts as closed here — the staleness sweep and admin lead
+// flows treat it as terminal, and a clarify question is by definition a
+// response request the contact has already stopped answering.
+const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive']);
+async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = false } = {}) {
+  if (draft.intent !== 'estimate_clarify') return { blocked: false };
+  if (!isEnabled('estimateClarifyAsks')) {
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(409).json({
+      error: 'Clarify asks are disabled (GATE_ESTIMATE_CLARIFY_ASKS is off) — draft left pending',
+      code: 'CLARIFY_GATE_OFF',
+    });
+    return { blocked: true };
+  }
+
+  const flags = parseFlags(draft.flags);
+  const missing = Array.isArray(flags.missing) ? flags.missing : [];
+  const retire = async (message) => {
+    await db('message_drafts').where({ id: draft.id }).update({ status: 'rejected' });
+    res.status(409).json({ error: message, code: 'CLARIFY_STALE' });
+    return { blocked: true };
+  };
+  try {
+    const [lead, customer, estimate] = await Promise.all([
+      // whereNull(deleted_at): a soft-deleted lead reads as gone, retiring
+      // the draft — matching how every other lead query treats deletion.
+      flags.lead_id ? db('leads').where({ id: flags.lead_id }).whereNull('deleted_at').first() : null,
+      draft.customer_id ? db('customers').where({ id: draft.customer_id }).whereNull('deleted_at').first() : null,
+      flags.estimate_id ? db('estimates').where({ id: flags.estimate_id }).first() : null,
+    ]);
+    if (flags.lead_id && !lead) {
+      return await retire('Clarify draft retired — the linked lead no longer exists.');
+    }
+    if (draft.customer_id && !customer) {
+      // Parity with the lead check — an archived/deleted customer must not
+      // receive a stale clarification.
+      return await retire('Clarify draft retired — the linked customer no longer exists.');
+    }
+    if (lead && CLOSED_LEAD_STATUSES.has(String(lead.status || ''))) {
+      return await retire('Clarify draft retired — the linked lead is closed.');
+    }
+    if (flags.estimate_id && !estimate) {
+      // Parity with the linked-lead check: deleting the shell estimate is a
+      // deliberate operator action — the clarification is obsolete.
+      return await retire('Clarify draft retired — the linked estimate no longer exists.');
+    }
+    if (estimate && (estimate.sent_at || estimate.status !== 'draft')) {
+      return await retire('Clarify draft retired — the linked estimate already moved past draft.');
+    }
+    // Answer-arrived recheck: retire only when EVERY asked item is now
+    // known — a partially answered ask is still actionable.
+    // The linked draft estimate's address counts too — operators resolve
+    // missing addresses directly on the estimate row.
+    const hasAddressNow = [lead?.address, customer?.address_line1, estimate?.address]
+      .some((value) => value && /\d/.test(String(value)));
+    const { hasConcreteServiceInterest } = require('../services/lead-estimate-automation');
+    // ONLY the lead row answers a service ask: customers.lead_service_interest
+    // is persistent leftover state from prior intake flows and would retire
+    // brand-new "which service?" questions as already answered.
+    const hasServiceNow = hasConcreteServiceInterest(lead?.service_interest);
+    const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
+      || (item === 'specific_service' && !hasServiceNow));
+    if (missing.length && !stillMissing.length) {
+      return await retire('Clarify draft retired — the customer already provided the missing details.');
+    }
+    if (stillMissing.length && stillMissing.length < missing.length) {
+      // Partial answer: never re-ask what the contact already supplied —
+      // rewrite the pending copy down to what's STILL missing before the
+      // send. The approve path sends draft_response (rewritten here); an
+      // owner-typed revision is deliberately untouched.
+      const { _private: clarify } = require('../services/estimate-clarify-asks');
+      const rewritten = clarify.composeClarifyBody({
+        missing: stillMissing,
+        firstName: lead?.first_name || customer?.first_name || null,
+      });
+      const rewrittenFlags = { ...flags, missing: stillMissing };
+      await db('message_drafts').where({ id: draft.id }).update({
+        draft_response: rewritten,
+        flags: JSON.stringify(rewrittenFlags),
+      });
+      if (isRevision) {
+        // The owner's revision was typed against the stale multi-question
+        // copy — it must not go out as-is. Claim released; the queue now
+        // shows the rewritten single question.
+        await releaseDraftClaim(draft.id, releaseFields);
+        res.status(409).json({
+          error: 'The customer already supplied part of this — the draft was rewritten to what is still missing. Review the new copy and try again.',
+          code: 'CLARIFY_UPDATED',
+        });
+        return { blocked: true };
+      }
+      draft.draft_response = rewritten;
+      draft.flags = JSON.stringify(rewrittenFlags);
+    }
+  } catch (err) {
+    await releaseDraftClaim(draft.id, releaseFields);
+    res.status(503).json({ error: 'Clarify staleness check unavailable — draft left pending, try again' });
+    return { blocked: true };
+  }
+  return { blocked: false };
+}
+
 async function guardCampaignSend(draft, req, res, releaseFields = {}) {
   if (!draft.campaign_type) return { blocked: false, customer: null };
 
@@ -526,6 +662,10 @@ router.put('/:id/approve', async (req, res, next) => {
     const campaignGuard = await guardCampaignSend(draft, req, res);
     if (campaignGuard.blocked) return;
 
+    // Gate recheck for clarify-ask drafts only.
+    const clarifyGuard = await guardClarifySend(draft, res);
+    if (clarifyGuard.blocked) return;
+
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;
     const fromNumber = requestedFromNumber || recipient.fromNumber || undefined;
@@ -646,6 +786,10 @@ router.put('/:id/revise', async (req, res, next) => {
     // Shared pre-send gate recheck (campaign drafts only).
     const campaignGuard = await guardCampaignSend(draft, req, res, { revised_response: null, final_response: null });
     if (campaignGuard.blocked) return;
+
+    // Gate recheck for clarify-ask drafts only.
+    const clarifyGuard = await guardClarifySend(draft, res, { revised_response: null, final_response: null }, { isRevision: true });
+    if (clarifyGuard.blocked) return;
 
     const recipient = await resolveDraftRecipient(draft);
     const toPhone = recipient.toPhone;

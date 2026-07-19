@@ -2,6 +2,11 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
+const { noStore } = require('../middleware/no-store');
+
+// Customer documents + the public /shared/:token surface: personal and
+// financial paperwork — never cacheable, never indexable.
+router.use(noStore);
 const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
 const {
@@ -403,23 +408,12 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   }
 
   // ══════════════════════════════════════════════════════
-  // WHAT I NOTICED — tech observations from field_flags, structured_notes, AI report
+  // WHAT I NOTICED — tech observations from structured_notes + AI report.
+  // field_flags are deliberately NOT printed: they are internal QA markers,
+  // not customer-facing (see the same classification in routes/services.js),
+  // and dumping every key/value put raw internal flags on a customer PDF.
   // ══════════════════════════════════════════════════════
-  let fieldObs = null;
-  if (service.field_flags) {
-    try {
-      const parsed = typeof service.field_flags === 'string' ? JSON.parse(service.field_flags) : service.field_flags;
-      if (Object.keys(parsed).length) fieldObs = parsed;
-    } catch { /* ignore */ }
-  }
-
   const observations = [];
-  if (fieldObs) {
-    Object.entries(fieldObs).forEach(([key, val]) => {
-      if (typeof val === 'boolean' && !val) return;
-      observations.push(`${key.replace(/_/g, ' ')}: ${typeof val === 'boolean' ? 'Yes' : val}`);
-    });
-  }
   if (structuredNotes?.observations) {
     const obs = Array.isArray(structuredNotes.observations) ? structuredNotes.observations : [structuredNotes.observations];
     observations.push(...obs);
@@ -828,14 +822,34 @@ router.get('/', authenticate, async (req, res, next) => {
     }));
 
     // Group by type
+    // Real cross-page totals: `total` previously reported THIS page's length,
+    // so the client's "N total on file" label could never exceed the page and
+    // paging looked complete after one fetch. Counts are per-source (stored
+    // docs + completed-service reports + project reports); the handful of
+    // page-level skips (internal-only typed reports, linked-doc dedup) make
+    // this a slight upper bound, which the label tolerates.
+    const [{ count: storedDocCount }] = await db('customer_documents')
+      .where({ customer_id: req.customerId })
+      .count('id as count');
+    let serviceCountQuery = db('service_records')
+      .where({ customer_id: req.customerId, status: 'completed' });
+    if (serviceRecordCols.completion_source) {
+      serviceCountQuery = serviceCountQuery.where(function visibleServiceReports() {
+        this.whereNull('completion_source')
+          .orWhereNot('completion_source', 'project_completion');
+      });
+    }
+    const [{ count: serviceReportCount }] = await serviceCountQuery.count('id as count');
+
     const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs];
+    const totalOnFile = parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length;
     const grouped = {};
     for (const d of allDocs) {
       if (!grouped[d.documentType]) grouped[d.documentType] = [];
       grouped[d.documentType].push(d);
     }
 
-    res.json({ documents: grouped, total: allDocs.length });
+    res.json({ documents: grouped, total: totalOnFile });
   } catch (err) {
     next(err);
   }
@@ -896,11 +910,13 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
         'dilution_rate', 'area_treated_sqft', 'wind_speed_mph', 'weather_conditions', 'application_site')
       .catch(() => []);
 
-    // Get invoice total if available
+    // Get invoice total if available. The column is `total` — the old
+    // `total_amount` select threw on every request and the .catch() silently
+    // dropped the invoice block from the PDF.
     const invoice = await db('invoices')
       .where({ customer_id: req.customerId })
       .where('service_date', service.service_date)
-      .select('total_amount', 'status', 'id')
+      .select('total as total_amount', 'status', 'id')
       .first()
       .catch(() => null);
 

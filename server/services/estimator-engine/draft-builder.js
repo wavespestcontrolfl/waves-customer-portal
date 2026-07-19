@@ -346,15 +346,27 @@ async function calibrationWarnings(engineResult) {
 // actually appears in the transcript/SMS source (whitespace/case-normalized).
 function verifyEvidenceQuotes(intent, context) {
   const normalize = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const haystack = normalize(
-    `${context?.transcript || ''} ${(context?.smsThread || []).map((m) => m.body).join(' ')}`,
-  );
+  // Each source RECORD is its own haystack — one concatenated string would
+  // verify a stitched "quote" whose words only meet across record boundaries
+  // (end of the transcript + start of an unrelated SMS), which is exactly
+  // the fabrication this check exists to catch. A verbatim quote lives
+  // inside a single transcript or a single message. SMS-origin contexts
+  // join the whole thread into `transcript` for the composer prompt, so
+  // they supply transcriptRecords (one entry per message) and those replace
+  // the joined transcript here.
+  const transcriptSources = Array.isArray(context?.transcriptRecords) && context.transcriptRecords.length
+    ? context.transcriptRecords
+    : [context?.transcript];
+  const haystacks = [
+    ...transcriptSources.map((t) => normalize(t)),
+    ...(context?.smsThread || []).map((m) => normalize(m?.body)),
+  ].filter(Boolean);
   const quotes = (intent?.evidence || []).map((e) => e.quote);
   // Empty/trivial quotes count as UNVERIFIED, not skipped — a quote too
   // short to check is a quote the operator can't verify either.
   const unverified = quotes.filter((q) => {
     const needle = normalize(q);
-    return needle.length < 8 || !haystack.includes(needle);
+    return needle.length < 8 || !haystacks.some((h) => h.includes(needle));
   });
   return { total: quotes.length, unverified: unverified.length };
 }
@@ -427,6 +439,16 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if ((intent.constraint_flags || []).length) {
     reasons.push(`constraints the engine can't express: ${intent.constraint_flags.map((f) => f.flag).join(', ')}`);
   }
+  // The draft keeps the transport-verified number (see createDraftEstimate).
+  // A DIFFERENT full 10-digit number from the composer is a real signal —
+  // the caller may have asked for another contact — but model-extracted text
+  // must never silently become the send target for a bearer link, so the
+  // divergence parks the draft for a deliberate operator edit instead.
+  const composerLast10 = phoneLookupValues(intent.customer_phone).last10;
+  const verifiedLast10 = phoneLookupValues(context?.phone).last10;
+  if (composerLast10 && verifiedLast10 && composerLast10 !== verifiedLast10) {
+    reasons.push(`composer proposed a different contact number (${intent.customer_phone}) than the verified caller ID — the draft keeps the caller ID; edit the phone before send if the customer asked for the other number`);
+  }
   if (intent.confidence !== 'high') reasons.push(`composer confidence ${intent.confidence}`);
   if ((intent.uncertainties || []).length) reasons.push(`open questions: ${intent.uncertainties.join(' | ')}`);
   if ((intent.evidence || []).length < Object.keys(intent.services || {}).length) {
@@ -493,6 +515,22 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
   ].filter((line) => line !== null).join('\n');
 }
 
+// Transport-verified number FIRST: context.phone comes from the transport
+// itself (Twilio caller ID / the SMS thread address), while
+// intent.customer_phone is model-extracted text — a misheard or hallucinated
+// 10-digit number there would aim the bearer estimate link and the
+// customer's PII at a third party the moment the operator clicks Send. The
+// composer's number is used only when the transport offers no usable number
+// (blocked/anonymous caller who dictated a callback number); when the two
+// disagree, classifyLane parks the draft in yellow with the composer's
+// number quoted so the operator applies it deliberately.
+function resolveDraftCustomerPhone(intent, context) {
+  const validPhone = (v) => String(v || '').replace(/\D/g, '').length >= 10;
+  return (validPhone(context?.phone) ? context.phone : null)
+    || (validPhone(intent?.customer_phone) ? intent.customer_phone : null)
+    || null;
+}
+
 // Engine tier keys are lowercase; customers.waveguard_tier's CHECK allows
 // only the title-case labels.
 const WAVEGUARD_TIER_LABELS = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
@@ -523,14 +561,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // estimate endpoint returns the `notes` COLUMN to the customer, so it must
   // never carry internal review material.
   const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call });
-  // The composer's phone is only trusted when it is a real 10-digit number —
-  // a placeholder ("unknown") or misheard fragment would break the duplicate
-  // guard's phone lock and leave the draft unsendable/mis-keyed. The verified
-  // caller-ID from context is the fallback.
-  const validPhone = (v) => String(v || '').replace(/\D/g, '').length >= 10;
-  const customerPhone = (validPhone(intent.customer_phone) ? intent.customer_phone : null)
-    || context?.phone
-    || null;
+  const customerPhone = resolveDraftCustomerPhone(intent, context);
   // priorQualifyingServices must NOT ride inside the stored engineInputs —
   // the public reconcile path clears only the TOP-LEVEL key on stale
   // membership snapshots, and a nested copy would keep replaying the
@@ -707,5 +738,5 @@ module.exports = {
   calibrationWarnings,
   classifyLane,
   createDraftEstimate,
-  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES, lookupFeatureModifiers },
+  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES, lookupFeatureModifiers, resolveDraftCustomerPhone },
 };

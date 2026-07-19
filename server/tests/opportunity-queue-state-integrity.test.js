@@ -63,6 +63,23 @@ describe('miner upsert: skipped is sticky, expired revives', () => {
     expect(caseMatch[1]).not.toContain("'expired'");
   });
 
+  test('the metadata refresh preserves the runner gate_retry marker (one-shot redraft survives the morning mine)', async () => {
+    db.raw.mockResolvedValue({ rowCount: 1 });
+    await miner.persistAll([{
+      bucket: 'seasonal_rising', action_type: 'new_supporting_blog',
+      query: 'termite swarm season', page_url: null, service: 'termite', city: null,
+      score: 80, score_breakdown: {}, signal_metadata: {}, dedupe_key: 'k1',
+    }]);
+
+    const [sql] = db.raw.mock.calls[0];
+    // The 7:30 ET mine runs BEFORE the 9AM engine; a wholesale
+    // signal_metadata replace here would erase the runner's one-shot
+    // gate_retry marker and turn the single feedback-informed redraft into
+    // repeated blind first attempts.
+    expect(sql).toContain("jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')");
+    expect(sql).toContain("jsonb_build_object('gate_retry', opportunity_queue.signal_metadata->'gate_retry')");
+  });
+
   test('the intercept SEEDER deliberately keeps revive-on-reseed (operator signal)', async () => {
     // Contrast case: seedAll's CASE must NOT include 'skipped' — an operator
     // re-running the seed script is an explicit "run these".
@@ -293,5 +310,41 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
     expect(q._filters).toEqual(expect.arrayContaining([
       ['attempt_count', '<', 5],
     ]));
+  });
+});
+
+describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {
+  test('claim-guarded update: pending, future available_at, cleared skip_reason, extended expires_at', async () => {
+    const q = chain({ updateResult: 1 });
+    db.mockImplementation(() => q);
+    const when = new Date('2026-07-20T04:00:00Z');
+
+    const ok = await queue.defer('opp_defer', when, { claimToken: 'tok' });
+
+    expect(ok).toBe(true);
+    expect(q._filters).toEqual(expect.arrayContaining([
+      ['id', 'opp_defer'],
+      ['status', 'claimed'],
+      ['claimed_at', 'tok'],
+    ]));
+    const patch = q.update.mock.calls[0][0];
+    expect(patch.status).toBe('pending');
+    expect(patch.claimed_at).toBeNull();
+    // 'pending' rows must look pending — the deferral reason lives on the
+    // autonomous_runs row, not the queue row.
+    expect(patch.skip_reason).toBeNull();
+    expect(patch.available_at).toBe(when);
+    // expires_at must be pushed past the defer horizon or expireStale()
+    // expires the row before it ever becomes claimable again.
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('GREATEST(COALESCE(expires_at'), expect.any(Array));
+    // A deferral is not a failure: the attempt claimNext consumed must be
+    // refunded, or repeated cap-window deferrals exhaust the lifetime
+    // attempt budget and land in attempts_exhausted review.
+    expect(db.raw).toHaveBeenCalledWith('GREATEST(attempt_count - 1, 0)');
+  });
+
+  test('requires a claimToken and a real Date', async () => {
+    await expect(queue.defer('opp_defer', new Date('2026-07-20T04:00:00Z'), {})).rejects.toThrow('claimToken');
+    await expect(queue.defer('opp_defer', 'monday', { claimToken: 'tok' })).rejects.toThrow('availableAt');
   });
 });

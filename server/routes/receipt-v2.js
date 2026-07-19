@@ -2,6 +2,11 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
+const { noStore } = require('../middleware/no-store');
+
+// Receipt links are PERMANENT bearer URLs — the strongest case on the
+// portal for keeping responses out of shared caches and search indexes.
+router.use(noStore);
 const { generateInvoicePDF, generateReceiptPDF } = require('../services/pdf/invoice-pdf');
 const logger = require('../services/logger');
 

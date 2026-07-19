@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
+const { noStore } = require('../middleware/no-store');
+
+// Token-keyed contract data (names, addresses, signatures) — never cache.
+router.use(noStore);
 const { logAutopay } = require('../services/autopay-log');
 const { documentRequiresSignature, hashContractToken, serializeContract } = require('../services/contracts');
 const logger = require('../services/logger');

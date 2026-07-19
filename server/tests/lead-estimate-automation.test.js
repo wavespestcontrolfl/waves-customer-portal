@@ -45,6 +45,9 @@ describe('lead estimate automation gate', () => {
   test('blocks leads missing a concrete requested service', () => {
     expect(hasConcreteServiceInterest('Pest Control Consultation')).toBe(false);
     expect(hasConcreteServiceInterest('Other Services')).toBe(false);
+    // The email-lead default label is a placeholder, never a service.
+    expect(hasConcreteServiceInterest('General inquiry')).toBe(false);
+    expect(hasConcreteServiceInterest('General question about service')).toBe(false);
     expect(hasConcreteServiceInterest('One-Time Termite Treatment')).toBe(true);
 
     const readiness = evaluateLeadEstimateAutomationReadiness({
@@ -313,5 +316,120 @@ describe('lead estimate automation gate', () => {
     });
     expect(triageDraft.estimateData.engineResult.lineItems[0].service).toBe('mosquito');
     expect(triageDraft.monthly).not.toBe(initialDraft.monthly);
+  });
+});
+
+// ── Estimator audit hardening: negation, cadence, bed-bug enum ──
+describe('service-interest mapper hardening', () => {
+  test('negated services are not selected: "pest, no lawn" quotes pest only', () => {
+    const mapped = mapServiceInterestToEstimateServices('Pest control, no lawn');
+    expect(mapped.supported).toBe(true);
+    expect(mapped.services.pest).toMatchObject({ frequency: 'quarterly' });
+    expect(mapped.services.lawn).toBeUndefined();
+    expect(mapped.services.oneTimeLawn).toBeUndefined();
+    expect(mapped.services.lawnPestControl).toBeUndefined();
+  });
+
+  test('negation stays inside its clause: "no pest, lawn care" still quotes lawn', () => {
+    const mapped = mapServiceInterestToEstimateServices('No pest, lawn care');
+    expect(mapped.services.pest).toBeUndefined();
+    expect(mapped.services.oneTimePest).toBeUndefined();
+    expect(mapped.services.lawn).toMatchObject({ track: 'st_augustine', tier: 'enhanced' });
+  });
+
+  test('a CONTRASTIVE conjunction ends the negation: "no lawn but pest control"', () => {
+    const mapped = mapServiceInterestToEstimateServices('no lawn but pest control');
+    expect(mapped.services.lawn).toBeUndefined();
+    expect(mapped.services.pest).toMatchObject({ frequency: 'quarterly' });
+  });
+
+  test('plain "and" does NOT reset — "no lawn and mosquito" is a coordinated negated list', () => {
+    const mapped = mapServiceInterestToEstimateServices('quarterly pest, no lawn and mosquito');
+    expect(mapped.services.pest).toMatchObject({ frequency: 'quarterly' });
+    expect(mapped.services.lawn).toBeUndefined();
+    expect(mapped.services.mosquito).toBeUndefined();
+    expect(mapped.services.oneTimeMosquito).toBeUndefined();
+  });
+
+  test("don't-need phrasing negates through intervening words", () => {
+    const mapped = mapServiceInterestToEstimateServices("Quarterly pest — don't need any mosquito");
+    expect(mapped.services.pest).toBeDefined();
+    expect(mapped.services.mosquito).toBeUndefined();
+    expect(mapped.services.oneTimeMosquito).toBeUndefined();
+  });
+
+  test('negation reaches to the end of its clause, however many words intervene', () => {
+    const mapped = mapServiceInterestToEstimateServices(
+      'I do not currently have any interest in mosquito service, just pest control please',
+    );
+    expect(mapped.services.pest).toBeDefined();
+    expect(mapped.services.mosquito).toBeUndefined();
+    expect(mapped.services.oneTimeMosquito).toBeUndefined();
+
+    // A fully long-negated interest parks — never a wrong auto-quote.
+    const parked = mapServiceInterestToEstimateServices('I do not currently have any interest in mosquito service');
+    expect(parked.supported).toBe(false);
+  });
+
+  test('positive idioms "not only"/"not just" are not negations', () => {
+    const both = mapServiceInterestToEstimateServices('not only pest but lawn care');
+    expect(both.services.pest).toMatchObject({ frequency: 'quarterly' });
+    expect(both.services.lawn).toMatchObject({ track: 'st_augustine' });
+
+    const notJust = mapServiceInterestToEstimateServices('not just pest, lawn too');
+    expect(notJust.services.pest).toBeDefined();
+    expect(notJust.services.lawn).toBeDefined();
+  });
+
+  test('fully negated interest fails SAFE to manual review, never to a wrong quote', () => {
+    const mapped = mapServiceInterestToEstimateServices('no pest control');
+    expect(mapped.supported).toBe(false);
+    expect(mapped.unsupportedReason).toBe('service_not_mapped_for_automation');
+  });
+
+  test('un-negated mentions still map exactly as before (regression)', () => {
+    expect(mapServiceInterestToEstimateServices('Recurring Pest Control + Lawn Care')).toMatchObject({
+      supported: true,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', tier: 'enhanced' },
+      },
+    });
+  });
+
+  test('semiannual cadence parks for manual scoping instead of silently quoting quarterly', () => {
+    const mapped = mapServiceInterestToEstimateServices('Semiannual pest control');
+    expect(mapped.supported).toBe(false);
+    expect(mapped.unsupportedReason).toBe('semiannual_cadence_requires_manual_scope');
+    // One-time-only requests are untouched by the recurring-cadence rule.
+    expect(mapServiceInterestToEstimateServices('One-time pest treatment').supported).toBe(true);
+  });
+
+  test('bed bug defaults use a real pricing-engine occupancy enum', () => {
+    const mapped = mapServiceInterestToEstimateServices('Bed bug treatment');
+    expect(mapped.supported).toBe(true);
+    expect(mapped.services.bedBug).toMatchObject({ occupancyType: 'singleFamily' });
+    expect(mapped.review).toContain('bed_bug_defaults_used');
+  });
+
+  test('automated bed-bug lead now survives engine generation end to end', () => {
+    const readiness = evaluateLeadEstimateAutomationReadiness({
+      phone: '+19415550199',
+      serviceInterest: 'Bed bug treatment',
+      intake: {
+        email: 'lead@example.com',
+        serviceInterest: 'Bed bug treatment',
+        normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' },
+      },
+    });
+    const draft = buildAutomatedLeadDraftEstimate({
+      intake: { serviceInterest: 'Bed bug treatment', fullAddress: '123 Main St, Venice, FL 34285' },
+      body: { homeSqFt: 1800, lotSqFt: 7000 },
+      readiness,
+    });
+    // The old occupancyType 'residential' failed the engine's assertEnum and
+    // flipped every bed-bug lead to generation_failed.
+    expect(draft.automation.status).not.toBe('generation_failed');
+    expect(draft.automation.error).toBeUndefined();
   });
 });

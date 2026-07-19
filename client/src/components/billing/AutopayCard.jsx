@@ -159,6 +159,11 @@ export default function AutopayCard({ onStateChange }) {
   // setup-intent response decides whether the bank tab exists at all, and
   // bankPending renders the micro-deposit notice after a deferred save.
   const [addMethodType, setAddMethodType] = useState('card');
+  // Server said the selected method has no enrollment-qualifying consent
+  // row (409 consent_required) — hold the patch, show the authorization
+  // copy, and re-submit with consent_accepted once the box is ticked.
+  const [consentPrompt, setConsentPrompt] = useState(null); // { patch, methodType } | null
+  const [consentChecked, setConsentChecked] = useState(false);
   const [achOffered, setAchOffered] = useState(false);
   const [bankPending, setBankPending] = useState(false);
   const [bankVerifyUrl, setBankVerifyUrl] = useState('');
@@ -305,7 +310,15 @@ export default function AutopayCard({ onStateChange }) {
       await load();
       setModal(null);
     } catch (e) {
-      setErr(e.message || 'Update failed');
+      if (e.status === 409 && e.code === 'consent_required') {
+        // Not an error state — the method just needs its recurring-charge
+        // authorization on record. Fresh unchecked box every time: the tick
+        // IS the consent event being recorded.
+        setConsentChecked(false);
+        setConsentPrompt({ patch, methodType: e.methodType || 'card' });
+      } else {
+        setErr(e.message || 'Update failed');
+      }
     }
     setSaving(false);
   };
@@ -665,6 +678,37 @@ export default function AutopayCard({ onStateChange }) {
               </div>
             </div>
           )}
+        </Modal>
+      )}
+
+      {consentPrompt && (
+        <Modal title="Authorize Auto Pay" onClose={() => setConsentPrompt(null)}>
+          <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, lineHeight: 1.5 }}>
+            This payment method was saved without an Auto Pay authorization.
+            Review and accept the authorization below to use it for automatic billing.
+          </div>
+          <SaveCardConsent
+            checked={consentChecked}
+            onChange={setConsentChecked}
+            methodType={consentPrompt.methodType}
+            headline="Use this payment method for Auto Pay"
+          />
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+            <button type="button" {...btnGlass('secondary')} style={btn('secondary')} onClick={() => setConsentPrompt(null)}>Cancel</button>
+            <button
+              type="button"
+              {...btnGlass('primary')}
+              style={btn('primary')}
+              disabled={saving || !consentChecked}
+              onClick={() => {
+                const patch = { ...consentPrompt.patch, consent_accepted: true };
+                setConsentPrompt(null);
+                runUpdate(patch);
+              }}
+            >
+              {saving ? 'Saving...' : 'Agree & Turn On'}
+            </button>
+          </div>
         </Modal>
       )}
     </div>

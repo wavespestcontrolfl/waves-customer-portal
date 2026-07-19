@@ -29,6 +29,10 @@ function hasConcreteServiceInterest(serviceInterest) {
   if (/\bconsultation\b/.test(text)) return false;
   if (/\bnot\s+sure\b/.test(text)) return false;
   if (/\b(other services?|something else)\b/.test(text)) return false;
+  // The email-lead default label ('General inquiry') is a placeholder, not
+  // a service — treating it as concrete both let unpriceable form leads
+  // through readiness and instantly retired clarify asks at approval.
+  if (/\bgeneral (inquiry|question)\b/.test(text)) return false;
   return true;
 }
 
@@ -41,13 +45,56 @@ function numberOrNull(...values) {
   return null;
 }
 
-function normalizedServiceText(serviceInterest) {
+// Lowercased, alnum-only service text — except punctuation collapses to a
+// ' . ' clause marker instead of vanishing, so negation lookback can stop at
+// clause boundaries: in "no lawn, pest quarterly" the negation must not
+// cross the comma and swallow pest.
+function normalizedServiceClauses(serviceInterest) {
   return firstNonEmpty(serviceInterest)
     .toLowerCase()
     .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[,;.:!?()/\n\r]+/g, ' . ')
+    .replace(/[^a-z0-9.]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Negation tokens. The positive idioms "not only …"/"not just …" are NOT
+// negations — "not only pest but lawn care" asks for both services.
+const NEGATION_WORD = /\b(?:no|not|without|never|skip|except|cancel|dont|don t|do not|doesnt|doesn t|does not)\b(?!\s+(?:only|just|to mention)\b)/g;
+// CONTRASTIVE conjunctions end a negation's reach: "no lawn but pest"
+// still selects pest. Plain "and" does NOT reset — "no lawn and mosquito"
+// is a coordinated negated list, and treating "and" as a reset would quote
+// the second service the customer explicitly declined. The cost is that
+// "no lawn and pest please" parks for manual review instead of quoting
+// pest — the safe failure direction.
+const NEGATION_RESET = /\b(?:but|however|plus)\b/;
+
+// True when the pattern matches somewhere in the text WITHOUT a negation
+// governing it. A negation governs from its token to the END of its clause
+// ("I do not currently have any interest in mosquito service" negates
+// mosquito however many words intervene) unless a scope-resetting
+// conjunction appears between the negation and the mention. "pest, no lawn"
+// selects pest only; "no pest, lawn care" selects lawn only. The safe
+// failure direction is over-negation: a dropped service leads to an
+// unsupported/manual-review park, never a wrong auto-quote.
+function hasUnnegatedMention(text, pattern) {
+  for (const clause of text.split(' . ')) {
+    const re = new RegExp(pattern.source, 'g');
+    let match;
+    while ((match = re.exec(clause)) !== null) {
+      const before = clause.slice(0, match.index);
+      let lastNegationEnd = -1;
+      const negRe = new RegExp(NEGATION_WORD.source, 'g');
+      let neg;
+      while ((neg = negRe.exec(before)) !== null) lastNegationEnd = neg.index + neg[0].length;
+      const governed = lastNegationEnd >= 0
+        && !NEGATION_RESET.test(before.slice(lastNegationEnd));
+      if (!governed) return true;
+      if (re.lastIndex === match.index) re.lastIndex += 1;
+    }
+  }
+  return false;
 }
 
 function isOneTimeServiceText(text) {
@@ -66,7 +113,7 @@ function pestFrequencyFromText(text) {
 }
 
 function mapServiceInterestToEstimateServices(serviceInterest) {
-  const text = normalizedServiceText(serviceInterest);
+  const text = normalizedServiceClauses(serviceInterest);
   const services = {};
   const review = [];
 
@@ -76,8 +123,12 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
 
   const oneTime = isOneTimeServiceText(text);
   const recurring = isRecurringServiceText(text);
+  // Service DETECTION is negation-aware ("pest, no lawn" must not select
+  // lawn); cadence/modifier words (one time, quarterly, monitoring…) stay
+  // plain matches — they qualify a selected service, they don't select one.
+  const wants = (pattern) => hasUnnegatedMention(text, pattern);
 
-  if (/\baeration\b|\bplugging\b|\blawn plug\b|\bcore plug\b/.test(text)) {
+  if (wants(/\baeration\b|\bplugging\b|\blawn plug\b|\bcore plug\b/)) {
     return {
       services,
       supported: false,
@@ -86,7 +137,8 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     };
   }
 
-  if (/\bpest\b/.test(text) || /\bant\b/.test(text) || /\bcockroach\b/.test(text) || /\broach\b/.test(text)) {
+  const pestWanted = wants(/\bpest\b|\bant\b|\bcockroach\b|\broach\b/);
+  if (pestWanted) {
     if (oneTime) {
       services.oneTimePest = {};
     } else {
@@ -94,10 +146,11 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     }
   }
 
-  if (/\blawn\b|\bfertilization\b|\bweed\b/.test(text)) {
-    if (/\bpest\b/.test(text) && !/\blawn pest\b/.test(text)) {
+  if (wants(/\blawn\b|\bfertilization\b|\bweed\b/)) {
+    const lawnPest = wants(/\blawn pest\b/);
+    if (pestWanted && !lawnPest) {
       services.lawn = { track: 'st_augustine', tier: 'enhanced' };
-    } else if (/\blawn pest\b/.test(text)) {
+    } else if (lawnPest) {
       services.lawnPestControl = {};
       review.push('lawn_pest_control_defaulted');
     } else if (oneTime || /\bweed\b/.test(text)) {
@@ -107,7 +160,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     }
   }
 
-  if (/\bmosquito\b/.test(text)) {
+  if (wants(/\bmosquito\b/)) {
     if (oneTime) {
       services.oneTimeMosquito = {};
     } else {
@@ -115,7 +168,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     }
   }
 
-  if (/\btermite\b/.test(text)) {
+  if (wants(/\btermite\b/)) {
     if (/\bmonitoring\b|\bprotection\b|\bbait\b/.test(text) || recurring) {
       services.termite = { system: 'advance', monitoringTier: 'basic' };
     } else {
@@ -128,28 +181,33 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     }
   }
 
-  if (/\bflea\b|\btick\b/.test(text)) {
+  if (wants(/\bflea\b|\btick\b/)) {
     services.flea = {};
     review.push('flea_treatment_defaulted');
   }
 
-  if (/\bwasp\b|\bhornet\b|\bstinging\b|\bbee\b/.test(text)) {
+  if (wants(/\bwasp\b|\bhornet\b|\bstinging\b|\bbee\b/)) {
     services.stinging = { species: 'PAPER_WASP', tier: 2, removal: 'NONE' };
     review.push('stinging_insect_defaults_used');
   }
 
-  if (/\bbed bug\b|\bbedbug\b/.test(text)) {
+  if (wants(/\bbed bug\b|\bbedbug\b/)) {
     services.bedBug = {
       method: 'CHEMICAL',
       rooms: 2,
       severity: 'moderate',
       prepStatus: 'ready',
-      occupancyType: 'residential',
+      // Must be a real pricing-engine enum (singleFamily/apartment/hotel/
+      // studentHousing) — the old 'residential' failed assertEnum and killed
+      // EVERY automated bed-bug lead at generation. Residential web leads
+      // default to the base singleFamily multiplier; the review flag below
+      // already parks bed-bug drafts for a human pass.
+      occupancyType: 'singleFamily',
     };
     review.push('bed_bug_defaults_used');
   }
 
-  if (/\brodent\b|\brat\b|\bmouse\b|\bmice\b/.test(text)) {
+  if (wants(/\brodent\b|\brat\b|\bmouse\b|\bmice\b/)) {
     if (/\bbait\b|\bstation\b/.test(text)) {
       services.rodentBait = {};
     } else {
@@ -160,6 +218,20 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
         review,
       };
     }
+  }
+
+  // Semiannual isn't a cadence the catalog offers on any recurring line
+  // (pest: monthly/bimonthly/quarterly; mosquito: monthly tiers). The engine
+  // would silently coerce it — pest to quarterly — and quote a cadence the
+  // customer never asked for, so the request parks for manual scoping.
+  const recurringSelected = Object.keys(services).some((key) => !/^oneTime/.test(key));
+  if (recurringSelected && /\bsemiannual\b|\bsemi annual\b/.test(text)) {
+    return {
+      services,
+      supported: false,
+      unsupportedReason: 'semiannual_cadence_requires_manual_scope',
+      review,
+    };
   }
 
   const supported = Object.keys(services).length > 0;

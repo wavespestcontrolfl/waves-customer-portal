@@ -804,7 +804,16 @@ const ReviewService = {
   async submitRating(token, { rating, feedbackText }) {
     const request = await db("review_requests").where({ token }).first();
     if (!request) throw new Error("Review request not found");
-    if (request.rated_at) throw new Error("Already rated");
+    // Finality is cross-surface: the newer /api/rate flow marks completion
+    // with status='submitted' (and this path with rated_at) — honor BOTH so
+    // a submitted request can't be re-used through the legacy endpoint, and
+    // honor expiry the same way /api/rate does.
+    if (request.rated_at || ["submitted", "reviewed", "rated"].includes(request.status)) {
+      throw new Error("Already rated");
+    }
+    if (request.expires_at && new Date(request.expires_at) < new Date()) {
+      throw new Error("Review link expired");
+    }
 
     const customer = await db("customers")
       .where({ id: request.customer_id })
@@ -827,7 +836,19 @@ const ReviewService = {
       updates.status = "reviewed"; // optimistic — they got the redirect
     }
 
-    await db("review_requests").where({ id: request.id }).update(updates);
+    // Atomic claim: the check above is check-then-update, so two concurrent
+    // submissions could both pass it and double-fire the SMS/referral/
+    // activity side effects. Gate the write on the same finality predicate
+    // (NULL-safe — legacy rows may carry a NULL status) and stop when
+    // another submission won the race.
+    const claimed = await db("review_requests")
+      .where({ id: request.id })
+      .whereNull("rated_at")
+      .where(function notFinal() {
+        this.whereNull("status").orWhereNotIn("status", ["submitted", "reviewed", "rated"]);
+      })
+      .update(updates);
+    if (!claimed) throw new Error("Already rated");
 
     // Referral invite on the warmest moment we have (owner trigger call
     // 2026-07-06): a promoter-grade rating just came in. Fire-and-forget

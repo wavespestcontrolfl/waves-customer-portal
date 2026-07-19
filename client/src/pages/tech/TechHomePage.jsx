@@ -50,6 +50,7 @@ import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/C
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
+import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
@@ -189,6 +190,7 @@ export default function TechHomePage() {
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
+  const [zoneTarget, setZoneTarget] = useState(null); // schedule row → treatment-zone mapper open
   const [leadTarget, setLeadTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
@@ -654,6 +656,7 @@ export default function TechHomePage() {
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
                 })}
+                onZone={() => setZoneTarget(s)}
                 onLead={() => setLeadTarget(s)}
               />
             ))}
@@ -745,6 +748,17 @@ export default function TechHomePage() {
           serviceId={photoTarget.id}
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
+        />
+      )}
+
+      {zoneTarget && (
+        <TechTreatmentZoneModal
+          serviceId={zoneTarget.id}
+          customerName={zoneTarget.customer_name || zoneTarget.customerName || 'Customer'}
+          address={zoneTarget.address || ''}
+          lat={zoneTarget.lat}
+          lng={zoneTarget.lng}
+          onClose={() => setZoneTarget(null)}
         />
       )}
 
@@ -1027,7 +1041,7 @@ function TimecardSignoffCard({ techName }) {
   );
 }
 
-function ServiceRow({ service, onPhotos, onProject, onLead }) {
+function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
   const status = service.status || 'pending';
   const statusColor = {
     completed: '#22c55e',
@@ -1074,6 +1088,13 @@ function ServiceRow({ service, onPhotos, onProject, onLead }) {
           color: DARK.teal, cursor: 'pointer',
         }}>
           📷 Photos
+        </button>
+        <button onClick={onZone} aria-label="Trace treatment zone" style={{
+          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+          border: `1px solid ${DARK.border}`, background: 'transparent',
+          color: DARK.teal, cursor: 'pointer',
+        }}>
+          🛰️ Zone
         </button>
         <button onClick={onLead} aria-label="Flag opportunity" style={{
           padding: '6px 8px', borderRadius: 6, fontSize: 12, fontWeight: 600,
@@ -1150,8 +1171,6 @@ function RainOutSheet({ service, onClose, onDone }) {
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
   const selected = allOptions.find((opt) => keyOf(opt) === selectedKey) || null;
-  // The SMS offers the best *other-day* option as the reply-2 alternate.
-  const alt = selected ? (options?.days || []).find((opt) => keyOf(opt) !== selectedKey) || null : null;
 
   const handleCommit = async () => {
     if (!selected || busy) return;
@@ -1170,7 +1189,6 @@ function RainOutSheet({ service, onClose, onDone }) {
           reasonCode: reason,
           scope,
           target,
-          alt: alt ? { date: alt.date, window: alt.window } : null,
           notifyCustomer: notify,
         }),
       });
@@ -1301,7 +1319,7 @@ function RainOutSheet({ service, onClose, onDone }) {
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: DARK.text, marginBottom: 16, cursor: 'pointer' }}>
               <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
-              Text customer{scope === 'route' ? 's' : ''} (reply 1 confirms, 2 switches{alt ? ` to ${alt.display}` : ''}; includes local forecast link)
+              Text customer{scope === 'route' ? 's' : ''} (reply 1 confirms; includes reschedule + local forecast links)
             </label>
 
             <button

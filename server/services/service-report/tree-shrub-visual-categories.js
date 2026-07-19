@@ -36,7 +36,7 @@ function scoreStatus(value) {
 
 // Plain-language explanation per (category, band). Deterministic — no LLM — so the
 // customer copy can't drift or overclaim. The pest and disease rows say SIGNALS only.
-function explain(categoryKey, band) {
+function explain(categoryKey, band, { pestTreatedToday = false } = {}) {
   const T = {
     foliage_fullness: {
       strong: 'Full, dense canopy with healthy growth and no bare areas.',
@@ -51,11 +51,16 @@ function explain(categoryKey, band) {
       needs_attention: 'Yellowing, bronzing, or leaf scorch that needs support.',
     },
     // Category 3 — SIGNALS, never a confirmed pest. Never "infestation".
+    // The needs_attention row claims treatment ONLY when an insect-targeting
+    // application actually happened (same insecticide/miticide gate the
+    // insight card uses) — an inspection-only visit must not say "treated
+    // today" (audit 2026-07-18 P2; same class as the #2824 gates).
     pest_activity: {
       strong: 'No visible pest-pressure signals on the foliage today.',
       healthy: 'Little to no pest-pressure signals visible today.',
       watch: 'Light pest-pressure signals on some foliage — worth monitoring.',
-      needs_attention: 'Visible pest-pressure signals we treated today and will keep monitoring.',
+      needs_attention: 'Visible pest-pressure signals we documented today and will keep monitoring.',
+      needs_attention_treated: 'Visible pest-pressure signals we treated today and will keep monitoring.',
     },
     // Category 4 — SIGNALS / disease-like symptoms, never "diseased".
     disease_leaf_spot: {
@@ -73,6 +78,9 @@ function explain(categoryKey, band) {
   };
   const byBand = T[categoryKey] || {};
   const key = band === 'strong' ? 'strong' : band === 'healthy' ? 'healthy' : band === 'watch' ? 'watch' : 'needs_attention';
+  if (categoryKey === 'pest_activity' && key === 'needs_attention' && pestTreatedToday) {
+    return byBand.needs_attention_treated || byBand.needs_attention || '';
+  }
   return byBand[key] || '';
 }
 
@@ -94,6 +102,7 @@ function buildTreeShrubVisualCategories({
   scores = {},
   techConfirmedPest = false,
   techConfirmedDisease = false,
+  pestTreatedToday = false,
 } = {}) {
   const s = scores || {};
   const foliage = toScore(s.foliageFullness);
@@ -113,7 +122,7 @@ function buildTreeShrubVisualCategories({
       // A tracking (null/unscored) category must read neutral — never the
       // worst-case "needs attention" copy bandOf() would otherwise return for it.
       // The client falls back to "Not clearly visible in today’s photos."
-      customerExplanation: status === 'tracking' ? '' : explain(key, bandOf(status)),
+      customerExplanation: status === 'tracking' ? '' : explain(key, bandOf(status), { pestTreatedToday }),
       evidence,
     };
   };

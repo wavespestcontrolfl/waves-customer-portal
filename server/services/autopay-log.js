@@ -18,6 +18,14 @@ const logger = require('./logger');
  * @param {string} [opts.paymentMethodId]
  * @param {string} [opts.paymentId]
  * @param {Object} [opts.details] — arbitrary JSONB context
+ * @param {Object} [opts.db] — knex handle/transaction to write through.
+ *   Opt-out events are GUARD INPUT, not just audit: enrollConsentedMethod's
+ *   opted_out_after_authorization check reads autopay_log, so a disable and
+ *   its event row must commit atomically or a delayed enrollment can land in
+ *   the gap and overwrite a real opt-out.
+ * @param {boolean} [opts.required] — rethrow insert failures instead of
+ *   swallowing (use inside the disable transaction so a failed event write
+ *   rolls the state change back with it).
  */
 async function logAutopay(customerId, eventType, opts = {}) {
   try {
@@ -29,8 +37,9 @@ async function logAutopay(customerId, eventType, opts = {}) {
       payment_id: opts.paymentId ?? null,
       details: opts.details ? JSON.stringify(opts.details) : null,
     };
-    await db('autopay_log').insert(row);
+    await (opts.db || db)('autopay_log').insert(row);
   } catch (err) {
+    if (opts.required) throw err;
     // Never let logging failures break billing flow
     logger.error(`[autopay-log] Failed to log ${eventType} for ${customerId}: ${err.message}`);
   }

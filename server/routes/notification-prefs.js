@@ -21,7 +21,13 @@ router.get('/', async (req, res, next) => {
       serviceReminder24h: prefs.service_reminder_24h ?? true,
       techEnRoute: prefs.tech_en_route ?? true,
       serviceCompleted: prefs.service_completed ?? true,
-      billingAlerts: prefs.billing_alerts ?? true,
+      // DB column is billing_reminder — the API name billingAlerts is kept
+      // for the portal UI. (billing_alerts never existed as a column; reads
+      // were always undefined and writes 500'd the whole PUT.) Default false
+      // to match the schema default AND the canonical /api/notifications API
+      // (notifications.js reads !!prefs.billing_reminder) — the two customer
+      // preference surfaces must not disagree on the default.
+      billingAlerts: prefs.billing_reminder ?? false,
       seasonalTips: prefs.seasonal_tips ?? true,
       // New toggles
       reviewRequest: prefs.review_request ?? true,
@@ -58,7 +64,7 @@ router.put('/', async (req, res, next) => {
       serviceReminder24h: 'service_reminder_24h',
       techEnRoute: 'tech_en_route',
       serviceCompleted: 'service_completed',
-      billingAlerts: 'billing_alerts',
+      billingAlerts: 'billing_reminder',
       seasonalTips: 'seasonal_tips',
       reviewRequest: 'review_request',
       referralNudge: 'referral_nudge',

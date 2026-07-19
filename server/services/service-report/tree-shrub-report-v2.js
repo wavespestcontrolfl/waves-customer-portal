@@ -37,6 +37,13 @@ function classifyProduct(app = {}) {
   let fallback = 'applied as part of today’s tree and shrub program';
   if (/fung|azoxy|propiconazole|thiophanate|mancozeb|chlorothalonil/.test(hay)) { kind = 'fungicide'; tag = 'disease protection'; fallback = 'helps protect foliage where leaf-spot or disease pressure calls for it'; }
   else if (/mite|abamectin|bifenazate|spiromesifen/.test(hay)) { kind = 'miticide'; tag = 'mite control'; fallback = 'targets mites that stipple and bronze the foliage'; }
+  // Herbicides classify BEFORE the insect-systemics branch: a "systemic
+  // weed preventer" would otherwise land in the 'systemic' bucket, which
+  // the pest diagnosis/insight gates read as an insect treatment — the
+  // exact overclaim the treatment gates exist to prevent (codex P2 r1).
+  // \bweeds?\b, not bare 'weed': 'seaweed' biostimulants must fall through
+  // to the supplement branch, not render as herbicides (codex P2 r2).
+  else if (/herbicide|pre[\s-]?emergent|post[\s-]?emergent|\bweeds?\b|glyphosate|prodiamine|dithiopyr|isoxaben|indaziflam|pendimethalin|oxadiazon|barricade|dimension|gallery|ronstar|specticle|marengo|snapshot|sedgehammer/.test(hay)) { kind = 'herbicide'; tag = 'weed prevention'; fallback = 'keeps bed weeds from establishing in the treated areas'; }
   else if (/imidacloprid|dinotefuran|acephate|insect|bifenthrin|systemic|merit|safari/.test(hay)) { kind = /imidacloprid|dinotefuran|systemic|merit|safari/.test(hay) ? 'systemic' : 'insecticide'; tag = 'pest protection'; fallback = 'protects the plants from foliage-feeding pests'; }
   else if (/iron|micro|biostim|humic|kelp|seaweed|chelat/.test(hay)) { kind = 'supplement'; tag = 'color support'; fallback = 'supports leaf color and stress tolerance'; }
   else if (/fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/.test(hay)) { kind = 'fertilizer'; tag = 'color & growth'; fallback = 'feeds the plants to support color, density, and new growth'; }
@@ -242,10 +249,19 @@ function buildTreeShrubReportV2({
   if (!treeShrubAssessment) return null;
   const scores = treeShrubAssessment.scores || {};
 
+  // Treatment is computed BEFORE the categories so the pest diagnosis row
+  // can gate its "treated today" claim on an actual insect-targeting
+  // application — the same insecticide/miticide gate the insight card uses.
+  const treatment = buildTreatment({ applications, actions });
+  const treatmentKinds = treatment ? treatment.kinds : [];
   const categories = buildTreeShrubVisualCategories({
     scores,
     techConfirmedPest: !!treeShrubAssessment.techConfirmedPest,
     techConfirmedDisease: !!treeShrubAssessment.techConfirmedDisease,
+    // 'systemic' is classifyProduct's insect-family systemics bucket
+    // (imidacloprid/dinotefuran/Merit/Safari) — an insect treatment for this
+    // gate's purposes.
+    pestTreatedToday: treatmentKinds.includes('insecticide') || treatmentKinds.includes('miticide') || treatmentKinds.includes('systemic'),
   });
   // Client cards read `explanation`; keep customerExplanation too.
   const diagnosis = categories.map((c) => ({ ...c, explanation: c.customerExplanation }));
@@ -271,7 +287,6 @@ function buildTreeShrubReportV2({
   }
   if (water) water.localizedDry = localizedDry;
 
-  const treatment = buildTreatment({ applications, actions });
   const plantGroups = buildPlantGroups(treeShrubAssessment.plantGroups);
 
   const insights = buildTreeShrubInsightCards({
@@ -279,7 +294,7 @@ function buildTreeShrubReportV2({
     water: water ? { ...water, localizedDry } : (localizedDry ? { localizedDry: true } : {}),
     plantGroups,
     customerConcern,
-    treatmentKinds: treatment ? treatment.kinds : [],
+    treatmentKinds,
   });
 
   // Photos for the strip (best first) + ONE consolidated summary (never the
