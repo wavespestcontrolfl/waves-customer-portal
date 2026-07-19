@@ -374,7 +374,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         metadata: JSON.stringify({ formId, formName, utmSource, utmMedium, utmCampaign }),
       });
 
-      logger.info(`Lead webhook: existing customer ${existing.first_name} ${existing.last_name} submitted form${isDuplicateSubmission ? ' (duplicate within 5min — skipping notifications)' : ''}`);
+      logger.info(`Lead webhook: existing customer ${existing.id} submitted form${isDuplicateSubmission ? ' (duplicate within 5min — skipping notifications)' : ''}`);
     } else {
       isNewCustomer = true;
       // Create new customer

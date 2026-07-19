@@ -663,12 +663,36 @@ const BOOKING_FUNNEL_SERVICE_ALIASES = {
   'rodent control': 'rodent',
   'bora-care wood treatment': 'bora_care',
 };
+// Canonical display label per funnel key — the ONLY label shape that ever
+// persists or renders from a client-supplied service value. The raw string
+// reaches the customer confirmation page (/status/:code), the owner-alert
+// SMS, and admin/tech dispatch, so an unrecognized label must fall back to a
+// server-owned value, never echo through.
+const BOOKING_FUNNEL_SERVICE_LABELS = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  mosquito: 'Mosquito Control',
+  tree_shrub: 'Tree & Shrub',
+  termite: 'Termite Inspection',
+  rodent: 'Rodent Control',
+  bora_care: 'Bora-Care Wood Treatment',
+};
 // Normalized funnel service key ('' when the value names no funnel service).
+// Own-property checks only: plain-object lookup would let "__proto__" /
+// "constructor" pass normalization and hand back inherited objects instead
+// of catalog values.
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 function normalizeBookingServiceKey(value) {
   const text = String(value || '').trim().toLowerCase();
   if (!text) return '';
-  if (BOOKING_FUNNEL_SERVICE_DURATIONS[text] !== undefined) return text;
-  return BOOKING_FUNNEL_SERVICE_ALIASES[text] || '';
+  if (hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, text)) return text;
+  return hasOwn(BOOKING_FUNNEL_SERVICE_ALIASES, text) ? BOOKING_FUNNEL_SERVICE_ALIASES[text] : '';
+}
+// Allowlisted display label for a client-supplied service value ('' when the
+// value names no funnel service).
+function canonicalBookingServiceLabel(value) {
+  const key = normalizeBookingServiceKey(value);
+  return key && hasOwn(BOOKING_FUNNEL_SERVICE_LABELS, key) ? BOOKING_FUNNEL_SERVICE_LABELS[key] : '';
 }
 
 // Stable location scope for signed offers: the server-resolved coordinates
@@ -1555,10 +1579,16 @@ async function createSelfBooking(payload = {}) {
       c.toLowerCase() === (customer.city || '').toLowerCase()
     )) || null;
 
-    const resolvedServiceType = cleanBookingServiceLabel(quoted_service_label)
-      || cleanBookingServiceLabel(service_type)
-      || estimate?.services?.[0]
-      || estimate?.service_type
+    // ALLOWLIST, never echo: the persisted/displayed label derives from the
+    // slot_sig-VERIFIED serviceKey first, then from allowlist-matching the
+    // posted values, then from the server-side estimate row. A crafted
+    // ?service_label= string ("FREE Termite Treatment call 941-…") must never
+    // land on the confirmation page, owner SMS, or dispatch surfaces.
+    const resolvedServiceType = BOOKING_FUNNEL_SERVICE_LABELS[serviceKey]
+      || canonicalBookingServiceLabel(quoted_service_label)
+      || canonicalBookingServiceLabel(service_type)
+      || cleanBookingServiceLabel(estimate?.services?.[0])
+      || cleanBookingServiceLabel(estimate?.service_type)
       || 'General Pest Control';
 
     // Pay-per-application (gated by bookingPayAtVisit): resolve a per-application
@@ -2286,7 +2316,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       zip: str(nc.zip, 20),
       lat: num(nc.lat),
       lng: num(nc.lng),
-      service_type: cleanBookingServiceLabel(b.quoted_service_label) || cleanBookingServiceLabel(b.service_type) || str(b.service_type, 120),
+      // Allowlisted only — this value feeds the recovery link/SMS prefill, so
+      // an unrecognized client string stays out (null, not an echo).
+      service_type: canonicalBookingServiceLabel(b.service_id)
+        || canonicalBookingServiceLabel(b.service_type)
+        || canonicalBookingServiceLabel(b.quoted_service_label)
+        || null,
       service_id: str(b.service_id, 60),
       slot_date: b.slot_date ? String(b.slot_date).split('T')[0].slice(0, 10) : null,
       slot_start: str(b.slot_start, 10),
@@ -2473,6 +2508,8 @@ module.exports = router;
 module.exports._internals = {
   isOneTimeBookingSource,
   cleanBookingServiceLabel,
+  canonicalBookingServiceLabel,
+  BOOKING_FUNNEL_SERVICE_LABELS,
   addressMatchesCustomer,
   unitsConflict,
   stripInlineUnitFromLine,

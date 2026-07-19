@@ -195,7 +195,7 @@ async function executeAutoAction(email, classification) {
         auto_action: 'operational_sender_skipped',
         updated_at: new Date(),
       });
-      logger.info(`[email-actions] Skipped ${classification.category} auto-action for operational sender ${email.from_address} ("${email.subject}")`);
+      logger.info(`[email-actions] Skipped ${classification.category} auto-action for operational sender (email ${email.id})`);
       return;
     }
     switch (classification.category) {
@@ -244,7 +244,7 @@ async function handleSpam(email) {
     auto_action: 'spam_blocked',
     updated_at: new Date(),
   });
-  logger.info(`[email-actions] Spam blocked: "${email.subject}" from ${email.from_address}`);
+  logger.info(`[email-actions] Spam blocked (email ${email.id})`);
 }
 
 async function handleNewsletter(email) {
@@ -258,7 +258,7 @@ async function handleNewsletter(email) {
     const result = await autoUnsubscribe(email);
     unsubMethod = result.method;
   } catch (e) {
-    logger.warn(`[email-actions] Unsubscribe failed for ${email.from_address}: ${e.message}`);
+    logger.warn(`[email-actions] Unsubscribe failed (email ${email.id}): ${e.message}`);
   }
 
   // 3. Mark in DB
@@ -755,7 +755,7 @@ async function handleComplaint(email, classification) {
     });
   } catch (e) { /* non-critical */ }
 
-  logger.warn(`[email-actions] COMPLAINT: ${email.from_address} — "${email.subject}"`);
+  logger.warn(`[email-actions] COMPLAINT received (email ${email.id})`);
 }
 
 async function handleVendorInvoice(email, classification) {
