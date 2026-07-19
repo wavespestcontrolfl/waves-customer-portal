@@ -11907,9 +11907,26 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     setLocation(prev => prev === val ? '' : val);
   };
 
+  // Some browsers report an empty file.type for HEIC/HEIF, and FileReader
+  // then emits data:;base64,… with no mime — which the server's data-URL
+  // prefix check rejects wholesale. Rebuild the prefix from the extension so
+  // the accepted-but-typeless file still uploads with a valid mime.
+  const EXT_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', heic: 'image/heic', heif: 'image/heif' };
+  const mimeFromName = (name) => EXT_MIME[String(name || '').split('.').pop().toLowerCase()] || null;
+
   const readPhotoFile = (file) => new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = (ev) => resolve({ preview: ev.target.result, data: ev.target.result, name: file.name });
+    reader.onload = (ev) => {
+      let dataUrl = ev.target.result;
+      if (typeof dataUrl === 'string' && dataUrl.startsWith('data:;base64,')) {
+        const mime = file.type || mimeFromName(file.name);
+        // No inferable image mime → drop it (filtered below) rather than
+        // send a body the server will reject.
+        if (!mime) return resolve(null);
+        dataUrl = `data:${mime};base64,${dataUrl.slice('data:;base64,'.length)}`;
+      }
+      resolve({ preview: dataUrl, data: dataUrl, name: file.name });
+    };
     // A corrupt/unreadable file fires error/abort instead of load — settle
     // with null so one bad image can't hang Promise.all (and the photo
     // picker) forever; nulls are filtered out below.
@@ -11932,7 +11949,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     e.target.value = '';
     if (!all.length) return;
     const usable = all
-      .filter(f => (!f.type || PHOTO_TYPE_RE.test(f.type)) && f.size <= MAX_PHOTO_BYTES)
+      // Accept by mime when present; when empty (HEIC on some browsers),
+      // require a recognized extension so readPhotoFile can rebuild the
+      // data-URL prefix — an empty type with no usable extension would
+      // upload as data:;base64 and be server-rejected.
+      .filter(f => (f.type ? PHOTO_TYPE_RE.test(f.type) : !!mimeFromName(f.name)) && f.size <= MAX_PHOTO_BYTES)
       .slice(0, photosRemaining);
     const rejectedCount = all.length - usable.length;
     setSubmitError(rejectedCount > 0
