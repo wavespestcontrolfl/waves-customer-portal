@@ -1230,8 +1230,17 @@ function EstimateToolView() {
   // quote — these saves have no replayable engine input, so a stale
   // disarmed module state would persist a below-floor client price). The
   // fallback generate path awaits the tracked promise; 5s abort keeps that
-  // bounded, and any failure keeps the last applied state (fail-open).
-  const pricingConfigReadyRef = useRef(Promise.resolve());
+  // bounded. There is NO fail-open: every fallback quote requires the
+  // refresh it just ran to succeed, because the pricingMetadata stamp makes
+  // whatever state priced the quote authoritative at view/accept and these
+  // saves have no replayable engine input — pricing on stale module state
+  // (fresh-session defaults OR a pre-re-arm load) would permanently persist
+  // a floor bypass (pre-push codex P0+P1 rounds on #2827). A failed refresh
+  // blocks the quote with a retry alert instead. A 404 is AUTHORITATIVE,
+  // not a failure: an absent pricing_config row means the disarmed in-code
+  // defaults BY DESIGN (db-bridge's kill-value pattern) — it resets to
+  // them and counts as a successful load.
+  const pricingConfigReadyRef = useRef(Promise.resolve(false));
   const refreshPricingConfig = useCallback(() => {
     const run = (async () => {
       const fetchConfigRow = async (key) => {
@@ -1242,10 +1251,11 @@ function EstimateToolView() {
             headers: authHeaders,
             signal: ctrl.signal,
           });
-          if (!r.ok) return null;
-          return (await r.json())?.data ?? null;
+          if (r.status === 404) return { ok: true, data: null };
+          if (!r.ok) return { ok: false, data: null };
+          return { ok: true, data: (await r.json())?.data ?? null };
         } catch {
-          return null; /* last applied (or disarmed default) state stands */
+          return { ok: false, data: null }; /* last applied state stands */
         } finally {
           clearTimeout(timer);
         }
@@ -1254,8 +1264,9 @@ function EstimateToolView() {
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
       ]);
-      if (lawnRow) applyServerLawnPricingConfig(lawnRow);
-      if (pestRow) applyServerPestPricingConfig(pestRow);
+      if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
+      if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
+      return lawnRow.ok && pestRow.ok;
     })();
     pricingConfigReadyRef.current = run;
     return run;
@@ -2045,8 +2056,14 @@ function EstimateToolView() {
     // Refresh the live pricing config for THIS quote (bounded — 5s abort +
     // fail-open to the last applied state) so a re-arm after mount, or an
     // early generate racing the initial load, can't price on stale floor
-    // switches.
-    await refreshPricingConfig();
+    // switches. A failed refresh BLOCKS the quote — no fail-open, ever:
+    // stale module state would be stamped as the quote's authoritative
+    // pricing config (pre-push codex P0 — see refreshPricingConfig).
+    const pricingConfigOk = await refreshPricingConfig();
+    if (!pricingConfigOk) {
+      alert("Live pricing configuration could not be loaded — retry in a moment. (Quotes are blocked rather than priced on possibly-stale floor settings.)");
+      return;
+    }
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =
