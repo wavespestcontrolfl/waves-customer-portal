@@ -218,6 +218,24 @@ describe('rain-out service', () => {
     });
   });
 
+  describe('rain_out_moved_v2 template migration', () => {
+    const { transformBody } = require('../models/migrations/20260719000010_rain_out_moved_v2_template')._test;
+    // Verbatim prod body of the LEGACY row (read-only prod query, 2026-07-18)
+    // — the v2 body is derived from it so admin copy edits carry over.
+    const PROD_BODY = 'Hello {first_name} — {weather_phrase} rolled through your area, so we moved your {service_type} to {new_option}.{alt_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.';
+
+    test('derives the v2 body from the live legacy body, preserving surrounding copy', () => {
+      const next = transformBody(PROD_BODY);
+      expect(next).toBe('Hello {first_name} — {weather_lead}, so we moved your {service_type} to {new_option}.{better_day_clause}{alt_clause}{efficacy_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.');
+      expect(transformBody(next)).toBe(next); // idempotent
+    });
+
+    test('a diverged legacy body passes through untouched', () => {
+      const custom = 'Totally rewritten by the admin.';
+      expect(transformBody(custom)).toBe(custom);
+    });
+  });
+
   describe('sameDayOptions', () => {
     test('mid-morning offers +2h and +4h on-the-hour 1-hour windows', () => {
       // 14:10Z = 10:10 ET → +2h = 12:10 → nearest hour 12:00; +4h = 14:10 → 14:00.
@@ -278,8 +296,10 @@ describe('rain-out service', () => {
 
       // ...but the CUSTOMER is quoted the usual 2-hour arrival window from the
       // start (13:00 → 1:00-3:00 PM), never the internal 1-hour end.
+      // Renders the forecast-grounded v2 template seeded by this PR's
+      // migration; the untouched legacy row is only a fallback.
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
       const vars = renderSmsTemplate.mock.calls[0][1];
-      expect(vars.weather_phrase).toBe('heavy rain'); // legacy compat var still sent
       expect(vars.weather_lead).toBe('storms are likely today (85% chance)');
       expect(vars.better_day_clause).toBe(' Thursday afternoon looks a lot better — just a 10% chance of rain around your new time.');
       expect(vars.efficacy_clause).toBe(''); // gate dark
@@ -292,6 +312,28 @@ describe('rain-out service', () => {
       expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1' });
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a missing v2 template falls back to the legacy row with legacy variables', async () => {
+      wireSingle();
+      // v2 render nulls (e.g. rolled-back migration) → legacy render used.
+      renderSmsTemplate.mockResolvedValueOnce(null);
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+      });
+
+      expect(result.results[0].smsSent).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(2);
+      expect(renderSmsTemplate.mock.calls[1][0]).toBe('rain_out_moved');
+      const legacyVars = renderSmsTemplate.mock.calls[1][1];
+      expect(legacyVars.weather_phrase).toBe('heavy rain');
+      expect(legacyVars.weather_lead).toBeUndefined();
     });
 
     test('no reschedule token falls back to a reply-to-adjust clause', async () => {

@@ -434,28 +434,43 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   const newChance = outlook?.[String(chosen.date)]?.rainChance ?? null;
   const windowChance = windowRainChance(hourly, String(chosen.date), chosen.window?.start);
 
-  const body = await renderSmsTemplate('rain_out_moved', {
+  const sharedVars = {
     first_name: customer.first_name || 'there',
-    // weather_phrase stays for compat: it renders correctly if the template
-    // body predates the {weather_lead} migration (old-instance deploy window).
-    weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
+    service_type: (job.service_type || 'service').toLowerCase(),
+    new_option: customerArrivalOption(chosen.date, chosen.window),
+    alt_clause: altClause,
+    forecast_clause: forecastClause,
+  };
+  const renderContext = {
+    workflow: 'tech_rain_out',
+    entity_type: 'scheduled_service',
+    entity_id: serviceId,
+  };
+
+  // rain_out_moved_v2 is the forecast-grounded template this PR's
+  // migration seeds; the legacy rain_out_moved row stays untouched so an
+  // older server (or a rolled-back deploy) keeps rendering it. If v2 is
+  // missing/inactive — a rolled-back migration — fall back to the legacy
+  // row with legacy variables: old copy, but the customer still gets a
+  // text. The legacy row is retired in the cleanup PR once this deploy
+  // is verified.
+  let body = await renderSmsTemplate('rain_out_moved_v2', {
+    ...sharedVars,
     weather_lead: composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance }),
     better_day_clause: composeBetterDayClause({
       reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
       windowChance, windowStart: chosen.window?.start,
     }),
     efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
-    service_type: (job.service_type || 'service').toLowerCase(),
-    new_option: customerArrivalOption(chosen.date, chosen.window),
-    alt_clause: altClause,
-    forecast_clause: forecastClause,
-  }, {
-    workflow: 'tech_rain_out',
-    entity_type: 'scheduled_service',
-    entity_id: serviceId,
-  });
+  }, renderContext);
   if (!body) {
-    logger.warn(`[rain-out] rain_out_moved template missing/disabled — moved ${serviceId} without SMS`);
+    body = await renderSmsTemplate('rain_out_moved', {
+      ...sharedVars,
+      weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
+    }, renderContext);
+  }
+  if (!body) {
+    logger.warn(`[rain-out] rain_out_moved templates missing/disabled — moved ${serviceId} without SMS`);
     return { sent: false, reason: 'missing_template' };
   }
 
