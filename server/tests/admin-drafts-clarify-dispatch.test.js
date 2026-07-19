@@ -310,9 +310,8 @@ describe('approve — clarify dispatch wiring', () => {
 });
 
 describe('revise — clarify dispatch wiring', () => {
-  test("outcome 'rewritten' → 409 CLARIFY_UPDATED with the revision cleared", async () => {
+  test("outcome 'rewritten' → 409 CLARIFY_UPDATED; the decision released the claim, the route must not", async () => {
     enqueue('message_drafts', { returning: [clarifyDraft({ status: 'revised' })] });
-    enqueue('message_drafts', { update: 1 });                         // release
     claimClarifyDispatch.mockResolvedValue({ outcome: 'rewritten' });
 
     await withServer(async (baseUrl) => {
@@ -325,12 +324,14 @@ describe('revise — clarify dispatch wiring', () => {
       expect((await res.json()).code).toBe('CLARIFY_UPDATED');
     });
 
-    expect(claimClarifyDispatch).toHaveBeenCalledWith(expect.objectContaining({ isRevision: true }));
+    expect(claimClarifyDispatch).toHaveBeenCalledWith(expect.objectContaining({
+      isRevision: true,
+      releaseFields: { revised_response: null, final_response: null },
+    }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    const release = updates[updates.length - 1];
-    expect(release.payload.status).toBe('pending');
-    expect(release.payload.revised_response).toBeNull();
-    expect(release.payload.final_response).toBeNull();
+    // No route-side release — an unconditional pending-write here could
+    // resurrect a draft rejected between the decision's commit and now.
+    expect(updates.filter((u) => u.table === 'message_drafts')).toHaveLength(1); // the claim only
   });
 
   test('a revise-path provider throw reconciles via reopen with the revision cleared', async () => {

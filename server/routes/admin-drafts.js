@@ -364,16 +364,17 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
   // downstream MUST reconcile via releaseFailedSendClaim, never plain
   // releaseDraftClaim.
   const { claimClarifyDispatch } = require('../services/estimate-clarify-asks');
-  const verdict = await claimClarifyDispatch({ draft, isRevision });
+  const verdict = await claimClarifyDispatch({ draft, isRevision, releaseFields });
   if (verdict.outcome === 'retired') {
     res.status(409).json({ error: verdict.message, code: 'CLARIFY_STALE' });
     return { blocked: true };
   }
   if (verdict.outcome === 'rewritten') {
     // The owner's revision was typed against the stale multi-question copy —
-    // it must not go out as-is. Claim released; the queue now shows the
-    // rewritten single question.
-    await releaseDraftClaim(draft.id, releaseFields);
+    // it must not go out as-is. The decision already released the claim in
+    // its locked conditional write (an unconditional release here could
+    // resurrect a concurrent reject); the queue now shows the rewritten
+    // single question.
     res.status(409).json({
       error: 'The customer already supplied part of this — the draft was rewritten to what is still missing. Review the new copy and try again.',
       code: 'CLARIFY_UPDATED',

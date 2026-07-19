@@ -497,17 +497,28 @@ describe('claimClarifyDispatch', () => {
     expect(JSON.parse(payload.flags).missing).toEqual(['specific_service']);
   });
 
-  test('partial answer on a REVISION rewrites but never dispatches — the owner must re-review', async () => {
+  test('partial answer on a REVISION rewrites, releases the claim in the same conditional write, and never dispatches', async () => {
     mockState.firstQueue = [
       freshRow({}, { missing: ['street_address', 'specific_service'], lead_id: 'lead-1' }),
       { id: 'lead-1', status: 'new', address: '123 Main St', service_interest: null, first_name: 'Pat' },
     ];
-    const verdict = await claimClarifyDispatch({ draft: DRAFT, isRevision: true });
+    const verdict = await claimClarifyDispatch({
+      draft: DRAFT,
+      isRevision: true,
+      releaseFields: { revised_response: null, final_response: null },
+    });
     expect(verdict.outcome).toBe('rewritten');
     expect(mockState.updates).toHaveLength(1);
-    expect(mockState.updates[0].payload.sent_at).toBeUndefined();
-    expect(mockState.updates[0].payload.draft_response)
+    const payload = mockState.updates[0].payload;
+    expect(payload.sent_at).toBeUndefined();
+    expect(payload.draft_response)
       .toBe(_private.composeClarifyBody({ missing: ['specific_service'], firstName: 'Pat' }));
+    // The claim release rides the SAME status-conditional write — a separate
+    // unconditional release could resurrect a concurrent reject.
+    expect(payload.status).toBe('pending');
+    expect(payload.approved_by).toBeNull();
+    expect(payload.revised_response).toBeNull();
+    expect(payload.final_response).toBeNull();
   });
 
   test('a closed lead retires the draft', async () => {

@@ -638,11 +638,11 @@ const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate'
  * reopenClarifyAfterFailedSend); {outcome:'retired', message} (stale — where
  * the staleness is OURS the status moved to rejected here; a concurrent
  * reject's verdict is respected without a write); {outcome:'rewritten'}
- * (isRevision only — copy rewritten to the remainder, claim release is the
- * caller's step); {outcome:'error'} (transient — fail closed, nothing
- * written).
+ * (isRevision only — copy rewritten to the remainder AND the claim released
+ * to pending in the same conditional write, releaseFields applied);
+ * {outcome:'error'} (transient — fail closed, nothing written).
  */
-async function claimClarifyDispatch({ draft, isRevision = false }) {
+async function claimClarifyDispatch({ draft, isRevision = false, releaseFields = {} }) {
   const digits = digitsFromClarifyRef(draft && draft.source_ref);
   if (!digits) return { outcome: 'error' };
   try {
@@ -728,13 +728,20 @@ async function claimClarifyDispatch({ draft, isRevision = false }) {
         // claim is gone and nothing may dispatch.
         if (isRevision) {
           // The owner's revision was typed against the stale multi-question
-          // copy — rewrite the stored draft and bounce the send; the queue
-          // now shows the single remaining question.
+          // copy — rewrite the stored draft, bounce the send, and release
+          // the claim IN THIS SAME conditional write (releaseFields clears
+          // the stale revision): a separate unconditional release outside
+          // the lock could resurrect a concurrently rejected draft. The
+          // queue now shows the single remaining question.
           const rewrote = await trx('message_drafts')
             .where({ id: fresh.id }).whereIn('status', ['approved', 'revised'])
             .update({
               draft_response: rewritten,
               flags: JSON.stringify(rewrittenFlags),
+              status: 'pending',
+              approved_by: null,
+              approved_at: null,
+              ...releaseFields,
             });
           if (!rewrote) {
             return { outcome: 'retired', message: 'Clarify draft is no longer claimed — another action already resolved it.' };
