@@ -1297,8 +1297,10 @@ describe('admin projects routes', () => {
     });
     // sendClaim = the delivery_status 'sending' concurrency claim taken
     // before any side effect; its update resolving 1 means "claim won".
+    // stillOwned = the pre-delivery ownership recheck (must find the row).
     const sendClaim = chain();
-    const projectQueries = [projectRead, projectColumnInfo, sendClaim, markSent, updatedProjectRead, sequenceRead, persistDelivery];
+    const stillOwned = chain({ first: jest.fn().mockResolvedValue({ id: 'project-1' }) });
+    const projectQueries = [projectRead, projectColumnInfo, sendClaim, markSent, updatedProjectRead, sequenceRead, stillOwned, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
@@ -1377,7 +1379,8 @@ describe('admin projects routes', () => {
       }),
     });
     const sendClaim = chain();
-    const projectQueries = [projectRead, projectColumnInfo, sendClaim, markToken, updatedProjectRead, sequenceRead, persistDelivery];
+    const stillOwned = chain({ first: jest.fn().mockResolvedValue({ id: 'project-1' }) });
+    const projectQueries = [projectRead, projectColumnInfo, sendClaim, markToken, updatedProjectRead, sequenceRead, stillOwned, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;

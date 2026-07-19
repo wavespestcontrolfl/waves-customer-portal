@@ -3281,6 +3281,24 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     const channels = {};
 
+    // Ownership recheck immediately before the external sends: the token
+    // fences every DB write, but a stalled request that resumes after a
+    // takeover could otherwise still EMAIL — and resend keys don't collide
+    // across owners, so the provider wouldn't dedupe the pair. Rechecking
+    // here shrinks that window from build-time (PDF render, archive) to
+    // milliseconds.
+    const stillOwned = await db('projects')
+      .where({ id: project.id, delivery_claim_token: sendClaimToken })
+      .first('id');
+    if (!stillOwned) {
+      await revertManualHoldClaim();
+      logger.error(`[projects] send superseded before delivery for ${project.id} — claim taken over; nothing emailed by this request`);
+      return res.status(409).json({
+        error: 'This send was superseded by a newer request — refresh and check the report status.',
+        code: 'send_superseded',
+      });
+    }
+
     // Email first (through editable Waves template library). For WDO it carries
     // the FDACS PDF, so the SMS link is only sent after the email succeeds.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
@@ -3289,7 +3307,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       try {
         // Recipient-hashed idempotency key (same pattern as the hold release):
         // the claim stops concurrent duplicates, this stops crash-retry
-        // duplicates at the provider layer. A resend mints a fresh key.
+        // duplicates at the provider layer. A resend keys on the claim token —
+        // deterministic within this attempt, distinct across attempts.
         const recipientHash = crypto.createHash('sha1')
           .update(String(emailRecipient.email).toLowerCase())
           .digest('hex')
@@ -3300,7 +3319,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           reportUrl,
           isResend: isResendSend,
           attachments: wdoPdf ? [wdoPdf.attachment] : [],
-          idempotencyKey: `project.report_ready:${project.id}:${isResendSend ? new Date().toISOString() : 'initial'}:${recipientHash}`,
+          idempotencyKey: `project.report_ready:${project.id}:${isResendSend ? `resend-${sendClaimToken}` : 'initial'}:${recipientHash}`,
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -4703,6 +4722,26 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const firstName = customer.first_name || 'there';
     const channels = {};
 
+    // Ownership recheck immediately before the external sends (same contract
+    // as /send): the token fences DB writes, but a stalled request resuming
+    // after a takeover could otherwise still email/text the customer.
+    const stillOwned = await db('projects')
+      .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
+      .first('id');
+    if (!stillOwned) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] invoice claim release after superseded delivery failed for ${invoice.id}: ${err.message}`));
+      claimedInvoice = null;
+      await reverseProjectCreditOnAbort();
+      await revertHeldReportClaimOnAbort();
+      logger.error(`[projects] combined send superseded before delivery for ${project.id} — claim taken over; nothing sent by this request`);
+      return res.status(409).json({
+        error: 'This send was superseded by a newer request — refresh and check the report status.',
+        code: 'send_superseded',
+      });
+    }
+
     // ONE email FIRST — it carries the report attachments (the FDACS PDF for WDO)
     // + the invoice PDF. For WDO it's the required channel: the pay-link SMS is
     // only sent after the email succeeds, so a failed email can't leave the
@@ -5615,14 +5654,26 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
     try {
       mutation = await db.transaction(async (trx) => {
         const locked = await lockProjectForPhotoMutation(project, trx);
-        const count = await trx('project_photos')
+        const current = await trx('project_photos')
           .where({ id: req.params.photoId, project_id: req.params.id })
-          .update({ ...updates, updated_at: db.fn.now() });
-        if (!count) return { changed: 0, staleness: false };
+          .first();
+        if (!current) return { changed: 0, staleness: false };
+        // Only persist values that actually differ — Postgres reports a
+        // matched row as updated even when nothing changed, and a no-op save
+        // (open the caption editor, hit save) must never force a legal
+        // re-sign on a signed WDO.
+        const realChanges = {};
+        for (const [field, value] of Object.entries(updates)) {
+          if (String(current[field] ?? '') !== String(value ?? '')) realChanges[field] = value;
+        }
+        if (Object.keys(realChanges).length === 0) return { changed: 1, staleness: false };
+        await trx('project_photos')
+          .where({ id: req.params.photoId, project_id: req.params.id })
+          .update({ ...realChanges, updated_at: db.fn.now() });
         // Caption/category/order all render into the FDACS photo addendum —
         // an edit to any of them on a signed WDO requires a re-sign.
         const stale = await flagWdoSignatureStaleForPhotos(project, trx, locked);
-        return { changed: count, staleness: stale };
+        return { changed: 1, staleness: stale };
       });
     } catch (e) {
       if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });

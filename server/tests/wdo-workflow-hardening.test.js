@@ -387,7 +387,10 @@ describe('POST /:id/send concurrency claim', () => {
         updated_at: '2026-06-01T00:00:00Z',
       })),
     });
-    const photos = chain({ update: jest.fn().mockResolvedValue(1) });
+    const photos = chain({
+      first: jest.fn().mockResolvedValue({ id: 'photo-9', project_id: 'project-1', caption: 'Old caption', category: null }),
+      update: jest.fn().mockResolvedValue(1),
+    });
     mockTables({ projects, project_photos: photos });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-9`, {
@@ -429,7 +432,10 @@ describe('POST /:id/send concurrency claim', () => {
 describe('photo mutations flag a signed WDO signature stale', () => {
   test('PUT caption on a signed WDO flags stale in the same transaction', async () => {
     const projects = chain({ first: jest.fn().mockResolvedValue(wdoProject()) });
-    const photos = chain({ update: jest.fn().mockResolvedValue(1) });
+    const photos = chain({
+      first: jest.fn().mockResolvedValue({ id: 'photo-1', project_id: 'project-1', caption: 'Old caption', category: 'wdo_evidence' }),
+      update: jest.fn().mockResolvedValue(1),
+    });
     mockTables({ projects, project_photos: photos });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-1`, {
@@ -443,6 +449,31 @@ describe('photo mutations flag a signed WDO signature stale', () => {
       const sigWrite = projects.update.mock.calls.find(([arg]) => arg && arg.wdo_signature);
       expect(sigWrite).toBeDefined();
       expect(JSON.parse(sigWrite[0].wdo_signature).content_stale).toBe(true);
+    });
+  });
+
+  test('a no-op caption save never flags the signature stale', async () => {
+    // Opening the caption editor and saving the SAME text must not force a
+    // legal re-sign — matched-but-unchanged rows are detected and skipped.
+    const projects = chain({ first: jest.fn().mockResolvedValue(wdoProject()) });
+    const photos = chain({
+      first: jest.fn().mockResolvedValue({ id: 'photo-1', project_id: 'project-1', caption: 'Frass at garage door frame', category: 'wdo_evidence' }),
+      update: jest.fn().mockResolvedValue(1),
+    });
+    mockTables({ projects, project_photos: photos });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caption: 'Frass at garage door frame' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.signature_stale).toBeUndefined();
+      expect(photos.update).not.toHaveBeenCalled();
+      const sigWrite = projects.update.mock.calls.find(([arg]) => arg && arg.wdo_signature);
+      expect(sigWrite).toBeUndefined();
     });
   });
 
