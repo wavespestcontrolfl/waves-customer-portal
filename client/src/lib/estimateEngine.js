@@ -387,12 +387,22 @@ export function applyServerLawnPricingConfig(config) {
 // the WaveGuard give-back — matching the server's applyMarginGuard lift —
 // so a no-enriched-profile pest estimate can't be saved/accepted below the
 // re-armed floor (codex P2 round 8 on #2827).
-const PEST_BASE = { enforceFloorPostDiscount: false };
+const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89 };
 
 export function applyServerPestPricingConfig(config) {
   PEST_BASE.enforceFloorPostDiscount = (
     config?.enforce_floor_post_discount ?? config?.enforceFloorPostDiscount
   ) === true;
+  // Live-configurable per-visit floor (pest_base.floor) — the same value the
+  // server's pestProgramFloorPerVisit reads (PEST.floor, db-bridge synced),
+  // so a re-arm at a floor other than $89 stamps/gives back the SAME floor
+  // the server normalizes and view/accept clamps at (pre-push codex P0,
+  // round 9 on #2827). Absent/invalid resets the in-code default — the
+  // kill-value pattern.
+  const floor = Number(config?.floor);
+  PEST_BASE.floorPerVisit = Number.isFinite(floor) && floor > 0
+    ? Math.round(floor * 100) / 100
+    : 89;
   return PEST_BASE.enforceFloorPostDiscount;
 }
 
@@ -1847,7 +1857,7 @@ export function calculateEstimate(inputs) {
       // while off). Disarmed default (owner ruling 2026-07-17): no stamp.
       const pestFloorMeta = PEST_BASE.enforceFloorPostDiscount === true
         ? (() => {
-            const floorPa = Math.round(89 * ft.disc * 100) / 100;
+            const floorPa = Math.round(PEST_BASE.floorPerVisit * ft.disc * 100) / 100;
             const floorAnn = Math.round(floorPa * ft.f * 100) / 100;
             const floorMo = Math.round(floorAnn / 12 * 100) / 100;
             return { floorPa, floorAnn, floorMo };

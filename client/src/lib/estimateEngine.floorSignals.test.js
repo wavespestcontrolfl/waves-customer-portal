@@ -122,6 +122,26 @@ describe("applyServerPestPricingConfig — live pest floor re-arm in the fallbac
     expect(est.results.pest.pa).toBeLessThan(98.9);
     expect(est.recurring.pestProgramFloorApplied).toBe(true);
   });
+
+  it("re-armed at a configured floor: stamps pest_base.floor, not a hardcoded $89 (pre-push codex P0 round 9)", () => {
+    // The DB row can re-arm at any floor (e.g. $79) — the fallback must
+    // stamp/give back the SAME value the server's pestProgramFloorPerVisit
+    // reads (PEST.floor), or preview and view/accept disagree.
+    expect(applyServerPestPricingConfig({ enforce_floor_post_discount: true, floor: 79 })).toBe(true);
+    const est = calculateEstimate(lawnInput({
+      svcPest: true,
+      homeSqFt: 1000,
+      shrubDensity: "LIGHT",
+      landscapeComplexity: "SIMPLE",
+    }));
+    expect(est.error).toBeUndefined();
+    const tier = est.results.pestTiers.find((t) => t.apps === 4);
+    expect(tier.floorPa).toBeCloseTo(79, 2);
+    expect(tier.floorAnn).toBeCloseTo(316, 2);
+    // Silver 10% on a $95 visit ($85.50) stays ABOVE a $79 floor — no
+    // give-back at this configured value, unlike the $89 case above.
+    expect(est.recurring.pestProgramFloorApplied).toBe(false);
+  });
 });
 
 describe("fallback lawn margin visibility — report-only WaveGuard breach warning", () => {

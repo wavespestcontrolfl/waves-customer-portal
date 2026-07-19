@@ -220,12 +220,16 @@ describe('deprecated client estimator pricing drift guards', () => {
     // and the WaveGuard give-back on that switch — never stamp or lift while
     // disarmed — and (c) keep the pestProgramFloorApplied field in the return
     // shape (false while disarmed) so stored-payload consumers don't lose it.
-    expect(source).toContain('const PEST_BASE = { enforceFloorPostDiscount: false };');
+    expect(source).toContain('const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89 };');
     expect(source).toContain('const pestFloorMeta = PEST_BASE.enforceFloorPostDiscount === true');
     expect(source).toContain('if (PEST_BASE.enforceFloorPostDiscount === true');
     expect(source).toContain('let pestProgramFloorApplied = false;');
-    // The stamp arithmetic exists ONLY inside the flag-gated tier block.
-    expect((source.match(/const floorPa = Math\.round\(89 \* ft\.disc \* 100\) \/ 100;/g) || []).length).toBe(1);
+    // The stamp arithmetic exists ONLY inside the flag-gated tier block and
+    // reads the LIVE configured floor (pest_base.floor via
+    // applyServerPestPricingConfig), never a hardcoded $89 — mirroring the
+    // server's pestProgramFloorPerVisit (PEST.floor × freq multiplier).
+    expect(source).not.toContain('Math.round(89 * ft.disc');
+    expect((source.match(/const floorPa = Math\.round\(PEST_BASE\.floorPerVisit \* ft\.disc \* 100\) \/ 100;/g) || []).length).toBe(1);
   });
 
   test('client fallback applies the full WaveGuard percent at the list bottom (floors disarmed 2026-07-17)', () => {

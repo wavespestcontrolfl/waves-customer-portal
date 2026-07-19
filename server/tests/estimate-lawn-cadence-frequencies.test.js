@@ -668,6 +668,37 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
     }
   });
 
+  test('a legacy pre-stamp estimate keeps its saved program-minimum clamp via stored row evidence', () => {
+    // Pre-stamp saves made while the minimum was armed carry it on the
+    // stored rows (mapper prov.programMinimumMonthly, or the applied flag on
+    // value-less client-fallback rows). With the global now 0, the ladder
+    // must still clamp at the saved $50 — a $600 saved line must not render
+    // or accept at $594 (pre-push codex P0, round 9 on #2827).
+    const provStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+      result: { results: { lawn: [{ v: 6, mo: 50, ann: 600, prov: { programMinimumMonthly: 50 } }] } },
+    });
+    expect(Object.fromEntries(provStamp.map((f) => [f.key, f])).standard.monthly)
+      .toBeCloseTo(50, 2);
+
+    // Client-fallback legacy row: applied flag only — its clamped monthly IS
+    // the minimum it was held at.
+    const appliedFlag = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+      result: { results: { lawn: [{ v: 6, mo: 50, ann: 600, programMinimumApplied: true, pricingSource: 'PROGRAM_MINIMUM' }] } },
+    });
+    expect(Object.fromEntries(appliedFlag.map((f) => [f.key, f])).standard.monthly)
+      .toBeCloseTo(50, 2);
+
+    // A post-disarm stamp (0) BEATS row evidence — deliberate disarm wins.
+    const disarmedStamp = lawnFrequenciesFromEngineResult({ lineItems: [marginFlooredLine()] }, {
+      result: {
+        pricingMetadata: { lawnProgramMinimumMonthly: 0 },
+        results: { lawn: [{ v: 6, mo: 50, ann: 600, prov: { programMinimumMonthly: 50 } }] },
+      },
+    });
+    expect(Object.fromEntries(disarmedStamp.map((f) => [f.key, f])).standard.monthly)
+      .toBeCloseTo(49.5, 2);
+  });
+
   test('a legacy pre-disarm estimate keeps its floor re-clamp via stored enforcement stamps', () => {
     // Pre-disarm saves never persisted the flag (the engine armed by
     // default) — the evidence is the enforcement stamps on the stored rows.

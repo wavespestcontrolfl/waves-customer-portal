@@ -12634,13 +12634,13 @@ function lawnProgramMinimumMonthly() {
 // keeps its clamp after the global returns to 0, and a quote saved disarmed
 // is never clamped UP by a later re-arm). Estimates without a stamp
 // (pre-stamp saves) fall back to the live global — their existing behavior.
+// Delegates to the converter's shared resolver (stamp → legacy row
+// evidence → live global) so billing and render can never disagree about
+// which minimum a stored quote carries — see
+// resolveLawnProgramMinimumMonthlyForEstimate in estimate-converter.js for
+// the full resolution rules (pre-push codex P0s, round 9 on #2827).
 function lawnProgramMinimumMonthlyFor(estData) {
-  const stamped = estData?.result?.pricingMetadata?.lawnProgramMinimumMonthly
-    ?? estData?.pricingMetadata?.lawnProgramMinimumMonthly
-    ?? estData?.result?.routingMetadata?.lawnProgramMinimumMonthly;
-  const n = Number(stamped);
-  if (stamped != null && Number.isFinite(n) && n >= 0) return n;
-  return lawnProgramMinimumMonthly();
+  return require('../services/estimate-converter').resolveLawnProgramMinimumMonthlyForEstimate(estData);
 }
 
 // Normalize an explicitly threaded per-estimate minimum; callers that were
