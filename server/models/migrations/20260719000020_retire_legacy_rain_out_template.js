@@ -41,12 +41,9 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('sms_templates'))) return;
-  const cols = await knex('sms_templates').columnInfo();
-  if (!cols.is_active) return;
-  await knex('sms_templates').where({ template_key: LEGACY_KEY }).update({
-    is_active: true,
-    ...(cols.updated_at ? { updated_at: new Date() } : {}),
-  });
-};
+// Deliberate no-op: is_active doubles as the operator send kill switch,
+// and up() can't know whether the row was already off by admin choice —
+// a rollback that blindly re-enables could resume texts an operator had
+// intentionally suppressed. Re-enabling after a rollback is a one-click
+// admin toggle.
+exports.down = async function down() {};
