@@ -112,6 +112,7 @@ function chain(overrides = {}) {
     limit: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     groupBy: jest.fn().mockReturnThis(),
+    forUpdate: jest.fn().mockReturnThis(),
     first: jest.fn(),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockReturnThis(),
@@ -252,7 +253,7 @@ describe('WDO signature content binding', () => {
     const projectUpdate = chain();
     const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
     const staleUpdate = chain();
-    const projectQueries = [projectRead, projectUpdate, projectRefetch, staleUpdate];
+    const projectQueries = [projectRead, chain(), projectUpdate, projectRefetch, staleUpdate]; // chain() = PUT trx lock read
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
@@ -296,7 +297,7 @@ describe('WDO signature content binding', () => {
     const projectUpdate = chain();
     const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
     const spareUpdate = chain();
-    const projectQueries = [projectRead, projectUpdate, projectRefetch, spareUpdate];
+    const projectQueries = [projectRead, chain(), projectUpdate, projectRefetch, spareUpdate]; // chain() = PUT trx lock read
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
@@ -335,7 +336,7 @@ describe('WDO signature content binding', () => {
     const projectUpdate = chain();
     const projectRefetch = chain({ first: jest.fn().mockResolvedValue(after) });
     const unstaleUpdate = chain();
-    const projectQueries = [projectRead, projectUpdate, projectRefetch, unstaleUpdate];
+    const projectQueries = [projectRead, chain(), projectUpdate, projectRefetch, unstaleUpdate]; // chain() = PUT trx lock read
     const activityLog = chain();
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();

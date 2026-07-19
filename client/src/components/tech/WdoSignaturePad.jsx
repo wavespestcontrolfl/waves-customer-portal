@@ -21,6 +21,10 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   // mid-signature (rotation, iOS keyboard/URL-bar collapse) can restore the
   // ink instead of silently wiping it.
   const inkSnapshot = useRef(null);
+  // Bumped on every canvas init: the restore's async image decode must not
+  // land on a canvas that was cleared or re-inited after it started, or old
+  // ink would resurrect over a Clear (and mark the pad drawn).
+  const initGen = useRef(0);
   const [signerName, setSignerName] = useState(defaultSignerName);
   const [signerIdCard, setSignerIdCard] = useState(defaultSignerIdCard);
   const [saving, setSavingState] = useState(false);
@@ -31,6 +35,7 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   const initCanvas = useCallback(({ preserveInk = false } = {}) => {
     const c = canvasRef.current;
     if (!c) return;
+    const gen = ++initGen.current;
     // Size the bitmap from the rendered box (× devicePixelRatio): a fixed
     // 520×160 bitmap on a ~350px-wide phone box stretched the exported PNG
     // horizontally relative to what was actually signed, and rendered blurry
@@ -62,7 +67,10 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
     const img = new Image();
     img.onload = () => {
       const cur = canvasRef.current;
-      if (!cur) return;
+      // Stale-callback fence: a Clear or another resize re-init after this
+      // decode started means this restore must not land (it would resurrect
+      // cleared ink and mark the pad drawn).
+      if (!cur || initGen.current !== gen) return;
       const scale = cur.height / (img.height || 1);
       cur.getContext("2d").drawImage(img, 0, 0, img.width * scale, cur.height);
       hasDrawn.current = true;

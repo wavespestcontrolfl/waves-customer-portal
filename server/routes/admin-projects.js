@@ -2119,7 +2119,19 @@ router.put('/:id', async (req, res, next) => {
     dropStaleCertTreatmentDate(project, updates);
     if (Object.keys(updates).length === 0) return res.json({ project });
 
-    await db('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
+    // Serialized with in-flight deliveries the same way photo mutations are:
+    // a findings/date edit landing while a send (or the payment-hold release)
+    // is building would make the emailed signed PDF differ from the live
+    // public report, or race the staleness bookkeeping below.
+    try {
+      await db.transaction(async (trx) => {
+        await lockProjectForPhotoMutation(project, trx, 'the edit');
+        await trx('projects').where({ id: req.params.id }).update({ ...updates, updated_at: db.fn.now() });
+      });
+    } catch (e) {
+      if (e.code === 'send_in_progress') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
     const updated = await db('projects').where({ id: req.params.id }).first();
 
     // If this edit changed the content a captured WDO signature attests to,
@@ -2360,14 +2372,15 @@ async function refreshWdoSignatureStaleness(req, before, after) {
 // findings hash, this doesn't self-heal on revert — a photo edit is a re-sign.
 // Returns false (no signature / not a WDO), 'already_stale', or 'flagged'
 // (newly flagged by THIS mutation — the caller logs the activity entry).
-// Locks the project row for the duration of a photo mutation's transaction
-// and rejects while a send claim is active: a photo change landing between
-// the send's freshness check and its addendum snapshot would otherwise ride
-// into the emailed filing unattested. The locked row (not the request-scope
-// snapshot, which a concurrent signature save can invalidate) also feeds the
-// staleness decision below. Applies to every project type — any in-flight
-// send is rendering photos it already validated.
-async function lockProjectForPhotoMutation(project, trx) {
+// Locks the project row for the duration of a content mutation's transaction
+// (photos, findings edits, signature saves) and rejects while a send claim is
+// active: a change landing between the send's freshness check and its
+// render/snapshot would otherwise ride into the emailed filing unattested.
+// The locked row (not the request-scope snapshot, which a concurrent
+// signature save can invalidate) also feeds the staleness decision below.
+// Applies to every project type — any in-flight send is rendering content it
+// already validated.
+async function lockProjectForPhotoMutation(project, trx, what = 'the photo change') {
   const locked = await trx('projects')
     .where({ id: project.id })
     .forUpdate()
@@ -2378,7 +2391,7 @@ async function lockProjectForPhotoMutation(project, trx) {
   // the FDACS addendum without ever setting delivery_status.
   if (String(locked?.delivery_status || '') === 'sending'
     || String(locked?.report_hold_status || '') === 'releasing') {
-    const err = new Error('This report is being sent right now — retry the photo change in a moment.');
+    const err = new Error(`This report is being sent right now — retry ${what} in a moment.`);
     err.code = 'send_in_progress';
     throw err;
   }
@@ -3100,12 +3113,17 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const previousDeliveryStatus = project.delivery_status === 'sending'
       ? 'failed'
       : (project.delivery_status || null);
+    // Ownership fence: the stale takeover reuses the same 'sending' value, so
+    // without a per-claim token a stalled-but-alive original request could
+    // revert or finalize over the takeover's claim. Every revert/finalize
+    // below conditions on this token.
+    const sendClaimToken = crypto.randomBytes(12).toString('hex');
     const sendClaim = await db('projects')
       .where({ id: project.id })
       .where((q) => q
         .whereRaw("delivery_status IS DISTINCT FROM 'sending'")
         .orWhereRaw("updated_at < now() - interval '10 minutes'"))
-      .update({ delivery_status: 'sending', updated_at: db.fn.now() });
+      .update({ delivery_status: 'sending', delivery_claim_token: sendClaimToken, updated_at: db.fn.now() });
     if (!sendClaim) {
       return res.status(409).json({
         error: 'This report is already being sent — give it a moment, then refresh.',
@@ -3114,8 +3132,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     }
     const revertSendClaim = async () => {
       await db('projects')
-        .where({ id: project.id, delivery_status: 'sending' })
-        .update({ delivery_status: previousDeliveryStatus, updated_at: db.fn.now() })
+        .where({ id: project.id, delivery_status: 'sending', delivery_claim_token: sendClaimToken })
+        .update({ delivery_status: previousDeliveryStatus, delivery_claim_token: null, updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] send claim revert failed for ${project.id}: ${err.message}`));
     };
     revertSendClaimOnError = revertSendClaim;
@@ -3366,11 +3384,21 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
     }
 
-    await db('projects').where({ id: req.params.id }).update(deliveryUpdate);
+    // Fenced finalize: only the request that still owns the claim may write
+    // the outcome. Zero rows = a stale takeover superseded this request —
+    // the emails above already went out, but the row's state belongs to the
+    // new owner now; recording over it would corrupt THEIR in-flight send.
+    deliveryUpdate.delivery_claim_token = null;
+    const finalized = await db('projects')
+      .where({ id: req.params.id, delivery_claim_token: sendClaimToken })
+      .update(deliveryUpdate);
+    if (!finalized) {
+      logger.error(`[projects] send finalize fenced off for ${project.id} — claim superseded by a stale-takeover; outcome not recorded`);
+    }
 
     // Nothing went out — return the manual claim so the sweep (or a retry
     // of this endpoint) can deliver later.
-    if (manualHoldClaim && !delivered) {
+    if (manualHoldClaim && !delivered && finalized) {
       await revertManualHoldClaim();
     }
 
@@ -4117,8 +4145,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   const revertDeliveryClaimOnAbort = async (projectId) => {
     if (!deliveryClaim) return;
     await db('projects')
-      .where({ id: projectId, delivery_status: 'sending' })
-      .update({ delivery_status: deliveryClaim.previousStatus, updated_at: db.fn.now() })
+      .where({ id: projectId, delivery_status: 'sending', delivery_claim_token: deliveryClaim.token })
+      .update({ delivery_status: deliveryClaim.previousStatus, delivery_claim_token: null, updated_at: db.fn.now() })
       .catch((err) => logger.warn(`[projects] combined-send delivery claim revert failed for ${projectId}: ${err.message}`));
     deliveryClaim = null;
   };
@@ -4419,12 +4447,14 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const previousDeliveryStatus = project.delivery_status === 'sending'
       ? 'failed'
       : (project.delivery_status || null);
+    // Same ownership fence as /send: token per claim, conditioned reverts.
+    const deliveryClaimToken = crypto.randomBytes(12).toString('hex');
     const deliveryClaimRows = await db('projects')
       .where({ id: project.id })
       .where((q) => q
         .whereRaw("delivery_status IS DISTINCT FROM 'sending'")
         .orWhereRaw("updated_at < now() - interval '10 minutes'"))
-      .update({ delivery_status: 'sending', updated_at: db.fn.now() });
+      .update({ delivery_status: 'sending', delivery_claim_token: deliveryClaimToken, updated_at: db.fn.now() });
     if (!deliveryClaimRows) {
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
@@ -4435,7 +4465,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         code: 'send_in_progress',
       });
     }
-    deliveryClaim = { previousStatus: previousDeliveryStatus };
+    deliveryClaim = { previousStatus: previousDeliveryStatus, token: deliveryClaimToken };
 
     // Report link + portal visibility — mirror /send so a token_only WDO report
     // never leaks into the customer portal via the `portal_visible IS NULL` +
@@ -4922,20 +4952,24 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       await revertHeldReportClaimOnAbort();
     }
 
+    // Both delivered-branch finalizes are fenced on the claim token (same
+    // contract as /send): zero rows = a stale takeover owns the row now.
+    let finalized = !delivered;
     if (delivered && holdActive) {
       // Invoice is out. The hold itself was stamped BEFORE delivery (in the
       // token update — see the Codex P1 note there), so this records only
       // the delivery bookkeeping. The project stays in its pre-send
       // lifecycle (no status='sent' / sent_at — the report has not been
       // delivered) and the release sweep owns the next transition.
-      await db('projects').where({ id: project.id }).update({
+      finalized = await db('projects').where({ id: project.id, delivery_claim_token: deliveryClaimToken }).update({
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,
+        delivery_claim_token: null,
         updated_at: db.fn.now(),
       });
     } else if (delivered) {
-      await db('projects').where({ id: project.id }).update({
+      finalized = await db('projects').where({ id: project.id, delivery_claim_token: deliveryClaimToken }).update({
         // Resending a closed project's report must not regress its lifecycle
         // (closed_at stays set and closeout artifacts key on status='closed').
         status: project.status === 'closed' ? project.status : 'sent',
@@ -4943,6 +4977,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,
+        delivery_claim_token: null,
         updated_at: db.fn.now(),
         ...(wdoFiling && projectCols.wdo_sent_filings ? {
           // Atomic jsonb append — never read-modify-write the filing index.
@@ -4965,6 +5000,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       });
       // Released atomically above — nothing left for the outer catch to revert.
       heldReportClaim = null;
+    }
+    if (delivered && !finalized) {
+      logger.error(`[projects] combined-send finalize fenced off for ${project.id} — claim superseded by a stale-takeover; outcome not recorded`);
     }
     // Delivered branches resolved the claim by writing the final
     // delivery_status; anything short of delivered restores the pre-claim

@@ -360,6 +360,23 @@ describe('POST /:id/send concurrency claim', () => {
     });
   });
 
+  test('findings edits 409 while a send claim is active', async () => {
+    // PUT /:id must respect the same delivery claims as photo mutations — an
+    // edit mid-send would fork the emailed PDF from the live public report.
+    const projects = chain({ first: jest.fn().mockResolvedValue(wdoProject({ delivery_status: 'sending' })) });
+    mockTables({ projects });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findings: { ...FINDINGS, wdo_evidence: 'Edited mid-send' } }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('send_in_progress');
+    });
+  });
+
   test('photo mutations 409 while the payment-hold release is delivering', async () => {
     // The release sweep claims report_hold_status='releasing' without ever
     // setting delivery_status — the photo guard must respect that claim too.

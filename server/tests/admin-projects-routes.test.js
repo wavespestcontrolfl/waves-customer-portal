@@ -268,7 +268,9 @@ describe('admin projects routes', () => {
     const projectUpdated = chain({
       first: jest.fn().mockResolvedValue({ id: 'project-1', title: 'Updated title' }),
     });
-    const projectQueries = [projectRead, projectUpdate, projectUpdated];
+    // PUT persists inside a locked transaction now — the lock read consumes
+    // one projects slot before the update.
+    const projectQueries = [projectRead, chain(), projectUpdate, projectUpdated];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'service_records') return serviceRead;
