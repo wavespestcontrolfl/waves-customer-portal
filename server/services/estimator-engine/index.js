@@ -33,7 +33,6 @@ const {
   calibrationWarnings,
   classifyLane,
   createDraftEstimate,
-  isCommercialRelationshipRed,
 } = require('./draft-builder');
 
 function estimatorEngineEnabled() {
@@ -315,21 +314,41 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
         // the generic quote-promised bells suppressed behind the gate, that
         // would leave a silent draft forever. notify() dedupes internally,
         // so this is a no-op when the bell already rang.
-        const existingLane = (() => {
+        const existingMeta = (() => {
           try {
             const data = typeof existing.estimate_data === 'string'
               ? JSON.parse(existing.estimate_data) : existing.estimate_data;
-            return data?.estimatorEngine?.lane || 'yellow';
-          } catch { return 'yellow'; }
+            return {
+              lane: data?.estimatorEngine?.lane || 'yellow',
+              commercialProposal: data?.estimatorEngine?.commercialProposal === true,
+            };
+          } catch { return { lane: 'yellow', commercialProposal: false }; }
         })();
+        if (existingMeta.commercialProposal) {
+          // A proposal scaffold recovered on re-entry must keep its proposal
+          // semantics: the generic draft bell would read "$0/mo" (the row is
+          // deliberately unpriced) and link the estimates list instead of
+          // the proposal builder.
+          await notify({
+            call: context.call,
+            context,
+            lane: existingMeta.lane,
+            quotePromised,
+            estimateId: existing.id,
+            link: `/admin/estimates/${existing.id}/proposal`,
+            title: CALL_ORIGIN.strings.proposalTitle,
+            body: CALL_ORIGIN.strings.proposalBody(callerLabel(null, context)),
+          });
+          return result;
+        }
         await notify({
           call: context.call,
           context,
-          lane: existingLane,
+          lane: existingMeta.lane,
           quotePromised,
           estimateId: existing.id,
-          title: `AI estimate draft ${existingLane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
-          body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingLane).toUpperCase()}). Review in admin/estimates and send.`,
+          title: `AI estimate draft ${existingMeta.lane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
+          body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingMeta.lane).toUpperCase()}). Review in admin/estimates and send.`,
         });
         return result;
       }
@@ -521,7 +540,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     const draftable = intent.decision === 'draft'
       && Object.keys(intent.services || {}).length > 0
       && !!intent.address;
-    const { lane, reasons } = (engineResult || !draftable)
+    const { lane, reasons, causes = [] } = (engineResult || !draftable)
       ? classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context })
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
     result.lane = lane;
@@ -534,12 +553,16 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // Commercial/HOA proposal lane (GATE_ESTIMATOR_COMMERCIAL_PROPOSALS,
       // default OFF): the relationship-quote red produces a prospect
       // research brief + unpriced proposal scaffold instead of a bell-only
-      // dead end. Strictly fail-soft — any miss (gate off, no address,
-      // duplicate block, insert failure) falls through to the standard red
-      // path below, so the owed-quote bell can never be lost to this lane.
+      // dead end. Routed on classifyLane's machine-readable CAUSE, not the
+      // raw commercial predicate — a commercial property that redded for an
+      // unrelated reason (no line items, pricing failure) must keep the
+      // standard red + clarify path. Strictly fail-soft — any miss (gate
+      // off, no address, duplicate block, insert failure) falls through to
+      // the standard red path below, so the owed-quote bell can never be
+      // lost to this lane.
       try {
         const { commercialProposalsEnabled, maybeBuildCommercialProposalDraft } = require('./commercial-proposal');
-        if (commercialProposalsEnabled() && isCommercialRelationshipRed({ intent, propertyFacts })) {
+        if (commercialProposalsEnabled() && causes.includes('commercial_relationship_quote')) {
           const proposalOutcome = await maybeBuildCommercialProposalDraft({
             intent,
             propertyFacts,

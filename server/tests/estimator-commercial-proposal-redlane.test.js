@@ -33,6 +33,17 @@ jest.mock('../services/estimator-engine/intent-composer', () => ({
   composeIntent: (...args) => mockComposeIntent(...args),
 }));
 
+jest.mock('../services/pricing-engine', () => ({
+  generateEstimate: () => { throw new Error('pricing engine down'); },
+}));
+
+const mockExistingDraftForCall = jest.fn();
+const mockBuildCallContext = jest.fn();
+jest.mock('../services/estimator-engine/context-builder', () => ({
+  buildCallContext: (...args) => mockBuildCallContext(...args),
+  existingDraftForCall: (...args) => mockExistingDraftForCall(...args),
+}));
+
 jest.mock('../services/estimator-engine/source-arbitration', () => ({
   resolvePropertyFacts: () => ({ home: { value: 25000 }, lot: { value: null } }),
   normalizeParcelView: () => null,
@@ -41,7 +52,6 @@ jest.mock('../services/estimator-engine/source-arbitration', () => ({
 }));
 
 const mockClassifyLane = jest.fn();
-const mockIsCommercialRed = jest.fn();
 const mockCreateDraft = jest.fn();
 jest.mock('../services/estimator-engine/draft-builder', () => ({
   LANES: { GREEN: 'green', YELLOW: 'yellow', RED: 'red' },
@@ -51,7 +61,6 @@ jest.mock('../services/estimator-engine/draft-builder', () => ({
   calibrationWarnings: async () => [],
   classifyLane: (...args) => mockClassifyLane(...args),
   createDraftEstimate: (...args) => mockCreateDraft(...args),
-  isCommercialRelationshipRed: (...args) => mockIsCommercialRed(...args),
 }));
 
 const mockProposalsEnabled = jest.fn();
@@ -120,12 +129,14 @@ beforeEach(() => {
   mockClassifyLane.mockReset().mockReturnValue({
     lane: 'red',
     reasons: ['commercial building over 10,000 sqft — relationship quote, not an auto-draft'],
+    causes: ['commercial_relationship_quote'],
   });
-  mockIsCommercialRed.mockReset().mockReturnValue(true);
   mockCreateDraft.mockReset();
   mockProposalsEnabled.mockReset().mockReturnValue(true);
   mockBuildProposal.mockReset().mockResolvedValue({ created: true, estimateId: 'est-9', briefComposed: true });
   mockNotifyAdmin.mockReset();
+  mockExistingDraftForCall.mockReset().mockResolvedValue(null);
+  mockBuildCallContext.mockReset();
 });
 
 test('relationship red + gate on ⇒ proposal draft + deep-linked bell, no red bell', async () => {
@@ -182,13 +193,30 @@ test('gate off ⇒ builder never consulted, red path unchanged', async () => {
   expect(mockNotifyAdmin.mock.calls[0][1]).toBe('RED-TITLE');
 });
 
-test('non-commercial red ⇒ builder never consulted even with the gate on', async () => {
-  mockIsCommercialRed.mockReturnValue(false);
+test('red WITHOUT the relationship cause ⇒ builder never consulted, even on a commercial property', async () => {
+  // A >10k-sqft commercial intent whose red came from something else (zero
+  // totals, no line items) must keep the standard red + clarify path — the
+  // routing keys on classifyLane's CAUSE, never the raw predicate.
   mockClassifyLane.mockReturnValue({ lane: 'red', reasons: ['engine produced zero totals'] });
   await run();
 
   expect(mockBuildProposal).not.toHaveBeenCalled();
   expect(mockNotifyAdmin.mock.calls[0][1]).toBe('RED-TITLE');
+});
+
+test('pricing-engine failure red (classifyLane never ran) ⇒ builder never consulted', async () => {
+  // Draftable intent (services + address) whose pricing threw: the pipeline
+  // takes the fallback red literal, which carries no causes.
+  mockComposeIntent.mockResolvedValue({
+    intent: { ...INTENT, services: { pest: { frequency: 'monthly' } } },
+    model: 'test-composer',
+  });
+  await run();
+
+  expect(mockClassifyLane).not.toHaveBeenCalled();
+  expect(mockBuildProposal).not.toHaveBeenCalled();
+  expect(mockNotifyAdmin.mock.calls[0][1]).toBe('RED-TITLE');
+  expect(mockNotifyAdmin.mock.calls[0][2]).toContain('pricing engine failed');
 });
 
 test('request-only red (quotePromised=false) with a created scaffold still bells the artifact', async () => {
@@ -202,6 +230,43 @@ test('request-only red (quotePromised=false) with a created scaffold still bells
   expect(result.created).toBe(true);
   expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   expect(mockNotifyAdmin.mock.calls[0][1]).toBe('PROPOSAL-TITLE');
+});
+
+test('re-entry recovery: existing proposal scaffold keeps proposal semantics + deep-link', async () => {
+  // Crash between insert and notify ⇒ next run is intercepted by
+  // existingDraftForCall. The scaffold row is deliberately unpriced — the
+  // generic recovery bell would read "$0/mo" and link the estimates list.
+  const { maybeDraftEstimateForCall } = require('../services/estimator-engine');
+  mockBuildCallContext.mockResolvedValue({ ...CONTEXT });
+  mockExistingDraftForCall.mockResolvedValue({
+    id: 'est-77',
+    monthly_total: null,
+    estimate_data: JSON.stringify({ estimatorEngine: { lane: 'red', commercialProposal: true } }),
+  });
+
+  const result = await maybeDraftEstimateForCall({ callLogId: 'call-1' });
+  expect(result.lane).toBe('existing');
+  expect(result.estimateId).toBe('est-77');
+  expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  const [, title, body, opts] = mockNotifyAdmin.mock.calls[0];
+  expect(title).toBe('Commercial prospect on call — proposal scaffold ready');
+  expect(body).toContain('proposal builder');
+  expect(opts.link).toBe('/admin/estimates/est-77/proposal');
+});
+
+test('re-entry recovery: generic existing draft keeps the classic bell (regression)', async () => {
+  const { maybeDraftEstimateForCall } = require('../services/estimator-engine');
+  mockBuildCallContext.mockResolvedValue({ ...CONTEXT });
+  mockExistingDraftForCall.mockResolvedValue({
+    id: 'est-78',
+    monthly_total: 120,
+    estimate_data: JSON.stringify({ estimatorEngine: { lane: 'green' } }),
+  });
+
+  await maybeDraftEstimateForCall({ callLogId: 'call-1' });
+  const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+  expect(title).toBe('AI estimate draft ready — $120/mo');
+  expect(opts.link).toBe('/admin/estimates');
 });
 
 test('request-only red WITHOUT a scaffold stays silent (no false owed-quote task)', async () => {

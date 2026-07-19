@@ -412,7 +412,15 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
     return { lane: LANES.RED, reasons: [`nothing auto-priceable: ${manualLines.map((l) => l.manualReviewReasons?.[0] || l.reason || l.service).join('; ')}`] };
   }
   if (isCommercialRelationshipRed({ intent, propertyFacts })) {
-    return { lane: LANES.RED, reasons: [`commercial building over ${COMMERCIAL_FOOTPRINT_RED_SQFT.toLocaleString()} sqft — relationship quote, not an auto-draft`] };
+    // The machine-readable cause routes ONLY this red into the commercial
+    // proposal lane. Other red causes on a commercial property (no line
+    // items, pricing failure) must keep the standard red + clarify path —
+    // matching the raw predicate downstream would swallow them.
+    return {
+      lane: LANES.RED,
+      reasons: [`commercial building over ${COMMERCIAL_FOOTPRINT_RED_SQFT.toLocaleString()} sqft — relationship quote, not an auto-draft`],
+      causes: ['commercial_relationship_quote'],
+    };
   }
   if (!positive(totals?.monthly) && !positive(totals?.annual) && !positive(totals?.oneTime)) {
     return { lane: LANES.RED, reasons: ['engine produced zero totals'] };
