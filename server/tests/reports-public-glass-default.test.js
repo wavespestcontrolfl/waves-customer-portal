@@ -44,6 +44,10 @@ jest.mock('../services/pest-pressure/store', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: jest.fn(),
+  // #2866 routed print modes through the shared schedule-field strip; keep
+  // the REAL implementation (pdf-cache-config precedent) so this suite keeps
+  // exercising the route's actual print path instead of 500ing on the mock.
+  stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: jest.fn().mockResolvedValue({}),
