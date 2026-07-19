@@ -41,8 +41,10 @@ const mockGates = {};
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => mockGates[gate] !== false),
 }));
+const mockPreDispatchCheck = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/estimate-clarify-asks', () => ({
   claimClarifyDispatch: jest.fn(),
+  clarifyPreDispatchCheck: jest.fn(() => mockPreDispatchCheck),
   reopenClarifyAfterFailedSend: jest.fn(),
 }));
 
@@ -164,6 +166,9 @@ describe('approve — clarify dispatch wiring', () => {
       to: '+19415550142',
       body: 'Decision-fresh question?',
       purpose: 'estimate_followup',
+      // The locked final recheck rides into the canonical send path as the
+      // last await before the provider handoff.
+      preDispatchCheck: mockPreDispatchCheck,
     }));
     const finalize = updates.find((u) => u.payload.final_response !== undefined);
     expect(finalize.payload.final_response).toBe('Decision-fresh question?');

@@ -794,6 +794,53 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
 }
 
 /**
+ * Final abort point for a committed clarify dispatch, built for
+ * sendCustomerMessage's preDispatchCheck hook — the LAST await before the
+ * provider handoff. Under the clarify lock: verify the claim still stands
+ * and the asked items are still the ones the outbound copy asks for; any
+ * answer recorded while the send pipeline's own validators ran (or a
+ * concurrent reject) aborts the send, and the route's failed-send
+ * reconciliation then rewrites/retires the draft. Fail closed on error —
+ * an unverifiable ask must not go out.
+ */
+function clarifyPreDispatchCheck({ draftId, sourceRef, dispatchedMissing }) {
+  return async () => {
+    const digits = digitsFromClarifyRef(sourceRef);
+    if (!digits) {
+      return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'unparseable clarify source_ref' };
+    }
+    try {
+      return await withClarifyLock(digits, async (trx) => {
+        const fresh = await trx('message_drafts').where({ id: draftId }).first();
+        if (!fresh) {
+          return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'clarify draft no longer exists' };
+        }
+        if (!['approved', 'revised'].includes(fresh.status)) {
+          return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'clarify draft is no longer claimed' };
+        }
+        let flags = {};
+        try {
+          flags = typeof fresh.flags === 'string' ? JSON.parse(fresh.flags) : (fresh.flags || {});
+        } catch { flags = {}; }
+        const missing = Array.isArray(flags.missing) ? flags.missing : [];
+        if (flags.answered_at || !missing.length) {
+          return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'customer answered while the send was validating' };
+        }
+        const changed = Array.isArray(dispatchedMissing)
+          && (dispatchedMissing.length !== missing.length
+            || missing.some((item) => !dispatchedMissing.includes(item)));
+        if (changed) {
+          return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'customer answered part of this while the send was validating' };
+        }
+        return { ok: true };
+      });
+    } catch (err) {
+      return { ok: false, code: 'CLARIFY_RECHECK_FAILED', reason: err.message };
+    }
+  };
+}
+
+/**
  * Reconcile a clarify draft whose provider send FAILED after
  * claimClarifyDispatch committed the decision. Under the clarify lock: a
  * concurrent reject's status is respected (never resurrected to pending);
@@ -880,6 +927,7 @@ module.exports = {
   handleClarifyReply,
   recordClarifyAnswer,
   claimClarifyDispatch,
+  clarifyPreDispatchCheck,
   reopenClarifyAfterFailedSend,
   _private: { composeClarifyBody, extractAddressReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };

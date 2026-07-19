@@ -88,6 +88,7 @@ const {
   handleClarifyReply,
   recordClarifyAnswer,
   claimClarifyDispatch,
+  clarifyPreDispatchCheck,
   reopenClarifyAfterFailedSend,
   clarifyAsksEnabled,
   _private,
@@ -608,6 +609,54 @@ describe('claimClarifyDispatch', () => {
     const verdict = await claimClarifyDispatch({ draft: DRAFT });
     expect(verdict.outcome).toBe('retired');
     expect(verdict.message).toContain('no longer claimed');
+  });
+});
+
+describe('clarifyPreDispatchCheck', () => {
+  const PARAMS = {
+    draftId: 'draft-1',
+    sourceRef: 'clarify:9415550142',
+    dispatchedMissing: ['street_address'],
+  };
+  const claimedRow = (flags = {}, overrides = {}) => ({
+    id: 'draft-1',
+    status: 'approved',
+    sent_at: null,
+    flags: JSON.stringify({ missing: ['street_address'], ...flags }),
+    ...overrides,
+  });
+
+  test('claim standing and ask unchanged → ok', async () => {
+    mockState.firstQueue = [claimedRow()];
+    expect(await clarifyPreDispatchCheck(PARAMS)()).toEqual({ ok: true });
+  });
+
+  test('an answer recorded while validators ran aborts the send', async () => {
+    mockState.firstQueue = [claimedRow({ missing: [], answered_at: '2026-07-19T00:00:00Z' })];
+    const verdict = await clarifyPreDispatchCheck(PARAMS)();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
+  });
+
+  test('a partial answer (missing set changed since dispatch) aborts the send', async () => {
+    const check = clarifyPreDispatchCheck({ ...PARAMS, dispatchedMissing: ['street_address', 'specific_service'] });
+    mockState.firstQueue = [claimedRow({ missing: ['specific_service'], answer_recorded: ['street_address'] })];
+    const verdict = await check();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
+  });
+
+  test('a concurrent reject aborts the send', async () => {
+    mockState.firstQueue = [claimedRow({}, { status: 'rejected' })];
+    const verdict = await clarifyPreDispatchCheck(PARAMS)();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
+  });
+
+  test('an unparseable ref fails closed without a db read', async () => {
+    const verdict = await clarifyPreDispatchCheck({ ...PARAMS, sourceRef: 'nope' })();
+    expect(verdict.ok).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
   });
 });
 

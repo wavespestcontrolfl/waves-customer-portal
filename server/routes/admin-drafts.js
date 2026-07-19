@@ -378,7 +378,7 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
   // send). From the 'send' outcome on, the decision is committed: failures
   // downstream MUST reconcile via releaseFailedSendClaim, never plain
   // releaseDraftClaim.
-  const { claimClarifyDispatch } = require('../services/estimate-clarify-asks');
+  const { claimClarifyDispatch, clarifyPreDispatchCheck } = require('../services/estimate-clarify-asks');
   const verdict = await claimClarifyDispatch({ draft, isRevision, releaseFields });
   if (verdict.outcome === 'retired') {
     res.status(409).json({ error: verdict.message, code: 'CLARIFY_STALE' });
@@ -403,10 +403,19 @@ async function guardClarifySend(draft, res, releaseFields = {}, { isRevision = f
   }
   draft.draft_response = verdict.body;
   draft.flags = JSON.stringify(verdict.flags);
+  const dispatchedMissing = Array.isArray(verdict.flags.missing) ? verdict.flags.missing : [];
   return {
     blocked: false,
     dispatchCommitted: true,
-    dispatchedMissing: Array.isArray(verdict.flags.missing) ? verdict.flags.missing : [],
+    dispatchedMissing,
+    // Final abort point, run by sendCustomerMessage as the last await
+    // before the provider handoff — catches answers that land while the
+    // send pipeline's own validators run.
+    preDispatchCheck: clarifyPreDispatchCheck({
+      draftId: draft.id,
+      sourceRef: draft.source_ref,
+      dispatchedMissing,
+    }),
   };
 }
 
@@ -687,6 +696,7 @@ router.put('/:id/approve', async (req, res, next) => {
         // stored-preference consentBasis); legacy null-purpose drafts keep
         // the conversational shape exactly.
         ...sendPolicy,
+        preDispatchCheck: clarifyGuard.preDispatchCheck,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_approve',
@@ -815,6 +825,7 @@ router.put('/:id/revise', async (req, res, next) => {
         // stored-preference consentBasis); legacy null-purpose drafts keep
         // the conversational shape exactly.
         ...sendPolicy,
+        preDispatchCheck: clarifyGuard.preDispatchCheck,
         customerId: recipient.customerId || undefined,
         identityTrustLevel: recipient.identityTrustLevel,
         entryPoint: 'admin_draft_revise',
