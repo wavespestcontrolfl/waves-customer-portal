@@ -350,6 +350,9 @@ describe('handleClarifyReply', () => {
     const flags = JSON.parse(fallback.flags);
     expect(flags.answer_recorded).toEqual(['specific_service']);
     expect(flags.answered_at).toBeTruthy();
+    // Copy untouched on a claimed row → the mismatch must be marked so the
+    // dispatch decision recomposes instead of sending the old text.
+    expect(flags.copy_stale).toBe(true);
   });
 
   test('chit-chat never records as the service — the classifier is the bar', async () => {
@@ -448,7 +451,9 @@ describe('recordClarifyAnswer', () => {
     const fallback = mockState.updates[1].payload;
     expect(fallback.status).toBeUndefined();
     expect(fallback.draft_response).toBeUndefined();
-    expect(JSON.parse(fallback.flags).answered_at).toBeTruthy();
+    const fallbackFlags = JSON.parse(fallback.flags);
+    expect(fallbackFlags.answered_at).toBeTruthy();
+    expect(fallbackFlags.copy_stale).toBe(true);
   });
 
   test('a CLAIMED-unsent ask (mid-approval) records stamp-only — copy and status untouched', async () => {
@@ -470,6 +475,7 @@ describe('recordClarifyAnswer', () => {
     const flags = JSON.parse(update.flags);
     expect(flags.missing).toEqual(['specific_service']);
     expect(flags.answer_recorded).toEqual(['street_address']);
+    expect(flags.copy_stale).toBe(true);
   });
 
   test('irrelevant items or no awaiting ask record nothing', async () => {
@@ -595,6 +601,35 @@ describe('claimClarifyDispatch', () => {
     expect(mockState.updates).toHaveLength(0);
   });
 
+  test('copy_stale (stamp-only writer shrank the ask) forces a recompose even when CRM shows nothing new', async () => {
+    // A reply answered street_address while the row was claimed: missing is
+    // already shrunk, the stored copy still asks both questions, and the
+    // customer-only linkage means no lead row exists for the CRM recheck.
+    mockState.firstQueue = [
+      freshRow(
+        { draft_response: 'Old two-question copy?' },
+        { missing: ['specific_service'], answer_recorded: ['street_address'], copy_stale: true },
+      ),
+    ];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT });
+    expect(verdict.outcome).toBe('send');
+    const expected = _private.composeClarifyBody({ missing: ['specific_service'], firstName: null });
+    expect(verdict.body).toBe(expected);
+    expect(verdict.flags.copy_stale).toBeUndefined();
+    const payload = mockState.updates[0].payload;
+    expect(payload.draft_response).toBe(expected);
+    expect(JSON.parse(payload.flags).copy_stale).toBeUndefined();
+  });
+
+  test('copy_stale on a REVISION bounces to re-review — the owner typed against the old copy', async () => {
+    mockState.firstQueue = [
+      freshRow({}, { missing: ['specific_service'], answer_recorded: ['street_address'], copy_stale: true }),
+    ];
+    const verdict = await claimClarifyDispatch({ draft: DRAFT, isRevision: true });
+    expect(verdict.outcome).toBe('rewritten');
+    expect(mockState.updates[0].payload.status).toBe('pending');
+  });
+
   test('a draft the unlocked reject route already resolved is respected — no write, no send', async () => {
     mockState.firstQueue = [freshRow({ status: 'rejected' })];
     const verdict = await claimClarifyDispatch({ draft: DRAFT });
@@ -653,6 +688,13 @@ describe('clarifyPreDispatchCheck', () => {
     expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
   });
 
+  test('copy_stale set after the decision aborts the send', async () => {
+    mockState.firstQueue = [claimedRow({ copy_stale: true })];
+    const verdict = await clarifyPreDispatchCheck(PARAMS)();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('CLARIFY_SUPERSEDED');
+  });
+
   test('an unparseable ref fails closed without a db read', async () => {
     const verdict = await clarifyPreDispatchCheck({ ...PARAMS, sourceRef: 'nope' })();
     expect(verdict.ok).toBe(false);
@@ -698,6 +740,20 @@ describe('reopenClarifyAfterFailedSend', () => {
     expect(result.reopened).toBe(true);
     expect(mockState.updates[0].payload.draft_response)
       .toBe(_private.composeClarifyBody({ missing: ['specific_service'], firstName: null }));
+  });
+
+  test('copy_stale reopens with a recomposed copy and the marker cleared', async () => {
+    const stale = stampedRow({ missing: ['specific_service'], answer_recorded: ['street_address'], copy_stale: true });
+    mockState.firstQueue = [stale, stale, null];
+    const result = await reopenClarifyAfterFailedSend({
+      draftId: 'draft-1',
+      dispatchedMissing: ['specific_service'], // same set — the MARKER drives the recompose
+    });
+    expect(result.reopened).toBe(true);
+    const payload = mockState.updates[0].payload;
+    expect(payload.draft_response)
+      .toBe(_private.composeClarifyBody({ missing: ['specific_service'], firstName: null }));
+    expect(JSON.parse(payload.flags).copy_stale).toBeUndefined();
   });
 
   test('an ask fully consumed while the row read as sent retires with the stamp cleared', async () => {

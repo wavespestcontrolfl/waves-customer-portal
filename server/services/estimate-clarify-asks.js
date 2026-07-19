@@ -479,12 +479,18 @@ async function handleClarifyReply({ phone, body }) {
       }
 
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
-      const answeredFlags = JSON.stringify({
+      const answeredFlagsObj = {
         ...freshFlags,
         missing: remaining,
         answer_recorded: [...(Array.isArray(freshFlags.answer_recorded) ? freshFlags.answer_recorded : []), ...recorded],
         ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
-      });
+      };
+      const answeredFlags = JSON.stringify(answeredFlagsObj);
+      // Stamp-only writes on a CLAIMED-unsent row shrink missing without
+      // touching the copy — copy_stale marks that mismatch so the dispatch
+      // decision recomposes (and the pre-dispatch check aborts) instead of
+      // sending the old multi-question text.
+      const stampOnlyFlags = JSON.stringify({ ...answeredFlagsObj, copy_stale: true });
       if (!fresh.sent_at && fresh.status === 'pending') {
         // Answered before approval: rewrite the pending copy to the
         // remainder or retire it outright (status-guarded — a claim wins).
@@ -498,8 +504,11 @@ async function handleClarifyReply({ phone, body }) {
           // read — the answer must not be silently lost. Stamp the flags
           // against the now-claimed row (status untouched); the dispatch
           // decision runs under this same lock afterward and honors them.
-          await trx('message_drafts').where({ id: fresh.id }).update({ flags: answeredFlags });
+          await trx('message_drafts').where({ id: fresh.id }).update({ flags: stampOnlyFlags });
         }
+      } else if (!fresh.sent_at) {
+        // Claimed-unsent: copy untouched by design, so mark it stale.
+        await trx('message_drafts').where({ id: fresh.id }).update({ flags: stampOnlyFlags });
       } else {
         await trx('message_drafts').where({ id: fresh.id }).update({ flags: answeredFlags });
       }
@@ -582,12 +591,16 @@ async function recordClarifyAnswer({ phone, items = [] }) {
       const recorded = missing.filter((item) => items.includes(item));
       if (!recorded.length) return { recorded: false };
       const remaining = missing.filter((item) => !recorded.includes(item));
-      const answeredFlags = JSON.stringify({
+      const answeredFlagsObj = {
         ...flags,
         missing: remaining,
         answer_recorded: [...(Array.isArray(flags.answer_recorded) ? flags.answer_recorded : []), ...recorded],
         ...(remaining.length ? {} : { answered_at: new Date().toISOString() }),
-      });
+      };
+      const answeredFlags = JSON.stringify(answeredFlagsObj);
+      // Same copy_stale contract as handleClarifyReply: a stamp-only write
+      // on a claimed-unsent row leaves the copy behind the missing set.
+      const stampOnlyFlags = JSON.stringify({ ...answeredFlagsObj, copy_stale: true });
       if (!awaiting.sent_at && awaiting.status === 'pending') {
         // Answered before approval: rewrite the pending copy down to the
         // remainder, or retire it outright when nothing remains. Guarded on
@@ -601,8 +614,11 @@ async function recordClarifyAnswer({ phone, items = [] }) {
           // The UNLOCKED admin claim won the race after our read — fall
           // back to stamp-only so the answer reaches the claimed row and
           // the dispatch decision (under this same lock) honors it.
-          await trx('message_drafts').where({ id: awaiting.id }).update({ flags: answeredFlags });
+          await trx('message_drafts').where({ id: awaiting.id }).update({ flags: stampOnlyFlags });
         }
+      } else if (!awaiting.sent_at) {
+        // Claimed-unsent: copy untouched by design, so mark it stale.
+        await trx('message_drafts').where({ id: awaiting.id }).update({ flags: stampOnlyFlags });
       } else {
         await trx('message_drafts').where({ id: awaiting.id }).update({ flags: answeredFlags });
       }
@@ -727,14 +743,19 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       if (!stillMissing.length) {
         return retire('Clarify draft retired — the customer already provided the missing details.');
       }
-      if (stillMissing.length < missing.length) {
+      if (stillMissing.length < missing.length || flags.copy_stale === true) {
         // Partial answer: never re-ask what the contact already supplied —
-        // rewrite the copy down to what's STILL missing.
+        // rewrite the copy down to what's STILL missing. copy_stale forces
+        // this branch even when the missing set already matches: a
+        // stamp-only writer shrank missing on the claimed row WITHOUT
+        // touching the copy, so the stored text still asks the old
+        // multi-question form.
         const rewritten = composeClarifyBody({
           missing: stillMissing,
           firstName: lead?.first_name || customer?.first_name || null,
         });
-        const rewrittenFlags = { ...flags, missing: stillMissing };
+        const { copy_stale: _resolved, ...restFlags } = flags;
+        const rewrittenFlags = { ...restFlags, missing: stillMissing };
         // Conditional writes: the unlocked reject route can still move the
         // row between our read and this statement — READ COMMITTED re-checks
         // the WHERE against the winner's row, so zero rows updated means the
@@ -826,9 +847,10 @@ function clarifyPreDispatchCheck({ draftId, sourceRef, dispatchedMissing }) {
         if (flags.answered_at || !missing.length) {
           return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'customer answered while the send was validating' };
         }
-        const changed = Array.isArray(dispatchedMissing)
-          && (dispatchedMissing.length !== missing.length
-            || missing.some((item) => !dispatchedMissing.includes(item)));
+        const changed = flags.copy_stale === true
+          || (Array.isArray(dispatchedMissing)
+            && (dispatchedMissing.length !== missing.length
+              || missing.some((item) => !dispatchedMissing.includes(item))));
         if (changed) {
           return { ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'customer answered part of this while the send was validating' };
         }
@@ -889,9 +911,11 @@ async function reopenClarifyAfterFailedSend({ draftId, dispatchedMissing = null,
           .update({ status: 'rejected', sent_at: null, ...releaseFields });
         return { reopened: false, retired: true };
       }
-      const missingChanged = Array.isArray(dispatchedMissing)
-        && (dispatchedMissing.length !== missing.length
-          || missing.some((item) => !dispatchedMissing.includes(item)));
+      const missingChanged = flags.copy_stale === true
+        || (Array.isArray(dispatchedMissing)
+          && (dispatchedMissing.length !== missing.length
+            || missing.some((item) => !dispatchedMissing.includes(item))));
+      const { copy_stale: _resolved, ...restFlags } = flags;
       // Conditional on the claim still standing — a reject interleaving
       // after the fresh read must not be resurrected to pending.
       const reopened = await trx('message_drafts')
@@ -901,10 +925,16 @@ async function reopenClarifyAfterFailedSend({ draftId, dispatchedMissing = null,
           approved_by: null,
           approved_at: null,
           sent_at: null,
-          // Recompose only when a reply shrank the ask mid-flight — otherwise
-          // the parked copy (with its greeting) is still exactly right.
+          // Recompose only when a reply shrank the ask mid-flight (or a
+          // stamp-only write left the copy behind the missing set) —
+          // otherwise the parked copy (with its greeting) is still exactly
+          // right. The recompose clears copy_stale: copy and flags match
+          // again.
           ...(missingChanged
-            ? { draft_response: composeClarifyBody({ missing, firstName: null }) }
+            ? {
+              draft_response: composeClarifyBody({ missing, firstName: null }),
+              flags: JSON.stringify({ ...restFlags, missing }),
+            }
             : {}),
           ...releaseFields,
         });
