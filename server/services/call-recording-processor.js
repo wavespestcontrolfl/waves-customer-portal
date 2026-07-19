@@ -3595,7 +3595,12 @@ Return ONLY valid JSON.`;
   try {
     return normalizeCallExtraction(JSON.parse(cleaned), { callerPhone });
   } catch (e) {
-    logger.error(`[call-proc] Invalid JSON from Gemini: ${e.message} — raw: ${cleaned.slice(0, 200)}`);
+    // Fixed message + length ONLY — the raw model output is a call
+    // extraction carrying the caller's name/phone/address, and JSON.parse
+    // error messages themselves echo a fragment of the rejected input
+    // (`Unexpected token 'J', "John Smith"…`), so e.message can't be
+    // logged either (AGENTS.md PII-in-logs).
+    logger.error(`[call-proc] Invalid JSON from Gemini (${cleaned.length} chars)`);
     return normalizeCallExtraction({
       first_name: null,
       is_spam: false,
@@ -3632,7 +3637,9 @@ function finalizeV2Extraction(rawText, { callId = null, extractionModel, promptV
     const cleaned = String(rawText).replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
     parsed = JSON.parse(cleaned);
   } catch (e) {
-    logger.error(`[call-proc-v2] JSON parse failed: ${e.message} (${String(rawText).length} chars)`);
+    // Same PII rule as the v1 site above: JSON.parse error messages echo a
+    // fragment of the rejected model output — fixed message + length only.
+    logger.error(`[call-proc-v2] JSON parse failed (${String(rawText).length} chars)`);
     return { status: 'parse_failed', extraction: null, errors: [{ message: e.message }] };
   }
 

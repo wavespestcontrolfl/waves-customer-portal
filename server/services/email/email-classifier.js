@@ -3,12 +3,23 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 
+// Mirrors the category vocabulary in the classification prompt below. Used
+// to sanitize LOG lines: category/confidence are model output and must never
+// be echoed off-vocabulary (PII could ride in either field).
+const EMAIL_CATEGORIES = [
+  'lead_inquiry', 'customer_request', 'complaint', 'vendor_invoice',
+  'vendor_communication', 'scheduling', 'review_notification', 'regulatory',
+  'marketing_newsletter', 'internal', 'spam', 'other',
+];
+
 function parseClaudeJson(text) {
   try {
     const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     return JSON.parse(cleaned);
   } catch {
-    logger.warn(`[email-classifier] Failed to parse Claude JSON: ${text.substring(0, 200)}`);
+    // No raw excerpt: the model output is derived from a customer email and
+    // can carry their name/address/contact details (AGENTS.md PII-in-logs).
+    logger.warn(`[email-classifier] Failed to parse Claude JSON (${String(text || '').length} chars)`);
     return null;
   }
 }
@@ -103,7 +114,18 @@ async function classifyEmail(email) {
     const { executeAutoAction } = require('./email-actions');
     await executeAutoAction(email, result);
 
-    logger.info(`[email-classifier] ${email.id}: ${result.category} (${result.confidence}) — ${result.summary}`);
+    // Category + confidence only, and only from the fixed vocabulary — both
+    // fields are model output, so an off-vocabulary value is logged as a
+    // sentinel rather than echoed (a malformed-but-valid JSON response could
+    // otherwise put the customer's name/email into either field). The model
+    // summary stays out entirely: it restates the customer's email and
+    // belongs in the DB row, not the logs.
+    const loggedCategory = EMAIL_CATEGORIES.includes(result.category) ? result.category : 'invalid_category';
+    const numericConfidence = Number(result.confidence);
+    const loggedConfidence = Number.isFinite(numericConfidence) && numericConfidence >= 0 && numericConfidence <= 1
+      ? numericConfidence
+      : 'invalid';
+    logger.info(`[email-classifier] ${email.id}: ${loggedCategory} (${loggedConfidence})`);
     return result;
   } catch (err) {
     logger.error(`[email-classifier] Failed for ${email.id}: ${err.message}`);
