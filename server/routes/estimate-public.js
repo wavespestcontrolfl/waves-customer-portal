@@ -6918,18 +6918,97 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const estData = isString
       ? JSON.parse(estimate.estimate_data)
       : (estimate.estimate_data || null);
-    const snapshot = estData && estData.membershipSnapshot;
-    if (!snapshot || !snapshot.isExistingCustomer) return;
+    if (!estData) return;
+    const snapshot = estData.membershipSnapshot;
+    const frozenSnapshot = !!(snapshot && snapshot.isExistingCustomer);
+    // EVERY membership artifact the cleanup below removes must also arm the
+    // trigger, or an estimate carrying only that artifact returns before the
+    // live plan check and keeps the discount: SERVER-stamped recurring flags
+    // in any replay shape (admin persistence writes them for a verified
+    // active-plan member — including one-time-only members with NO qualifying
+    // priors, whose snapshot may be absent), prior-service lists nested in a
+    // replay shape (legacy rows predating the save-time sanitizer), and the
+    // top-level priorQualifyingServices even without a snapshot.
+    // extractEngineInputs() replays all of them on every reprice.
+    const replayShapes = [estData.engineInputs, estData.inputs, estData.engineRequest?.options]
+      .filter((shape) => shape && typeof shape === 'object');
+    // Mirror the engine's truthy coercion: generateEstimate treats ANY truthy
+    // recurring value (boolean true, 'true', legacy strings, form 'YES') as
+    // recurring, so the trigger must too — only explicit negatives are inert.
+    // Over-triggering is safe: an active member early-returns on the live
+    // check, and a lapsed one gets exactly the cleanup+reprice it needs.
+    const truthyRecurringFlag = (value) => {
+      if (value == null || value === false) return false;
+      const normalized = String(value).trim().toLowerCase();
+      return normalized !== '' && normalized !== 'no' && normalized !== 'false' && normalized !== '0';
+    };
+    const frozenRecurring = replayShapes.some((shape) => truthyRecurringFlag(shape.recurringCustomer)
+      || truthyRecurringFlag(shape.isRecurringCustomer)
+      || (Array.isArray(shape.priorQualifyingServices) && shape.priorQualifyingServices.length > 0))
+      || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0);
+    if (!frozenSnapshot && !frozenRecurring) return;
     if (await isActivePlanCustomer(db, estimate.customer_id)) return;
     // Drop every frozen artifact derived from the stale "existing customer"
     // classification, not just the snapshot: priorQualifyingServices is
     // re-injected by extractEngineInputs() on every recompute (keeping the
-    // combined-tier discount), and sendSnapshot.pricingBundle is consulted by
-    // buildPricingBundle() before the runtime cache (returning the old bundle
-    // with no waivable setup fee). Leaving either behind lets the lead keep
-    // member pricing / undercharge even after the snapshot is gone.
+    // combined-tier discount), the recurring flags in the stored replay
+    // shapes re-grant the member perk the same way, and
+    // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
+    // the runtime cache (returning the old bundle with no waivable setup
+    // fee). Leaving any behind lets the lead keep member pricing /
+    // undercharge even after the snapshot is gone.
     delete estData.membershipSnapshot;
     delete estData.priorQualifyingServices;
+    for (const shape of replayShapes) {
+      delete shape.recurringCustomer;
+      delete shape.isRecurringCustomer;
+      // A prior-service list NESTED in a replay shape (legacy rows predate
+      // the save-time sanitizer) replays straight through extractEngineInputs
+      // and restores the combined-tier discount the top-level delete just
+      // removed.
+      delete shape.priorQualifyingServices;
+    }
+    // Clearing the flags alone is not enough: the discount is already BAKED
+    // INTO the stored result/totals from save-time, and buildPricingBundle's
+    // v1 path (readV1Shape) + normalizeOneTimeBreakdown serve those stored
+    // prices verbatim — the lapsed member could still view and accept the
+    // member price. Reprice in-memory from the sanitized replay inputs with
+    // non-member identity (empty deps = no priors, no recurring forcing; the
+    // engine still auto-derives the perk from a cart that itself buys a
+    // recurring service). When no trustworthy reprice is possible (legacy row
+    // with no replayable engine input, or an engine error), fail CLOSED:
+    // membershipLapsedRequote makes resolveEstimateQuoteRequirement mark the
+    // bundle quote-required on every path, so accept/deposit refuse instead
+    // of charging the stale member price.
+    // Frozen per-tier discount RATES were snapshotted under the stale member
+    // classification — accept-time tier math (snapshotTierDiscount) prefers
+    // them over live rates, so they must go with the rest of the artifacts.
+    if (estData.sendSnapshot && typeof estData.sendSnapshot === 'object') {
+      delete estData.sendSnapshot.tierDiscounts;
+    }
+    if (estData.pricingContext && typeof estData.pricingContext === 'object') {
+      delete estData.pricingContext.tierDiscounts;
+    }
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const reprice = await serverRecomputeFromEstimateData(estData, {});
+    if (reprice.recomputed) {
+      estData.result = reprice.serverResult;
+      // A successful authoritative reprice supersedes any earlier fail-closed
+      // flag — without this a transient failure would leave the estimate
+      // permanently quote-required.
+      delete estData.membershipLapsedRequote;
+      estimate.monthly_total = reprice.serverTotals.monthlyTotal ?? 0;
+      estimate.annual_total = reprice.serverTotals.annualTotal ?? 0;
+      estimate.onetime_total = reprice.serverTotals.onetimeTotal ?? 0;
+      // Acceptance reads the ROW tier for discount math — leaving the stale
+      // member tier would reapply e.g. a Platinum discount to Bronze-priced
+      // data at invoice time.
+      estimate.waveguard_tier = reprice.serverResult?.recurring?.waveGuardTier
+        || reprice.serverResult?.recurring?.tier
+        || null;
+    } else {
+      estData.membershipLapsedRequote = true;
+    }
     invalidateSendSnapshotPricingBundle(estData);
     estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
     // The runtime pricing cache key ignores estimate_data content, so bust it
@@ -11185,6 +11264,13 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const retiredTreeShrubRequote = retiredTreeShrubRequoteNeeded(
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   );
+  // A lapsed member whose stored member-priced result could not be repriced
+  // (reconcileFrozenMembershipSnapshot found no replayable engine input) must
+  // not self-serve accept the stale member price — fail closed to a manual
+  // quote.
+  const membershipLapsedRequote = (
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  )?.membershipLapsedRequote === true;
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
@@ -11193,7 +11279,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
     || commercialRiskTypeReview
     || commercialLowConfidenceSiteQuote
     || retiredLawnRequote
-    || retiredTreeShrubRequote;
+    || retiredTreeShrubRequote
+    || membershipLapsedRequote;
 
   return {
     quoteRequired,
@@ -11204,7 +11291,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
         || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
-        || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)),
+        || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)
+        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)),
     items: quoteRequiredItems,
   };
 }
