@@ -25,8 +25,11 @@ function chain(overrides = {}) {
     whereRaw: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     whereNotNull: jest.fn().mockReturnThis(),
+    orWhere: jest.fn().mockReturnThis(),
     join: jest.fn().mockReturnThis(),
+    leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockResolvedValue([]),
     ...overrides,
   };
@@ -155,6 +158,9 @@ describe('runWdoReportAttentionSweep', () => {
       '<',
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
     );
+    // LEFT join — an inner join would drop legacy rows with null service_id
+    // (their WDO-ness lives in the free-text service_type fallback).
+    expect(apptChain.leftJoin).toHaveBeenCalledWith('services as s', 's.id', 'ss.service_id');
   });
 
   test('a failed bell insert fails the sweep instead of recording a ring', async () => {

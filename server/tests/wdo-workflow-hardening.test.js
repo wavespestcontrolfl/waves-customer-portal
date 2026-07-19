@@ -359,6 +359,25 @@ describe('POST /:id/send concurrency claim', () => {
       expect(photos.update).not.toHaveBeenCalled();
     });
   });
+
+  test('photo mutations 409 while the payment-hold release is delivering', async () => {
+    // The release sweep claims report_hold_status='releasing' without ever
+    // setting delivery_status — the photo guard must respect that claim too.
+    const projects = chain({ first: jest.fn().mockResolvedValue(wdoProject({ report_hold_status: 'releasing' })) });
+    const photos = chain({ update: jest.fn().mockResolvedValue(1) });
+    mockTables({ projects, project_photos: photos });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/photos/photo-9`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caption: 'Late edit' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('send_in_progress');
+      expect(photos.update).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('photo mutations flag a signed WDO signature stale', () => {

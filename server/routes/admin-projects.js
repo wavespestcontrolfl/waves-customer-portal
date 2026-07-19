@@ -2371,8 +2371,13 @@ async function lockProjectForPhotoMutation(project, trx) {
   const locked = await trx('projects')
     .where({ id: project.id })
     .forUpdate()
-    .first('wdo_signature', 'delivery_status', 'project_type');
-  if (String(locked?.delivery_status || '') === 'sending') {
+    .first('wdo_signature', 'delivery_status', 'project_type', 'report_hold_status');
+  // Two in-flight delivery claims to respect: the shared send claim
+  // (delivery_status) AND the payment-hold release sweep's claim
+  // (report_hold_status='releasing') — the release path builds and emails
+  // the FDACS addendum without ever setting delivery_status.
+  if (String(locked?.delivery_status || '') === 'sending'
+    || String(locked?.report_hold_status || '') === 'releasing') {
     const err = new Error('This report is being sent right now — retry the photo change in a moment.');
     err.code = 'send_in_progress';
     throw err;
@@ -2590,21 +2595,23 @@ async function buildWdoPdfAttachment(project, customer) {
     err.code = 'signature_stale';
     throw err;
   }
+  // The photo-row read propagates failure: a signature hashed over an EMPTY
+  // photo set would otherwise collide with an errored-read-as-[] and slip an
+  // unverified addendum through — a read failure must abort the build, never
+  // masquerade as "no photos" (Codex P2 on #2887).
   const [baseApplicator, photoRows] = await Promise.all([
     resolveProjectApplicator(project),
-    loadWdoAddendumPhotoRows(project).catch(() => null),
+    loadWdoAddendumPhotoRows(project),
   ]);
   // Photo-set verification (the findings hash's sibling): refuse to stamp
   // the signature onto a photo addendum the licensee never saw. Legacy
-  // signatures without a photo_set_hash rely on the content_stale flag
-  // alone. A failed row read fails CLOSED here (null → hash mismatch) when
-  // a hash exists — better a re-sign prompt than an unattested addendum.
-  if (signature.photoSetHash && signature.photoSetHash !== wdoPhotoSetHash(photoRows || [])) {
+  // signatures without a photo_set_hash rely on the content_stale flag alone.
+  if (signature.photoSetHash && signature.photoSetHash !== wdoPhotoSetHash(photoRows)) {
     const err = new Error('Photos changed after signing — the licensee must re-sign before sending');
     err.code = 'signature_stale';
     throw err;
   }
-  const photos = await loadWdoAddendumPhotos(project, photoRows || []);
+  const photos = await loadWdoAddendumPhotos(project, photoRows);
   const applicator = applicatorForReport(baseApplicator, signature);
   const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature, photos });
   // Callers need the raw buffer too (to archive the exact emailed bytes), not
@@ -3876,18 +3883,23 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
     const customer = project.customer_id
       ? await db('customers').where({ id: project.customer_id }).first()
       : null;
-    const [baseApplicator, photos] = await Promise.all([
+    const [baseApplicator, photoRows] = await Promise.all([
       resolveProjectApplicator(project),
-      loadWdoAddendumPhotos(project),
+      loadWdoAddendumPhotoRows(project),
     ]);
     // Never stamp a signature onto content that isn't sendable — even in this
     // admin preview, which can be downloaded and filed manually. Render unsigned
-    // when the signature is stale OR when the Section 2 hard gates (contradiction
-    // / incomplete) would 422 the send, so a downloadable preview can't become a
-    // signed FDACS filing that the send routes themselves refuse to emit.
+    // when the signature is stale (findings hash, mutation flag, OR photo-set
+    // hash — the same checks the send choke point enforces) or when the
+    // Section 2 hard gates (contradiction / incomplete) would 422 the send,
+    // so a downloadable preview can't become a signed FDACS filing that the
+    // send routes themselves refuse to emit.
     const { fresh, signature } = wdoSignatureFreshness(project);
+    const photosFresh = !signature?.photoSetHash
+      || signature.photoSetHash === wdoPhotoSetHash(photoRows);
     const sendBlocked = wdoSectionTwoContradiction(project) || wdoCoreFindingsIncomplete(project);
-    const stampSignature = (fresh && !sendBlocked) ? signature : null;
+    const stampSignature = (fresh && photosFresh && !sendBlocked) ? signature : null;
+    const photos = await loadWdoAddendumPhotos(project, photoRows);
     const applicator = applicatorForReport(baseApplicator, stampSignature);
     const buffer = await buildWdoReportPDFBuffer({ project, customer, applicator, signature: stampSignature, photos });
     res.setHeader('Content-Type', 'application/pdf');
@@ -4032,8 +4044,11 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
         const locked = await trx('projects')
           .where({ id: project.id })
           .forUpdate()
-          .first('delivery_status');
-        if (String(locked?.delivery_status || '') === 'sending') {
+          .first('delivery_status', 'report_hold_status');
+        // Same two claims the photo-mutation lock respects: the shared send
+        // claim and the payment-hold release sweep's 'releasing' claim.
+        if (String(locked?.delivery_status || '') === 'sending'
+          || String(locked?.report_hold_status || '') === 'releasing') {
           const err = new Error('This report is being sent right now — retry the signature in a moment.');
           err.code = 'send_in_progress';
           throw err;

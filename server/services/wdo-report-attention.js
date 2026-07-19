@@ -51,8 +51,13 @@ async function findAttentionItems(now = new Date()) {
   // its own scheduled evening once UTC rolls past midnight).
   const stuckApptCutoff = etDateString(new Date(now.getTime() - STUCK_APPT_HOURS * 3600e3));
   const stuckAppts = await db('scheduled_services as ss')
-    .join('services as s', 's.id', 'ss.service_id')
-    .where('s.name', 'ilike', '%wdo%')
+    // LEFT join + service_type fallback: legacy rows carry a null service_id
+    // with only the free-text service_type — an inner join would silently
+    // drop exactly the old compliance visits most likely to be stalled.
+    .leftJoin('services as s', 's.id', 'ss.service_id')
+    .where((q) => q
+      .where('s.name', 'ilike', '%wdo%')
+      .orWhere((legacy) => legacy.whereNull('ss.service_id').where('ss.service_type', 'ilike', '%wdo%')))
     .where('ss.scheduled_date', '<', stuckApptCutoff)
     .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
     .select('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.customer_id');
