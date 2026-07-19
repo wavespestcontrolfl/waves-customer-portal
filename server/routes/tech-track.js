@@ -605,4 +605,140 @@ router.delete('/:id/recap-media/:mediaId', async (req, res, next) => {
   } catch (err) { return next(err); }
 });
 
+// ── Treatment Zone Mapper (traced perimeter over the satellite photo) ────────
+// The tech traces the treated perimeter over a satellite view of the property;
+// we store the path (image px + lat/lng), linear feet, and the composited
+// snapshot PNG. Keyed on the scheduled-service id like the recap lane so it
+// works before or after completion — the report joins back through
+// service_records.scheduled_service_id. Gated: GATE_TREATMENT_ZONE_MAP.
+const featureGates = require('../config/feature-gates');
+const {
+  saveTreatmentZoneMap,
+  getTreatmentZoneMapForScheduledService,
+} = require('../services/treatment-zone-maps');
+const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
+const { geocodeAddress } = require('../services/geocoder');
+
+router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(req.body?.payload || '');
+    } catch {
+      return res.status(400).json({ error: 'payload must be valid JSON' });
+    }
+    if (req.file && req.file.mimetype !== 'image/png') {
+      return res.status(400).json({ error: 'snapshot must be a PNG' });
+    }
+
+    const row = await saveTreatmentZoneMap({
+      scheduledServiceId: svc.id,
+      customerId: svc.customer_id,
+      technicianId: req.technicianId,
+      pathPoints: payload.pathPoints,
+      closedLoop: payload.closedLoop,
+      linearFt: payload.linearFt,
+      centerLat: payload.lat,
+      centerLng: payload.lng,
+      zoom: payload.zoom,
+      address: payload.address,
+      snapshotPngBuffer: req.file?.buffer || null,
+    });
+
+    logger.info(
+      `[tech-track] treatment zone saved service=${svc.id} tech=${req.technicianId} ` +
+      `points=${Array.isArray(payload.pathPoints) ? payload.pathPoints.length : 0} ` +
+      `linearFt=${row.linear_ft ?? 'n/a'}`
+    );
+
+    // The traced map renders on the report, so a completed visit's cached
+    // PDF is stale the moment a trace is saved or replaced (the cache key is
+    // content-insensitive — see pdf-storage.js). Best-effort by contract.
+    const completedRecord = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first('id');
+    if (completedRecord) await invalidateServiceReportPdfCache(completedRecord.id);
+
+    return res.json({ treatmentZone: row });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone save failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+// GET /api/tech/services/:id/geocode — server-side geocode of the visit's
+// stamped/customer address for the treatment-zone mapper. The Geocoding web
+// service rejects referer-restricted keys, so once the client key is locked
+// to prod origins a browser-side fallback would break; the fallback runs here
+// with the server key instead. Only called when the schedule row has no
+// coordinates (divergent stamp with no lat/lng).
+router.get('/:id/geocode', async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.status(404).json({ error: 'Not enabled' });
+    }
+    const svc = await db('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .where('scheduled_services.id', req.params.id)
+      .first(
+        'scheduled_services.id',
+        'scheduled_services.technician_id',
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as line1'),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip')
+      );
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    const address = [svc.line1, svc.city, svc.state, svc.zip].filter(Boolean).join(', ');
+    if (!address) return res.status(422).json({ error: 'No address on file for this visit' });
+    // Shared server geocoder: GOOGLE_API_KEY || GOOGLE_MAPS_API_KEY chain,
+    // in-process memo, ZERO_RESULTS caching. (The static-maps key can be
+    // API-restricted to Static Maps, so it must not be used for geocoding.)
+    const loc = await geocodeAddress(address);
+    if (!loc) return res.status(422).json({ error: 'Could not locate this address on the map' });
+    return res.json({ lat: loc.lat, lng: loc.lng });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone geocode failed: ${err.message}`);
+    return next(err);
+  }
+});
+
+router.get('/:id/treatment-zone', async (req, res, next) => {
+  try {
+    // Read stays 200 with enabled:false when the gate is off so the modal
+    // can tell the tech BEFORE they trace (the write route 404s regardless).
+    if (!featureGates.isEnabled('treatmentZoneMap')) {
+      return res.json({ treatmentZone: null, enabled: false });
+    }
+    if (!(await loadOwnedServiceOr403(req, res))) return undefined;
+    const row = await getTreatmentZoneMapForScheduledService(req.params.id);
+    if (!row) return res.json({ treatmentZone: null, enabled: true });
+    let snapshotUrl = null;
+    if (row.snapshot_s3_key && config.s3?.bucket) {
+      snapshotUrl = await getSignedUrl(s3, new GetObjectCommand({
+        Bucket: config.s3.bucket, Key: row.snapshot_s3_key,
+      }), { expiresIn: 3600 });
+    }
+    return res.json({ treatmentZone: { ...row, snapshotUrl }, enabled: true });
+  } catch (err) {
+    logger.error(`[tech-track] treatment zone fetch failed: ${err.message}`);
+    return next(err);
+  }
+});
+
 module.exports = router;

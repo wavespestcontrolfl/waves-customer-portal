@@ -8,6 +8,7 @@ const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+const { hasCancellableWork } = require('../services/cancellation-eligibility');
 
 router.use(authenticate);
 
@@ -49,7 +50,16 @@ router.get('/', async (req, res, next) => {
       )
       .orderBy('scheduled_services.scheduled_date', 'asc');
 
+    // The SAME cancellation-eligibility verdict POST /api/requests enforces,
+    // so the Plan tab's Account Options gate renders from the server's
+    // answer instead of approximating it from the visit list above — which
+    // deliberately omits rows the guard still counts (date-exempt
+    // 'rescheduled' rebook intents, dispatch-owned pending follow-ups) and
+    // says nothing about billing.
+    const cancellable = await hasCancellableWork(req.customerId);
+
     res.json({
+      hasCancellableWork: cancellable,
       upcoming: upcoming.map(s => ({
         id: s.id,
         date: s.scheduled_date,

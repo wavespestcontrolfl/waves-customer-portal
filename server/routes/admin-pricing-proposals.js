@@ -2,9 +2,15 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const dbBridge = require('../services/pricing-engine/db-bridge');
+const { validatePricingConfigData, parseConfigData } = require('./admin-pricing-config');
 
+// Reads stay tech-or-admin; the approve/reject MUTATIONS are admin-only —
+// approval writes pricing_config directly (billing-authoritative via
+// db-bridge), so it must carry the same admin gate as the direct
+// pricing-config writes or a technician could change pricing through the
+// proposal queue instead.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // ---- helpers -------------------------------------------------------------
@@ -45,6 +51,19 @@ function buildRationaleText(proposal, reviewNotes, technicianId) {
   }
   if (reviewNotes) lines.push(`Admin review_notes: ${reviewNotes}`);
   return lines.join('\n');
+}
+
+// Prospective-row builder for validation: mirrors jsonb_set(..., true)
+// semantics (create missing intermediate objects, set the leaf).
+function setAtPath(data, path, value) {
+  const clone = JSON.parse(JSON.stringify(data ?? {}));
+  let node = clone;
+  for (let i = 0; i < path.length - 1; i += 1) {
+    if (!node[path[i]] || typeof node[path[i]] !== 'object') node[path[i]] = {};
+    node = node[path[i]];
+  }
+  node[path[path.length - 1]] = value;
+  return clone;
 }
 
 function splitConfigKey(configKey) {
@@ -122,7 +141,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST /api/admin/pricing-proposals/:id/approve
-router.post('/:id/approve', async (req, res) => {
+router.post('/:id/approve', requireAdmin, async (req, res) => {
   const { review_notes = null } = req.body || {};
   const technicianId = req.technicianId;
   const proposalId = req.params.id;
@@ -150,6 +169,38 @@ router.post('/:id/approve', async (req, res) => {
         const e = new Error(`config_key '${proposal.config_key}' has no dotted path — whole-row updates are not supported`);
         e.status = 400;
         throw e;
+      }
+
+      // Same money-correctness bar as the direct pricing-config writes: the
+      // applied leaf must be a real finite number. numVal(null) is null and
+      // Number('abc') is NaN — both JSON.stringify to 'null', which
+      // jsonb_set would happily install into a billing-authoritative row.
+      const proposedValue = numVal(proposal.proposed_value);
+      if (typeof proposedValue !== 'number' || !Number.isFinite(proposedValue)) {
+        const e = new Error(`Proposal ${proposalId} has a non-numeric proposed_value (${JSON.stringify(proposal.proposed_value)}) — cannot apply to pricing_config`);
+        e.status = 400;
+        throw e;
+      }
+
+      // And the SAME key-specific range validation as PUT /:key, run against
+      // the PROSPECTIVE row: a finite-but-wrong proposal (negative labor
+      // rate, margin floor of 35 instead of 0.35, pest base of 0) must not
+      // reach jsonb_set and poison live pricing after the cache sync.
+      {
+        const { rowKey } = splitConfigKey(proposal.config_key);
+        const row = await trx('pricing_config').where('config_key', rowKey).first();
+        if (!row) {
+          const e = new Error(`pricing_config row '${rowKey}' not found`);
+          e.status = 404;
+          throw e;
+        }
+        const prospective = setAtPath(parseConfigData(row.data), splitConfigKey(proposal.config_key).jsonPath, proposedValue);
+        const verdict = validatePricingConfigData(rowKey, prospective, row);
+        if (!verdict.ok) {
+          const e = new Error(`Proposal ${proposalId} fails pricing validation: ${verdict.error}`);
+          e.status = 400;
+          throw e;
+        }
       }
 
       const category = determineCategory(proposal.config_key);
@@ -204,7 +255,7 @@ router.post('/:id/approve', async (req, res) => {
 });
 
 // POST /api/admin/pricing-proposals/:id/reject
-router.post('/:id/reject', async (req, res) => {
+router.post('/:id/reject', requireAdmin, async (req, res) => {
   const { review_notes = null } = req.body || {};
   const technicianId = req.technicianId;
 

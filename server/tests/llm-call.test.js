@@ -16,7 +16,7 @@ const {
   parseLooseJson,
   providerErrorReason,
 } = require('../services/llm/call');
-const { PROVIDER, ROUTES, FLAGSHIP, OPENAI_BEST, GEMINI_VISION_BEST } = require('../config/models');
+const { PROVIDER, ROUTES, FLAGSHIP, OPENAI_BEST, GEMINI_VISION_BEST, CALL_EXTRACTION_ANTHROPIC } = require('../config/models');
 
 describe('llm/call parsers', () => {
   test('extractOpenAIText reads output_text and the output[].content walk', () => {
@@ -84,6 +84,33 @@ describe('llm/call parsers', () => {
     expect(providerErrorReason('anthropic', { status: 529 })).toBe('anthropic_529');
     expect(providerErrorReason('anthropic', { message: '529 overloaded' })).toBe('anthropic_529');
     expect(providerErrorReason('anthropic', new Error('socket closed'))).toBe('error');
+  });
+});
+
+describe('callAnthropic temperature-deprecation retry', () => {
+  const savedKey = process.env.ANTHROPIC_API_KEY;
+  beforeEach(() => { process.env.ANTHROPIC_API_KEY = 'test-key'; mockAnthropicCreate.mockReset(); });
+  afterEach(() => {
+    if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedKey;
+  });
+
+  test('a temperature-deprecated 400 retries once without sampling controls', async () => {
+    mockAnthropicCreate
+      .mockRejectedValueOnce(new Error('400 {"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."}}'))
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    const res = await callAnthropic({ model: CALL_EXTRACTION_ANTHROPIC, text: 'hi', jsonMode: true, maxTokens: 32, temperature: 0 });
+    expect(res.ok).toBe(true);
+    expect(mockAnthropicCreate).toHaveBeenCalledTimes(2);
+    expect(mockAnthropicCreate.mock.calls[0][0].temperature).toBe(0);
+    expect(mockAnthropicCreate.mock.calls[1][0].temperature).toBeUndefined();
+  });
+
+  test('other 400s do not retry', async () => {
+    mockAnthropicCreate.mockRejectedValue(new Error('400 invalid_request_error: max_tokens too large'));
+    const res = await callAnthropic({ model: CALL_EXTRACTION_ANTHROPIC, text: 'hi', maxTokens: 32, temperature: 0 });
+    expect(res.ok).toBe(false);
+    expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
   });
 });
 

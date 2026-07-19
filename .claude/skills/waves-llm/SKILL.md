@@ -97,9 +97,13 @@ service.
 ## 5. The exceptions
 
 - **Call transcription + extraction** keep their own providers/models in
-  `call-recording-processor.js` (transcription `gpt-4o-transcribe-diarize`,
-  extraction `gemini-2.5-pro`). This is the one place competing/parallel
-  models still make sense; it is intentionally NOT in `ROUTES`. Leave it.
+  `call-recording-processor.js` (transcription `gpt-4o-transcribe-diarize`
+  with Gemini fallback; V2 extraction routes `CALL_EXTRACTION_PROVIDER` /
+  `CALL_EXTRACTION_MODEL`, default `openai`/`gpt-5.6-sol` with a
+  registry-pinned Claude Opus fallback — 25-call bake-off 2026-07-18; kill =
+  `CALL_EXTRACTION_PROVIDER=gemini`). Pipeline-specific by design; it is
+  intentionally NOT in `ROUTES`. Change the extraction route only with a
+  fresh bake-off through the exact V2 contract.
 - **Managed agents stay on Anthropic** — the Managed Agents API has no
   OpenAI equivalent.
 - **Intelligence Bar** has its own model overrides:

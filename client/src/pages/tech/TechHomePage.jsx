@@ -50,6 +50,7 @@ import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/C
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
+import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
@@ -189,6 +190,7 @@ export default function TechHomePage() {
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
+  const [zoneTarget, setZoneTarget] = useState(null); // schedule row → treatment-zone mapper open
   const [leadTarget, setLeadTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
@@ -654,6 +656,7 @@ export default function TechHomePage() {
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
                 })}
+                onZone={() => setZoneTarget(s)}
                 onLead={() => setLeadTarget(s)}
               />
             ))}
@@ -745,6 +748,17 @@ export default function TechHomePage() {
           serviceId={photoTarget.id}
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
+        />
+      )}
+
+      {zoneTarget && (
+        <TechTreatmentZoneModal
+          serviceId={zoneTarget.id}
+          customerName={zoneTarget.customer_name || zoneTarget.customerName || 'Customer'}
+          address={zoneTarget.address || ''}
+          lat={zoneTarget.lat}
+          lng={zoneTarget.lng}
+          onClose={() => setZoneTarget(null)}
         />
       )}
 
@@ -1027,7 +1041,7 @@ function TimecardSignoffCard({ techName }) {
   );
 }
 
-function ServiceRow({ service, onPhotos, onProject, onLead }) {
+function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
   const status = service.status || 'pending';
   const statusColor = {
     completed: '#22c55e',
@@ -1074,6 +1088,13 @@ function ServiceRow({ service, onPhotos, onProject, onLead }) {
           color: DARK.teal, cursor: 'pointer',
         }}>
           📷 Photos
+        </button>
+        <button onClick={onZone} aria-label="Trace treatment zone" style={{
+          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+          border: `1px solid ${DARK.border}`, background: 'transparent',
+          color: DARK.teal, cursor: 'pointer',
+        }}>
+          🛰️ Zone
         </button>
         <button onClick={onLead} aria-label="Flag opportunity" style={{
           padding: '6px 8px', borderRadius: 6, fontSize: 12, fontWeight: 600,

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
@@ -108,6 +108,10 @@ const inputStyle = docInput();
 
 export default function ContractSignPage() {
   const { token } = useParams();
+  // Always reflects the active token so an in-flight sign POST can tell if the
+  // page moved to a different contract before it resolved.
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
   // BrandCard / BrandButton / WavesShell already emit their own data-glass markup.
   useGlassSurface(true, 'full');
   const [contract, setContract] = useState(null);
@@ -123,9 +127,46 @@ export default function ContractSignPage() {
     agreeDocumentTerms: false,
   });
 
+  // Bearer-token page: never indexed/archived. The server X-Robots-Tag in
+  // sensitive-spa-headers.js is the authoritative protection; this client
+  // meta is belt-and-suspenders for the mounted view. Mount-only, and it
+  // RESTORES the prior tag on unmount — the SPA never reloads, so leaving a
+  // noindex tag behind would silently de-index whatever public page the
+  // visitor navigates to next.
+  useEffect(() => {
+    const existing = document.querySelector('meta[name="robots"]');
+    const priorContent = existing ? existing.getAttribute('content') : null;
+    const createdTag = !existing;
+    const meta = existing || document.createElement('meta');
+    meta.setAttribute('name', 'robots');
+    meta.setAttribute('content', 'noindex,nofollow,noarchive');
+    if (createdTag) document.head.appendChild(meta);
+    return () => {
+      if (createdTag) meta.remove();
+      else if (priorContent !== null) meta.setAttribute('content', priorContent);
+      else meta.removeAttribute('content');
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    // Every token starts CLEAN. React-router reuses this component instance
+    // when only the :token param changes, so without these resets contract
+    // A's typed initials, signature name, and checked agreement boxes would
+    // survive into contract B's render — B could arrive pre-filled and
+    // immediately submittable with A's identity.
+    setContract(null);
+    setError('');
+    setSubmitting(false);
+    setSigned(false);
+    setForm({
+      initials: '',
+      signedName: '',
+      agreeElectronic: false,
+      agreeAuthorization: false,
+      agreeDocumentTerms: false,
+    });
     fetch(`${API_BASE}/contracts/${encodeURIComponent(token)}`)
       .then(async (res) => {
         const body = await res.json().catch(() => ({}));
@@ -135,6 +176,8 @@ export default function ContractSignPage() {
       .then((next) => {
         if (cancelled) return;
         setContract(next);
+        // Seed the signature field from THIS contract's own recipient —
+        // never from whatever a previous token's signer typed.
         setForm((prev) => ({
           ...prev,
           signedName: prev.signedName || next.recipientName || '',
@@ -168,6 +211,11 @@ export default function ContractSignPage() {
   const submit = async (event) => {
     event.preventDefault();
     if (!canSubmit) return;
+    // Bind this submission to the token it was signed under: if the page
+    // navigates to a different contract while the POST is in flight, its
+    // completion must not overwrite the new contract's state with A's
+    // signed row/status or A's error.
+    const submittedToken = token;
     setSubmitting(true);
     setError('');
     try {
@@ -183,13 +231,15 @@ export default function ContractSignPage() {
         }),
       });
       const body = await res.json().catch(() => ({}));
+      if (submittedToken !== tokenRef.current) return;
       if (!res.ok) throw new Error(body.error || 'Could not sign contract');
       setContract(body.contract);
       setSigned(true);
     } catch (err) {
+      if (submittedToken !== tokenRef.current) return;
       setError(err.message || 'Could not sign contract');
     } finally {
-      setSubmitting(false);
+      if (submittedToken === tokenRef.current) setSubmitting(false);
     }
   };
 

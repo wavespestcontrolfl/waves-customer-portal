@@ -148,6 +148,20 @@ const TREE_SHRUB_RECURRING_PLANS = {
     visitsPerYear: 9,
     targetAppointmentCount: 4,
   },
+  // Light (4x) downsell tier (v4.5 mandate; catalog row seeded 20260718300000).
+  // Without this plan a "Quarterly Tree & Shrub" row resolved to the
+  // bimonthly plan and WaveGuard alignment assumed 6 visits (audit 2026-07-18).
+  quarterly: {
+    planKey: 'tree_shrub_quarterly',
+    serviceKey: 'tree_shrub_quarterly',
+    serviceType: 'Tree & Shrub Care',
+    label: 'Quarterly Tree & Shrub Program (Light)',
+    tier: 'Bronze',
+    monthlyRate: 22, // v4.6 ts_monthly_floors.light
+    recurringPattern: 'quarterly',
+    visitsPerYear: 4,
+    targetAppointmentCount: 3,
+  },
 };
 
 const MOSQUITO_RECURRING_PLANS = {
@@ -235,6 +249,7 @@ const SELF_BOOKING_RECURRING_PLANS = {
   tree_shrub: TREE_SHRUB_RECURRING_PLANS.bimonthly,
   tree_shrub_bimonthly: TREE_SHRUB_RECURRING_PLANS.bimonthly,
   tree_shrub_6week: TREE_SHRUB_RECURRING_PLANS.every_6_weeks,
+  tree_shrub_quarterly: TREE_SHRUB_RECURRING_PLANS.quarterly,
   termite_bait: TERMITE_BAIT_RECURRING_PLANS.quarterly,
   termite_bait_quarterly: TERMITE_BAIT_RECURRING_PLANS.quarterly,
   termite_bait_monitoring: TERMITE_BAIT_RECURRING_PLANS.monitoring,
@@ -372,6 +387,15 @@ function resolveTreeShrubRecurringPlan(serviceType) {
     || /\b9\s*(visits?|apps?|applications?)\b/.test(text)
   ) {
     return TREE_SHRUB_RECURRING_PLANS.every_6_weeks;
+  }
+  if (
+    raw.includes('tree_shrub_quarterly')
+    || /\bquarterly\b/.test(text)
+    || /\bevery\s*3\s*months?\b/.test(text)
+    || /\b4\s*(visits?|apps?|applications?)\b/.test(text)
+    || /\blight\b/.test(text)
+  ) {
+    return TREE_SHRUB_RECURRING_PLANS.quarterly;
   }
   return TREE_SHRUB_RECURRING_PLANS.bimonthly;
 }

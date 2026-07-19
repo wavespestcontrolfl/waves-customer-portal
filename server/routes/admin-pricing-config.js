@@ -2,10 +2,16 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { costLineFromUsage } = require('../services/product-costing');
 const { BED_BUG } = require('../services/pricing-engine/constants');
 
+// Reads and the calculators (margin-check / estimate / quick-quote) stay
+// tech-or-admin — the tech portal estimators price off them. WRITES are
+// admin-only (requireAdmin on each mutating route below): pricing_config is
+// DB-authoritative (db-bridge syncs it OVER the in-code constants), so a
+// technician login must not be able to change the numbers every estimate
+// bills from.
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // Best-effort audit insert: a failure must never block the pricing edit
@@ -168,6 +174,156 @@ function normalizeIncomingConfigData(configKey, data) {
     return normalized;
   }
   return data;
+}
+
+// Pre-write validation for PUT /:key. pricing_config is DB-authoritative —
+// syncConstantsFromDB() loads these rows OVER the in-code constants right
+// after the handler commits, so a malformed row (negative labor rate, a
+// margin "ratio" of 35 instead of 0.35, a lawn grid with a $0 cell) poisons
+// every estimate priced after the sync. Known keys get value checks; lawn
+// grids are recognized by the row's category; everything else gets a
+// structural check (array/object shape must match the existing row so a
+// stray string can't replace a config blob).
+// Strict numeric read for pricing payloads: JSON numbers ONLY. Numeric
+// strings are rejected rather than normalized — the handler persists the
+// raw payload, so a synced "51" would concatenate in pricing arithmetic
+// (100 + "51" → "10051"). Number(true) === 1 and Number(null) === 0, so
+// boolean/null coercion is equally banned. The admin Pricing Logic panel
+// already sends real numbers (EditCell wraps every numeric save in
+// Number()), so only hand-crafted payloads are affected.
+function strictPricingNumber(v) {
+  return typeof v === 'number' ? v : NaN;
+}
+
+function validatePricingConfigData(configKey, data, oldConfig) {
+  const fail = (error) => ({ ok: false, error });
+  const num = strictPricingNumber;
+  const isRatio01 = (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) < 1;
+  const isPositive = (v) => Number.isFinite(num(v)) && num(v) > 0;
+  const isNonNegative = (v) => Number.isFinite(num(v)) && num(v) >= 0;
+
+  // The global_* singles must be STRICTLY positive: syncConstantsFromDB
+  // applies them through truthy `?.value` checks, so a stored 0 would return
+  // success here and then be silently ignored at runtime — DB/UI saying one
+  // thing while estimates price off the in-code default.
+  if (configKey === 'global_labor_rate') {
+    if (!isPositive(data?.value)) return fail('global_labor_rate.value must be a positive $/hr number');
+  } else if (['global_drive_time', 'global_admin_annual', 'global_conditional_ceiling'].includes(configKey)) {
+    if (!isPositive(data?.value)) return fail(`${configKey}.value must be a positive number (the runtime sync ignores zero values)`);
+  } else if (['global_margin_floor', 'global_margin_target_ts'].includes(configKey)) {
+    if (!isPositive(data?.value) || num(data?.value) >= 1) return fail(`${configKey}.value must be a ratio in (0, 1) — 0.35 means 35% (the runtime sync ignores zero values)`);
+  } else if (configKey === 'waveguard_tiers') {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return fail('waveguard_tiers must be an object of tier configs');
+    for (const [tier, cfg] of Object.entries(data)) {
+      if (!isRatio01(cfg?.discount)) return fail(`waveguard_tiers.${tier}.discount must be a ratio in [0, 1)`);
+      if (!Number.isInteger(num(cfg?.min_services)) || num(cfg?.min_services) < 1) {
+        return fail(`waveguard_tiers.${tier}.min_services must be a positive integer`);
+      }
+    }
+  } else if (configKey === 'pest_base') {
+    // Validate every field the sync consumes — not just base. A row like
+    // { base: 117, floor: -1 } would otherwise persist, then
+    // assertValidPestPricingConfig would fail during the sync, restore the
+    // defaults, and this route would still have returned success. (Building
+    // a prospective constants snapshot to reuse the engine's own validator
+    // needs db-bridge's private appliers — deliberately not reached into
+    // from here; these checks mirror exactly what the sync reads.)
+    if (!isPositive(data?.base)) return fail('pest_base.base must be a positive dollar amount');
+    if (data?.floor !== undefined && !isPositive(data.floor)) {
+      return fail('pest_base.floor must be a positive dollar amount (the runtime sync ignores zero values)');
+    }
+    if (data?.enforce_floor_post_discount !== undefined && typeof data.enforce_floor_post_discount !== 'boolean') {
+      return fail('pest_base.enforce_floor_post_discount must be a boolean');
+    }
+    if (data?.initial_roach !== undefined) {
+      const ir = data.initial_roach;
+      if (!ir || typeof ir !== 'object' || Array.isArray(ir)) {
+        return fail('pest_base.initial_roach must be an object of species bracket arrays');
+      }
+      for (const species of ['regular', 'german', 'regular_standalone']) {
+        if (ir[species] === undefined) continue;
+        if (!Array.isArray(ir[species]) || !ir[species].length) {
+          return fail(`pest_base.initial_roach.${species} must be a non-empty bracket array`);
+        }
+        // Mirror db-bridge's validateSortedBrackets invariants: ascending
+        // sqft, null/'Infinity' allowed ONLY as the terminal bound, and a
+        // terminal Infinity REQUIRED. The sync's assertValidPestPricingConfig
+        // rejects anything else AFTER this row has persisted — the sync then
+        // restores defaults on every future run while this route returned
+        // 200, leaving DB/UI permanently disagreeing with runtime pricing.
+        const rows = ir[species];
+        let previous = -Infinity;
+        for (let i = 0; i < rows.length; i += 1) {
+          const bracket = rows[i];
+          const rawBound = bracket?.sqft;
+          const isTerminalToken = rawBound === null || rawBound === 'Infinity';
+          if (isTerminalToken && i !== rows.length - 1) {
+            return fail(`pest_base.initial_roach.${species}: null/'Infinity' sqft is allowed only on the final bracket`);
+          }
+          const bound = isTerminalToken ? Infinity : strictPricingNumber(rawBound);
+          if (!isTerminalToken && (!Number.isFinite(bound) || bound < 0)) {
+            return fail(`pest_base.initial_roach.${species}: sqft must be a non-negative number, or null/'Infinity' on the final bracket`);
+          }
+          if (bound < previous) {
+            return fail(`pest_base.initial_roach.${species}: brackets must be sorted ascending by sqft`);
+          }
+          previous = bound;
+          if (!isPositive(bracket?.price)) return fail(`pest_base.initial_roach.${species}: price must be a positive number`);
+        }
+        const terminal = rows[rows.length - 1]?.sqft;
+        if (!(terminal === null || terminal === 'Infinity')) {
+          return fail(`pest_base.initial_roach.${species}: the final bracket's sqft must be null or 'Infinity'`);
+        }
+      }
+      // Nested drop protection: the payload must keep every species array
+      // the stored row already carries — the shallow top-level drop check
+      // below can't see inside initial_roach, and PUT replaces the whole
+      // blob, so an omitted species would silently delete tuned brackets.
+      const oldRoach = parseConfigData(oldConfig?.data)?.initial_roach;
+      if (oldRoach && typeof oldRoach === 'object' && !Array.isArray(oldRoach)) {
+        const missingSpecies = Object.keys(oldRoach).filter((species) => ir[species] === undefined);
+        if (missingSpecies.length) {
+          return fail(`pest_base.initial_roach drops stored species ${missingSpecies.join(', ')} — include every stored species array`);
+        }
+      }
+    }
+  } else if (oldConfig?.category === 'lawn' && Array.isArray(parseConfigData(oldConfig.data))) {
+    // Lawn grids: rows of [sqft, ...tier prices]; every price must be a
+    // positive number and every sqft breakpoint non-negative.
+    if (!Array.isArray(data) || !data.length) return fail(`${configKey} must be a non-empty bracket array`);
+    for (const row of data) {
+      if (!Array.isArray(row) || row.length < 2) return fail(`${configKey}: each bracket row must be [sqft, ...prices]`);
+      if (!isNonNegative(row[0])) return fail(`${configKey}: sqft breakpoint must be a non-negative number`);
+      for (const price of row.slice(1)) {
+        if (!isPositive(price)) return fail(`${configKey}: every bracket price must be a positive number (got ${JSON.stringify(price)})`);
+      }
+    }
+    return { ok: true };
+  }
+
+  // Structural backstop for every key: the stored jsonb's shape survives.
+  const oldData = parseConfigData(oldConfig?.data);
+  if (oldData !== null && oldData !== undefined && data !== null && data !== undefined) {
+    const shape = (v) => (Array.isArray(v) ? 'array' : typeof v);
+    if (shape(oldData) !== shape(data)) {
+      return fail(`data shape mismatch for ${configKey}: existing config is ${shape(oldData)}, got ${shape(data)}`);
+    }
+  }
+  // Whole-object PUT replaces the stored blob, so a payload MISSING keys the
+  // stored row carries would silently DELETE tuned pricing (pest_base
+  // without initial_roach, an empty waveguard_tiers object). Compare against
+  // the NORMALIZED old blob so retired keys never false-positive. New keys
+  // are fine; drops are not — the raw-JSON admin editor is exactly the path
+  // this protects.
+  if (data && typeof data === 'object' && !Array.isArray(data)
+    && oldData && typeof oldData === 'object' && !Array.isArray(oldData)) {
+    const oldNorm = normalizeIncomingConfigData(configKey, oldData) || {};
+    const missing = Object.keys(oldNorm).filter((key) => !(key in data));
+    if (missing.length) {
+      return fail(`payload drops existing key(s) ${missing.join(', ')} for ${configKey} — PUT replaces the whole config, include every stored field`);
+    }
+  }
+  return { ok: true };
 }
 
 async function ensureTable() {
@@ -335,23 +491,62 @@ router.get('/lawn-brackets', async (req, res, next) => {
 });
 
 // PUT /lawn-brackets/:track — update brackets for a track
-router.put('/lawn-brackets/:track', async (req, res, next) => {
+router.put('/lawn-brackets/:track', requireAdmin, async (req, res, next) => {
   try {
     const { brackets, reason } = req.body; // array of { sqft_bracket, tier, monthly_price }
+    // Validate the WHOLE batch before any write: a zero/negative/NaN/boolean
+    // price, a malformed identifier, a duplicate cell, or a cell that does
+    // not exist must reject the request outright rather than committing part
+    // of the grid — these rows are billing-authoritative via db-bridge.
+    if (!Array.isArray(brackets) || !brackets.length) {
+      return res.status(400).json({ error: 'brackets must be a non-empty array' });
+    }
+    const seenCells = new Set();
+    for (const b of brackets) {
+      const price = strictPricingNumber(b?.monthly_price);
+      if (!Number.isFinite(price) || price <= 0) {
+        return res.status(400).json({
+          error: `invalid monthly_price for bracket ${b?.sqft_bracket ?? '?'}:${b?.tier ?? '?'} — must be a positive number`,
+        });
+      }
+      const sqft = strictPricingNumber(b?.sqft_bracket);
+      if (!Number.isInteger(sqft) || sqft < 0) {
+        return res.status(400).json({ error: `sqft_bracket must be a non-negative integer (got ${JSON.stringify(b?.sqft_bracket)})` });
+      }
+      if (typeof b?.tier !== 'string' || !b.tier.trim()) {
+        return res.status(400).json({ error: 'tier must be a non-empty string' });
+      }
+      const cell = `${sqft}:${b.tier}`;
+      if (seenCells.has(cell)) {
+        return res.status(400).json({ error: `duplicate bracket cell ${cell}` });
+      }
+      seenCells.add(cell);
+    }
     const existing = await db('lawn_pricing_brackets').where({ grass_track: req.params.track });
     const byCell = new Map(existing.map((r) => [`${r.sqft_bracket}:${r.tier}`, r]));
-    const changes = [];
+    // Every target cell must already exist — this route re-prices the grid,
+    // it does not create cells, and a typo'd tier/breakpoint silently
+    // updating zero rows would read as success.
     for (const b of brackets) {
-      const prev = byCell.get(`${b.sqft_bracket}:${b.tier}`);
-      const nextPrice = Number(b.monthly_price);
-      if (prev && Number(prev.monthly_price) === nextPrice) continue; // no-op cell — skip write and audit
-      const updated = await db('lawn_pricing_brackets')
-        .where({ grass_track: req.params.track, sqft_bracket: b.sqft_bracket, tier: b.tier })
-        .update({ monthly_price: b.monthly_price, updated_at: new Date() });
-      if (updated && prev) {
-        changes.push({ sqft_bracket: b.sqft_bracket, tier: b.tier, old: Number(prev.monthly_price), new: nextPrice });
+      if (!byCell.has(`${strictPricingNumber(b.sqft_bracket)}:${b.tier}`)) {
+        return res.status(400).json({ error: `unknown bracket cell ${b.sqft_bracket}:${b.tier} for track ${req.params.track}` });
       }
     }
+    // One transaction: either the whole batch re-prices or none of it does.
+    const changes = [];
+    await db.transaction(async (trx) => {
+      for (const b of brackets) {
+        const prev = byCell.get(`${strictPricingNumber(b.sqft_bracket)}:${b.tier}`);
+        const nextPrice = strictPricingNumber(b.monthly_price);
+        if (prev && Number(prev.monthly_price) === nextPrice) continue; // no-op cell — skip write and audit
+        const updated = await trx('lawn_pricing_brackets')
+          .where({ grass_track: req.params.track, sqft_bracket: b.sqft_bracket, tier: b.tier })
+          .update({ monthly_price: b.monthly_price, updated_at: new Date() });
+        if (updated && prev) {
+          changes.push({ sqft_bracket: b.sqft_bracket, tier: b.tier, old: Number(prev.monthly_price), new: nextPrice });
+        }
+      }
+    });
     if (changes.length) {
       await insertPricingAudit({
         configKey: `lawn_brackets:${req.params.track}`,
@@ -386,12 +581,31 @@ router.get('/discount-rules', async (req, res, next) => {
 });
 
 // PUT /discount-rules/:serviceKey — update a service discount rule
-router.put('/discount-rules/:serviceKey', async (req, res, next) => {
+router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) => {
   try {
     const updates = {};
     const allowed = ['tier_qualifier', 'max_discount_pct', 'flat_credit', 'flat_credit_min_tier', 'exclude_from_pct_discount', 'notes'];
     for (const k of allowed) {
       if (req.body[k] !== undefined) updates[k] = req.body[k];
+    }
+    // Range-validate BEFORE the write — these fields gate every discount the
+    // engine applies. max_discount_pct is a RATIO (discount-engine compares
+    // it against tier discounts like 0.20), not a 0–100 percent. Strict
+    // numeric read: booleans/'' must not coerce (Number(true) === 1).
+    if (updates.max_discount_pct !== undefined && updates.max_discount_pct !== null) {
+      const pct = strictPricingNumber(updates.max_discount_pct);
+      if (!Number.isFinite(pct) || pct < 0 || pct >= 1) {
+        return res.status(400).json({ error: 'max_discount_pct must be a ratio in [0, 1) — 0.15 means 15%' });
+      }
+    }
+    if (updates.flat_credit !== undefined && updates.flat_credit !== null) {
+      const credit = strictPricingNumber(updates.flat_credit);
+      if (!Number.isFinite(credit) || credit < 0) {
+        return res.status(400).json({ error: 'flat_credit must be a non-negative dollar amount' });
+      }
+    }
+    if (updates.exclude_from_pct_discount !== undefined && typeof updates.exclude_from_pct_discount !== 'boolean') {
+      return res.status(400).json({ error: 'exclude_from_pct_discount must be a boolean' });
     }
     const existing = await db('service_discount_rules').where({ service_key: req.params.serviceKey }).first();
     updates.updated_at = new Date();
@@ -516,8 +730,33 @@ router.post('/margin-check', async (req, res) => {
     const laborRate = GLOBAL.LABOR_RATE || 35;
     const driveMin = GLOBAL.DRIVE_TIME || 20;
     const driveCost = laborRate * driveMin / 60;
+    // Fully-allocated COGS per POLICY.md's MARGIN_FLOOR definition: labor +
+    // materials + drive + ADMIN_ANNUAL ($/service/yr). Omitting the admin
+    // allocation overstated every margin this tool reported.
+    const adminAnnual = Number.isFinite(Number(GLOBAL.ADMIN_ANNUAL)) ? Number(GLOBAL.ADMIN_ANNUAL) : 51;
 
-    // Build service request to get all recurring services priced
+    // The tier selector drives the BUNDLE SIZE: WaveGuard tiers are earned
+    // by service count, so the requested tier prices that tier's LIVE
+    // minServices worth of services and the engine derives the matching
+    // discount. Previously the four-service request always landed platinum
+    // and the operator's tier choice was silently ignored — gold margins
+    // shown were really platinum (20%-discount) margins. Thresholds come
+    // from the synced WAVEGUARD config (admins can retune min_services on
+    // this very route), never a hardcoded 1/2/3/4.
+    const SERVICE_ORDER = [
+      ['pest', { frequency: 'quarterly' }],
+      ['lawn', { track: 'st_augustine', tier: 'enhanced' }],
+      ['treeShrub', { tier: 'enhanced' }],
+      ['mosquito', { tier: 'monthly' }],
+    ];
+    const liveTiers = pricingEngine.constants?.WAVEGUARD?.tiers || {};
+    const requestedTier = liveTiers[String(waveguardTier || '').toLowerCase()] ? String(waveguardTier).toLowerCase() : 'gold';
+    const minServices = Number(liveTiers[requestedTier]?.minServices);
+    const bundleSize = Number.isInteger(minServices) && minServices >= 1
+      ? Math.min(minServices, SERVICE_ORDER.length)
+      : SERVICE_ORDER.length;
+    const serviceRequest = Object.fromEntries(SERVICE_ORDER.slice(0, bundleSize));
+
     const estimate = pricingEngine.generateEstimate({
       homeSqFt, lotSqFt, lawnSqFt, bedArea,
       stories: 1,
@@ -525,12 +764,7 @@ router.post('/margin-check', async (req, res) => {
       features: {},
       zone: 'A',
       paymentMethod: 'card',
-      services: {
-        pest: { frequency: 'quarterly' },
-        lawn: { track: 'st_augustine', tier: 'enhanced' },
-        treeShrub: { tier: 'enhanced' },
-        mosquito: { tier: 'monthly' },
-      },
+      services: serviceRequest,
     });
 
     const services = [];
@@ -539,7 +773,7 @@ router.post('/margin-check', async (req, res) => {
       const ce = await getInventoryCostEstimate(item.service, dimensions);
       const laborPerVisit = laborRate * ce.laborMin / 60;
       const costPerVisit = laborPerVisit + ce.materialPerVisit + driveCost;
-      const annualCost = costPerVisit * (item.visits || item.visitsPerYear || ce.visitsPerYear);
+      const annualCost = costPerVisit * (item.visits || item.visitsPerYear || ce.visitsPerYear) + adminAnnual;
       const afterDiscount = item.annualAfterDiscount || item.annual;
       const margin = afterDiscount > 0 ? (afterDiscount - annualCost) / afterDiscount : 0;
 
@@ -558,7 +792,21 @@ router.post('/margin-check', async (req, res) => {
       });
     }
 
-    res.json({ services, property: estimate.property, waveGuard: estimate.waveGuard });
+    // Label the margins by the tier the engine actually DERIVED for the
+    // bundle it priced — discount-engine owns the canonical tier thresholds
+    // (deliberately not re-implemented here), so if an admin retunes
+    // min_services out of line with those thresholds the response reports
+    // the real discount tier plus an explicit mismatch flag instead of
+    // mislabeling the numbers as the requested tier.
+    const appliedTier = String(estimate.waveGuard?.tier || '').toLowerCase() || null;
+    res.json({
+      services,
+      property: estimate.property,
+      waveGuard: estimate.waveGuard,
+      waveguardTier: appliedTier || requestedTier,
+      waveguardTierRequested: requestedTier,
+      waveguardTierMismatch: appliedTier ? appliedTier !== requestedTier : false,
+    });
   } catch (err) {
     res.json({ error: err.message, services: [] });
   }
@@ -576,7 +824,7 @@ router.get('/:key', async (req, res, next) => {
 });
 
 // PUT /:key — update config data (with audit logging)
-router.put('/:key', async (req, res, next) => {
+router.put('/:key', requireAdmin, async (req, res, next) => {
   try {
     const { data, name, description, reason } = req.body;
 
@@ -586,6 +834,13 @@ router.put('/:key', async (req, res, next) => {
 
     const updates = { updated_at: new Date() };
     const normalizedData = data !== undefined ? normalizeIncomingConfigData(req.params.key, data) : undefined;
+    // Validate BEFORE the write — syncConstantsFromDB() below loads this row
+    // over the in-code constants, so a bad commit immediately poisons live
+    // pricing rather than waiting for someone to notice.
+    if (normalizedData !== undefined) {
+      const verdict = validatePricingConfigData(req.params.key, normalizedData, oldConfig);
+      if (!verdict.ok) return res.status(400).json({ error: verdict.error });
+    }
     if (normalizedData !== undefined) updates.data = JSON.stringify(normalizedData);
     if (name !== undefined) updates.name = name;
     if (description !== undefined) updates.description = description;
@@ -656,3 +911,8 @@ router.post('/quick-quote', async (req, res, next) => {
 });
 
 module.exports = router;
+// The proposal-approval queue (admin-pricing-proposals) applies leaf edits
+// to the same billing-authoritative rows — it must run the SAME key-specific
+// validation on the prospective row before writing.
+module.exports.validatePricingConfigData = validatePricingConfigData;
+module.exports.parseConfigData = parseConfigData;

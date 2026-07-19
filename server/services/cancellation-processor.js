@@ -6,17 +6,10 @@ const { etDateString } = require('../utils/datetime-et');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
 const CHURN_REASON = 'Customer cancellation request';
-// The same "still cancellable" allowlist the admin series-cancel path and the
-// customer portal's upcoming-visits query use. Deliberately excludes terminal
-// history (completed / cancelled / skipped / no_show — never rewritten) and
-// in-progress work (en_route / on_site — a tech already rolling is an office
-// decision; the admin alert flags the account for follow-up either way).
-const CANCELLABLE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
-// track_state values that mean a tech is actively working the visit right now.
-// The tracker can LEAD the legacy status: track-transitions flips track_state
-// first and syncs `status` best-effort (a sync failure only logs), so a live
-// visit can still read status=pending/confirmed.
-const LIVE_TRACK_STATES = ['en_route', 'on_property'];
+// Status/track-state vocabulary lives in cancellation-eligibility so the
+// POST /api/requests gate, the /api/schedule payload, and this sweep can
+// never drift; re-exported below for existing consumers.
+const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('./cancellation-eligibility');
 // Card-hold outcomes that leave money unresolved: the fee path never throws
 // into the host flow — a decline / ambiguous Stripe outcome / post-charge
 // write failure comes back as a reason code with the hold parked for review.

@@ -756,6 +756,36 @@ router.put('/cards/:id/default', async (req, res, next) => {
     const carriesAutopay = !!currentDefault?.autopay_enabled && currentDefault.id !== card.id;
     const newCardChargeable = card.processor === 'stripe' && !!card.stripe_payment_method_id;
 
+    // Consent scope: carrying Auto Pay onto the new default puts it in
+    // charge of recurring billing — same v8+ enrollment gate as the autopay
+    // routes. A hold-only card (estimate_card_hold consent) or a pre-v8 save
+    // never authorized recurring charges; without this, "Set default" was a
+    // silent enrollment path around hasEnrollmentScopedConsent. The client
+    // shows the full authorization copy and re-submits with consent_accepted;
+    // the acceptance is recorded BEFORE any flag moves.
+    if (carriesAutopay && newCardChargeable) {
+      const ConsentService = require('../services/payment-method-consents');
+      const hasConsent = await ConsentService.hasEnrollmentScopedConsent(req.customerId, card.stripe_payment_method_id);
+      if (!hasConsent) {
+        if (req.body?.consent_accepted !== true) {
+          return res.status(409).json({
+            error: 'Your default method is on Auto Pay, and this payment method has not been authorized for Auto Pay yet. Review and accept the authorization to continue.',
+            code: 'consent_required',
+            method_type: card.method_type || 'card',
+          });
+        }
+        await ConsentService.recordConsent({
+          customerId: req.customerId,
+          paymentMethodId: card.id,
+          stripePaymentMethodId: card.stripe_payment_method_id,
+          source: 'portal_set_default',
+          methodType: card.method_type || 'card',
+          ip: req.ip,
+          userAgent: req.get('user-agent') || null,
+        });
+      }
+    }
+
     await db.transaction(async (trx) => {
       await trx('payment_methods')
         .where({ customer_id: req.customerId })

@@ -39,6 +39,7 @@ const {
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const featureGates = require('../../config/feature-gates');
 
 let PhotoService = null;
 try {
@@ -1272,6 +1273,20 @@ function structuredCustomerConcern(structured = {}) {
   ).trim();
 }
 
+// LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
+// place: cached PDFs / static renders are content-key-insensitive snapshots,
+// and a reschedule after render would leave a stale appointment fossilized in
+// the downloadable document. Covers the top-level nextAppointment AND the V2
+// snapshot's nextVisit (lawn + tree & shrub) — the queued PDF renderer
+// (pdf-queue.js) builds its payload outside the route helper, so the strip
+// must be shared, not route-inlined (codex P2 2026-07-18).
+function stripLiveOnlyScheduleFields(data) {
+  if (!data || typeof data !== 'object') return data;
+  delete data.nextAppointment;
+  if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
+  return data;
+}
+
 function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
   const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
   const concernText = structuredCustomerConcern(structured);
@@ -2294,6 +2309,38 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     mode: 'live',
   }).catch(() => ({ available: false, fallbackReason: 'build_failed' }));
 
+  // Technician-traced treatment perimeter (Treatment Zone Mapper): the traced
+  // path + composited satellite snapshot saved from the tech portal. When
+  // present it replaces the generic schematic as the report's coverage map.
+  // Fail-soft everywhere — a missing table, row, or S3 signature must never
+  // break report rendering. Gated by GATE_TREATMENT_ZONE_MAP.
+  let tracedTreatmentZone = null;
+  try {
+    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id) {
+      const tracedRow = await knex('treatment_zone_maps')
+        .where({ scheduled_service_id: service.scheduled_service_id })
+        .first()
+        .catch(() => null);
+      if (tracedRow?.snapshot_s3_key && PhotoService) {
+        const tracedSnapshotUrl = await PhotoService.getViewUrl(
+          tracedRow.snapshot_s3_key,
+          PhotoService.CUSTOMER_DWELL_TTL_SECONDS
+        ).catch(() => null);
+        if (tracedSnapshotUrl) {
+          tracedTreatmentZone = {
+            snapshotUrl: tracedSnapshotUrl,
+            linearFt: numberOrNull(tracedRow.linear_ft),
+            closedLoop: Boolean(tracedRow.closed_loop),
+            capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
+            label: 'Treated perimeter traced on-site by your technician.',
+          };
+        }
+      }
+    }
+  } catch {
+    tracedTreatmentZone = null;
+  }
+
   // Bait station map (station-map-v1): numbered pins + this visit's statuses
   // over the same live satellite image. Gated to termite-bait-typed reports —
   // the VIEWER-VISIBLE snapshot types, so an internal_only companion's
@@ -2909,6 +2956,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         label: 'Schematic view of inspected and treated zones. Service zones are approximate.',
       },
       satellite: satelliteMap,
+      traced: tracedTreatmentZone,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     stationMap,
@@ -2958,6 +3006,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 module.exports = {
   buildReportV1Data,
   structuredCustomerConcern,
+  stripLiveOnlyScheduleFields,
   calculateLawnOverallScore,
   lawnScoreDelta,
   lawnScoreValue,

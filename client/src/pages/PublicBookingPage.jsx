@@ -124,6 +124,18 @@ export default function PublicBookingPage() {
   // Guards booking_availability_loaded against double-firing when a manually
   // typed address is geocoded server-side (setCoords re-runs loadAvailability).
   const availTrackedForRef = useRef(null);
+  // Latest-wins guards for the async address/phone lookups and availability
+  // fetch: a lookup started for address A can resolve AFTER the visitor edits
+  // to address B, and without these it would re-bind A's customer id / coords
+  // onto B's booking. Every address edit bumps the counter (see updateAddress),
+  // and each fetch captures its value and discards a stale response. Mirrors
+  // the latestPickedDateRef pattern already used for browse-days here and the
+  // requestId guard in SlotPicker.
+  const addressLookupSeqRef = useRef(0);
+  // Phone edits invalidate the phone lookup independently of the address (the
+  // match is resolved against phone + address), so a late lookup for an
+  // earlier phone can't apply its customer/contact after the number changes.
+  const phoneLookupSeqRef = useRef(0);
   // Proof-of-funnel token from the availability response; echoed to
   // /capture-intent so the public capture endpoint can't be abused.
   const captureTokenRef = useRef(null);
@@ -142,6 +154,22 @@ export default function PublicBookingPage() {
       const next = typeof updater === 'function' ? updater(current) : updater;
       return next;
     });
+    // Drop the previous address's geocode: coords otherwise survive an edit
+    // (onSelect only sets them when Google returns them, so a manually typed
+    // street keeps the OLD coordinates), and the confirm payload + slot_sig
+    // location key would ship address B with address A's lat/lng. A fresh
+    // geocode arrives from the autocomplete onSelect or the availability echo.
+    setCoords(null);
+    // Invalidate any in-flight address-scoped request (customer/phone lookup,
+    // availability, AI search, browse-days) so a late response can't restore
+    // the prior address's match, slots, search result, or capture token onto
+    // this edited address — selecting one of those slots would then fail the
+    // server's location-bound slot_sig check.
+    addressLookupSeqRef.current += 1;
+    // A pending onPickDate is keyed on its date; null the ref so its late
+    // browse response is discarded too (the seq guard below is the primary
+    // invalidator, this is belt-and-suspenders for the date-race path).
+    latestPickedDateRef.current = null;
     setAvailability([]);
     setSelectedDate(null);
     setSelectedSlot(null);
@@ -152,6 +180,10 @@ export default function PublicBookingPage() {
     setSearchResult(null);
     setBrowseDays(null);
     setBrowseError('');
+    // A pending browse whose finally is now short-circuited by the seq bump
+    // won't clear this itself — reset it here so returning to step 2 never
+    // shows "Loading times…" forever with no active request.
+    setBrowseLoading(false);
     setPickedDate(null);
     setOpenDay(null);
   }, []);
@@ -159,6 +191,7 @@ export default function PublicBookingPage() {
   // Step 2 → load availability whenever we enter it
   const loadAvailability = useCallback(async () => {
     if (!service || !address.line1) return;
+    const seq = addressLookupSeqRef.current;
     setLoading(true);
     setError('');
     try {
@@ -176,8 +209,15 @@ export default function PublicBookingPage() {
         params.set('lng', String(coords.lng));
       }
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
+      // Address edited mid-flight: don't apply this address's slots, capture
+      // token, geocode echo, error, OR loading state onto the new one — the
+      // re-triggered load owns those now. Checked before the ok/throw branch
+      // so a stale FAILURE can't clear the current request's availability
+      // or surface a stale error either.
+      if (seq !== addressLookupSeqRef.current) return;
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not load availability');
+      if (seq !== addressLookupSeqRef.current) return;
       if (data.capture_token) captureTokenRef.current = data.capture_token;
       setAvailability(data.days || []);
       // Fire once per resolved address: loadAvailability re-runs when the server
@@ -201,10 +241,15 @@ export default function PublicBookingPage() {
         setError('No times available in the next 2 weeks. Call (941) 297-5749 and we\'ll get you on the schedule.');
       }
     } catch (err) {
+      // A stale request's failure must not clear the current request's slots
+      // or show its error.
+      if (seq !== addressLookupSeqRef.current) return;
       setError(err.message);
       setAvailability([]);
+    } finally {
+      // Only the current request owns the loading flag.
+      if (seq === addressLookupSeqRef.current) setLoading(false);
     }
-    setLoading(false);
   }, [service, address, coords]);
 
   const applyCustomer = useCallback((customer) => {
@@ -225,6 +270,7 @@ export default function PublicBookingPage() {
     // apartment's account. The unit travels only as its own param.
     const lookupAddress = nextAddress.line1 || nextAddress.formatted;
     if (!lookupAddress) return;
+    const seq = addressLookupSeqRef.current;
     try {
       const params = new URLSearchParams({ address: lookupAddress });
       if (nextAddress.city) params.set('city', nextAddress.city);
@@ -233,6 +279,9 @@ export default function PublicBookingPage() {
       const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (!res.ok) return;
       const data = await res.json();
+      // Discard if the address changed while this was in flight — otherwise
+      // the prior address's match would re-bind onto the edited one.
+      if (seq !== addressLookupSeqRef.current) return;
       setAddressMayMatchCustomer(!!data.possible_match);
       // Link a recognized returning customer to their account as early as
       // step 1 so a fast Confirm doesn't race the step-3 phone lookup and trip
@@ -261,6 +310,10 @@ export default function PublicBookingPage() {
   const checkExistingCustomer = useCallback(async (phone) => {
     const digits = phone.replace(/\D/g, '');
     if (digits.length !== 10) return;
+    // The phone match depends on BOTH phone and address, so it's stale if
+    // either changed while in flight.
+    const addrSeq = addressLookupSeqRef.current;
+    const phoneSeq = phoneLookupSeqRef.current;
     try {
       const params = new URLSearchParams({ phone: digits });
       // Same street-only preference as checkExistingCustomerByAddress — a
@@ -273,6 +326,9 @@ export default function PublicBookingPage() {
       const res = await fetch(`${API_BASE}/booking/customer-lookup?${params}`);
       if (res.ok) {
         const data = await res.json();
+        // Discard if the address OR the phone changed under it — the match was
+        // resolved against the old address + old phone.
+        if (addrSeq !== addressLookupSeqRef.current || phoneSeq !== phoneLookupSeqRef.current) return;
         if (data.customer) {
           applyCustomer(data.customer);
         }
@@ -444,6 +500,7 @@ export default function PublicBookingPage() {
   });
 
   const runAiSearch = async (query) => {
+    const seq = addressLookupSeqRef.current;
     const res = await fetch(`${API_BASE}/booking/find-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -451,6 +508,9 @@ export default function PublicBookingPage() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Search failed');
+    // Address edited mid-search: don't restore this address's result or
+    // capture token onto the new one.
+    if (seq !== addressLookupSeqRef.current) return { summary: data.summary };
     if (data.capture_token) captureTokenRef.current = data.capture_token;
     setPickedDate(null);
     setSelectedDate(null);
@@ -462,6 +522,10 @@ export default function PublicBookingPage() {
 
   const onPickDate = async (date) => {
     latestPickedDateRef.current = date;
+    // Also bind to the address: a same-date browse started for address A must
+    // not restore A's days/capture token after the visitor edits to B.
+    const seq = addressLookupSeqRef.current;
+    const isCurrent = () => latestPickedDateRef.current === date && seq === addressLookupSeqRef.current;
     setSearchResult(null);
     setPickedDate(date);
     setBrowseDays(null);
@@ -486,15 +550,15 @@ export default function PublicBookingPage() {
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Could not check that date');
-      if (latestPickedDateRef.current !== date) return;
+      if (!isCurrent()) return;
       if (data.capture_token) captureTokenRef.current = data.capture_token;
       setBrowseDays(data.days || []);
     } catch {
-      if (latestPickedDateRef.current !== date) return;
+      if (!isCurrent()) return;
       setBrowseDays(null);
       setBrowseError("We couldn't check that date right now. Try again in a moment.");
     } finally {
-      if (latestPickedDateRef.current === date) setBrowseLoading(false);
+      if (isCurrent()) setBrowseLoading(false);
     }
   };
 
@@ -625,6 +689,14 @@ export default function PublicBookingPage() {
                   onChange={(e) => {
                     const v = e.target.value;
                     setAddress(a => ({ ...a, line2: v }));
+                    // Invalidate any in-flight address/phone lookup: a late
+                    // response for Apt A must not re-bind onto Apt B (and this
+                    // handler just cleared the matched account + contact).
+                    addressLookupSeqRef.current += 1;
+                    phoneLookupSeqRef.current += 1;
+                    // A pending browse's finally is now short-circuited by the
+                    // seq bump — clear its loading flag so it can't stick.
+                    setBrowseLoading(false);
                     setExistingCustomerId(null);
                     setAddressMayMatchCustomer(false);
                     setContact({ firstName: '', lastName: '', phone: '', email: '' });
@@ -951,7 +1023,12 @@ export default function PublicBookingPage() {
                   inputMode="tel"
                   placeholder="(941) 555-1234"
                   value={contact.phone}
-                  onChange={e => setContact(c => ({ ...c, phone: e.target.value }))}
+                  onChange={e => {
+                    // Invalidate an in-flight phone lookup so a late match for
+                    // an earlier number can't apply its contact/customer id.
+                    phoneLookupSeqRef.current += 1;
+                    setContact(c => ({ ...c, phone: e.target.value }));
+                  }}
                   onBlur={() => { checkExistingCustomer(contact.phone); captureBookingIntent(); }}
                   className="waves-focus-ring" style={inputStyle}
                   disabled={!!existingCustomerId}

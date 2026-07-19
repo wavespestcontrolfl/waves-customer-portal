@@ -44,6 +44,9 @@ jest.mock('../services/pest-pressure/store', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: jest.fn(),
+  // #2866 added this to the route's destructure — an in-place field strip
+  // for non-live modes; a no-op keeps this suite's fixtures untouched.
+  stripLiveOnlyScheduleFields: jest.fn(),
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: jest.fn().mockResolvedValue({}),

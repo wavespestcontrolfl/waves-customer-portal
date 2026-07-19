@@ -107,15 +107,77 @@ describe('v2 extraction function (extractCallDataV2)', () => {
     expect(typeof extractCallDataV2).toBe('function');
   });
 
-  test('returns not_run when GEMINI_API_KEY is not set', async () => {
-    const originalKey = process.env.GEMINI_API_KEY;
-    delete process.env.GEMINI_API_KEY;
+  test('returns not_run when no provider key exists for either route leg', async () => {
+    const KEYS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+    const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    KEYS.forEach((k) => delete process.env[k]);
     try {
       const result = await extractCallDataV2('test transcript', '+19415551234', {});
       expect(result.status).toBe('not_run');
       expect(result.extraction).toBeNull();
     } finally {
-      if (originalKey) process.env.GEMINI_API_KEY = originalKey;
+      KEYS.forEach((k) => {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      });
+    }
+  });
+
+  test('extraction route crosses providers and pins the bake-off winner', () => {
+    const { CALL_EXTRACTION_ROUTE } = CallRecordingProcessor._test;
+    expect(CALL_EXTRACTION_ROUTE.primary).toEqual({ provider: 'openai', model: 'gpt-5.6-sol' });
+    expect(CALL_EXTRACTION_ROUTE.fallback.provider).toBe('anthropic');
+    // dispatchWithFallback rejects same-provider policies — the route must
+    // never collapse to one provider.
+    expect(CALL_EXTRACTION_ROUTE.fallback.provider).not.toBe(CALL_EXTRACTION_ROUTE.primary.provider);
+  });
+
+  test('a typo\'d provider fails OPEN to the openai default, never bricks the route', () => {
+    jest.resetModules();
+    const saved = process.env.CALL_EXTRACTION_PROVIDER;
+    process.env.CALL_EXTRACTION_PROVIDER = 'gemnii';
+    try {
+      const fresh = require('../services/call-recording-processor');
+      const route = fresh._test.CALL_EXTRACTION_ROUTE;
+      expect(route.primary.provider).toBe('openai');
+      expect(route.fallback.provider).toBe('anthropic');
+    } finally {
+      if (saved === undefined) delete process.env.CALL_EXTRACTION_PROVIDER;
+      else process.env.CALL_EXTRACTION_PROVIDER = saved;
+      jest.resetModules();
+    }
+  });
+
+  test('gemini kill switch ignores a lingering OpenAI model override', () => {
+    jest.resetModules();
+    const saved = { p: process.env.CALL_EXTRACTION_PROVIDER, m: process.env.CALL_EXTRACTION_MODEL };
+    process.env.CALL_EXTRACTION_PROVIDER = 'gemini';
+    process.env.CALL_EXTRACTION_MODEL = 'gpt-5.6-sol'; // stale override from the Sol era
+    try {
+      const fresh = require('../services/call-recording-processor');
+      const route = fresh._test.CALL_EXTRACTION_ROUTE;
+      // One-variable rollback: the gemini leg must run a GEMINI model.
+      expect(route.primary.provider).toBe('gemini');
+      expect(route.primary.model).toMatch(/^gemini-/);
+      expect(route.fallback.provider).toBe('anthropic');
+    } finally {
+      if (saved.p === undefined) delete process.env.CALL_EXTRACTION_PROVIDER; else process.env.CALL_EXTRACTION_PROVIDER = saved.p;
+      if (saved.m === undefined) delete process.env.CALL_EXTRACTION_MODEL; else process.env.CALL_EXTRACTION_MODEL = saved.m;
+      jest.resetModules();
+    }
+  });
+
+  test('report-writer env overrides must not move the extraction default', () => {
+    jest.resetModules();
+    const prev = process.env.MODEL_OPENAI_REPORT_WRITER;
+    process.env.MODEL_OPENAI_REPORT_WRITER = 'gpt-hypothetical-writer';
+    try {
+      const fresh = require('../services/call-recording-processor');
+      expect(fresh._test.CALL_EXTRACTION_ROUTE.primary.model).toBe('gpt-5.6-sol');
+    } finally {
+      if (prev === undefined) delete process.env.MODEL_OPENAI_REPORT_WRITER;
+      else process.env.MODEL_OPENAI_REPORT_WRITER = prev;
+      jest.resetModules();
     }
   });
 });
