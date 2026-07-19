@@ -69,21 +69,22 @@ async function isAssessmentBooking(booking) {
 }
 
 // Merge the booking linkage into an engine-created draft's estimate_data.
-// Best-effort read-modify-write, fail-soft; an existing linkage (the call
-// pipeline stitches this key when one call produced both rows) wins.
+// ONE atomic jsonb_set guarded by a missing-key predicate: a
+// read-modify-write of the whole blob could overwrite a concurrent admin
+// revision's estimate_data with a stale snapshot (quote data loss). An
+// existing linkage (the call pipeline stitches this key when one call
+// produced both rows) wins via the predicate. Fail-soft.
 async function linkEstimateToBooking(estimateId, scheduledServiceId) {
   try {
-    const row = await db('estimates').where({ id: estimateId }).first();
-    if (!row) return;
-    let data = row.estimate_data;
-    if (typeof data === 'string') {
-      try { data = JSON.parse(data); } catch { data = null; }
-    }
-    data = data && typeof data === 'object' ? data : {};
-    if (data.scheduled_service_id) return;
-    await db('estimates').where({ id: estimateId }).update({
-      estimate_data: JSON.stringify({ ...data, scheduled_service_id: scheduledServiceId }),
-    });
+    await db('estimates')
+      .where({ id: estimateId })
+      .whereRaw("(estimate_data ->> 'scheduled_service_id') is null")
+      .update({
+        estimate_data: db.raw(
+          "jsonb_set(coalesce(estimate_data, '{}'::jsonb), '{scheduled_service_id}', to_jsonb(?::text))",
+          [String(scheduledServiceId)],
+        ),
+      });
   } catch (err) {
     logger.warn(`[booking-predraft] booking linkage merge failed for estimate ${estimateId}: ${err.message}`);
   }

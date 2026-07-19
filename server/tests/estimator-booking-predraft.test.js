@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
       whereIn() { return builder; },
       whereNull() { return builder; },
       whereNot() { return builder; },
-      whereRaw() { return builder; },
+      whereRaw(...args) { mockState.whereRaws.push({ table, args }); return builder; },
       orderBy() { return builder; },
       select() { return builder; },
       first: async () => {
@@ -45,7 +45,8 @@ jest.mock('../models/db', () => {
     raw: async (...args) => { mockState.raws.push(args); return {}; },
   });
   dbMock.transaction = async (callback) => callback(trx);
-  dbMock.raw = async () => ({});
+  // Fragment-builder usage (update payloads) — record args, return a marker.
+  dbMock.raw = (...args) => { mockState.rawFragments.push(args); return { __raw: args }; };
   return dbMock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -101,7 +102,7 @@ const CUSTOMER = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { firstQueue: [], inserts: [], updates: [], raws: [], firstError: null };
+  mockState = { firstQueue: [], inserts: [], updates: [], raws: [], whereRaws: [], rawFragments: [], firstError: null };
   process.env.GATE_ESTIMATOR_BOOKING_PREDRAFTS = 'true';
   mockEstimatorEngineEnabled.mockReturnValue(true);
   mockBlockDuplicate.mockResolvedValue(null);
@@ -178,12 +179,8 @@ describe('maybePreDraftForBooking — filters', () => {
 });
 
 describe('maybePreDraftForBooking — call delegation', () => {
-  test('a phone-booked assessment rides the FULL engine call context and gets the booking linkage merged', async () => {
-    mockState.firstQueue = [
-      BOOKING({ source_call_log_id: 'call-7' }),
-      // linkEstimateToBooking's read of the engine-created estimate.
-      { id: 'est-5', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-7' } }) },
-    ];
+  test('a phone-booked assessment rides the FULL engine call context and gets the booking linkage merged ATOMICALLY', async () => {
+    mockState.firstQueue = [BOOKING({ source_call_log_id: 'call-7' })];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, lane: 'green', estimateId: 'est-5' });
     const result = await maybePreDraftForBooking('svc-1');
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
@@ -192,22 +189,14 @@ describe('maybePreDraftForBooking — call delegation', () => {
     });
     expect(result).toEqual({ drafted: true, delegated: 'call_engine', lane: 'green', estimateId: 'est-5' });
     expect(mockState.inserts).toHaveLength(0); // the engine owns the insert
-    // The booking linkage merges into the engine draft (schedule badge +
-    // collision guard), preserving the engine's own estimate_data.
+    // The linkage merge is ONE conditional jsonb_set — never a blob
+    // read-modify-write that could overwrite a concurrent admin revision —
+    // guarded by a missing-key predicate so a stitched linkage wins.
     expect(mockState.updates).toHaveLength(1);
-    const merged = JSON.parse(mockState.updates[0].payload.estimate_data);
-    expect(merged.scheduled_service_id).toBe('svc-1');
-    expect(merged.estimatorEngine.callLogId).toBe('call-7');
-  });
-
-  test('an existing stitched linkage is never clobbered', async () => {
-    mockState.firstQueue = [
-      BOOKING({ source_call_log_id: 'call-7' }),
-      { id: 'est-5', estimate_data: JSON.stringify({ scheduled_service_id: 'svc-other' }) },
-    ];
-    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'green', estimateId: 'est-5' });
-    await maybePreDraftForBooking('svc-1');
-    expect(mockState.updates).toHaveLength(0);
+    expect(mockState.updates[0].payload.estimate_data.__raw[0]).toContain('jsonb_set');
+    expect(mockState.updates[0].payload.estimate_data.__raw[1]).toEqual(['svc-1']);
+    expect(mockState.whereRaws.some((w) => w.table === 'estimates'
+      && w.args[0].includes("'scheduled_service_id') is null"))).toBe(true);
   });
 });
 
