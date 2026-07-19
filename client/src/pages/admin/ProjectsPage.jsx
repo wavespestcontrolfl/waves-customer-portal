@@ -1651,6 +1651,17 @@ export function ProjectDetail({
   // WDO reports can't be sent until the licensee signature is captured.
   const wdoNeedsSignature =
     project?.project_type === WDO_TYPE && !project?.wdo_signature?.signed;
+  // Signed, but the content (findings/date/photos) changed afterwards — the
+  // server 422s the send, so surface the re-sign requirement HERE instead of
+  // letting the operator discover it as a send failure.
+  const wdoSignatureStale =
+    project?.project_type === WDO_TYPE &&
+    !!project?.wdo_signature?.signed &&
+    !!project?.wdo_signature?.content_stale;
+  const wdoSendBlocked = wdoNeedsSignature || wdoSignatureStale;
+  const wdoSendBlockedTitle = wdoNeedsSignature
+    ? "Capture the licensee signature first"
+    : "Report changed after signing — the licensee must clear & re-sign first";
   // Payment hold: server-computed availability (official termite document +
   // gate on + not sent) and the live state driving the release hint.
   const reportHoldAvailable = !!project?.report_payment_hold_available;
@@ -1767,19 +1778,49 @@ export function ProjectDetail({
         )) || "";
       if (!overrideReason) return;
     }
-    const actionLabel =
-      project.status === "sent"
-        ? "Resend report to customer?"
-        : "Send report to customer? This generates a public link and marks the project as Sent.";
-    if (!(await confirmAsk(actionLabel, { confirmLabel: "Send" }))) return;
     setSaving(true);
     setError("");
     setNotice("");
     try {
       // Persist any dirty edits (including an AI-drafted Recommendations block)
-      // before delivery runs — otherwise the customer sees the pre-edit version
-      // at the public link.
+      // BEFORE the routing preview — the "Report sent to" third-party copies
+      // are parsed from the saved findings, so an unsaved edit would preview
+      // (and then send) against stale routing.
       await saveDirtyProjectEdits("Could not save project before sending");
+      // dry_run routing preview: the report-only send was the one blind path —
+      // the operator never saw who the FDACS "Report sent to" copies go to
+      // (or that a typo'd address silently drops one).
+      const preview = await adminFetch(`/admin/projects/${projectId}/send`, {
+        method: "POST",
+        body: {
+          dry_run: true,
+          ...(overrideReason ? { override_reason: overrideReason } : {}),
+        },
+      });
+      const pv = await readJsonResponse(preview, "Could not prepare report send");
+      const routing = pv.email_routing || {};
+      const routingLines = [
+        routing.recipient
+          ? `Email to: ${routing.recipient}`
+          : "⚠ No customer email on file — the report email can't deliver.",
+        routing.report_copies?.length
+          ? `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
+          : null,
+        pv.releases_payment_hold
+          ? "This send RELEASES the payment hold — the report goes out now, before payment."
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const actionLabel =
+        (project.status === "sent"
+          ? "Resend report to customer?"
+          : "Send report to customer? This generates a public link and marks the project as Sent.") +
+        (routingLines ? `\n\n${routingLines}` : "");
+      if (!(await confirmAsk(actionLabel, { confirmLabel: "Send" }))) {
+        setSaving(false);
+        return;
+      }
       const r = await adminFetch(`/admin/projects/${projectId}/send`, {
         method: "POST",
         body: overrideReason ? { override_reason: overrideReason } : {},
@@ -2873,6 +2914,7 @@ export function ProjectDetail({
                   photo={ph}
                   projectId={projectId}
                   onDelete={() => handlePhotoDelete(ph.id)}
+                  onCaptionSaved={() => load({ preserveEdits: true })}
                 />
               ))}
             </div>
@@ -3132,9 +3174,9 @@ export function ProjectDetail({
             <button
               type="button"
               onClick={handleSend}
-              disabled={saving || wdoNeedsSignature}
-              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
-              title={wdoNeedsSignature ? "Capture the licensee signature first" : undefined}
+              disabled={saving || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
+              title={wdoSendBlocked ? wdoSendBlockedTitle : undefined}
             >
               Resend report
             </button>
@@ -3145,11 +3187,11 @@ export function ProjectDetail({
             <button
               type="button"
               onClick={handleSend}
-              disabled={saving || wdoNeedsSignature}
-              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
+              disabled={saving || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
               title={
-                wdoNeedsSignature
-                  ? "Capture the licensee signature first"
+                wdoSendBlocked
+                  ? wdoSendBlockedTitle
                   : reportHeld
                     ? "Deliver the report now — this releases the payment hold"
                     : undefined
@@ -3166,11 +3208,11 @@ export function ProjectDetail({
             <button
               type="button"
               onClick={handleSendWithInvoice}
-              disabled={saving || wdoNeedsSignature}
-              style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
+              disabled={saving || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
               title={
-                wdoNeedsSignature
-                  ? "Capture the licensee signature first"
+                wdoSendBlocked
+                  ? wdoSendBlockedTitle
                   : reportHoldAvailable
                     ? holdReportUntilPaid
                       ? project.project_type === WDO_TYPE
@@ -3306,9 +3348,37 @@ function ProjectHistoryPanel({ activity }) {
   );
 }
 
-function PhotoThumb({ photo, projectId, onDelete }) {
+// Named export so the caption editor can be mounted standalone in tests and
+// UI verification (the drawer needs a full project fixture to render).
+export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved }) {
   const [url, setUrl] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  // Inline caption editing — captions print on the FDACS photo addendum, and
+  // the admin drawer previously had no way to add or fix one (office-added
+  // photos landed on the legal PDF as bare "Service photo").
+  const [editingCaption, setEditingCaption] = useState(false);
+  const [captionDraft, setCaptionDraft] = useState(photo.caption || "");
+  const [captionSaving, setCaptionSaving] = useState(false);
+
+  async function saveCaption() {
+    setCaptionSaving(true);
+    try {
+      const r = await adminFetch(`/admin/projects/${projectId}/photos/${photo.id}`, {
+        method: "PUT",
+        body: { caption: captionDraft.slice(0, 200) },
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || "Could not save caption");
+      }
+      setEditingCaption(false);
+      await onCaptionSaved?.();
+    } catch {
+      // keep the editor open so the admin can retry
+    } finally {
+      setCaptionSaving(false);
+    }
+  }
   useEffect(() => {
     let cancelled = false;
     setUrl(null);
@@ -3386,34 +3456,100 @@ function PhotoThumb({ photo, projectId, onDelete }) {
         }}
       >
         {" "}
-        <span
-          style={{
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {(photo.category || "").replace(/_/g, " ")}
-        </span>{" "}
-        <button
-          type="button"
-          onClick={(e) => {
-            e.preventDefault();
-            onDelete();
-          }}
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "#fff",
-            cursor: "pointer",
-            fontSize: 13,
-            padding: 0,
-            lineHeight: 1,
-          }}
-          aria-label="Remove photo"
-        >
-          ×
-        </button>{" "}
+        {editingCaption ? (
+          <>
+            <input
+              type="text"
+              value={captionDraft}
+              maxLength={200}
+              autoFocus
+              onChange={(e) => setCaptionDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveCaption();
+                if (e.key === "Escape") setEditingCaption(false);
+              }}
+              placeholder="Photo caption"
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: 10,
+                padding: "2px 4px",
+                borderRadius: 4,
+                border: "none",
+              }}
+            />
+            <button
+              type="button"
+              onClick={saveCaption}
+              disabled={captionSaving}
+              style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer", fontSize: 12, padding: "0 2px", lineHeight: 1 }}
+              aria-label="Save caption"
+            >
+              ✓
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditingCaption(false)}
+              disabled={captionSaving}
+              style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer", fontSize: 12, padding: "0 2px", lineHeight: 1 }}
+              aria-label="Cancel caption edit"
+            >
+              ✕
+            </button>
+          </>
+        ) : (
+          <>
+            <span
+              title={photo.caption || undefined}
+              style={{
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {photo.caption || (photo.category || "").replace(/_/g, " ")}
+            </span>{" "}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                setCaptionDraft(photo.caption || "");
+                setEditingCaption(true);
+              }}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 11,
+                padding: "0 4px 0 0",
+                lineHeight: 1,
+              }}
+              aria-label="Edit caption"
+            >
+              ✎
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                onDelete();
+              }}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 13,
+                padding: 0,
+                lineHeight: 1,
+              }}
+              aria-label="Remove photo"
+            >
+              ×
+            </button>
+          </>
+        )}{" "}
       </div>{" "}
     </div>
   );

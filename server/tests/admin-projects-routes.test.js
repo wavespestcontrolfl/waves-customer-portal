@@ -9,6 +9,9 @@ const mockAnthropicCreate = jest.fn();
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
+  // Photo mutations wrap insert/update/delete + the WDO staleness flag in one
+  // transaction; the mock trx dispatches through the same per-table map.
+  mock.transaction = jest.fn(async (cb) => cb(mock));
   return mock;
 });
 jest.mock('../config', () => ({
@@ -1289,7 +1292,10 @@ describe('admin projects routes', () => {
         email: null,
       }),
     });
-    const projectQueries = [projectRead, projectColumnInfo, markSent, updatedProjectRead, sequenceRead, persistDelivery];
+    // sendClaim = the delivery_status 'sending' concurrency claim taken
+    // before any side effect; its update resolving 1 means "claim won".
+    const sendClaim = chain();
+    const projectQueries = [projectRead, projectColumnInfo, sendClaim, markSent, updatedProjectRead, sequenceRead, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;
@@ -1367,7 +1373,8 @@ describe('admin projects routes', () => {
         email: 'van@example.com',
       }),
     });
-    const projectQueries = [projectRead, projectColumnInfo, markToken, updatedProjectRead, sequenceRead, persistDelivery];
+    const sendClaim = chain();
+    const projectQueries = [projectRead, projectColumnInfo, sendClaim, markToken, updatedProjectRead, sequenceRead, persistDelivery];
     db.mockImplementation((table) => {
       if (table === 'projects') return projectQueries.shift();
       if (table === 'customers') return customerRead;

@@ -809,6 +809,11 @@ const gates = {
   // Adam flips GATE_TREATMENT_ZONE_MAP=true. Kill switch: unset the var —
   // reports instantly fall back to the schematic; stored rows are untouched.
   treatmentZoneMap: isProd ? process.env.GATE_TREATMENT_ZONE_MAP === 'true' : true,
+
+  // WDO report attention sweep — admin bell for WDO reports stalled before
+  // send (uncompleted inspections, signed-but-unsent drafts, stuck holds).
+  // Admin-notification-only; no customer contact.
+  wdoReportAttention: isProd ? process.env.GATE_WDO_REPORT_ATTENTION === 'true' : true,
 };
 
 function isEnabled(gate) {

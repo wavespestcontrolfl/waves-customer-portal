@@ -973,6 +973,24 @@ httpServer.listen(PORT, () => {
       setInterval(runReportHoldSweep, 60 * 1000).unref();
     }
 
+    // WDO report attention sweep — exception-based bell for reports stalled
+    // BEFORE send (inspection never closed out, signed-but-unsent drafts,
+    // holds failing release). Quiet when clean; gated + cross-replica
+    // serialized inside the sweep itself. Every 6h with an early first run
+    // so a fresh deploy surfaces existing stalls the same morning.
+    {
+      const runWdoAttentionSweep = async () => {
+        try {
+          const { runWdoReportAttentionSweep } = require('./services/wdo-report-attention');
+          await runWdoReportAttentionSweep();
+        } catch (err) {
+          logger.error(`[wdo-report-attention] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runWdoAttentionSweep, 2 * 60 * 1000).unref();
+      setInterval(runWdoAttentionSweep, 6 * 60 * 60 * 1000).unref();
+    }
+
     // Call recordings are processed by the every-5-minute scheduler.js
     // cron (recoverMissingRecentRecordings + processAllPending). Running
     // this interval alongside it duplicated the work (harmless only

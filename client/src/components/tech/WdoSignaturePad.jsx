@@ -17,6 +17,10 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const hasDrawn = useRef(false);
+  // Last completed-stroke snapshot (PNG data URL) so a viewport resize
+  // mid-signature (rotation, iOS keyboard/URL-bar collapse) can restore the
+  // ink instead of silently wiping it.
+  const inkSnapshot = useRef(null);
   const [signerName, setSignerName] = useState(defaultSignerName);
   const [signerIdCard, setSignerIdCard] = useState(defaultSignerIdCard);
   const [saving, setSavingState] = useState(false);
@@ -24,7 +28,7 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(!signature?.signed);
 
-  const initCanvas = useCallback(() => {
+  const initCanvas = useCallback(({ preserveInk = false } = {}) => {
     const c = canvasRef.current;
     if (!c) return;
     // Size the bitmap from the rendered box (× devicePixelRatio): a fixed
@@ -44,6 +48,26 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
     ctx.lineJoin = "round";
     ctx.strokeStyle = "#0f172a";
     hasDrawn.current = false;
+    if (!preserveInk) {
+      inkSnapshot.current = null;
+      return;
+    }
+    // Restore the in-progress signature after a resize re-init. The bitmap
+    // height is constant (CSS height × dpr), so drawing the snapshot scaled
+    // by HEIGHT keeps the stroke aspect true — no stretching, which is what
+    // the old wipe-on-resize existed to prevent. A narrower box may clip the
+    // rightmost ink; the licensee can still Clear and restart.
+    const snapshot = inkSnapshot.current;
+    if (!snapshot) return;
+    const img = new Image();
+    img.onload = () => {
+      const cur = canvasRef.current;
+      if (!cur) return;
+      const scale = cur.height / (img.height || 1);
+      cur.getContext("2d").drawImage(img, 0, 0, img.width * scale, cur.height);
+      hasDrawn.current = true;
+    };
+    img.src = snapshot;
   }, []);
 
   useEffect(() => {
@@ -53,9 +77,9 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   // Re-size the bitmap when the rendered box changes (rotation, sheet
   // resize): strokes drawn after a resize would otherwise map against the
   // stale bitmap aspect and export distorted — the exact bug initCanvas
-  // fixes at mount. Re-initing clears any in-progress scribble; that beats
-  // silently stamping a stretched signature on an FDACS filing (the licensee
-  // just re-signs).
+  // fixes at mount. Re-initing restores completed strokes from the snapshot
+  // (height-scaled, aspect-true) so a rotation or iOS keyboard collapse
+  // mid-signature no longer silently wipes the licensee's ink.
   useEffect(() => {
     if (!editing) return undefined;
     const c = canvasRef.current;
@@ -65,7 +89,7 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
       const width = entries[entries.length - 1]?.contentRect?.width || 0;
       if (width > 0 && Math.abs(width - lastWidth) > 1) {
         lastWidth = width;
-        initCanvas();
+        initCanvas({ preserveInk: true });
       }
     });
     ro.observe(c);
@@ -99,6 +123,14 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   }
   function endDraw() {
     drawing.current = false;
+    // Snapshot completed strokes for the resize-restore path.
+    if (hasDrawn.current && canvasRef.current) {
+      try {
+        inkSnapshot.current = canvasRef.current.toDataURL("image/png");
+      } catch {
+        inkSnapshot.current = null;
+      }
+    }
   }
 
   async function save() {
@@ -169,12 +201,20 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
 
   if (signature?.signed && !editing) {
     const when = signature.signed_at ? new Date(signature.signed_at).toLocaleString() : "";
+    const stale = !!signature.content_stale;
     return (
       <div style={card}>
         <div style={label}>Licensee signature</div>
-        <div style={{ fontSize: 13, color: "#16a34a", marginBottom: 8 }}>
-          ✓ Signed{signature.signer_name ? ` by ${signature.signer_name}` : ""}{when ? ` · ${when}` : ""}
-        </div>
+        {stale ? (
+          <div style={{ fontSize: 13, color: "#b45309", marginBottom: 8 }}>
+            ⚠ Signed{signature.signer_name ? ` by ${signature.signer_name}` : ""}{when ? ` · ${when}` : ""}, but the
+            report changed after signing — clear &amp; re-sign before it can be sent.
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: "#16a34a", marginBottom: 8 }}>
+            ✓ Signed{signature.signer_name ? ` by ${signature.signer_name}` : ""}{when ? ` · ${when}` : ""}
+          </div>
+        )}
         <button type="button" style={btn} onClick={clearSaved} disabled={saving}>
           Clear &amp; re-sign
         </button>
@@ -221,7 +261,7 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         <button type="button" style={{ ...btn, background: "#0f172a", color: "#fff", borderColor: "#0f172a" }} onClick={save} disabled={saving}>
           {saving ? "Saving…" : "Save signature"}
         </button>
-        <button type="button" style={btn} onClick={initCanvas} disabled={saving}>Clear</button>
+        <button type="button" style={btn} onClick={() => initCanvas()} disabled={saving}>Clear</button>
         {signature?.signed ? (
           <button type="button" style={btn} onClick={() => setEditing(false)} disabled={saving}>Cancel</button>
         ) : null}

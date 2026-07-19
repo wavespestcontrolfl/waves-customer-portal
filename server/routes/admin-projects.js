@@ -94,6 +94,11 @@ const s3 = new S3Client({
     : undefined,
 });
 const PHOTO_PREFIX = 'project-photos/';
+
+// Project types whose project_date lands on a dated legal filing (FDACS-13645
+// / pre-treat certificate) — a future date can't be attested, so create/edit
+// reject it instead of trusting the keyboard.
+const LEGAL_DOC_DATE_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
 // project_photos.caption is varchar(200): a longer caption would fail the
 // INSERT after the image is already in S3, stranding an orphan object and
 // blocking every Save retry. Clamp rather than reject — losing the tail of a
@@ -1627,6 +1632,17 @@ router.post('/', async (req, res, next) => {
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
+    // A WDO / pre-treat certificate is a legal document dated the day the
+    // inspection/treatment actually happened — a future date can't be attested.
+    // A typo'd future date has already shipped on a signed prod filing
+    // (2027-03-13 for a 2026 inspection), so reject rather than trust.
+    if (LEGAL_DOC_DATE_TYPES.has(project_type) && projectDate > etDateString()) {
+      return res.status(422).json({
+        error: `The inspection/treatment date can't be in the future (${projectDate}) — use the date the work was actually performed.`,
+        code: 'project_date_in_future',
+      });
+    }
+
     // One visit, one report (#2717 server hardening): stale client caches
     // (week rows, continue snapshots) repeatedly re-offered the create
     // sheet for already-linked visits, and nothing here prevented a second
@@ -2077,6 +2093,14 @@ router.put('/:id', async (req, res, next) => {
     const allowed = ['title', 'project_date', 'findings', 'recommendations', 'followup_date', 'followup_findings'];
     for (const f of allowed) if (req.body[f] !== undefined) updates[f] = req.body[f];
     if (updates.project_date !== undefined) updates.project_date = normalizeDateOnly(updates.project_date);
+    // Mirror of the create-path clamp: a dated legal filing can't carry a
+    // future inspection/treatment date (one already shipped in prod).
+    if (updates.project_date && LEGAL_DOC_DATE_TYPES.has(project.project_type) && updates.project_date > etDateString()) {
+      return res.status(422).json({
+        error: `The inspection/treatment date can't be in the future (${updates.project_date}) — use the date the work was actually performed.`,
+        code: 'project_date_in_future',
+      });
+    }
     // Durable inspection-fee guard: an admin-saved narrative/title can't
     // persist the internal fee (legacy rows cleaned at rest by migration
     // 20260717000001, codex #2817). Cue AND recorded-value passes — a
@@ -2323,6 +2347,43 @@ async function refreshWdoSignatureStaleness(req, before, after) {
     );
   }
   return stale;
+}
+
+// The signature's content hash covers findings + project_date only — the photo
+// addendum (captions, categories, order, membership) is rendered LIVE into the
+// FDACS PDF at send time and sits outside the hash. Any photo mutation on a
+// signed WDO therefore flags the signature stale directly: the licensee
+// attested a report whose photo pages just changed, and must re-sign before
+// send. The flag write rides the SAME transaction as the photo mutation so a
+// crash can't land the photo change while losing the stale flag. Unlike the
+// findings hash, this doesn't self-heal on revert — a photo edit is a re-sign.
+// Returns false (no signature / not a WDO), 'already_stale', or 'flagged'
+// (newly flagged by THIS mutation — the caller logs the activity entry).
+async function flagWdoSignatureStaleForPhotos(project, trx) {
+  if (!project || project.project_type !== 'wdo_inspection') return false;
+  let sig = project.wdo_signature;
+  if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
+  if (!sig || !sig.image) return false;
+  if (sig.content_stale) return 'already_stale';
+  await trx('projects').where({ id: project.id }).update({
+    wdo_signature: JSON.stringify({ ...sig, content_stale: true }),
+    updated_at: db.fn.now(),
+  });
+  return 'flagged';
+}
+
+// Activity-trail companion to flagWdoSignatureStaleForPhotos — logged AFTER
+// the mutation's transaction commits (best-effort, like every activity write).
+async function logWdoPhotoStaleness(req, project, changeSummary) {
+  let sig = project.wdo_signature;
+  if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
+  await logProjectActivity(
+    req,
+    project,
+    'project_wdo_signature_stale',
+    `WDO photos changed after signing (${changeSummary}) — ${sig?.signer_name || 'licensee'} must re-sign before send`,
+    { signer_name: sig?.signer_name || null, photo_change: changeSummary },
+  ).catch(() => {});
 }
 
 // The FDACS Print Name / ID Card No must match whoever actually signed, which
@@ -2879,6 +2940,10 @@ function normalizeInvoiceLineItemsForPdf(lineItems) {
 // but status only moves to 'sent' after at least one customer channel works.
 // ---------------------------------------------------------------------------
 router.post('/:id/send', requireAdmin, async (req, res, next) => {
+  // Hoisted so the outer catch can release the send claim on an unexpected
+  // throw — otherwise a crash mid-send would 409 every later attempt for
+  // 10 minutes (the claim's stale-recovery window).
+  let revertSendClaimOnError = null;
   try {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -2929,6 +2994,35 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
     const projectCols = await db('projects').columnInfo().catch(() => ({}));
 
+    // dry_run: routing preview for the confirm dialog — who receives the
+    // report email and which "Report Sent to Requestor and to:" third parties
+    // get a report-only copy. Mirrors send-with-invoice's preview so the
+    // report-only send is no longer a blind fire. No side effects: nothing
+    // claimed, no token minted, nothing sent.
+    if (req.body?.dry_run) {
+      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
+      let previewCopies = [];
+      if (project.project_type === 'wdo_inspection') {
+        const prefs = customer
+          ? await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null)
+          : null;
+        const [billing] = getInvoiceEmailRecipients(customer || {}, prefs || {});
+        previewCopies = wdoReportCopyEmails(
+          parseFindings(project),
+          [previewRecipient.email, customer?.email, billing?.email],
+        );
+      }
+      return res.json({
+        dry_run: true,
+        email_routing: {
+          recipient: previewRecipient.email || null,
+          report_copies: previewCopies,
+        },
+        releases_payment_hold: reportHoldColumnsPresent(projectCols)
+          && ['held', 'releasing'].includes(String(project.report_hold_status || '')),
+      });
+    }
+
     // Payment-hold mutual exclusion (Codex P2 on #2753): a manual send on a
     // HELD report is the manual release, and it must take the SAME atomic
     // claim the payment sweep takes — otherwise an admin click while the
@@ -2958,6 +3052,34 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] manual hold claim revert failed for ${project.id}: ${err.message}`));
     };
+
+    // Send claim: /send previously had NO concurrency guard, so two
+    // overlapping POSTs (double-click, impatient retry) each passed the gates
+    // and both built + archived + emailed the FDACS filing — the customer got
+    // two copies and the project two identical archived filings. Claim the
+    // row as 'sending' before any side effect (mirrors the send-with-invoice
+    // invoice claim); a crashed claim self-recovers after 10 minutes.
+    const previousDeliveryStatus = project.delivery_status || null;
+    const sendClaim = await db('projects')
+      .where({ id: project.id })
+      .where((q) => q
+        .whereRaw("delivery_status IS DISTINCT FROM 'sending'")
+        .orWhereRaw("updated_at < now() - interval '10 minutes'"))
+      .update({ delivery_status: 'sending', updated_at: db.fn.now() });
+    if (!sendClaim) {
+      await revertManualHoldClaim();
+      return res.status(409).json({
+        error: 'This report is already being sent — give it a moment, then refresh.',
+        code: 'send_in_progress',
+      });
+    }
+    const revertSendClaim = async () => {
+      await db('projects')
+        .where({ id: project.id, delivery_status: 'sending' })
+        .update({ delivery_status: previousDeliveryStatus, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] send claim revert failed for ${project.id}: ${err.message}`));
+    };
+    revertSendClaimOnError = revertSendClaim;
 
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
       logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
@@ -2991,6 +3113,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // delivered without an email address — fail up front rather than text a bare
     // link and record the official report as sent.
     if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}).email) {
+      await revertSendClaim();
       await revertManualHoldClaim();
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
     }
@@ -3002,6 +3125,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     try {
       wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
     } catch (e) {
+      await revertSendClaim();
       await revertManualHoldClaim();
       logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
@@ -3020,6 +3144,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           sentByTechId: req.technicianId || null,
         });
       } catch (e) {
+        await revertSendClaim();
         await revertManualHoldClaim();
         logger.error(`[projects] WDO filing archive failed for ${updatedProject.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not archive the FDACS filing; nothing was sent.' });
@@ -3031,14 +3156,23 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // Email first (through editable Waves template library). For WDO it carries
     // the FDACS PDF, so the SMS link is only sent after the email succeeds.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {});
+    const isResendSend = Boolean(project.sent_at || project.status === 'sent');
     if (emailRecipient.email) {
       try {
+        // Recipient-hashed idempotency key (same pattern as the hold release):
+        // the claim stops concurrent duplicates, this stops crash-retry
+        // duplicates at the provider layer. A resend mints a fresh key.
+        const recipientHash = crypto.createHash('sha1')
+          .update(String(emailRecipient.email).toLowerCase())
+          .digest('hex')
+          .slice(0, 12);
         const result = await ProjectEmail.sendProjectReportReady({
           project: updatedProject,
           customer,
           reportUrl,
-          isResend: Boolean(project.sent_at || project.status === 'sent'),
+          isResend: isResendSend,
           attachments: wdoPdf ? [wdoPdf.attachment] : [],
+          idempotencyKey: `project.report_ready:${project.id}:${isResendSend ? new Date().toISOString() : 'initial'}:${recipientHash}`,
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -3206,7 +3340,10 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       sent: delivered,
       ...(readiness.missing.length > 0 ? { readiness_override: hasReadinessOverride } : {}),
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (revertSendClaimOnError) await revertSendClaimOnError().catch(() => {});
+    next(err);
+  }
 });
 
 function projectEmailFailureMessage(result) {
@@ -3748,16 +3885,18 @@ const MAX_SIGNATURE_BYTES = 2 * 1024 * 1024; // 2MB
 // which would flip the WDO send gate to "signed" and emit an officially signed
 // FDACS-13645 with no actual signature. Reject any image with ~zero variance on
 // every channel — a real signature, even a faint one, moves at least one channel
-// well past this floor. Can't decode? Don't block (we already validated the
-// magic bytes); the UI's hasDrawn gate is the primary guard, this is depth.
+// well past this floor. Can't decode? Fail closed: an image sharp can't read
+// here will also fail at PDF stamp time, and saving it would assert "signed"
+// on an unverifiable image — reject now while the signer is still holding the
+// pen instead of at send time.
 async function signatureHasInk(buffer) {
   try {
     const sharp = require('sharp');
     const stats = await sharp(buffer).stats();
     return stats.channels.some((ch) => ch.stdev > 1.5);
   } catch (err) {
-    logger.warn(`[projects] signature ink check skipped (decode failed): ${err.message}`);
-    return true;
+    logger.warn(`[projects] signature ink check failed (decode error): ${err.message}`);
+    return false;
   }
 }
 
@@ -3791,7 +3930,7 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
       return res.status(400).json({ error: 'signature image is not a valid PNG or JPEG' });
     }
     if (!(await signatureHasInk(decoded))) {
-      return res.status(400).json({ error: 'Signature looks blank — please sign before saving', code: 'signature_blank' });
+      return res.status(400).json({ error: 'Signature looks blank or unreadable — please clear the pad and sign again', code: 'signature_blank' });
     }
 
     const applicator = await resolveProjectApplicator(project);
@@ -5090,14 +5229,18 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       ContentType: contentType,
     }));
 
-    const [row] = await db('project_photos').insert({
-      project_id: project.id,
-      s3_key: key,
-      category: req.body.category || null,
-      caption: clampPhotoCaption(req.body.caption),
-      visit: req.body.visit === 'followup' ? 'followup' : 'primary',
-      uploaded_by_tech_id: req.technicianId,
-    }).returning('*');
+    const { row, staleness } = await db.transaction(async (trx) => {
+      const [inserted] = await trx('project_photos').insert({
+        project_id: project.id,
+        s3_key: key,
+        category: req.body.category || null,
+        caption: clampPhotoCaption(req.body.caption),
+        visit: req.body.visit === 'followup' ? 'followup' : 'primary',
+        uploaded_by_tech_id: req.technicianId,
+      }).returning('*');
+      const stale = await flagWdoSignatureStaleForPhotos(project, trx);
+      return { row: inserted, staleness: stale };
+    });
 
     await logProjectActivity(
       req,
@@ -5106,7 +5249,8 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       `Project photo uploaded: ${req.file.originalname}`,
       { photo_id: row.id, category: row.category, visit: row.visit },
     );
-    res.json({ photo: row });
+    if (staleness === 'flagged') await logWdoPhotoStaleness(req, project, 'photo added');
+    res.json({ photo: row, ...(staleness ? { signature_stale: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -5143,9 +5287,14 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
         logger.warn(`[projects] photo object already missing ${photo.id}: ${photo.s3_key}`);
       }
     }
-    const deleted = await db('project_photos')
-      .where({ id: req.params.photoId, project_id: req.params.id })
-      .del();
+    const { deleted, staleness } = await db.transaction(async (trx) => {
+      const count = await trx('project_photos')
+        .where({ id: req.params.photoId, project_id: req.params.id })
+        .del();
+      if (!count) return { deleted: 0, staleness: false };
+      const stale = await flagWdoSignatureStaleForPhotos(project, trx);
+      return { deleted: count, staleness: stale };
+    });
     if (!deleted) return res.status(404).json({ error: 'Photo not found' });
     await logProjectActivity(
       req,
@@ -5154,7 +5303,8 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
       `Project photo deleted: ${photo.caption || photo.category || photo.id}`,
       { photo_id: photo.id, category: photo.category, visit: photo.visit },
     );
-    res.json({ ok: true });
+    if (staleness === 'flagged') await logWdoPhotoStaleness(req, project, 'photo removed');
+    res.json({ ok: true, ...(staleness ? { signature_stale: true } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -5170,10 +5320,19 @@ router.put('/:id/photos/:photoId', async (req, res, next) => {
       }
     }
     if (Object.keys(updates).length === 0) return res.json({ ok: true });
-    await db('project_photos')
-      .where({ id: req.params.photoId, project_id: req.params.id })
-      .update({ ...updates, updated_at: db.fn.now() });
-    res.json({ ok: true });
+    const { changed, staleness } = await db.transaction(async (trx) => {
+      const count = await trx('project_photos')
+        .where({ id: req.params.photoId, project_id: req.params.id })
+        .update({ ...updates, updated_at: db.fn.now() });
+      if (!count) return { changed: 0, staleness: false };
+      // Caption/category/order all render into the FDACS photo addendum —
+      // an edit to any of them on a signed WDO requires a re-sign.
+      const stale = await flagWdoSignatureStaleForPhotos(project, trx);
+      return { changed: count, staleness: stale };
+    });
+    if (!changed) return res.status(404).json({ error: 'Photo not found' });
+    if (staleness === 'flagged') await logWdoPhotoStaleness(req, project, 'photo details edited');
+    res.json({ ok: true, ...(staleness ? { signature_stale: true } : {}) });
   } catch (err) { next(err); }
 });
 
