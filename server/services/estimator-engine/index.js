@@ -33,6 +33,7 @@ const {
   calibrationWarnings,
   classifyLane,
   createDraftEstimate,
+  isCommercialRelationshipRed,
 } = require('./draft-builder');
 
 function estimatorEngineEnabled() {
@@ -143,11 +144,14 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
-  const link = estimateId
-    ? '/admin/estimates'
-    : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications');
+  // Callers may pass a specific link (the proposal builder deep-link);
+  // otherwise derive the historical default from what the bell references.
+  link = link
+    || (estimateId
+      ? '/admin/estimates'
+      : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications'));
   const metadata = {
     callSid,
     ...(threadKey ? { smsThreadKey: threadKey } : {}),
@@ -260,6 +264,8 @@ const CALL_ORIGIN = {
     errorBody: 'A quote was promised on a call but the estimator engine hit an error. Send the estimate manually before end of day.',
     blockedTitle: 'Quote promised on call — estimate already open',
     blockedBody: (label) => `${label}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
+    proposalTitle: 'Commercial prospect on call — proposal scaffold ready',
+    proposalBody: (label) => `${label}: commercial relationship quote — prospect research and an unpriced proposal scaffold are drafted. Price it in the proposal builder.`,
   },
 };
 
@@ -525,6 +531,48 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     if (dryRun) return result;
 
     if (lane === LANES.RED) {
+      // Commercial/HOA proposal lane (GATE_ESTIMATOR_COMMERCIAL_PROPOSALS,
+      // default OFF): the relationship-quote red produces a prospect
+      // research brief + unpriced proposal scaffold instead of a bell-only
+      // dead end. Strictly fail-soft — any miss (gate off, no address,
+      // duplicate block, insert failure) falls through to the standard red
+      // path below, so the owed-quote bell can never be lost to this lane.
+      try {
+        const { commercialProposalsEnabled, maybeBuildCommercialProposalDraft } = require('./commercial-proposal');
+        if (commercialProposalsEnabled() && isCommercialRelationshipRed({ intent, propertyFacts })) {
+          const proposalOutcome = await maybeBuildCommercialProposalDraft({
+            intent,
+            propertyFacts,
+            parcelView: effectiveSignals.parcelView,
+            propertyRecord: effectiveSignals.propertyRecord,
+            context,
+            origin,
+            model,
+            reasons,
+          });
+          if (proposalOutcome?.created) {
+            result.created = true;
+            result.estimateId = proposalOutcome.estimateId;
+            result.commercialProposal = true;
+            // Unconditional like the created-draft bell below — an artifact
+            // now exists either way; the scaffold deep-links the builder.
+            await notify({
+              call: context.call,
+              context,
+              lane,
+              quotePromised,
+              threadKey,
+              estimateId: proposalOutcome.estimateId,
+              link: `/admin/estimates/${proposalOutcome.estimateId}/proposal`,
+              title: S.proposalTitle,
+              body: S.proposalBody(callerLabel(intent, context)),
+            });
+            return result;
+          }
+        }
+      } catch (proposalErr) {
+        logger.warn(`[estimator-engine] commercial proposal lane failed (red bell takes over): ${proposalErr.message}`);
+      }
       if (quotePromised) {
         await notify({
           call: context.call,

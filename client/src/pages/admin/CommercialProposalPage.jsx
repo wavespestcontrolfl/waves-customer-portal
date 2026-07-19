@@ -4,6 +4,7 @@ import { Button, Input, Select, Switch, Textarea, Badge, Card, CardHeader, CardT
 import {
   ArrowLeft, Plus, Trash2, Download, Building2, Loader2,
   Send as SendIcon, Link as LinkIcon, CheckCircle2, Copy,
+  ClipboardList, ChevronDown, ChevronUp,
 } from 'lucide-react';
 
 // Commercial proposal builder — the full-page surface for authoring the
@@ -163,6 +164,10 @@ export default function CommercialProposalPage() {
   const [terms, setTerms] = useState('');
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
   const [sendMethod, setSendMethod] = useState('email');
+  // Engine-composed prospect research (commercial proposal lane). Read-only
+  // context for pricing the walkthrough — never sent to the customer.
+  const [prospectBrief, setProspectBrief] = useState(null);
+  const [briefOpen, setBriefOpen] = useState(true);
 
   const locked = lockReason(estimate);
 
@@ -190,6 +195,7 @@ export default function CommercialProposalPage() {
           }))
         : [emptyBuilding(0)],
     );
+    setProspectBrief(data.prospectBrief || null);
     // An already-authored proposal means download/send are meaningful now.
     setSavedOnce(p.enabled === true);
     setDirty(false);
@@ -506,6 +512,97 @@ export default function CommercialProposalPage() {
               </div>
             </CardBody>
           </Card>
+
+          {prospectBrief && (
+            <Card>
+              <CardHeader>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 text-left"
+                  onClick={() => setBriefOpen((v) => !v)}
+                >
+                  <ClipboardList size={15} className="text-zinc-500" />
+                  <CardTitle>Prospect research</CardTitle>
+                  <span className="text-11 uppercase tracking-label text-zinc-400">internal — never sent</span>
+                  <span className="ml-auto text-zinc-400">
+                    {briefOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                  </span>
+                </button>
+              </CardHeader>
+              {briefOpen && (
+                <CardBody className="space-y-4">
+                  {prospectBrief.summary && (
+                    <p className="text-14 text-zinc-700 whitespace-pre-wrap">{prospectBrief.summary}</p>
+                  )}
+                  {prospectBrief.propertyProfile && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                      {[
+                        ['Property type', prospectBrief.propertyProfile.propertyType],
+                        ['Footprint sqft', prospectBrief.propertyProfile.footprintSqft?.toLocaleString?.()],
+                        ['Units', prospectBrief.propertyProfile.units],
+                        ['Buildings', prospectBrief.propertyProfile.buildings],
+                        ['Land use', prospectBrief.propertyProfile.landUse],
+                      ].filter(([, v]) => v != null && v !== '').map(([label, value]) => (
+                        <div key={label}>
+                          <div className={LABEL}>{label}</div>
+                          <div className="text-13 text-zinc-700 mt-0.5">{String(value)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {(prospectBrief.servicePrograms || []).length > 0 && (
+                    <div>
+                      <div className={LABEL}>Suggested programs (unpriced)</div>
+                      <ul className="mt-1 space-y-1">
+                        {prospectBrief.servicePrograms.map((p, i) => (
+                          <li key={i} className="text-13 text-zinc-700">
+                            <span className="text-zinc-900">{p.name}</span>
+                            {p.cadence && <span className="text-zinc-500"> · {p.cadence.replace('_', '-')}</span>}
+                            {p.scope && <span className="text-zinc-500"> — {p.scope}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {(prospectBrief.riskFactors || []).length > 0 && (
+                    <div>
+                      <div className={LABEL}>Risk factors</div>
+                      <ul className="mt-1 space-y-1 list-disc pl-4">
+                        {prospectBrief.riskFactors.map((r, i) => (
+                          <li key={i} className="text-13 text-zinc-700">{r}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {(prospectBrief.walkthroughChecklist || []).length > 0 && (
+                    <div>
+                      <div className={LABEL}>Walkthrough checklist</div>
+                      <ul className="mt-1 space-y-1 list-disc pl-4">
+                        {prospectBrief.walkthroughChecklist.map((r, i) => (
+                          <li key={i} className="text-13 text-zinc-700">{r}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {(prospectBrief.openQuestions || []).length > 0 && (
+                    <div>
+                      <div className={LABEL}>Open questions</div>
+                      <ul className="mt-1 space-y-1 list-disc pl-4">
+                        {prospectBrief.openQuestions.map((r, i) => (
+                          <li key={i} className="text-13 text-zinc-700">{r}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {prospectBrief.researchedAt && (
+                    <div className="text-11 text-zinc-400">
+                      Researched {new Date(prospectBrief.researchedAt).toLocaleString()}
+                    </div>
+                  )}
+                </CardBody>
+              )}
+            </Card>
+          )}
 
           {buildings.map((b, bi) => {
             const sub = buildingSubtotals(b);

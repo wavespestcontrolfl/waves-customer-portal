@@ -1449,6 +1449,10 @@ router.get('/:id/proposal', async (req, res, next) => {
     res.json({
       proposal,
       totals: computeProposalTotals(proposal),
+      // Engine-composed prospect research (commercial proposal lane) — the
+      // builder page shows it read-only above the line items. Additive:
+      // null for operator-originated proposals.
+      prospectBrief: parseEstimateData(estimate.estimate_data)?.commercialProspect || null,
       // Estimate summary for the standalone proposal-builder page, which loads
       // by id without the pipeline list. Additive — older consumers only read
       // `proposal`/`totals`.
