@@ -23,6 +23,7 @@ const logger = require('./logger');
 const SmartRebooker = require('./rebooker');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isRealProviderSend } = require('./sms-auto-send');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
 const { etParts, etDateString } = require('../utils/datetime-et');
@@ -485,10 +486,23 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     purpose: 'appointment',
     customerId: customer.id,
     identityTrustLevel: 'phone_matches_customer',
-    metadata: { original_message_type: 'rain_out_moved', reason_code: reasonCode },
+    // original_message_type doubles as the per-template ops kill-switch key
+    // (twilio.js isTemplateActive) and MUST be the v2 template's key: the
+    // legacy rain_out_moved row is retired (is_active=false), and stamping
+    // the legacy key suppresses every send as a sentinel "success". An
+    // absent v2 row (rolled-back migration) counts as active there, so the
+    // legacy-render fallback above still texts.
+    metadata: { original_message_type: 'rain_out_moved_v2', reason_code: reasonCode },
   });
   if (result?.blocked || result?.sent === false) {
     return { sent: false, reason: result.code || result.reason || 'blocked' };
+  }
+  // sent:true is necessary but not sufficient — upstream suppression paths
+  // (per-template kill switch, gates) report sent:true with a sentinel
+  // provider id and no SMS leaves. Surface those as not-sent so the rain-out
+  // sheet never tells the operator a customer was notified when they weren't.
+  if (!isRealProviderSend(result)) {
+    return { sent: false, reason: result?.providerMessageId || 'send_suppressed' };
   }
   return { sent: true };
 }

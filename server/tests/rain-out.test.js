@@ -8,7 +8,10 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn().mockResolvedValue('rendered body'),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
+  // A real provider send always carries a Twilio sid — sent:true with a
+  // sentinel/absent providerMessageId is an upstream suppression, which
+  // sendMovedSms must report as NOT sent.
+  sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true, providerMessageId: 'SMtest' }),
 }));
 jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlook: jest.fn().mockResolvedValue(null),
@@ -360,6 +363,45 @@ describe('rain-out service', () => {
       expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'missing_template' });
       expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('stamps the v2 key as the per-template kill-switch messageType, never the retired legacy key', async () => {
+      wireSingle();
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+      });
+
+      // twilio.js isTemplateActive keys on original_message_type. The legacy
+      // rain_out_moved row is retired (is_active=false), so stamping the
+      // legacy key suppresses every send as a sentinel "success" — the
+      // 2026-07-19 incident where the first real rain-out never texted.
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+        original_message_type: 'rain_out_moved_v2',
+        reason_code: 'weather_rain',
+      });
+    });
+
+    test('a suppression sentinel provider id reports smsSent:false, not a phantom send', async () => {
+      wireSingle();
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'template-disabled' });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+      });
+
+      // The move still commits; the sheet must show the customer was NOT told.
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'template-disabled' });
     });
 
     test('no reschedule token falls back to a reply-to-adjust clause', async () => {
